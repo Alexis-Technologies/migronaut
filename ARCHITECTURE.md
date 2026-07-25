@@ -430,7 +430,7 @@ The high-impact ones for code changes:
 
 ## 9. Testing strategy
 
-- **Runner:** vitest v4 (needs Node ≥ 20 to run the suite). `npm test` = `vitest run`.
+- **Runner:** vitest v4 (needs Node ≥ 20 to run the suite). `pnpm test` = `vitest run`.
 - **Two tiers:**
   - `tests/unit/` — mock the DB; test pure logic (config precedence, checksum, loader, mapping,
     lock semantics with a fake collection, template, date, errors).
@@ -452,25 +452,25 @@ The high-impact ones for code changes:
 
 Useful commands:
 ```bash
-npm test                                  # full suite
-npx vitest run tests/integration/up.test.ts   # one file
-npx vitest run --coverage --coverage.include='src/core/run.ts'  # coverage for one module
+pnpm test                                  # full suite
+pnpm exec vitest run tests/integration/up.test.ts   # one file
+pnpm exec vitest run --coverage --coverage.include='src/core/run.ts'  # coverage for one module
 ```
 
 ## 10. Build, typecheck, lint, release
 
-- **Build:** `npm run build` → tsup produces, into `dist/`: the library as **CJS + ESM + `.d.ts`**
+- **Build:** `pnpm run build` → tsup produces, into `dist/`: the library as **CJS + ESM + `.d.ts`**
   (from `src/index.ts`) and the CLI as **CJS only** (from `bin/migronaut.ts`, with the shebang banner).
   See [tsup.config.ts](tsup.config.ts). The `migronaut` version string is injected at build time
   (`MIGRONAUT_VERSION`); unbundled dev runs fall back to `0.0.0-dev`.
-- **Typecheck:** `npx tsc --noEmit` (covers `src/` + `bin/`).
-- **Lint/format:** `npx oxlint src bin tests` (and `npx oxfmt src bin tests` to fix formatting,
-  `npx oxfmt --check src bin tests` to verify without writing).
+- **Typecheck:** `pnpm exec tsc --noEmit` (covers `src/` + `bin/`).
+- **Lint/format:** `pnpm exec oxlint src bin tests` (and `pnpm exec oxfmt src bin tests` to fix
+  formatting, `pnpm exec oxfmt --check src bin tests` to verify without writing).
 - **Published artifact:** only `dist/`, `README.md`, `CHANGELOG.md` (the `files` field). The `docs/`
   site and this `ARCHITECTURE.md` live in the repo but are **never** shipped to npm (the `files`
   field is `dist`-scoped).
-- **Release:** `npm run release` = `bumpp` (version + tag, conventional-commits changelog) then
-  `npm publish`. `prepublishOnly` re-runs typecheck + lint + test + build as a gate.
+- **Release:** `pnpm run release` = `bumpp` (version + tag, conventional-commits changelog) then
+  `pnpm publish`. `prepublishOnly` re-runs typecheck + lint + test + build as a gate.
 - **Commits:** Conventional Commits required (`feat(scope):`, `fix(scope):`, `test(...)`, etc.).
 
 ## 11. Recipe: how to add a new command/feature
@@ -494,7 +494,7 @@ Concrete worked path — say you're adding `migronaut verify` (re-checks all che
    Both in the same PR.
 9. **Docs** — update `README.md` and add `docs/commands/verify.md` for the user site. Update the
    relevant section of this file if you introduced a nuance.
-10. **Verify:** `tsc --noEmit` → `oxlint` → `oxfmt --check` → `vitest run` → `npm run build`.
+10. **Verify:** `tsc --noEmit` → `oxlint` → `oxfmt --check` → `vitest run` → `pnpm run build`.
 
 **Where logic goes (decision rule):** mutation sequencing → a `runX` worker in `migrator.ts`; a
 reusable mechanism (hashing, locking, mapping) → its own `core/`/`utils/` module; anything about how

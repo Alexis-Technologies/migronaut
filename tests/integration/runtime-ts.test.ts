@@ -60,7 +60,7 @@ const DB = 'migronaut_runtime_test';
 beforeAll(async () => {
   // Always build so we test the CURRENT source as the shipped artifact, not a
   // stale dist/ from an earlier build.
-  execSync('npm run build', { cwd: repoRoot, stdio: 'ignore' });
+  execSync('pnpm run build', { cwd: repoRoot, stdio: 'ignore' });
   mongo = await startTestMongo(DB);
 }, 120_000);
 

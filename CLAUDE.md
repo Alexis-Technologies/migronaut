@@ -76,14 +76,14 @@ When adding new code, follow the right-hand column — there should be no more `
 ## Commands
 
 ```bash
-npm run typecheck      # tsc --noEmit
-npm run lint            # oxlint src bin tests
-npm run format           # oxfmt src bin tests
-npm run format:check      # oxfmt --check src bin tests
-npm test                  # vitest run (unit + integration, ~250 tests)
-npx vitest run tests/integration/up.test.ts   # single file
-npm run build              # tsup → dist/ (library CJS+ESM+d.ts, CLI CJS-only)
-npm run docs:dev            # vitepress dev docs
+pnpm run typecheck      # tsc --noEmit
+pnpm run lint            # oxlint src bin tests
+pnpm run format           # oxfmt src bin tests
+pnpm run format:check      # oxfmt --check src bin tests
+pnpm test                  # vitest run (unit + integration, ~250 tests)
+pnpm exec vitest run tests/integration/up.test.ts   # single file
+pnpm run build              # tsup → dist/ (library CJS+ESM+d.ts, CLI CJS-only)
+pnpm run docs:dev            # vitepress dev docs
 ```
 
 `prepublishOnly` runs typecheck + lint + format:check + test + build — treat that as the pre-merge gate.
@@ -107,7 +107,7 @@ npm run docs:dev            # vitepress dev docs
 - Two tiers: `tests/unit/` (mocked DB) and `tests/integration/` (real `mongodb-memory-server`
   replica set, so transactions work).
 - Silence the logger (`logger: null`) in tests. No committed `.only`/`.skip`.
-- Coverage gate: 90% lines / 90% functions / 85% branches (`npm run coverage`).
+- Coverage gate: 90% lines / 90% functions / 85% branches (`pnpm run coverage`).
 - Running the full integration suite *with* coverage can be memory-heavy — scope `--coverage`
   to specific files when checking one module.
 
