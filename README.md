@@ -26,6 +26,8 @@ change before it touches your database.
 
 ## Reasons to choose it
 
+- **Zero dependencies** — no runtime dependencies at all; only the `mongodb` driver as a peer.
+  Instant installs, nothing extra in your lockfile, no supply-chain surface.
 - **Run a single migration** — `migronaut up <file>`, not just "all pending".
 - **Roll back anything** — a batch (`--batch 3`), the last N (`--steps 2`), one file, or `redo`.
 - **Preview before you run** — `migronaut dry-run up` prints the exact plan without touching the database.
@@ -36,6 +38,8 @@ change before it touches your database.
 - **Opt-in transactions** — wrap a migration so it fully commits or fully aborts.
 - **TypeScript, ESM & CommonJS** — all run with no `ts-node` plumbing.
 - **Zero config files required** — drive everything from env vars if you prefer.
+- **Pino-friendly logging** — the `logger` option is pino-compatible; pass a pino instance directly
+  and migronaut logs through it (with a `component: 'migronaut'` child binding).
 
 ### How it compares to `migrate-mongo`
 
@@ -566,9 +570,31 @@ export default {
   // ── Code-only options (omit in migronaut.config.json) ─────────────────────────
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
   // mongoose: myMongooseInstance, // pass if your migrations use Mongoose models
-  // logger: null,                 // null silences all output (handy in CI/tests)
+  // logger: null,                 // null silences all output; a pino instance works directly
 };
 ```
+
+<details>
+<summary><b>Structured logging with pino</b> — the logger option is pino-compatible</summary>
+
+<br>
+
+Anything with `{ debug, info, warn, error }` methods works as `logger` — including a real pino
+instance. When the logger has a pino-style `child()`, migronaut binds `component: 'migronaut'`
+once, and a throwing logger can never break a migration run:
+
+```js
+const pino = require('pino');
+const { runMigrations } = require('@alexify/migronaut');
+
+await runMigrations({
+  uri: process.env.MIGRONAUT_URI,
+  dbName: 'my_app',
+  logger: pino({ level: 'info' }),
+});
+```
+
+</details>
 
 <details>
 <summary><b>Environment variables</b> — the zero-file way to configure everything</summary>
@@ -588,7 +614,11 @@ export default {
 | `MIGRONAUT_SEQUENTIAL` | `sequential` | `false` |
 | `MIGRONAUT_CREATE_EXTENSION` | `createExtension` | `js` |
 
-`.env` files are loaded automatically.
+`.env` files are loaded automatically — natively via `util.parseEnv` on Node ≥ 20.12, with a
+built-in fallback parser on older Node. Real environment variables always win over `.env` values.
+Supported syntax: one `KEY=VALUE` per line, optional `export ` prefix, matching single/double/back
+quotes, full-line and inline `#` comments. Not supported: multiline values, `\n` expansion inside
+double quotes, and `${VAR}` interpolation.
 
 </details>
 

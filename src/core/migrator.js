@@ -295,7 +295,7 @@ class MigratorKit {
           if (mismatch) {
             logger.warn(`⚠ Warning  Checksum mismatch: ${name}`);
           }
-          logger.dim(`⏭ Skipped  ${name}`);
+          logger.debug(`⏭ Skipped  ${name}`);
           results.push({ file: name, status: 'skipped', reason: 'Already applied' });
           continue;
         }
@@ -333,7 +333,7 @@ class MigratorKit {
         await changelog.markApplied(db, record);
         appliedCount += 1;
 
-        logger.success(`✔ Applied  ${name}   [${duration}ms]`);
+        logger.info(`✔ Applied  ${name}   [${duration}ms]`);
         results.push({ file: name, status: 'applied', duration, batch });
         await config.hooks?.afterEach?.(name, duration, context);
       } catch (error) {
@@ -434,7 +434,7 @@ class MigratorKit {
         });
         this.#progress?.onStop();
         await changelog.markReverted(db, name);
-        logger.success(`↩ Reverted ${name}   [${duration}ms]`);
+        logger.info(`↩ Reverted ${name}   [${duration}ms]`);
         results.push({ file: name, status: 'reverted', duration });
         await config.hooks?.afterEach?.(name, duration, context);
       } catch (error) {
@@ -468,7 +468,7 @@ class MigratorKit {
     this.#logger.error(
       `✖ Cannot roll back ${names.length} migrate-mongo-imported migration(s): ${names.join(', ')}`,
     );
-    this.#logger.dim(
+    this.#logger.debug(
       'These were adopted via `migronaut import` (forward-only). Their files use the positional ' +
         'migrate-mongo signature, which migronaut cannot run. Revert them manually or re-author ' +
         'them in migronaut format.',
@@ -605,7 +605,7 @@ class MigratorKit {
       js,
       ...(templatePath ? { templatePath } : {}),
     });
-    this.#logger.success(`✔ Created  ${path.basename(filepath)}`);
+    this.#logger.info(`✔ Created  ${path.basename(filepath)}`);
     return filepath;
   }
 
@@ -623,7 +623,7 @@ class MigratorKit {
       values,
       ...(options.secretProvider ? { secretProvider: true } : {}),
     });
-    this.#logger.success(`✔ Created  ${path.basename(filepath)}`);
+    this.#logger.info(`✔ Created  ${path.basename(filepath)}`);
     return filepath;
   }
 
@@ -734,7 +734,7 @@ class MigratorKit {
       await targetChangelog.markApplied(db, record);
     }
 
-    logger.success(`✔ Imported ${records.length} record(s) from "${source}" → "${target}"`);
+    logger.info(`✔ Imported ${records.length} record(s) from "${source}" → "${target}"`);
     return { source, target, imported: records.length, skipped, dryRun, rows };
   }
 

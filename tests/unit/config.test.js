@@ -3,8 +3,16 @@ const { tmpdir } = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { afterEach, beforeEach, describe, it } = require('node:test');
-const { DEFAULT_CONFIG, loadConfig } = require('../../src/core/config.js');
+const { DEFAULT_CONFIG, loadConfig, validateConfig } = require('../../src/core/config.js');
 const { ConfigInvalidError } = require('../../src/errors/index.js');
+
+/** A fully valid config for validateConfig tests — override per case */
+const validConfig = (overrides = {}) => ({
+  ...DEFAULT_CONFIG,
+  uri: 'mongodb://localhost:27017',
+  dbName: 'app',
+  ...overrides,
+});
 
 const MIGRONAUT_ENV_KEYS = [
   'MIGRONAUT_URI',
@@ -218,7 +226,7 @@ describe('loadConfig', () => {
     await assert.rejects(loadConfig({ cwd: tmp }), ConfigInvalidError);
   });
 
-  it('should load env vars from a .env file via dotenv', async () => {
+  it('should load env vars from a .env file', async () => {
     writeFileSync(
       path.join(tmp, '.env'),
       'MIGRONAUT_URI=mongodb://dotenv-host:27017\nMIGRONAUT_DB=dotenv-db\n',
@@ -226,5 +234,91 @@ describe('loadConfig', () => {
     const config = await loadConfig({ cwd: tmp });
     assert.strictEqual(config.uri, 'mongodb://dotenv-host:27017');
     assert.strictEqual(config.dbName, 'dotenv-db');
+  });
+});
+
+describe('validateConfig', () => {
+  it('should return no issues for a valid config', () => {
+    assert.deepStrictEqual(validateConfig(validConfig()), []);
+  });
+
+  it('should report a missing or empty uri and dbName', () => {
+    const issues = validateConfig(validConfig({ uri: '', dbName: undefined }));
+    assert.deepStrictEqual(issues, [
+      { path: 'uri', message: 'uri is required' },
+      { path: 'dbName', message: 'dbName is required' },
+    ]);
+  });
+
+  it('should report a non-positive lockTTLSeconds', () => {
+    const issues = validateConfig(validConfig({ lockTTLSeconds: -1 }));
+    assert.deepStrictEqual(issues, [
+      { path: 'lockTTLSeconds', message: 'must be a positive integer' },
+    ]);
+  });
+
+  it('should report a non-integer lockTTLSeconds', () => {
+    const issues = validateConfig(validConfig({ lockTTLSeconds: 1.5 }));
+    assert.strictEqual(issues[0].path, 'lockTTLSeconds');
+  });
+
+  it('should report an invalid createExtension', () => {
+    const issues = validateConfig(validConfig({ createExtension: 'py' }));
+    assert.deepStrictEqual(issues, [{ path: 'createExtension', message: "must be 'ts' or 'js'" }]);
+  });
+
+  it('should report an empty fileExtensions array', () => {
+    const issues = validateConfig(validConfig({ fileExtensions: [] }));
+    assert.deepStrictEqual(issues, [
+      { path: 'fileExtensions', message: 'must be a non-empty array of non-empty strings' },
+    ]);
+  });
+
+  it('should report a non-boolean strict', () => {
+    const issues = validateConfig(validConfig({ strict: 'yes' }));
+    assert.deepStrictEqual(issues, [{ path: 'strict', message: 'must be a boolean' }]);
+  });
+
+  it('should report an empty templatePath but allow an absent one', () => {
+    assert.deepStrictEqual(validateConfig(validConfig()), []);
+    const issues = validateConfig(validConfig({ templatePath: '' }));
+    assert.deepStrictEqual(issues, [
+      { path: 'templatePath', message: 'must be a non-empty string' },
+    ]);
+  });
+
+  it('should allow empty uri and dbName when requireDb is false', () => {
+    const issues = validateConfig(validConfig({ uri: '', dbName: '' }), { requireDb: false });
+    assert.deepStrictEqual(issues, []);
+  });
+
+  it('should still require string uri and dbName when requireDb is false', () => {
+    const issues = validateConfig(validConfig({ uri: 42, dbName: '' }), { requireDb: false });
+    assert.deepStrictEqual(issues, [{ path: 'uri', message: 'must be a string' }]);
+  });
+
+  it('should tolerate unknown keys and live instances', () => {
+    const config = validConfig({
+      unknownKey: 'anything',
+      mongoose: { model: () => {} },
+      hooks: { beforeAll: () => {} },
+      logger: null,
+    });
+    assert.deepStrictEqual(validateConfig(config), []);
+  });
+
+  it('should surface issues through loadConfig as ConfigInvalidError context', async () => {
+    try {
+      await loadConfig({
+        cwd: tmp,
+        flags: { uri: 'mongodb://x:27017', dbName: 'x', createExtension: 'py' },
+      });
+      assert.fail('expected loadConfig to reject');
+    } catch (error) {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.deepStrictEqual(error.context.issues, [
+        { path: 'createExtension', message: "must be 'ts' or 'js'" },
+      ]);
+    }
   });
 });

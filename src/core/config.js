@@ -1,9 +1,9 @@
 const { existsSync, readFileSync } = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const dotenv = require('dotenv');
-const { z } = require('zod');
 const { ConfigInvalidError } = require('../errors/index.js');
+const { applyEnvFile } = require('../utils/env.js');
+const { resolveLogger } = require('../utils/logger.js');
 
 /** Default values applied when no flag, env var, or config-file value is present */
 const DEFAULT_CONFIG = {
@@ -21,23 +21,62 @@ const DEFAULT_CONFIG = {
 /** Candidate config file names, checked in priority order within the cwd */
 const CONFIG_FILE_NAMES = ['migronaut.config.ts', 'migronaut.config.js', 'migronaut.config.json'];
 
-const configSchema = z.object({
-  uri: z.string().min(1, 'uri is required'),
-  dbName: z.string().min(1, 'dbName is required'),
-  migrationsDir: z.string().min(1),
-  migrationsCollection: z.string().min(1),
-  lockCollection: z.string().min(1),
-  lockTTLSeconds: z.number().int().positive(),
-  strict: z.boolean(),
-  useTransaction: z.boolean(),
-  fileExtensions: z.array(z.string().min(1)).min(1),
-  createExtension: z.enum(['ts', 'js']),
-  sequential: z.boolean(),
-  templatePath: z.string().min(1).optional(),
-  mongoose: z.unknown().optional(),
-  hooks: z.unknown().optional(),
-  logger: z.unknown().optional(),
-});
+const isNonEmptyString = (value) => typeof value === 'string' && value.length > 0;
+const isBoolean = (value) => typeof value === 'boolean';
+const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
+const isExtension = (value) => value === 'ts' || value === 'js';
+const isStringList = (value) =>
+  Array.isArray(value) && value.length > 0 && value.every(isNonEmptyString);
+
+/**
+ * Validation spec for every checked config key: predicate + failure message.
+ * `mongoose`, `hooks` and `logger` are deliberately unchecked — they hold
+ * live instances the validator has nothing to say about. Unknown keys are
+ * allowed, matching the previous zod (non-strict object) behavior.
+ */
+const CONFIG_KEYS = [
+  { path: 'uri', check: isNonEmptyString, message: 'uri is required' },
+  { path: 'dbName', check: isNonEmptyString, message: 'dbName is required' },
+  { path: 'migrationsDir', check: isNonEmptyString, message: 'must be a non-empty string' },
+  { path: 'migrationsCollection', check: isNonEmptyString, message: 'must be a non-empty string' },
+  { path: 'lockCollection', check: isNonEmptyString, message: 'must be a non-empty string' },
+  { path: 'lockTTLSeconds', check: isPositiveInteger, message: 'must be a positive integer' },
+  { path: 'strict', check: isBoolean, message: 'must be a boolean' },
+  { path: 'useTransaction', check: isBoolean, message: 'must be a boolean' },
+  {
+    path: 'fileExtensions',
+    check: isStringList,
+    message: 'must be a non-empty array of non-empty strings',
+  },
+  { path: 'createExtension', check: isExtension, message: "must be 'ts' or 'js'" },
+  { path: 'sequential', check: isBoolean, message: 'must be a boolean' },
+  {
+    path: 'templatePath',
+    check: isNonEmptyString,
+    message: 'must be a non-empty string',
+    optional: true,
+  },
+];
+
+/**
+ * Validate the merged config, returning a list of `{ path, message }` issues
+ * (empty when valid). With `requireDb: false`, empty `uri`/`dbName` strings
+ * are allowed — for commands that never touch the database (`init`, `create`).
+ */
+function validateConfig(config, options = {}) {
+  const requireDb = options.requireDb ?? true;
+  const issues = [];
+  for (const spec of CONFIG_KEYS) {
+    const value = config[spec.path];
+    if (spec.optional && value === undefined) continue;
+    if (!requireDb && (spec.path === 'uri' || spec.path === 'dbName')) {
+      if (typeof value !== 'string') issues.push({ path: spec.path, message: 'must be a string' });
+      continue;
+    }
+    if (!spec.check(value)) issues.push({ path: spec.path, message: spec.message });
+  }
+  return issues;
+}
 
 /** Parse a string into a boolean. 'true'/'1'/'yes' (case-insensitive) → true */
 function parseBoolean(value) {
@@ -134,7 +173,7 @@ async function loadConfigFile(filepath) {
 async function loadConfig(options = {}) {
   const cwd = options.cwd ?? process.cwd();
 
-  dotenv.config({ path: path.join(cwd, '.env'), override: false });
+  applyEnvFile(path.join(cwd, '.env'));
 
   const merged = { ...DEFAULT_CONFIG };
 
@@ -162,28 +201,19 @@ async function loadConfig(options = {}) {
     if (merged.dbName === undefined) merged.dbName = '';
   }
 
-  const schema = requireDb
-    ? configSchema
-    : configSchema.extend({ uri: z.string(), dbName: z.string() });
-  const parsed = schema.safeParse(merged);
-  if (!parsed.success) {
-    throw new ConfigInvalidError('Invalid configuration', {
-      issues: parsed.error.issues.map((issue) => ({
-        path: issue.path.join('.'),
-        message: issue.message,
-      })),
-    });
+  const issues = validateConfig(merged, { requireDb });
+  if (issues.length > 0) {
+    throw new ConfigInvalidError('Invalid configuration', { issues });
   }
 
   const config = merged;
 
-  if (config.logger) {
-    if (configFilePath) {
-      config.logger.dim(`Loaded config from ${path.basename(configFilePath)}`);
-    }
+  if (config.logger && configFilePath) {
+    // resolveLogger, not a direct call — config.logger may be a pino instance.
+    resolveLogger(config.logger).debug(`Loaded config from ${path.basename(configFilePath)}`);
   }
 
   return config;
 }
 
-module.exports = { DEFAULT_CONFIG, loadConfig };
+module.exports = { DEFAULT_CONFIG, loadConfig, validateConfig };

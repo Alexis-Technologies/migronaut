@@ -42,7 +42,7 @@ function registerUnlock(program) {
           if (opts.json) {
             emitJson({ released: released !== null, holder: released });
           } else {
-            createLogger().success('✔ Lock released');
+            createLogger().info('✔ Lock released');
           }
         },
         { spinner: true, ...(opts.json ? { json: true } : {}) },

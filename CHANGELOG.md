@@ -11,8 +11,9 @@ Initial release.
 - `MigratorKit` orchestration: `up`, `down`, `redo`, `dryRun`, `status`, `list`, `create`, `init`
 - `migronaut` CLI with `init`, `up`, `down`, `redo`, `status`, `list`, `dry-run`, `create`, `import`,
   and `unlock` commands
-- Config loader with priority: CLI flags → `MIGRONAUT_*` env vars → config file → defaults
-  (zod-validated)
+- Config loader with priority: CLI flags → `MIGRONAUT_*` env vars → config file → defaults,
+  checked by a built-in zero-dependency validator (`ConfigInvalidError` with per-issue
+  `{ path, message }`)
 - Function / async config files — `export default` a (sync or async) factory returning the config,
   for loading the connection from a secret manager at runtime with no bundled cloud SDKs
 - First-class `.ts` and `.js` (ESM + CJS) migration loading
@@ -40,6 +41,20 @@ Initial release.
   info (pid / host / user / since) and a confirmation prompt (`--yes` to skip)
 - **`migronaut up <file> --force --yes`** — confirm a forced re-run non-interactively
 
+### Zero dependencies
+
+- **No runtime dependencies at all** — `package.json` has no `dependencies` key; only `mongodb`
+  (required) and `mongoose` (optional) as peers
+- `.env` loading via native `util.parseEnv` on Node ≥ 20.12 with a built-in fallback parser on
+  older Node (quotes, `export ` prefix, full-line and inline `#` comments; no multiline values,
+  `\n` expansion, or `${VAR}` interpolation) — real env vars always win over `.env`
+- Hand-rolled ANSI colors (detection: `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > TTY), a TTY-only
+  spinner (complete no-op when piped), box-drawing tables with ANSI-aware column widths, and a
+  commander-compatible argument parser (combined short flags like `-fy` are not supported)
+- `MigronautLogger` is pino-compatible (`{ debug, info, warn, error, child? }`) — pass a pino
+  instance directly as `logger`; a `component: 'migronaut'` child binding is applied once and a
+  throwing logger can never break a migration run
+
 ### Import from `migrate-mongo`
 
 - **`migronaut import`** — read an existing `migrate-mongo` `changelog` and record that history in
@@ -58,8 +73,8 @@ Initial release.
   acquire/release/renew so a run never loses or steals a lock it doesn't hold
 - **Clear `.ts` runtime error** — an actionable error when a Node runtime can't import a `.ts`
   migration, instead of a cryptic `ERR_UNKNOWN_FILE_EXTENSION`
-- `prepublishOnly` runs `typecheck` + `lint` + `test` before `build`, so a broken release can't be
-  published
+- `prepublishOnly` runs `lint` + `format:check` + coverage-gated tests + `tsd` type tests, so a
+  broken release can't be published
 
 ### Documentation
 

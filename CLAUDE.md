@@ -64,6 +64,26 @@ user migration/config files can still be `.ts`/`.mjs`/`.cjs`/`.js` — see
 the *running* Node's own capabilities (native TS type-stripping on Node ≥22.18, or a loader
 like `tsx`) — not on anything migronaut itself compiles.
 
+## Zero dependencies
+
+`package.json` has **no `dependencies` key at all** — only `mongodb` (required) and `mongoose`
+(optional) as peers. Everything that used to be a library is hand-rolled in-tree:
+
+| Was | Now |
+|---|---|
+| `dotenv` | [src/utils/env.js](src/utils/env.js) — native `util.parseEnv` (Node ≥ 20.12) or built-in fallback, `override: false` semantics |
+| `chalk` | [src/utils/colors.js](src/utils/colors.js) — `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > `isTTY` detection, `stripAnsi` |
+| `ora` | [src/cli/spinner.js](src/cli/spinner.js) — `start(text)`/`stop()`, complete no-op off-TTY |
+| `commander` | [src/cli/args.js](src/cli/args.js) — commander-compatible subset (subcommands, `--no-x`, short aliases, camelCase, help/version); no combined short flags (`-fy`) |
+| `cli-table3` | [src/cli/table.js](src/cli/table.js) — box-drawing renderer, ANSI-aware widths (no wcwidth/CJK) |
+| `zod` | `validateConfig` in [src/core/config.js](src/core/config.js) — table-driven `CONFIG_KEYS`, same `{path, message}` issues |
+
+**Never add a runtime dependency.** Third-party integrations are injected by the user instead:
+`MigronautLogger` is pino-compatible (`{debug, info, warn, error, child?}`), so a pino instance
+passes straight through `resolveLogger` (which binds `child({component: 'migronaut'})` once and
+guards every call — logging must never break a run). devDependencies are fine (`pino` is a devDep
+because the logger-adapter tests exercise the real thing).
+
 ## Repository layout
 
 ```
@@ -74,8 +94,8 @@ src/
 ├── index.js                # Public API barrel — re-exported at the package root
 ├── errors/index.js          # MigronautError base + one subclass per error code
 ├── core/                     # The engine (config, lock, changelog, runner, context, import, migrator, run)
-├── utils/                     # logger, checksum, loader, template, date — pure-ish helpers
-└── cli/                        # commander root + one file per command, thin wrappers over MigratorKit
+├── utils/                     # logger, colors, env, checksum, loader, template, date — pure-ish helpers
+└── cli/                        # own arg parser (args.js) + spinner + table + one file per command
 tests/
 ├── unit/                # mocked DB, pure logic — node:test
 ├── integration/          # real in-memory MongoDB via mongodb-memory-server (replica set) — node:test
@@ -88,8 +108,8 @@ migrations/             # Example/dev migration files used while developing this
 **Layering rule:** Presentation (`cli/`, `bin/`) never touches the DB or contains migration
 logic. Orchestration (`core/migrator.js`, `core/run.js`) sequences steps and owns the
 connection lifecycle. Mechanism modules (`core/{lock,changelog,runner,context,import,config}.js`,
-`utils/`) do one job each and know nothing about the CLI — no `console.*`, no `ora`, no `chalk`.
-The CLI injects a `ProgressReporter` callback into core instead.
+`utils/`) do one job each and know nothing about the CLI — no `console.*`, no spinner or table
+imports. The CLI injects a `ProgressReporter` callback into core instead.
 
 ## Naming conventions (post-rename)
 

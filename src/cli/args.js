@@ -1,0 +1,247 @@
+const OPTION_PATTERN = /^(?:-([A-Za-z]), )?--([a-z][a-z0-9-]*)(?: <([^>]+)>)?$/;
+
+/** Convert a kebab-case option name to its camelCase opts key */
+const camelize = (name) => name.replace(/-([a-z0-9])/g, (_, char) => char.toUpperCase());
+
+/** Pad `label` so descriptions in a help block line up */
+const padLabel = (label, width) => label + ' '.repeat(width - label.length);
+
+/** Render one aligned `label  description` section of a help screen */
+function renderSection(title, rows) {
+  if (rows.length === 0) return [];
+  const width = Math.max(...rows.map((row) => row[0].length));
+  const lines = rows.map((row) => `  ${padLabel(row[0], width)}  ${row[1]}`);
+  return ['', `${title}:`, ...lines];
+}
+
+/**
+ * Minimal commander-compatible CLI framework covering exactly the surface the
+ * migronaut commands use: one level of subcommands, boolean/value/negatable
+ * (`--no-x`) options with camelCase keys and optional short aliases, required
+ * `<x>` / optional `[x]` positional arguments, `optsWithGlobals()`, and
+ * generated `--help` / `--version`. Global (root) options are recognized both
+ * before and after the subcommand name. Parse errors are written to stderr
+ * and set `process.exitCode = 1` — `process.exit()` is never called.
+ *
+ * Deliberately unsupported (unused by migronaut): combined short flags
+ * (`-fy`), variadic arguments, option defaults other than negatable `true`.
+ */
+class Command {
+  #name = '';
+  #description = '';
+  #version = null;
+  #options = [];
+  #arguments = [];
+  #commands = [];
+  #actionFn = null;
+  #parent = null;
+  #values = {};
+
+  name(value) {
+    this.#name = value;
+    return this;
+  }
+
+  description(value) {
+    this.#description = value;
+    return this;
+  }
+
+  version(value) {
+    this.#version = value;
+    return this;
+  }
+
+  option(flags, description = '') {
+    const match = OPTION_PATTERN.exec(flags);
+    if (!match) throw new TypeError(`Unsupported option flags: '${flags}'`);
+    const short = match[1] ?? null;
+    const rawName = match[2];
+    const negated = rawName.startsWith('no-');
+    this.#options.push({
+      flags,
+      description,
+      short,
+      long: `--${rawName}`,
+      key: camelize(negated ? rawName.slice(3) : rawName),
+      negated,
+      takesValue: Boolean(match[3]),
+    });
+    return this;
+  }
+
+  argument(spec, description = '') {
+    this.#arguments.push({
+      name: spec.slice(1, -1),
+      required: spec.startsWith('<'),
+      description,
+    });
+    return this;
+  }
+
+  command(name) {
+    const sub = new Command();
+    sub.#name = name;
+    sub.#parent = this;
+    this.#commands.push(sub);
+    return sub;
+  }
+
+  action(fn) {
+    this.#actionFn = fn;
+    return this;
+  }
+
+  opts() {
+    return this.#values;
+  }
+
+  optsWithGlobals() {
+    const globals = this.#parent ? this.#parent.#values : {};
+    return { ...globals, ...this.#values };
+  }
+
+  /** Parse argv (including the node + script tokens) and run the matching action */
+  async parseAsync(argv) {
+    const tokens = argv.slice(2);
+    this.#values = {};
+    this.#seedNegatableDefaults();
+
+    let command = null;
+    const positionals = [];
+    let helpTarget = null;
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (token === '-h' || token === '--help') {
+        helpTarget = command ?? this;
+        continue;
+      }
+      if ((token === '-V' || token === '--version') && this.#version !== null) {
+        process.stdout.write(`${this.#version}\n`);
+        return;
+      }
+      if (token.startsWith('-') && token !== '-') {
+        let name = token;
+        let inlineValue;
+        const separator = token.indexOf('=');
+        if (token.startsWith('--') && separator !== -1) {
+          name = token.slice(0, separator);
+          inlineValue = token.slice(separator + 1);
+        }
+        const found = this.#findOption(command, name);
+        if (!found) return this.#fail(`unknown option '${name}'`);
+        const { owner, option } = found;
+        if (option.takesValue) {
+          let value = inlineValue;
+          if (value === undefined) {
+            const next = tokens[i + 1];
+            if (next === undefined || (next.startsWith('-') && next !== '-')) {
+              return this.#fail(`option '${option.flags}' argument missing`);
+            }
+            value = next;
+            i++;
+          }
+          owner.#values[option.key] = value;
+        } else {
+          owner.#values[option.key] = !option.negated;
+        }
+        continue;
+      }
+      if (command === null) {
+        const sub = this.#commands.find((candidate) => candidate.#name === token);
+        if (!sub) return this.#fail(`unknown command '${token}'`);
+        command = sub;
+        command.#values = {};
+        command.#seedNegatableDefaults();
+        continue;
+      }
+      positionals.push(token);
+    }
+
+    if (helpTarget !== null) {
+      process.stdout.write(`${this.#helpText(helpTarget)}\n`);
+      return;
+    }
+    if (command === null) {
+      process.stderr.write(`${this.#helpText(this)}\n`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const args = [];
+    for (let i = 0; i < command.#arguments.length; i++) {
+      const spec = command.#arguments[i];
+      const value = positionals[i];
+      if (value === undefined && spec.required) {
+        return this.#fail(`missing required argument '${spec.name}'`);
+      }
+      args.push(value);
+    }
+
+    if (command.#actionFn) {
+      await command.#actionFn(...args, command.#values, command);
+    }
+  }
+
+  /** Seed negatable options: declaring `--no-x` makes `x` default to true */
+  #seedNegatableDefaults() {
+    for (const option of this.#options) {
+      if (option.negated) this.#values[option.key] = true;
+    }
+  }
+
+  /** Resolve an option token against the active command first, then the root */
+  #findOption(command, token) {
+    const lookup = (owner) => {
+      if (owner === null) return null;
+      const option = owner.#options.find((candidate) =>
+        token.startsWith('--') ? candidate.long === token : candidate.short === token.slice(1),
+      );
+      return option ? { owner, option } : null;
+    };
+    return lookup(command) ?? lookup(this);
+  }
+
+  #fail(message) {
+    process.stderr.write(`error: ${message}\n`);
+    process.exitCode = 1;
+  }
+
+  /** Usage suffix for a command's positional arguments, e.g. ` <direction> [file]` */
+  #argsUsage(command) {
+    return command.#arguments
+      .map((spec) => (spec.required ? ` <${spec.name}>` : ` [${spec.name}]`))
+      .join('');
+  }
+
+  #helpText(target) {
+    const isRoot = target === this;
+    const usage = isRoot
+      ? `Usage: ${this.#name} [options] [command]`
+      : `Usage: ${this.#name} ${target.#name} [options]${this.#argsUsage(target)}`;
+    const lines = [usage];
+    if (target.#description) lines.push('', target.#description);
+
+    const argumentRows = target.#arguments.map((spec) => [spec.name, spec.description]);
+    lines.push(...renderSection('Arguments', argumentRows));
+
+    const optionRows = target.#options.map((option) => [option.flags, option.description]);
+    if (isRoot && this.#version !== null) {
+      optionRows.push(['-V, --version', 'output the version number']);
+    }
+    optionRows.push(['-h, --help', 'display help for command']);
+    lines.push(...renderSection('Options', optionRows));
+
+    if (isRoot) {
+      const commandRows = this.#commands.map((sub) => {
+        const options = sub.#options.length > 0 ? ' [options]' : '';
+        return [`${sub.#name}${options}${this.#argsUsage(sub)}`, sub.#description];
+      });
+      lines.push(...renderSection('Commands', commandRows));
+    }
+    return lines.join('\n');
+  }
+}
+
+module.exports = { Command };

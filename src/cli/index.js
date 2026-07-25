@@ -1,4 +1,4 @@
-const { Command } = require('commander');
+const { Command } = require('./args.js');
 const { registerCreate } = require('./commands/create.js');
 const { registerDown } = require('./commands/down.js');
 const { registerDryRun } = require('./commands/dry-run.js');

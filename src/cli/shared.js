@@ -1,5 +1,5 @@
 const { createInterface } = require('node:readline/promises');
-const ora = require('ora');
+const { createSpinner } = require('./spinner.js');
 const { MigratorKit } = require('../core/migrator.js');
 const { MigronautError } = require('../errors/index.js');
 const { createLogger } = require('../utils/logger.js');
@@ -27,7 +27,7 @@ async function withMigrator(opts, fn, options = {}) {
   const json = options.json ?? false;
   // In JSON mode the spinner is suppressed and all human output goes to stderr,
   // so stdout carries exactly one JSON document.
-  const spinner = options.spinner && !json ? ora() : undefined;
+  const spinner = options.spinner && !json ? createSpinner() : undefined;
 
   const partial = partialFromOpts(opts);
   if (json) {

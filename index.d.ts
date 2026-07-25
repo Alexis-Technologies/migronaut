@@ -136,12 +136,17 @@ export type MigronautConfigInput =
 
 // ─── Logger ───────────────────────────────────────────────────────────────────
 
+/**
+ * Pino-compatible logger surface: any object with these four methods works,
+ * including a real pino instance (its optional `child` is used to bind a
+ * `component` field when present).
+ */
 export interface MigronautLogger {
+  debug: (msg: string) => void;
   info: (msg: string) => void;
-  success: (msg: string) => void;
   warn: (msg: string) => void;
   error: (msg: string) => void;
-  dim: (msg: string) => void;
+  child?: (bindings: Record<string, unknown>) => MigronautLogger;
 }
 
 // ─── Progress Reporter ─────────────────────────────────────────────────────────

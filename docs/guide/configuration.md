@@ -93,7 +93,7 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `templatePath` | `string` | — | Path to a custom migration template |
 | `mongoose` | `Mongoose` | — | Mongoose instance, if your migrations use it |
 | `hooks` | `MigrationHooks` | — | [Lifecycle hooks](/guide/hooks) |
-| `logger` | `MigronautLogger \| null` | built-in | Custom logger; `null` silences all output |
+| `logger` | `MigronautLogger \| null` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` silences all output |
 
 ## Environment variables
 
@@ -112,7 +112,11 @@ Every core option has an `MIGRONAUT_*` variable. These **override the config fil
 | `MIGRONAUT_SEQUENTIAL` | `sequential` |
 | `MIGRONAUT_CREATE_EXTENSION` | `createExtension` |
 
-`.env` files are loaded automatically (via `dotenv`) before env vars are read.
+`.env` files are loaded automatically before env vars are read — natively via `util.parseEnv` on
+Node ≥ 20.12, with a built-in fallback parser on older Node (migronaut has zero runtime
+dependencies). Real environment variables always win over `.env` values. Supported syntax: one
+`KEY=VALUE` per line, optional `export ` prefix, matching quotes, full-line and inline `#`
+comments; multiline values, `\n` expansion and `${VAR}` interpolation are not supported.
 
 ```bash
 # .env
