@@ -469,8 +469,9 @@ pnpm exec vitest run --coverage --coverage.include='src/core/run.ts'  # coverage
 - **Published artifact:** only `dist/`, `README.md`, `CHANGELOG.md` (the `files` field). The `docs/`
   site and this `ARCHITECTURE.md` live in the repo but are **never** shipped to npm (the `files`
   field is `dist`-scoped).
-- **Release:** `pnpm run release` = `bumpp` (version + tag, conventional-commits changelog) then
-  `pnpm publish`. `prepublishOnly` re-runs typecheck + lint + test + build as a gate.
+- **Release:** manual — bump `version` in `package.json`, write the entry in `CHANGELOG.md` by
+  hand, commit and tag, then `pnpm run release` (= `pnpm publish`). `prepublishOnly` re-runs
+  typecheck + lint + format:check + test + build as a gate before publish.
 - **Commits:** Conventional Commits required (`feat(scope):`, `fix(scope):`, `test(...)`, etc.).
 
 ## 11. Recipe: how to add a new command/feature

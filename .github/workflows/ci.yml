@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format:check
+      # Smoke: keeps the tsup build working and its output sizes visible in CI logs.
+      - run: pnpm run build
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # vitest 4 requires Node ^20 || ^22 || >=24 — no 18 here (it can't run the suite),
+        # even though the published package's own engines floor stays >=18.
+        node-version: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run coverage
+      - run: pnpm run typecheck
