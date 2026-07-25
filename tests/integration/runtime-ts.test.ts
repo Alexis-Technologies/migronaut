@@ -7,17 +7,17 @@ import { insertMigration, makeProject } from '../helpers/project.js';
 
 /**
  * These tests exercise the SHIPPED artifact the way an installed user runs it:
- * the bundled `dist/mmk.cjs` under plain `node` (no `tsx`). Every other CLI test
+ * the bundled `dist/migronaut.cjs` under plain `node` (no `tsx`). Every other CLI test
  * spawns the source via `npx tsx`, which transparently loads `.ts` — so on its
  * own the suite over-states real-world `.ts` support. Here we close that gap.
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.join(here, '..', '..');
-const builtBin = path.join(repoRoot, 'dist', 'mmk.cjs');
+const builtBin = path.join(repoRoot, 'dist', 'migronaut.cjs');
 
 // Node enabled TypeScript type-stripping by default in v22.18 (unflagged in
-// v23.6). Below that, plain `node` cannot import `.ts` and mmk surfaces a clear
+// v23.6). Below that, plain `node` cannot import `.ts` and migronaut surfaces a clear
 // error instead of a cryptic ERR_UNKNOWN_FILE_EXTENSION.
 const [major, minor] = process.versions.node.split('.').map(Number);
 const nodeStripsTypes = (major ?? 0) > 22 || ((major ?? 0) === 22 && (minor ?? 0) >= 18);
@@ -45,7 +45,7 @@ function runBuilt(args: string[], cwd: string): Promise<CliResult> {
   });
 }
 
-const tsMigration = `import type { MigrationContext } from 'mongo-migrate-kit';
+const tsMigration = `import type { MigrationContext } from '@alexify/migronaut';
 export async function up({ db }: MigrationContext): Promise<void> {
   await db.collection('rt_ts').insertOne({ marker: 'ts' });
 }
@@ -55,7 +55,7 @@ export async function down({ db }: MigrationContext): Promise<void> {
 `;
 
 let mongo: TestMongo;
-const DB = 'mmk_runtime_test';
+const DB = 'migronaut_runtime_test';
 
 beforeAll(async () => {
   // Always build so we test the CURRENT source as the shipped artifact, not a

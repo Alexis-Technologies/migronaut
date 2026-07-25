@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'tsup';
 
-// Inject the package version into the CLI bundle at build time so `mmk --version`
+// Inject the package version into the CLI bundle at build time so `migronaut --version`
 // always matches package.json — no hand-maintained version string to forget.
 const { version } = JSON.parse(
   readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
@@ -20,12 +20,12 @@ export default defineConfig([
   },
   // CLI build (CJS only — Node CLI must be CJS for broadest compat)
   {
-    entry: { mmk: 'bin/mmk.ts' },
+    entry: { migronaut: 'bin/migronaut.ts' },
     format: ['cjs'],
     dts: false,
     clean: false,
     shims: true,
-    define: { 'process.env.MMK_VERSION': JSON.stringify(version) },
+    define: { 'process.env.MIGRONAUT_VERSION': JSON.stringify(version) },
     banner: { js: '#!/usr/bin/env node' },
   },
 ]);

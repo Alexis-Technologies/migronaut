@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { LockAlreadyHeldError } from '../errors/index.js';
-import type { MmkConfig, RunResult, StatusRow } from '../types/index.js';
+import type { MigronautConfig, RunResult, StatusRow } from '../types/index.js';
 import { resolveLogger } from '../utils/logger.js';
 import { MigratorKit, type MigratorKitOptions } from './migrator.js';
 
@@ -48,7 +48,7 @@ const DEFAULT_LOCK_POLL_INTERVAL_MS = 500;
  * Unlike driving {@link MigratorKit} by hand, this opens its own connection,
  * runs pending `up` migrations, and **always disconnects in a `finally`** so a
  * failure never leaks a MongoDB connection. Migration errors propagate
- * unchanged (as {@link MmkError} subclasses with a typed `code`) so a broken
+ * unchanged (as {@link MigronautError} subclasses with a typed `code`) so a broken
  * migration aborts your boot sequence instead of starting the app against a
  * half-migrated database.
  *
@@ -58,7 +58,7 @@ const DEFAULT_LOCK_POLL_INTERVAL_MS = 500;
  *
  * @example
  * ```ts
- * import { runMigrations } from 'mongo-migrate-kit';
+ * import { runMigrations } from '@alexify/migronaut';
  *
  * const { applied, upToDate } = await runMigrations(
  *   { uri: process.env.MONGO_URI!, dbName: 'my_app' },
@@ -68,7 +68,7 @@ const DEFAULT_LOCK_POLL_INTERVAL_MS = 500;
  * ```
  */
 export async function runMigrations(
-  config: Partial<MmkConfig> = {},
+  config: Partial<MigronautConfig> = {},
   options: RunMigrationsOptions = {},
 ): Promise<MigrationSummary> {
   const {
@@ -119,7 +119,7 @@ export async function runMigrations(
  *
  * @example
  * ```ts
- * import { pendingMigrations } from 'mongo-migrate-kit';
+ * import { pendingMigrations } from '@alexify/migronaut';
  *
  * const pending = await pendingMigrations({ uri, dbName: 'my_app' });
  * if (pending.length > 0) {
@@ -128,7 +128,7 @@ export async function runMigrations(
  * ```
  */
 export async function pendingMigrations(
-  config: Partial<MmkConfig> = {},
+  config: Partial<MigronautConfig> = {},
   options: MigratorKitOptions = {},
 ): Promise<StatusRow[]> {
   const kit = new MigratorKit(config, options);

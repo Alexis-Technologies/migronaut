@@ -1,7 +1,7 @@
-# Why mongo-migrate-kit?
+# Why migronaut?
 
 Most MongoDB migration tools run every pending migration, then only undo the last one.
-`mongo-migrate-kit` gives you precise control over what runs and what rolls back — and won't leave
+`migronaut` gives you precise control over what runs and what rolls back — and won't leave
 your database half-migrated when something fails.
 
 ::: info Where to start
@@ -13,9 +13,9 @@ your database half-migrated when something fails.
 
 ## Reasons to choose it
 
-- **Run a single migration** — `mmk up <file>`, not just "all pending".
+- **Run a single migration** — `migronaut up <file>`, not just "all pending".
 - **Roll back anything** — a batch (`--batch 3`), the last N (`--steps 2`), one file, or `redo`.
-- **Preview before you run** — `mmk dry-run up` prints the exact plan without touching the database.
+- **Preview before you run** — `migronaut dry-run up` prints the exact plan without touching the database.
 - **No race conditions** — an atomic MongoDB lock stops two deploys running migrations at once.
 - **Tamper detection** — SHA-256 checksums catch a migration edited after it was applied.
 - **Audit trail kept** — a rollback updates the record, it never deletes it.
@@ -26,7 +26,7 @@ your database half-migrated when something fails.
 
 ## vs. migrate-mongo
 
-| Capability                                      | `migrate-mongo` | `mongo-migrate-kit` |
+| Capability                                      | `migrate-mongo` | `migronaut` |
 | ----------------------------------------------- | :-------------: | :-----------------: |
 | Run a single migration file                     |        ❌        |          ✅          |
 | Roll back a specific batch (not just the last)  |        ❌        |          ✅          |
@@ -38,7 +38,7 @@ your database half-migrated when something fails.
 | History kept on rollback (never deleted)        |        ❌        |          ✅          |
 
 ::: tip Already on migrate-mongo?
-Switch in one command — `mmk import` adopts your existing `changelog` as-is, with no re-running and
+Switch in one command — `migronaut import` adopts your existing `changelog` as-is, with no re-running and
 no data loss. See [Migrating from migrate-mongo](/guide/migrate-mongo).
 :::
 

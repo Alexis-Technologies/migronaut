@@ -1,12 +1,12 @@
 import { defineConfig } from 'vitepress';
 
-const ogTitle = 'mongo-migrate-kit — MongoDB migrations for Node.js';
+const ogTitle = 'migronaut — MongoDB migrations for Node.js';
 const ogDescription =
   'MongoDB migration toolkit for Node.js & TypeScript. Run a single migration, ' +
   'roll back any batch, preview with dry-run, transactions, checksums, and native locking.';
-const repo = 'https://github.com/guptasantosh327/mongo-migrate-kit';
+const repo = 'https://github.com/Alexis-Technologies/migronaut';
 const base = '/';
-const hostname = 'https://mongo-migrate-kit.vercel.app/';
+const hostname = 'https://migronaut.vercel.app/';
 const ogImage = `${hostname}logo.png`;
 
 const keywords = [
@@ -22,8 +22,8 @@ const keywords = [
   'migrate-mongo alternative',
   'mongoose migration',
   'mongodb migration cli',
-  'mmk',
-  'mongo-migrate-kit',
+  'migronaut',
+  '@alexify/migronaut',
 ].join(', ');
 
 // schema.org structured data — helps search and AI engines understand the package
@@ -31,13 +31,13 @@ const keywords = [
 const jsonLd = {
   '@context': 'https://schema.org',
   '@type': 'SoftwareApplication',
-  name: 'mongo-migrate-kit',
-  alternateName: 'mmk',
+  name: '@alexify/migronaut',
+  alternateName: 'migronaut',
   description: ogDescription,
   applicationCategory: 'DeveloperApplication',
   operatingSystem: 'Node.js >= 18',
   url: hostname,
-  downloadUrl: 'https://www.npmjs.com/package/mongo-migrate-kit',
+  downloadUrl: 'https://www.npmjs.com/package/@alexify/migronaut',
   codeRepository: repo,
   license: 'https://opensource.org/licenses/MIT',
   keywords,
@@ -47,7 +47,7 @@ const jsonLd = {
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
-  title: 'mongo-migrate-kit',
+  title: '@alexify/migronaut',
   titleTemplate: ':title — MongoDB migrations for Node.js',
   description: ogDescription,
   lang: 'en-US',
@@ -64,7 +64,7 @@ export default defineConfig({
     ['meta', { name: 'keywords', content: keywords }],
     ['meta', { name: 'robots', content: 'index, follow' }],
     ['meta', { property: 'og:type', content: 'website' }],
-    ['meta', { property: 'og:site_name', content: 'mongo-migrate-kit' }],
+    ['meta', { property: 'og:site_name', content: '@alexify/migronaut' }],
     ['meta', { property: 'og:title', content: ogTitle }],
     ['meta', { property: 'og:description', content: ogDescription }],
     ['meta', { property: 'og:image', content: ogImage }],
@@ -98,7 +98,7 @@ export default defineConfig({
         text: 'v1.2.2',
         items: [
           { text: 'Changelog', link: `${repo}/blob/main/CHANGELOG.md` },
-          { text: 'npm', link: 'https://www.npmjs.com/package/mongo-migrate-kit' },
+          { text: 'npm', link: 'https://www.npmjs.com/package/@alexify/migronaut' },
           { text: 'Releases', link: `${repo}/releases` },
         ],
       },
@@ -110,7 +110,7 @@ export default defineConfig({
         {
           text: 'Introduction',
           items: [
-            { text: 'Why mongo-migrate-kit?', link: '/guide/why' },
+            { text: 'Why migronaut?', link: '/guide/why' },
             { text: 'Core Concepts', link: '/guide/concepts' },
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'Tutorial', link: '/guide/tutorial' },
@@ -149,24 +149,24 @@ export default defineConfig({
         {
           text: 'Running migrations',
           items: [
-            { text: 'mmk up', link: '/commands/up' },
-            { text: 'mmk down', link: '/commands/down' },
-            { text: 'mmk redo', link: '/commands/redo' },
+            { text: 'migronaut up', link: '/commands/up' },
+            { text: 'migronaut down', link: '/commands/down' },
+            { text: 'migronaut redo', link: '/commands/redo' },
           ],
         },
         {
           text: 'Inspecting & authoring',
           items: [
-            { text: 'mmk status / list', link: '/commands/status' },
-            { text: 'mmk create / init', link: '/commands/create' },
-            { text: 'mmk dry-run', link: '/commands/dry-run' },
+            { text: 'migronaut status / list', link: '/commands/status' },
+            { text: 'migronaut create / init', link: '/commands/create' },
+            { text: 'migronaut dry-run', link: '/commands/dry-run' },
           ],
         },
         {
           text: 'Operations',
           items: [
-            { text: 'mmk import', link: '/commands/import' },
-            { text: 'mmk unlock', link: '/commands/unlock' },
+            { text: 'migronaut import', link: '/commands/import' },
+            { text: 'migronaut unlock', link: '/commands/unlock' },
           ],
         },
       ],

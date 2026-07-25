@@ -1,20 +1,20 @@
-# mmk create &amp; mmk init
+# migronaut create &amp; migronaut init
 
 Author new migration files and generate a config.
 
-## mmk create
+## migronaut create
 
 Create a new, timestamped migration file with `up`/`down` stubs.
 
 ```bash
-mmk create <name> [options]
+migronaut create <name> [options]
 ```
 
 ```bash
-mmk create add-users-index            # → 20260605143021-add-users-index.js
-mmk create add-users-index --ts       # force a .ts file
-mmk create add-users-index --js       # force a .js file
-mmk create add-users-index --template ./my-template.ts
+migronaut create add-users-index            # → 20260605143021-add-users-index.js
+migronaut create add-users-index --ts       # force a .ts file
+migronaut create add-users-index --js       # force a .js file
+migronaut create add-users-index --template ./my-template.ts
 ```
 
 ### File type resolution
@@ -31,32 +31,32 @@ built-in default (`js`).
 | `--json` | Emit the created file path as JSON. |
 
 ::: tip
-`mmk create` never connects to the database, so it needs no `uri`/`db`.
+`migronaut create` never connects to the database, so it needs no `uri`/`db`.
 :::
 
-## mmk init
+## migronaut init
 
 Generate a fully-commented config file in the current directory.
 
 ```bash
-mmk init [options]
+migronaut init [options]
 ```
 
 ```bash
-mmk init                     # → mmk.config.js (default)
-mmk init --ts                # → mmk.config.ts
-mmk init --json              # → mmk.config.json
-mmk init --secret-provider   # → a runtime secret-loading config (js/ts only)
-mmk init --force             # overwrite an existing config file
+migronaut init                     # → migronaut.config.js (default)
+migronaut init --ts                # → migronaut.config.ts
+migronaut init --json              # → migronaut.config.json
+migronaut init --secret-provider   # → a runtime secret-loading config (js/ts only)
+migronaut init --force             # overwrite an existing config file
 ```
 
 ### Options
 
 | Option | Description |
 |---|---|
-| `--ts` | Create `mmk.config.ts`. |
-| `--js` | Create `mmk.config.js` (the explicit default). |
-| `--json` | Create `mmk.config.json` (omits code-only options like `hooks`). |
+| `--ts` | Create `migronaut.config.ts`. |
+| `--js` | Create `migronaut.config.js` (the explicit default). |
+| `--json` | Create `migronaut.config.json` (omits code-only options like `hooks`). |
 | `--secret-provider` | Generate a factory-function config wired to a secret manager (AWS example, provider-agnostic). `--json --secret-provider` is rejected. |
 | `--force` | Overwrite an existing config file (otherwise exits 1 with `CONFIG_FILE_EXISTS`). |
 

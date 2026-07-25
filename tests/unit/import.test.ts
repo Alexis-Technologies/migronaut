@@ -10,7 +10,7 @@ const echoResolver = (fileName: string): { checksum: string; source: 'recomputed
 
 const baseOptions = {
   environment: 'imported',
-  executedBy: 'mmk-import',
+  executedBy: 'migronaut-import',
   resolveChecksum: echoResolver,
 };
 
@@ -40,7 +40,7 @@ describe('mapMigrateMongoDocs', () => {
       duration: 0,
       checksum: 'sum-a.js',
       environment: 'imported',
-      executedBy: 'mmk-import',
+      executedBy: 'migronaut-import',
       origin: 'migrate-mongo',
     });
     expect(record?.appliedAt).toEqual(new Date('2026-01-01T00:00:00Z'));

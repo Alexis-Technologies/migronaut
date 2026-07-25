@@ -41,13 +41,13 @@ function orderKey(doc: MigrateMongoDoc): number {
 }
 
 /**
- * Map migrate-mongo changelog docs into mongo-migrate-kit {@link MigrationRecord}s.
+ * Map migrate-mongo changelog docs into migronaut {@link MigrationRecord}s.
  * Pure: all impure inputs (disk checksums, env identity) arrive via `options`.
  *
  * Each migration gets a **unique** batch number, assigned sequentially in apply
  * order (`migrationBlock`, then `appliedAt`, then filename) starting at
  * `batchOffset + 1`. Run-grouping is deliberately not preserved: imported records
- * are forward-only (mmk refuses to `down` them), so a shared batch would only
+ * are forward-only (migronaut refuses to `down` them), so a shared batch would only
  * produce confusing duplicate batch ids with no rollback benefit.
  */
 export function mapMigrateMongoDocs(
@@ -71,7 +71,7 @@ export function mapMigrateMongoDocs(
       checksum,
       environment: options.environment,
       executedBy: options.executedBy,
-      // Marks the record forward-only: mmk down/redo will refuse it.
+      // Marks the record forward-only: migronaut down/redo will refuse it.
       origin: 'migrate-mongo',
     };
   });

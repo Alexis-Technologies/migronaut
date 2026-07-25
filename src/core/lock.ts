@@ -2,10 +2,10 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import type { Db } from 'mongodb';
 import { LockAlreadyHeldError, LockReleaseFailedError } from '../errors/index.js';
-import type { MmkLogger } from '../types/index.js';
+import type { MigronautLogger } from '../types/index.js';
 
 /** Fixed `_id` of the singleton lock document */
-export const LOCK_ID = 'mmk_lock';
+export const LOCK_ID = 'migronaut_lock';
 
 /** Shape of the lock document stored in the lock collection */
 export interface LockDocument {
@@ -120,7 +120,7 @@ export class MigrationLock {
 
   /**
    * Force-delete the lock regardless of who holds it, returning the document
-   * that was removed (or null if none). Used by `mmk unlock` to clear a lock
+   * that was removed (or null if none). Used by `migronaut unlock` to clear a lock
    * left behind by a crashed run — bypasses the owner scoping of {@link release}.
    */
   async forceRelease(): Promise<LockDocument | null> {
@@ -159,7 +159,7 @@ export class MigrationLock {
  */
 export async function runWithLock<T>(
   lock: MigrationLock,
-  options: { noLock?: boolean; logger: MmkLogger },
+  options: { noLock?: boolean; logger: MigronautLogger },
   fn: () => Promise<T>,
 ): Promise<T> {
   if (options.noLock) {

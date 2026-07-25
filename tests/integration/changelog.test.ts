@@ -4,11 +4,11 @@ import { type TestMongo, startTestMongo } from '../helpers/mongo.js';
 import { makeRecord } from '../helpers/records.js';
 
 let mongo: TestMongo;
-const COLLECTION = '_mmk_migrations';
+const COLLECTION = '_migronaut_migrations';
 const changelog = new Changelog(COLLECTION);
 
 beforeAll(async () => {
-  mongo = await startTestMongo('mmk_changelog_test');
+  mongo = await startTestMongo('migronaut_changelog_test');
 });
 
 afterAll(async () => {

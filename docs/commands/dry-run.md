@@ -1,18 +1,18 @@
-# mmk dry-run
+# migronaut dry-run
 
 Preview what `up` or `down` would do — **without ever touching the database**.
 
 ```bash
-mmk dry-run <up|down> [file] [options]
+migronaut dry-run <up|down> [file] [options]
 ```
 
 ## Usage
 
 ```bash
-mmk dry-run up               # preview every pending migration that would apply
-mmk dry-run up <file>        # preview a single file
-mmk dry-run down             # preview reverting the last batch
-mmk dry-run down --steps <n> # preview reverting the last N migrations
+migronaut dry-run up               # preview every pending migration that would apply
+migronaut dry-run up <file>        # preview a single file
+migronaut dry-run down             # preview reverting the last batch
+migronaut dry-run down --steps <n> # preview reverting the last N migrations
 ```
 
 ## How it works

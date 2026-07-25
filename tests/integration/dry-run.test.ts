@@ -5,7 +5,7 @@ import { type TestMongo, startTestMongo } from '../helpers/mongo.js';
 import { insertMigration, makeMigrator, makeProject } from '../helpers/project.js';
 
 let mongo: TestMongo;
-const DB = 'mmk_dryrun_test';
+const DB = 'migronaut_dryrun_test';
 
 beforeAll(async () => {
   mongo = await startTestMongo(DB);
@@ -41,7 +41,7 @@ describe('MigratorKit.dryRun (integration)', () => {
     expect(rows.map((r) => r.file)).toEqual(['0001-a.ts', '0002-b.ts']);
     expect(rows.every((r) => r.status === 'pending')).toBe(true);
     expect(await mongo.db.collection('things').countDocuments()).toBe(0);
-    expect(await mongo.db.collection('_mmk_migrations').countDocuments()).toBe(0);
+    expect(await mongo.db.collection('_migronaut_migrations').countDocuments()).toBe(0);
   });
 
   it('should list the last batch for down', async () => {

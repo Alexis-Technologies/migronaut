@@ -1,4 +1,4 @@
-# Distribution Kit — mongo-migrate-kit
+# Distribution Kit — migronaut
 
 Platform-native versions of the three blog posts. Each platform has its own etiquette, so these
 aren't copy-paste clones — they're written the way people actually post on each one.
@@ -26,13 +26,13 @@ tags: mongodb, node, typescript, opensource
 canonical_url: LINK
 ---
 
-(paste the full body of 01-why-i-built-mongo-migrate-kit.md here)
+(paste the full body of 01-why-i-built-migronaut.md here)
 ```
 
 ### Post 2 — Switch guide
 ```markdown
 ---
-title: "Switching from migrate-mongo to mongo-migrate-kit: A Zero-Downtime, Non-Destructive Guide"
+title: "Switching from migrate-mongo to migronaut: A Zero-Downtime, Non-Destructive Guide"
 published: true
 description: "A step-by-step guide to moving an existing project off migrate-mongo without re-running old migrations or losing history."
 tags: mongodb, node, database, tutorial
@@ -71,7 +71,7 @@ Suggested tags (Hashnode lets you add more than Dev.to):
 - Post 3: `MongoDB`, `Node.js`, `Web Development`, `DevOps`, `Open Source`
 
 Suggested subtitles (Hashnode shows a subtitle field):
-- Post 1: "The story behind mongo-migrate-kit — and the one command that makes switching painless."
+- Post 1: "The story behind migronaut — and the one command that makes switching painless."
 - Post 2: "Move off migrate-mongo without re-running a single old migration."
 - Post 3: "The gaps that bit me in production, and what I reach for now."
 
@@ -104,7 +104,7 @@ migration tool should do but didn't:
 → checksums to catch edited migrations
 → never delete history on rollback
 
-I built it. It's called mongo-migrate-kit.
+I built it. It's called migronaut.
 
 The part I'm proudest of: if you're already on migrate-mongo,
 you switch in one command. It reads your existing history,
@@ -166,15 +166,15 @@ gaps kept biting me as projects grew:
 - no checksum, so an edited migration silently drifts
 - rolling back deletes the changelog entry (bad for audits)
 
-So I built mongo-migrate-kit. Single-file up/down, dry-runs, a MongoDB-native
+So I built migronaut. Single-file up/down, dry-runs, a MongoDB-native
 lock, SHA-256 checksums, redo, and an append-only history that never gets deleted.
 TS and JS both work with no ts-node setup.
 
-The thing I worked hardest on is switching: `mmk import` adopts your existing
+The thing I worked hardest on is switching: `migronaut import` adopts your existing
 migrate-mongo changelog in one command without touching your old data, so
 it knows what's already applied and only runs what's new.
 
-Repo + npm: mongo-migrate-kit. Happy to answer anything, and genuinely open
+Repo + npm: migronaut. Happy to answer anything, and genuinely open
 to "this already exists" or "you got X wrong" — that's why I'm posting.
 ```
 
@@ -205,7 +205,7 @@ Body:
 Hi all,
 
 I've released an open-source MongoDB migration toolkit for Node.js called
-mongo-migrate-kit, and I'd value feedback from this community.
+migronaut, and I'd value feedback from this community.
 
 A few design choices I made specifically around MongoDB that I'd love thoughts on:
 
@@ -245,7 +245,7 @@ Discord is casual and fast. One or two lines, drop it in the right channel (usua
 
 ### Short version
 ```
-Made a MongoDB migration toolkit for Node — mongo-migrate-kit 🚀
+Made a MongoDB migration toolkit for Node — migronaut 🚀
 Single-file rollbacks, dry-runs, a native lock, checksums, and an audit trail
 that never deletes history. TS + JS both work out of the box.
 

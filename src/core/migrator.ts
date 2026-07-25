@@ -19,8 +19,8 @@ import type {
   LockInfo,
   MigrateMongoDoc,
   MigrationRecord,
-  MmkConfig,
-  MmkLogger,
+  MigronautConfig,
+  MigronautLogger,
   ProgressReporter,
   RunResult,
   StatusRow,
@@ -132,22 +132,22 @@ export interface MigratorKitOptions {
 }
 
 export class MigratorKit {
-  private readonly partialConfig: Partial<MmkConfig>;
+  private readonly partialConfig: Partial<MigronautConfig>;
   private readonly configPath: string | undefined;
   private readonly progress: ProgressReporter | undefined;
-  private config: MmkConfig | undefined;
+  private config: MigronautConfig | undefined;
   private client: MongoClient | undefined;
   private db: Db | undefined;
   private changelog: Changelog | undefined;
 
-  constructor(config: Partial<MmkConfig> = {}, options: MigratorKitOptions = {}) {
+  constructor(config: Partial<MigronautConfig> = {}, options: MigratorKitOptions = {}) {
     this.partialConfig = config;
     this.configPath = options.configPath;
     this.progress = options.progress;
   }
 
   /** Resolve and cache the full configuration */
-  private async ensureConfig(requireDb = true): Promise<MmkConfig> {
+  private async ensureConfig(requireDb = true): Promise<MigronautConfig> {
     if (!this.config) {
       this.config = await loadConfig({
         flags: this.partialConfig,
@@ -158,7 +158,7 @@ export class MigratorKit {
     return this.config;
   }
 
-  private get logger(): MmkLogger {
+  private get logger(): MigronautLogger {
     return resolveLogger(this.config?.logger);
   }
 
@@ -200,7 +200,7 @@ export class MigratorKit {
 
   /** Build a lock bound to the configured collection (assumes connected) */
   private buildLock(): MigrationLock {
-    const config = this.config as MmkConfig;
+    const config = this.config as MigronautConfig;
     return new MigrationLock(this.requireDb(), config.lockCollection, config.lockTTLSeconds);
   }
 
@@ -216,7 +216,7 @@ export class MigratorKit {
 
   /**
    * Force-release the migration lock regardless of who holds it — for clearing a
-   * lock left behind by a crashed run (`mmk unlock`). Returns the holder that was
+   * lock left behind by a crashed run (`migronaut unlock`). Returns the holder that was
    * removed, or null if no lock was held.
    */
   async forceUnlock(): Promise<LockInfo | null> {
@@ -249,7 +249,7 @@ export class MigratorKit {
    *
    * The name must be a bare filename: a name containing a path separator, a
    * NUL byte, or `.`/`..` is rejected with {@link MigrationInvalidNameError}.
-   * This prevents path traversal — e.g. `mmk up ../../evil.js` would otherwise
+   * This prevents path traversal — e.g. `migronaut up ../../evil.js` would otherwise
    * resolve (and `loadMigrationFile` execute) a file outside the migrations
    * directory. A final containment check guards against any residual escape.
    */
@@ -344,7 +344,7 @@ export class MigratorKit {
 
   private async runUp(filename?: string, options: UpOptions = {}): Promise<RunResult[]> {
     const force = options.force ?? false;
-    const config = this.config as MmkConfig;
+    const config = this.config as MigronautConfig;
     const db = this.requireDb();
     const changelog = this.requireChangelog();
     const logger = this.logger;
@@ -467,7 +467,7 @@ export class MigratorKit {
   }
 
   private async runDown(filename?: string, options: DownOptions = {}): Promise<RunResult[]> {
-    const config = this.config as MmkConfig;
+    const config = this.config as MigronautConfig;
     const db = this.requireDb();
     const changelog = this.requireChangelog();
     const logger = this.logger;
@@ -557,7 +557,7 @@ export class MigratorKit {
   /**
    * Refuse rollback of any migrate-mongo-imported record. These are forward-only:
    * their files use migrate-mongo's positional `up(db, client)`/`down(db, client)`
-   * signature, which mmk cannot invoke safely, so reverting them could corrupt the
+   * signature, which migronaut cannot invoke safely, so reverting them could corrupt the
    * collection. Throws before any migration runs or the changelog is touched.
    */
   private assertReversible(records: MigrationRecord[]): void {
@@ -570,9 +570,9 @@ export class MigratorKit {
       `✖ Cannot roll back ${names.length} migrate-mongo-imported migration(s): ${names.join(', ')}`,
     );
     this.logger.dim(
-      'These were adopted via `mmk import` (forward-only). Their files use the positional ' +
-        'migrate-mongo signature, which mmk cannot run. Revert them manually or re-author ' +
-        'them in mmk format.',
+      'These were adopted via `migronaut import` (forward-only). Their files use the positional ' +
+        'migrate-mongo signature, which migronaut cannot run. Revert them manually or re-author ' +
+        'them in migronaut format.',
     );
     throw new IrreversibleMigrationError(
       `Cannot roll back migrate-mongo-imported migration(s): ${names.join(', ')}`,
@@ -714,7 +714,7 @@ export class MigratorKit {
     return filepath;
   }
 
-  /** Create an mmk config file in the working directory and return its path */
+  /** Create a migronaut config file in the working directory and return its path */
   async init(options: InitOptions = {}): Promise<string> {
     const values: ConfigValues = {};
     if (this.partialConfig.uri) values.uri = this.partialConfig.uri;
@@ -751,7 +751,7 @@ export class MigratorKit {
   }
 
   private async runImport(options: ImportOptions): Promise<ImportResult> {
-    const config = this.config as MmkConfig;
+    const config = this.config as MigronautConfig;
     const db = this.requireDb();
     const changelog = this.requireChangelog();
     const logger = this.logger;
@@ -804,7 +804,7 @@ export class MigratorKit {
     const rowSources = new Map<string, ImportChecksumSource>();
     const records = mapMigrateMongoDocs(valid, {
       environment: 'imported',
-      executedBy: 'mmk-import',
+      executedBy: 'migronaut-import',
       batchOffset,
       resolveChecksum: (fileName, fileHash) => {
         const resolved = this.resolveImportChecksum(fileName, fileHash, options.trustHash ?? false);

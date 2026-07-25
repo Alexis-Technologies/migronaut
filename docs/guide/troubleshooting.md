@@ -9,14 +9,14 @@ to do. For the full list of error codes, see the [Error Codes reference](/refere
 LockAlreadyHeldError: Migration lock is held by pid 48213 on host deploy-runner-7
 ```
 
-**Why:** another `mmk` process is running migrations, *or* a previous run crashed and left the lock
+**Why:** another `migronaut` process is running migrations, *or* a previous run crashed and left the lock
 behind.
 
 **Fix:**
 - If a migration really is running elsewhere, wait — this is the lock doing its job.
 - If you're sure nothing is running (e.g. a CI job was killed), clear it:
   ```bash
-  mmk unlock
+  migronaut unlock
   ```
 - The lock also auto-expires after `lockTTLSeconds` (default 60), so waiting works too.
 
@@ -26,15 +26,15 @@ behind.
 ⚠ Warning  Checksum mismatch: 2026...-add-users-index.js
 ```
 
-**Why:** the file was **edited after it was already applied**. `mmk` detects this to stop you
+**Why:** the file was **edited after it was already applied**. `migronaut` detects this to stop you
 silently changing history.
 
 **Fix:**
 - **Never edit an applied migration.** Instead, write a *new* migration for the change.
 - If the edit was intentional and harmless (a comment, formatting), the warning is informational in
   the default (non-strict) mode and the file is skipped.
-- If you truly need to re-run it, that's `mmk up <file> --force` — but understand you're rewriting
-  history. See [`mmk up --force`](/commands/up#re-running-an-applied-migration).
+- If you truly need to re-run it, that's `migronaut up <file> --force` — but understand you're rewriting
+  history. See [`migronaut up --force`](/commands/up#re-running-an-applied-migration).
 
 ## "Connection failed"
 
@@ -46,7 +46,7 @@ ConnectionFailedError: Failed to connect to MongoDB
 
 **Fix:**
 - Verify the server is up: `mongosh "<your-uri>"`.
-- Check your config or env vars (`MMK_URI`, `MMK_DB`). See [Configuration](/guide/configuration).
+- Check your config or env vars (`MIGRONAUT_URI`, `MIGRONAUT_DB`). See [Configuration](/guide/configuration).
 - In Docker/CI, make sure the host is reachable (often `mongodb://mongo:27017`, not `localhost`).
 
 ## A `.ts` migration won't load
@@ -56,13 +56,13 @@ Cannot import a TypeScript migration: ERR_UNKNOWN_FILE_EXTENSION
 ```
 
 **Why:** you're on a Node version below 22.18, which can't import `.ts` directly, and no TypeScript
-loader is registered. `mmk` runs under your Node and does not bundle a loader.
+loader is registered. `migronaut` runs under your Node and does not bundle a loader.
 
 **Fix:** any one of:
 - **Upgrade to Node ≥ 22.18** — `.ts` then loads natively, no setup.
-- **Register a loader:** install `tsx` and run mmk under it, e.g.
-  `node --import tsx node_modules/mongo-migrate-kit/dist/mmk.cjs up`.
-- **Use `.js` instead** (`mmk create <name> --js`) — runs on Node 18+ with zero setup.
+- **Register a loader:** install `tsx` and run migronaut under it, e.g.
+  `node --import tsx node_modules/migronaut/dist/migronaut.cjs up`.
+- **Use `.js` instead** (`migronaut create <name> --js`) — runs on Node 18+ with zero setup.
 
 See [Running TypeScript migrations](/guide/writing-migrations#running-typescript-migrations) for the
 full breakdown.
@@ -86,7 +86,7 @@ NotAppliedError: 2026...-add-users-index.js has not been applied
 
 **Why:** you tried to `down` (revert) a migration that isn't currently applied.
 
-**Fix:** run `mmk status` to see what's actually applied, then target a file that is.
+**Fix:** run `migronaut status` to see what's actually applied, then target a file that is.
 
 ## An imported migration won't revert
 
@@ -94,8 +94,8 @@ NotAppliedError: 2026...-add-users-index.js has not been applied
 IrreversibleMigrationError: 2026...-legacy.js was imported from migrate-mongo and cannot be reverted
 ```
 
-**Why:** migrations adopted via [`mmk import`](/commands/import) use migrate-mongo's positional
-`up(db, client)` signature, which mmk can't run safely in reverse. This is intentional — it's caught
+**Why:** migrations adopted via [`migronaut import`](/commands/import) use migrate-mongo's positional
+`up(db, client)` signature, which migronaut can't run safely in reverse. This is intentional — it's caught
 *before* anything is touched.
 
 **Fix:** imported history is forward-only. To undo such a change, write a new migration that performs
@@ -105,4 +105,4 @@ the reverse operation.
 
 - Run any command with `--json` to get a structured error object you can inspect.
 - Check the [Error Codes reference](/reference/error-codes) for the exact `code` and its meaning.
-- Open an issue: <https://github.com/guptasantosh327/mongo-migrate-kit/issues>.
+- Open an issue: <https://github.com/Alexis-Technologies/migronaut/issues>.

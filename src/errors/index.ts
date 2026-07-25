@@ -1,13 +1,13 @@
-import type { MmkErrorCode } from '../types/index.js';
+import type { MigronautErrorCode } from '../types/index.js';
 
-/** Base error for all mongo-migrate-kit failures. Carries a typed code and context */
-export class MmkError extends Error {
-  readonly code: MmkErrorCode;
+/** Base error for all migronaut failures. Carries a typed code and context */
+export class MigronautError extends Error {
+  readonly code: MigronautErrorCode;
   readonly context?: Record<string, unknown>;
 
-  constructor(code: MmkErrorCode, message: string, context?: Record<string, unknown>) {
+  constructor(code: MigronautErrorCode, message: string, context?: Record<string, unknown>) {
     super(message);
-    this.name = 'MmkError';
+    this.name = 'MigronautError';
     this.code = code;
     if (context !== undefined) {
       this.context = context;
@@ -17,7 +17,7 @@ export class MmkError extends Error {
 }
 
 /** Thrown when a lock is already held by another process within its TTL */
-export class LockAlreadyHeldError extends MmkError {
+export class LockAlreadyHeldError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('LOCK_ALREADY_HELD', message, context);
     this.name = 'LockAlreadyHeldError';
@@ -25,7 +25,7 @@ export class LockAlreadyHeldError extends MmkError {
 }
 
 /** Thrown when releasing a lock fails */
-export class LockReleaseFailedError extends MmkError {
+export class LockReleaseFailedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('LOCK_RELEASE_FAILED', message, context);
     this.name = 'LockReleaseFailedError';
@@ -33,7 +33,7 @@ export class LockReleaseFailedError extends MmkError {
 }
 
 /** Thrown when a file's checksum differs from the one recorded at apply time */
-export class ChecksumMismatchError extends MmkError {
+export class ChecksumMismatchError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('CHECKSUM_MISMATCH', message, context);
     this.name = 'ChecksumMismatchError';
@@ -41,7 +41,7 @@ export class ChecksumMismatchError extends MmkError {
 }
 
 /** Thrown when a referenced migration file does not exist on disk */
-export class MigrationFileNotFoundError extends MmkError {
+export class MigrationFileNotFoundError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('MIGRATION_FILE_NOT_FOUND', message, context);
     this.name = 'MigrationFileNotFoundError';
@@ -53,7 +53,7 @@ export class MigrationFileNotFoundError extends MmkError {
  * path separator or `..`, which would let a target escape the migrations
  * directory (path traversal) when joined into a filesystem path.
  */
-export class MigrationInvalidNameError extends MmkError {
+export class MigrationInvalidNameError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('MIGRATION_INVALID_NAME', message, context);
     this.name = 'MigrationInvalidNameError';
@@ -61,7 +61,7 @@ export class MigrationInvalidNameError extends MmkError {
 }
 
 /** Thrown when a migration file does not export valid up()/down() functions */
-export class MigrationInvalidExportError extends MmkError {
+export class MigrationInvalidExportError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('MIGRATION_INVALID_EXPORT', message, context);
     this.name = 'MigrationInvalidExportError';
@@ -69,7 +69,7 @@ export class MigrationInvalidExportError extends MmkError {
 }
 
 /** Thrown when a migration's up() or down() throws during execution */
-export class MigrationExecutionFailedError extends MmkError {
+export class MigrationExecutionFailedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('MIGRATION_EXECUTION_FAILED', message, context);
     this.name = 'MigrationExecutionFailedError';
@@ -77,7 +77,7 @@ export class MigrationExecutionFailedError extends MmkError {
 }
 
 /** Thrown when the merged configuration fails validation */
-export class ConfigInvalidError extends MmkError {
+export class ConfigInvalidError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('CONFIG_INVALID', message, context);
     this.name = 'ConfigInvalidError';
@@ -85,7 +85,7 @@ export class ConfigInvalidError extends MmkError {
 }
 
 /** Thrown when creating a config file that already exists without `--force` */
-export class ConfigFileExistsError extends MmkError {
+export class ConfigFileExistsError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('CONFIG_FILE_EXISTS', message, context);
     this.name = 'ConfigFileExistsError';
@@ -93,7 +93,7 @@ export class ConfigFileExistsError extends MmkError {
 }
 
 /** Thrown when connecting to MongoDB fails */
-export class ConnectionFailedError extends MmkError {
+export class ConnectionFailedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('CONNECTION_FAILED', message, context);
     this.name = 'ConnectionFailedError';
@@ -101,7 +101,7 @@ export class ConnectionFailedError extends MmkError {
 }
 
 /** Thrown when attempting to apply a migration that is already applied */
-export class AlreadyAppliedError extends MmkError {
+export class AlreadyAppliedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('ALREADY_APPLIED', message, context);
     this.name = 'AlreadyAppliedError';
@@ -109,15 +109,15 @@ export class AlreadyAppliedError extends MmkError {
 }
 
 /** Thrown when attempting to revert a migration that was never applied */
-export class NotAppliedError extends MmkError {
+export class NotAppliedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('NOT_APPLIED', message, context);
     this.name = 'NotAppliedError';
   }
 }
 
-/** Thrown when `mmk import` targets a non-empty changelog without `--force` */
-export class ImportTargetNotEmptyError extends MmkError {
+/** Thrown when `migronaut import` targets a non-empty changelog without `--force` */
+export class ImportTargetNotEmptyError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('IMPORT_TARGET_NOT_EMPTY', message, context);
     this.name = 'ImportTargetNotEmptyError';
@@ -125,7 +125,7 @@ export class ImportTargetNotEmptyError extends MmkError {
 }
 
 /** Thrown when attempting to roll back a migrate-mongo-imported (forward-only) migration */
-export class IrreversibleMigrationError extends MmkError {
+export class IrreversibleMigrationError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>) {
     super('MIGRATION_IRREVERSIBLE', message, context);
     this.name = 'IrreversibleMigrationError';

@@ -16,6 +16,6 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true
   },
-  "include": ["src", "bin", "mmk.config.js"],
+  "include": ["src", "bin", "migronaut.config.js"],
   "exclude": ["node_modules", "dist", "tests"]
 }

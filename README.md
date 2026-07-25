@@ -1,24 +1,24 @@
 <div align="center">
 
-<img src="assets/logo-icon-b-alt2.png" alt="mongo-migrate-kit" width="420" />
+<img src="assets/logo-icon-b-alt2.png" alt="@alexify/migronaut" width="420" />
 
-# mongo-migrate-kit
+# migronaut
 
 **Elegant, fast, TypeScript-first MongoDB migrations for Node.js.**
 
 _A modern, drop-in replacement for `migrate-mongo` etc._
 
-[![npm version](https://img.shields.io/npm/v/mongo-migrate-kit?style=flat-square&color=1E9E57&logo=npm&logoColor=white)](https://www.npmjs.com/package/mongo-migrate-kit)
-[![Docs](https://img.shields.io/badge/docs-online-1E9E57?style=flat-square&logo=readthedocs&logoColor=white)](https://mongo-migrate-kit.vercel.app/)
+[![npm version](https://img.shields.io/npm/v/%40alexify%2Fmigronaut?style=flat-square&color=1E9E57&logo=npm&logoColor=white)](https://www.npmjs.com/package/@alexify/migronaut)
+[![Docs](https://img.shields.io/badge/docs-online-1E9E57?style=flat-square&logo=readthedocs&logoColor=white)](https://migronaut.vercel.app/)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A518-1E9E57?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org)
-[![Known Vulnerabilities](https://snyk.io/test/npm/mongo-migrate-kit/badge.svg)](https://snyk.io/test/npm/mongo-migrate-kit)
+[![Known Vulnerabilities](https://snyk.io/test/npm/@alexify/migronaut/badge.svg)](https://snyk.io/test/npm/@alexify/migronaut)
 [![License: MIT](https://img.shields.io/badge/License-MIT-1E9E57?style=flat-square)](https://opensource.org/licenses/MIT)
 
 
 Precise, safe migrations for MongoDB. Run a single file, roll back anything, and preview every
 change before it touches your database.
 
-### 📖 [Read the documentation →](https://mongo-migrate-kit.vercel.app/)
+### 📖 [Read the documentation →](https://migronaut.vercel.app/)
 
 </div>
 
@@ -26,9 +26,9 @@ change before it touches your database.
 
 ## Reasons to choose it
 
-- **Run a single migration** — `mmk up <file>`, not just "all pending".
+- **Run a single migration** — `migronaut up <file>`, not just "all pending".
 - **Roll back anything** — a batch (`--batch 3`), the last N (`--steps 2`), one file, or `redo`.
-- **Preview before you run** — `mmk dry-run up` prints the exact plan without touching the database.
+- **Preview before you run** — `migronaut dry-run up` prints the exact plan without touching the database.
 - **No race conditions** — an atomic MongoDB lock stops two deploys running migrations at once.
 - **Tamper detection** — SHA-256 checksums catch a migration edited after it was applied.
 - **Audit trail kept** — a rollback updates the record, it never deletes it.
@@ -39,7 +39,7 @@ change before it touches your database.
 
 ### How it compares to `migrate-mongo`
 
-| Capability                                      | `migrate-mongo` | `mongo-migrate-kit` |
+| Capability                                      | `migrate-mongo` | `migronaut` |
 | ----------------------------------------------- | :-------------: | :-----------------: |
 | Run a single migration file                     |        ❌        |          ✅          |
 | Roll back a specific batch (not just the last)  |        ❌        |          ✅          |
@@ -49,20 +49,20 @@ change before it touches your database.
 | Lifecycle hooks                                 |        ❌        |          ✅          |
 | First-class TypeScript (built-in)               |        ❌        |          ✅          |
 | History kept on rollback (never deleted)        |        ❌        |          ✅          |
-| Adopt an existing `migrate-mongo` changelog | — | ✅ `mmk import` |
+| Adopt an existing `migrate-mongo` changelog | — | ✅ `migronaut import` |
 
 <sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026. It has since added transaction access
-via a `client` argument; `mmk` exposes the same plus a declarative per-file `useTransaction` flag.</sub>
+via a `client` argument; `migronaut` exposes the same plus a declarative per-file `useTransaction` flag.</sub>
 
 > [!TIP]
 > ### 🔄 Already using `migrate-mongo`? Switch in under a minute.
 >
-> `mmk` adopts your existing `changelog` **as-is** — no re-running migrations, no data loss, no rewriting
+> `migronaut` adopts your existing `changelog` **as-is** — no re-running migrations, no data loss, no rewriting
 > files. Point it at the same database and bring your whole history over in one command:
 >
 > ```bash
-> mmk import     # one-time: adopt your migrate-mongo changelog (it's never modified)
-> mmk up         # applies only what's new — your past migrations are recognized as already applied
+> migronaut import     # one-time: adopt your migrate-mongo changelog (it's never modified)
+> migronaut up         # applies only what's new — your past migrations are recognized as already applied
 > ```
 >
 > Your applied history is preserved and new migrations run normally. Your `up`/`down`/`create`/`status`
@@ -74,28 +74,28 @@ via a `client` argument; `mmk` exposes the same plus a declarative per-file `use
 ## Quick start
 
 ```bash
-npm install mongo-migrate-kit
+npm install @alexify/migronaut
 npm install mongodb          # required peer dependency
 ```
 
 ```bash
-# 1 · create a configuration file mmk.config.*. (pass --ts if need ts file)
-npx mmk init
+# 1 · create a configuration file migronaut.config.*. (pass --ts if need ts file)
+npx migronaut init
 
 # 2 · create your first migration
-npx mmk create "add users email index"
+npx migronaut create "add users email index"
 
 # 3 · run everything pending
-npx mmk up
+npx migronaut up
 
 # 4 · see where you stand
-npx mmk status
+npx migronaut status
 ```
 
 A migration is just an `up` and a `down`:
 
 ```ts
-import type { MigrationContext } from 'mongo-migrate-kit';
+import type { MigrationContext } from '@alexify/migronaut';
 
 export const description = 'Add unique index on users.email';
 
@@ -108,21 +108,21 @@ export async function down({ db }: MigrationContext): Promise<void> {
 }
 ```
 
-> Prefer no files at all? Skip `mmk init` and export `MMK_URI` and `MMK_DB` — that is enough to run.
+> Prefer no files at all? Skip `migronaut init` and export `MIGRONAUT_URI` and `MIGRONAUT_DB` — that is enough to run.
 
 ---
 
 ## Documentation
 
 Full docs, guides, and the API reference live at
-**[mongo-migrate-kit.vercel.app](https://mongo-migrate-kit.vercel.app/)**.
+**[migronaut.vercel.app](https://migronaut.vercel.app/)**.
 
-- [Why mongo-migrate-kit?](https://mongo-migrate-kit.vercel.app/guide/why) — how it compares to `migrate-mongo`
-- [Core Concepts](https://mongo-migrate-kit.vercel.app/guide/concepts) — migrations, batches, the changelog, locking
-- [Getting Started](https://mongo-migrate-kit.vercel.app/guide/getting-started) & [Tutorial](https://mongo-migrate-kit.vercel.app/guide/tutorial)
-- [Configuration](https://mongo-migrate-kit.vercel.app/guide/configuration) · [Writing Migrations](https://mongo-migrate-kit.vercel.app/guide/writing-migrations) · [Transactions](https://mongo-migrate-kit.vercel.app/guide/transactions) · [Hooks](https://mongo-migrate-kit.vercel.app/guide/hooks)
-- [Programmatic API](https://mongo-migrate-kit.vercel.app/guide/api) · [CI/CD](https://mongo-migrate-kit.vercel.app/guide/ci-cd) · [Troubleshooting](https://mongo-migrate-kit.vercel.app/guide/troubleshooting)
-- Reference: [CLI Cheatsheet](https://mongo-migrate-kit.vercel.app/reference/cli) · [Error Codes](https://mongo-migrate-kit.vercel.app/reference/error-codes)
+- [Why migronaut?](https://migronaut.vercel.app/guide/why) — how it compares to `migrate-mongo`
+- [Core Concepts](https://migronaut.vercel.app/guide/concepts) — migrations, batches, the changelog, locking
+- [Getting Started](https://migronaut.vercel.app/guide/getting-started) & [Tutorial](https://migronaut.vercel.app/guide/tutorial)
+- [Configuration](https://migronaut.vercel.app/guide/configuration) · [Writing Migrations](https://migronaut.vercel.app/guide/writing-migrations) · [Transactions](https://migronaut.vercel.app/guide/transactions) · [Hooks](https://migronaut.vercel.app/guide/hooks)
+- [Programmatic API](https://migronaut.vercel.app/guide/api) · [CI/CD](https://migronaut.vercel.app/guide/ci-cd) · [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting)
+- Reference: [CLI Cheatsheet](https://migronaut.vercel.app/reference/cli) · [Error Codes](https://migronaut.vercel.app/reference/error-codes)
 
 ---
 
@@ -132,16 +132,16 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, and `--config`.
 
 | Command | What it does |
 |---|---|
-| `mmk init` | Create a documented `mmk.config.*` in the current directory |
-| `mmk import` | Adopt an existing `migrate-mongo` changelog (one-time, forward-only) |
-| `mmk create <name>` | Generate a timestamped migration file |
-| `mmk up [file]` | Run all pending migrations, or one named file |
-| `mmk down [file]` | Roll back the last batch, a chosen batch, the last N steps, or one file |
-| `mmk redo [file]` | Roll back then re-apply (the last migration, or one file) |
-| `mmk status` | Print the full migration status table (`--check` to fail CI on pending) |
-| `mmk list` | List migrations, filtered by status |
-| `mmk dry-run <up\|down> [file]` | Preview a run without touching the database |
-| `mmk unlock` | Force-release a stuck lock left behind by a crashed run |
+| `migronaut init` | Create a documented `migronaut.config.*` in the current directory |
+| `migronaut import` | Adopt an existing `migrate-mongo` changelog (one-time, forward-only) |
+| `migronaut create <name>` | Generate a timestamped migration file |
+| `migronaut up [file]` | Run all pending migrations, or one named file |
+| `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, or one file |
+| `migronaut redo [file]` | Roll back then re-apply (the last migration, or one file) |
+| `migronaut status` | Print the full migration status table (`--check` to fail CI on pending) |
+| `migronaut list` | List migrations, filtered by status |
+| `migronaut dry-run <up\|down> [file]` | Preview a run without touching the database |
+| `migronaut unlock` | Force-release a stuck lock left behind by a crashed run |
 
 Most data commands (`up`, `down`, `redo`, `status`, `list`, `dry-run`, `import`, `create`,
 `unlock`) accept **`--json`** for machine-readable output — see [CI & automation](#ci--automation).
@@ -151,85 +151,85 @@ Most data commands (`up`, `down`, `redo`, `status`, `list`, `dry-run`, `import`,
 
 ```bash
 # init — generate a config file
-mmk init                     # mmk.config.js (default)
-mmk init --js                # mmk.config.js (explicit default)
-mmk init --ts                # mmk.config.ts
-mmk init --json              # mmk.config.json  (NOTE: here --json picks the file format)
-mmk init --secret-provider   # async config that loads the URI from a secret manager (js/ts only)
-mmk init --force             # overwrite an existing config file
-mmk init --uri mongodb://localhost:27017 --db my_app   # prefill the generated config
+migronaut init                     # migronaut.config.js (default)
+migronaut init --js                # migronaut.config.js (explicit default)
+migronaut init --ts                # migronaut.config.ts
+migronaut init --json              # migronaut.config.json  (NOTE: here --json picks the file format)
+migronaut init --secret-provider   # async config that loads the URI from a secret manager (js/ts only)
+migronaut init --force             # overwrite an existing config file
+migronaut init --uri mongodb://localhost:27017 --db my_app   # prefill the generated config
 
 # import — adopt an existing migrate-mongo changelog
-mmk import                   # read `changelog`, write the mmk changelog
-mmk import --from <name>     # read a differently-named source collection
-mmk import --to <name>       # write to a specific collection (default: config migrationsCollection)
-mmk import --dry-run         # preview the mapping, write nothing
-mmk import --trust-hash      # reuse migrate-mongo's fileHash instead of recomputing
-mmk import --force           # proceed even if the mmk changelog already has records
-mmk import --no-lock         # skip the concurrency lock (local dev only)
-mmk import --json            # machine-readable output
+migronaut import                   # read `changelog`, write the migronaut changelog
+migronaut import --from <name>     # read a differently-named source collection
+migronaut import --to <name>       # write to a specific collection (default: config migrationsCollection)
+migronaut import --dry-run         # preview the mapping, write nothing
+migronaut import --trust-hash      # reuse migrate-mongo's fileHash instead of recomputing
+migronaut import --force           # proceed even if the migronaut changelog already has records
+migronaut import --no-lock         # skip the concurrency lock (local dev only)
+migronaut import --json            # machine-readable output
 
 # create — generate a migration file
-mmk create <name>            # file type follows config `createExtension` (default .js)
-mmk create <name> --ts       # force a .ts file
-mmk create <name> --js       # force a .js file
-mmk create <name> --template <path>   # use a custom template
-mmk create <name> --json     # machine-readable output ({ "path": "..." })
+migronaut create <name>            # file type follows config `createExtension` (default .js)
+migronaut create <name> --ts       # force a .ts file
+migronaut create <name> --js       # force a .js file
+migronaut create <name> --template <path>   # use a custom template
+migronaut create <name> --json     # machine-readable output ({ "path": "..." })
 
 # up — apply migrations
-mmk up                       # all pending (one shared batch for the run)
-mmk up <file>                # one specific file
-mmk up --step                # apply each file as its own batch (revert individually later)
-mmk up <file> --force        # re-run an ALREADY-applied file (asks for confirmation)
-mmk up <file> --force --yes  # confirm a re-run non-interactively (required with --json)
-mmk up --strict              # abort on any checksum mismatch
-mmk up --no-lock             # skip the concurrency lock (local dev only)
-mmk up --json                # machine-readable output (array of run results)
+migronaut up                       # all pending (one shared batch for the run)
+migronaut up <file>                # one specific file
+migronaut up --step                # apply each file as its own batch (revert individually later)
+migronaut up <file> --force        # re-run an ALREADY-applied file (asks for confirmation)
+migronaut up <file> --force --yes  # confirm a re-run non-interactively (required with --json)
+migronaut up --strict              # abort on any checksum mismatch
+migronaut up --no-lock             # skip the concurrency lock (local dev only)
+migronaut up --json                # machine-readable output (array of run results)
 
 # down — roll back
-mmk down                     # the last batch (may be several files)
-mmk down <file>              # one specific file
-mmk down --batch <n>         # a specific batch number
-mmk down --steps <n>         # the last N migrations, newest first, ignoring batches
-mmk down --no-lock           # skip the concurrency lock (local dev only)
-mmk down --json              # machine-readable output (array of run results)
+migronaut down                     # the last batch (may be several files)
+migronaut down <file>              # one specific file
+migronaut down --batch <n>         # a specific batch number
+migronaut down --steps <n>         # the last N migrations, newest first, ignoring batches
+migronaut down --no-lock           # skip the concurrency lock (local dev only)
+migronaut down --json              # machine-readable output (array of run results)
 
 # redo — down then up
-mmk redo                     # the most recently applied migration
-mmk redo <file>              # a specific file
-mmk redo --json              # machine-readable output (array of run results)
+migronaut redo                     # the most recently applied migration
+migronaut redo <file>              # a specific file
+migronaut redo --json              # machine-readable output (array of run results)
 
 # status — full status table
-mmk status                   # the full status table
-mmk status --check           # exit 1 if any migration is pending (CI gate)
-mmk status --json            # machine-readable output (array of status rows)
+migronaut status                   # the full status table
+migronaut status --check           # exit 1 if any migration is pending (CI gate)
+migronaut status --json            # machine-readable output (array of status rows)
 
 # list — filtered status
-mmk list                     # all migrations
-mmk list --pending           # only pending
-mmk list --applied           # only applied
-mmk list --json              # machine-readable output (array of status rows)
+migronaut list                     # all migrations
+migronaut list --pending           # only pending
+migronaut list --applied           # only applied
+migronaut list --json              # machine-readable output (array of status rows)
 
 # dry-run — preview, never writes
-mmk dry-run up [file]
-mmk dry-run down [file]
-mmk dry-run down --steps <n> # preview a step rollback (the last N migrations)
-mmk dry-run up --json        # machine-readable output (array of status rows)
+migronaut dry-run up [file]
+migronaut dry-run down [file]
+migronaut dry-run down --steps <n> # preview a step rollback (the last N migrations)
+migronaut dry-run up --json        # machine-readable output (array of status rows)
 
 # unlock — clear a stuck lock after a crash
-mmk unlock                   # shows the holder, prompts y/N
-mmk unlock --yes             # skip the prompt
-mmk unlock --json            # machine-readable output ({ "released": ..., "holder": ... })
+migronaut unlock                   # shows the holder, prompts y/N
+migronaut unlock --yes             # skip the prompt
+migronaut unlock --json            # machine-readable output ({ "released": ..., "holder": ... })
 ```
 
-**Global flags** (available on all commands): `--uri <uri>` (override `MMK_URI`),
-`--db <name>` (override `MMK_DB`), `--dir <path>` (override `MMK_MIGRATIONS_DIR`),
+**Global flags** (available on all commands): `--uri <uri>` (override `MIGRONAUT_URI`),
+`--db <name>` (override `MIGRONAUT_DB`), `--dir <path>` (override `MIGRONAUT_MIGRATIONS_DIR`),
 `--config <path>` (explicit config file, overrides auto-discovery).
 
 **`--json`** is accepted by every data command above (`up`, `down`, `redo`, `status`, `list`,
 `dry-run`, `import`, `create`, `unlock`) and prints one JSON document to stdout — see
-[CI & automation](#ci--automation). On `mmk init` only, `--json` instead selects the config
-**file format** (`mmk.config.json`).
+[CI & automation](#ci--automation). On `migronaut init` only, `--json` instead selects the config
+**file format** (`migronaut.config.json`).
 
 </details>
 
@@ -238,41 +238,41 @@ mmk unlock --json            # machine-readable output ({ "released": ..., "hold
 ## Advanced features
 
 <details id="migrating-from-migrate-mongo">
-<summary><b>Migrating from <code>migrate-mongo</code></b> — adopt an existing changelog with <code>mmk import</code></summary>
+<summary><b>Migrating from <code>migrate-mongo</code></b> — adopt an existing changelog with <code>migronaut import</code></summary>
 
 <br>
 
-`mmk import` reads your existing `migrate-mongo` changelog and records that history in the `mmk`
-changelog, so `mmk up` knows what is already applied and runs only what is new. It is a **one-time,
+`migronaut import` reads your existing `migrate-mongo` changelog and records that history in the `migronaut`
+changelog, so `migronaut up` knows what is already applied and runs only what is new. It is a **one-time,
 forward-only** step.
 
 ```bash
-# point mmk at the same database, then:
-mmk import --dry-run     # preview the mapping first (writes nothing)
-mmk import               # adopt the history
-mmk up                   # apply only the migrations added since
+# point migronaut at the same database, then:
+migronaut import --dry-run     # preview the mapping first (writes nothing)
+migronaut import               # adopt the history
+migronaut up                   # apply only the migrations added since
 ```
 
 **What it does**
 
 - Reads the source collection (`changelog` by default; `--from` to override) and **never modifies it** —
-  the mapped records are written to the `mmk` changelog (your config's `migrationsCollection`,
-  `_mmk_migrations` by default; `--to` to write to a different collection).
+  the mapped records are written to the `migronaut` changelog (your config's `migrationsCollection`,
+  `_migronaut_migrations` by default; `--to` to write to a different collection).
 - Maps `fileName → name`, `appliedAt → appliedAt`, and resolves a checksum: it reuses `migrate-mongo`'s
   `fileHash` when it matches the file on disk, otherwise recomputes a SHA-256 from disk (`--trust-hash`
   reuses the stored hash as-is). Records whose files are missing are still imported.
-- Assigns each migration a **unique, sequential batch number** in apply order. If the `mmk` changelog
+- Assigns each migration a **unique, sequential batch number** in apply order. If the `migronaut` changelog
   already has records, imported batches **continue after** the existing maximum (use `--force` to import
   into a non-empty changelog).
 - Leaves migration files that exist on disk but are **not** in the source changelog **pending** — they
-  run on the next `mmk up`, exactly as expected for newly added migrations.
+  run on the next `migronaut up`, exactly as expected for newly added migrations.
 
 **Options**
 
 | Flag | Default | What it does |
 |---|---|---|
 | `--from <collection>` | `changelog` | Source collection to read (never modified). |
-| `--to <collection>` | config `migrationsCollection` (`_mmk_migrations`) | Target collection to write the adopted history to. |
+| `--to <collection>` | config `migrationsCollection` (`_migronaut_migrations`) | Target collection to write the adopted history to. |
 | `--dry-run` | off | Preview the mapping and print the table; writes nothing. |
 | `--trust-hash` | off | Reuse `migrate-mongo`'s stored `fileHash` as-is instead of recomputing the checksum from disk. |
 | `--force` | off | Import into a changelog that already has records (imported batches continue after the existing max). |
@@ -283,15 +283,15 @@ Plus the global flags `--uri`, `--db`, `--dir`, and `--config`.
 **Forward-only — imported migrations cannot be rolled back**
 
 Adopted records are tagged `origin: 'migrate-mongo'`. `migrate-mongo` files use a positional
-`up(db, client)` signature, which `mmk` does not execute (it passes a single context object). To avoid
-ever corrupting your data, `mmk down` / `mmk redo` **refuse** an imported migration up front, before
+`up(db, client)` signature, which `migronaut` does not execute (it passes a single context object). To avoid
+ever corrupting your data, `migronaut down` / `migronaut redo` **refuse** an imported migration up front, before
 running or writing anything, and tell you why:
 
 ```text
 ✖ Cannot roll back 1 migrate-mongo-imported migration(s): 20260101-add-index.js
 ```
 
-If you need an old migration to be reversible under `mmk`, re-author its file in the native format
+If you need an old migration to be reversible under `migronaut`, re-author its file in the native format
 (named exports, single context argument — see [Migration file formats](#migration-file-formats)).
 
 </details>
@@ -343,13 +343,13 @@ hooks: {
 <br>
 
 A `.ts`/`.js` config may export a **function** (sync or async) instead of an object.
-`mmk` calls it once per command, so you can fetch the connection from a secret manager at run time.
+`migronaut` calls it once per command, so you can fetch the connection from a secret manager at run time.
 The secret is **never written to disk**, and a rotated value is picked up automatically on the next run.
 
 The library ships **no** cloud SDKs — you bring the one you already use, so any provider works:
 
 ```js
-// mmk.config.js — AWS Secrets Manager
+// migronaut.config.js — AWS Secrets Manager
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 
 export default async () => {
@@ -360,7 +360,7 @@ export default async () => {
 };
 ```
 
-Run `mmk init --secret-provider` to scaffold this form with an AWS example you can swap for any provider.
+Run `migronaut init --secret-provider` to scaffold this form with an AWS example you can swap for any provider.
 If the function throws, it surfaces as a `ConfigInvalidError` with the cause attached.
 
 </details>
@@ -370,18 +370,18 @@ If the function throws, it surfaces as a `ConfigInvalidError` with the cause att
 
 <br>
 
-A **batch** is one `mmk up` run. By default every migration applied in a single run shares one batch
-number, so `mmk down` rolls back that whole run as a unit — the same model used by **Laravel** and
+A **batch** is one `migronaut up` run. By default every migration applied in a single run shares one batch
+number, so `migronaut down` rolls back that whole run as a unit — the same model used by **Laravel** and
 **Knex**. That keeps a deploy atomic: one command applied it, one command reverts it.
 
 When you want finer control, two flags mirror Laravel's `migrate --step` / `migrate:rollback --step`:
 
-- **`mmk up --step`** — apply each file in the run as its **own** sequential batch instead of one shared
-  batch. A later `mmk down` then peels them off one at a time.
-- **`mmk down --steps <n>`** — revert the **last N applied migrations**, newest first, counted as
-  individual files **regardless of batch**. `mmk down --steps 1` reverts just the single most-recently
+- **`migronaut up --step`** — apply each file in the run as its **own** sequential batch instead of one shared
+  batch. A later `migronaut down` then peels them off one at a time.
+- **`migronaut down --steps <n>`** — revert the **last N applied migrations**, newest first, counted as
+  individual files **regardless of batch**. `migronaut down --steps 1` reverts just the single most-recently
   applied migration; a larger N can cross batch boundaries, so preview it first with
-  `mmk dry-run down --steps <n>`.
+  `migronaut dry-run down --steps <n>`.
 
 `--steps` is mutually exclusive with `--batch` and a filename. Migrations are always reverted
 newest-first, so `up` followed by `down --steps <same n>` returns you to the starting state.
@@ -393,17 +393,17 @@ newest-first, so `up` followed by `down --steps <same n>` returns you to the sta
 
 <br>
 
-**Lock.** Each run acquires an atomic lock document in `_mmk_locks`, so two deploys can never migrate
+**Lock.** Each run acquires an atomic lock document in `_migronaut_locks`, so two deploys can never migrate
 at once. A lock older than `lockTTLSeconds` is treated as stale and reclaimed; while a migration runs,
 a heartbeat renews the lock at half the TTL so a long migration can't have its lock stolen mid-run.
 The lock is always released in a `finally` block. `--no-lock` bypasses it for local development (and
-warns loudly). If a process crashes hard and leaves a lock behind, clear it with **`mmk unlock`** (it
+warns loudly). If a process crashes hard and leaves a lock behind, clear it with **`migronaut unlock`** (it
 shows you who held it and asks for confirmation).
 
-**Checksums.** Every applied migration stores a SHA-256 of its file. On later runs `mmk` compares the
+**Checksums.** Every applied migration stores a SHA-256 of its file. On later runs `migronaut` compares the
 two and surfaces drift in `status`. With `strict: true` (or `--strict`) a mismatch aborts the run;
 otherwise it warns and skips. To intentionally re-run an edited, already-applied file, use
-`mmk up <file> --force`.
+`migronaut up <file> --force`.
 
 </details>
 
@@ -420,13 +420,13 @@ stdout and exits `1`.
 
 ```bash
 # Apply pending migrations and capture the result in CI
-mmk up --json | jq '.[] | select(.status == "applied") | .file'
+migronaut up --json | jq '.[] | select(.status == "applied") | .file'
 
 # Fail a deploy step if the database isn't fully migrated
-mmk status --check          # exits 1 when anything is pending, 0 otherwise
+migronaut status --check          # exits 1 when anything is pending, 0 otherwise
 
 # Inspect status as data
-mmk status --json | jq 'map(select(.status == "pending")) | length'
+migronaut status --json | jq 'map(select(.status == "pending")) | length'
 ```
 
 A typical pipeline gate:
@@ -434,10 +434,10 @@ A typical pipeline gate:
 ```yaml
 # .github/workflows/deploy.yml (excerpt)
 - name: Fail if migrations are pending
-  run: npx mmk status --check --uri "$MONGO_URI" --db "$MONGO_DB"
+  run: npx migronaut status --check --uri "$MONGO_URI" --db "$MONGO_DB"
 ```
 
-> Note: `mmk init --json` is the one exception — there `--json` means "write `mmk.config.json`",
+> Note: `migronaut init --json` is the one exception — there `--json` means "write `migronaut.config.json`",
 > not machine-readable output (kept for backwards compatibility).
 
 </details>
@@ -447,7 +447,7 @@ A typical pipeline gate:
 
 <br>
 
-Every record in `_mmk_migrations` stores `batch`, `status`, `appliedAt`, `revertedAt`, `duration`,
+Every record in `_migronaut_migrations` stores `batch`, `status`, `appliedAt`, `revertedAt`, `duration`,
 `checksum`, `environment`, and `executedBy`. Rolling back **updates** a record's status to `reverted`
 and stamps `revertedAt` — it is **never deleted**, so the full history stays intact for compliance.
 
@@ -466,7 +466,7 @@ leaks a MongoDB connection. A failing migration aborts startup instead of lettin
 traffic against a half-migrated database:
 
 ```ts
-import { runMigrations } from 'mongo-migrate-kit';
+import { runMigrations } from '@alexify/migronaut';
 
 // Call this before your server starts listening.
 const { applied, upToDate } = await runMigrations({
@@ -501,7 +501,7 @@ cold starts don't fail, and rely on the auto-disconnect so each invocation clean
 `pendingMigrations()` is a connection-managed, read-only readiness probe:
 
 ```ts
-import { pendingMigrations } from 'mongo-migrate-kit';
+import { pendingMigrations } from '@alexify/migronaut';
 
 const pending = await pendingMigrations({ uri, dbName: 'my_app' });
 if (pending.length > 0) {
@@ -514,7 +514,7 @@ if (pending.length > 0) {
 For everything else, every CLI command is a method on `MigratorKit` (you manage the lifecycle):
 
 ```ts
-import { MigratorKit } from 'mongo-migrate-kit';
+import { MigratorKit } from '@alexify/migronaut';
 
 const migrator = new MigratorKit({ uri, dbName: 'my_app', migrationsDir: './migrations' });
 await migrator.connect();
@@ -522,7 +522,7 @@ const rows = await migrator.status();   // StatusRow[]
 await migrator.disconnect();
 ```
 
-All errors extend `MmkError` and carry a typed `code` (`LOCK_ALREADY_HELD`, `CHECKSUM_MISMATCH`,
+All errors extend `MigronautError` and carry a typed `code` (`LOCK_ALREADY_HELD`, `CHECKSUM_MISMATCH`,
 `NOT_APPLIED`, …), so `catch` blocks stay type-safe.
 
 </details>
@@ -531,17 +531,17 @@ All errors extend `MmkError` and carry a typed `code` (`LOCK_ALREADY_HELD`, `CHE
 
 ## Configuration
 
-`mmk` resolves settings in this order (**highest wins**):
+`migronaut` resolves settings in this order (**highest wins**):
 
 > **CLI flags → environment variables → config file → built-in defaults**
 
-A config file is optional and auto-discovered in the working directory as `mmk.config.ts`,
-`mmk.config.js`, or `mmk.config.json`. Run `mmk init` to generate one — it ships fully commented,
+A config file is optional and auto-discovered in the working directory as `migronaut.config.ts`,
+`migronaut.config.js`, or `migronaut.config.json`. Run `migronaut init` to generate one — it ships fully commented,
 so every setting lives in one documented place:
 
 ```js
-// mmk.config.js — generated by `mmk init`, every option explained
-/** @type {import('mongo-migrate-kit').MmkConfig} */
+// migronaut.config.js — generated by `migronaut init`, every option explained
+/** @type {import('@alexify/migronaut').MigronautConfig} */
 export default {
   // ── Connection (required) ───────────────────────────────────────────────
   uri: 'mongodb://localhost:27017', // MongoDB connection string
@@ -550,20 +550,20 @@ export default {
   // ── Files ───────────────────────────────────────────────────────────────
   migrationsDir: './migrations',    // where migration files live
   fileExtensions: ['.ts', '.js'],   // which files count as migrations
-  createExtension: 'js',            // default type for `mmk create` ('js' | 'ts'); --js/--ts override
+  createExtension: 'js',            // default type for `migronaut create` ('js' | 'ts'); --js/--ts override
   sequential: false,                // true → 0001-style numbering instead of timestamps
-  // templatePath: './migration.template.ts', // custom template for `mmk create`
+  // templatePath: './migration.template.ts', // custom template for `migronaut create`
 
   // ── Bookkeeping collections ─────────────────────────────────────────────
-  migrationsCollection: '_mmk_migrations', // the append-only audit trail
-  lockCollection: '_mmk_locks',            // the concurrency lock
+  migrationsCollection: '_migronaut_migrations', // the append-only audit trail
+  lockCollection: '_migronaut_locks',            // the concurrency lock
   lockTTLSeconds: 60,                       // a lock older than this is reclaimable
 
   // ── Safety ──────────────────────────────────────────────────────────────
   strict: false,        // true → abort on a checksum mismatch (instead of warn + skip)
   useTransaction: false, // true → wrap every migration in a transaction (override per file)
 
-  // ── Code-only options (omit in mmk.config.json) ─────────────────────────
+  // ── Code-only options (omit in migronaut.config.json) ─────────────────────────
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
   // mongoose: myMongooseInstance, // pass if your migrations use Mongoose models
   // logger: null,                 // null silences all output (handy in CI/tests)
@@ -577,16 +577,16 @@ export default {
 
 | Env var | Config key | Default |
 |---|---|---|
-| `MMK_URI` | `uri` | — *(required)* |
-| `MMK_DB` | `dbName` | — *(required)* |
-| `MMK_MIGRATIONS_DIR` | `migrationsDir` | `./migrations` |
-| `MMK_COLLECTION` | `migrationsCollection` | `_mmk_migrations` |
-| `MMK_LOCK_COLLECTION` | `lockCollection` | `_mmk_locks` |
-| `MMK_LOCK_TTL` | `lockTTLSeconds` | `60` |
-| `MMK_STRICT` | `strict` | `false` |
-| `MMK_USE_TRANSACTION` | `useTransaction` | `false` |
-| `MMK_SEQUENTIAL` | `sequential` | `false` |
-| `MMK_CREATE_EXTENSION` | `createExtension` | `js` |
+| `MIGRONAUT_URI` | `uri` | — *(required)* |
+| `MIGRONAUT_DB` | `dbName` | — *(required)* |
+| `MIGRONAUT_MIGRATIONS_DIR` | `migrationsDir` | `./migrations` |
+| `MIGRONAUT_COLLECTION` | `migrationsCollection` | `_migronaut_migrations` |
+| `MIGRONAUT_LOCK_COLLECTION` | `lockCollection` | `_migronaut_locks` |
+| `MIGRONAUT_LOCK_TTL` | `lockTTLSeconds` | `60` |
+| `MIGRONAUT_STRICT` | `strict` | `false` |
+| `MIGRONAUT_USE_TRANSACTION` | `useTransaction` | `false` |
+| `MIGRONAUT_SEQUENTIAL` | `sequential` | `false` |
+| `MIGRONAUT_CREATE_EXTENSION` | `createExtension` | `js` |
 
 `.env` files are loaded automatically.
 
@@ -596,7 +596,7 @@ export default {
 
 ## Migration file formats
 
-`mmk` loads TypeScript and both JavaScript module systems with no extra setup:
+`migronaut` loads TypeScript and both JavaScript module systems with no extra setup:
 
 ```ts
 // TypeScript / ESM — named exports (native on Node 22.18+, or under a loader like tsx)

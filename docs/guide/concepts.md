@@ -1,6 +1,6 @@
 # Core Concepts
 
-New to database migrations? This page explains the mental model `mongo-migrate-kit` is built on.
+New to database migrations? This page explains the mental model `migronaut` is built on.
 Five minutes here makes every other page click.
 
 ## What is a migration?
@@ -19,7 +19,7 @@ Each migration has two halves:
 
 ## The changelog
 
-`mmk` records every migration it has applied in a collection called `_mmk_migrations` (the
+`migronaut` records every migration it has applied in a collection called `_migronaut_migrations` (the
 **changelog**). Before running, it reads this collection to know what's already done, so a migration
 is never applied twice.
 
@@ -38,7 +38,7 @@ At any moment, every migration file is in one of two states:
 - **Pending** — the file exists on disk but isn't in the changelog yet.
 - **Applied** — it's recorded in the changelog as run.
 
-`mmk up` applies pending migrations; `mmk status` shows you the full picture.
+`migronaut up` applies pending migrations; `migronaut status` shows you the full picture.
 
 ## Ordering
 
@@ -48,13 +48,13 @@ your whole team. Never reorder or rename an applied migration.
 
 ## Batches
 
-Every time you run `mmk up`, all the migrations that run together are tagged with the same **batch
+Every time you run `migronaut up`, all the migrations that run together are tagged with the same **batch
 number**. Batches are how rollbacks know what "the last thing I did" was:
 
-- `mmk down` reverts the **whole last batch** (everything from the most recent `mmk up`).
-- `mmk down --batch 3` reverts a **specific** batch.
-- `mmk down --steps 2` ignores batches and reverts the **last 2 migrations** individually.
-- `mmk up --step` puts **each** file in its own batch, so you can peel them off one at a time later.
+- `migronaut down` reverts the **whole last batch** (everything from the most recent `migronaut up`).
+- `migronaut down --batch 3` reverts a **specific** batch.
+- `migronaut down --steps 2` ignores batches and reverts the **last 2 migrations** individually.
+- `migronaut up --step` puts **each** file in its own batch, so you can peel them off one at a time later.
 
 Think of a batch as "one deploy's worth of migrations."
 
@@ -62,11 +62,11 @@ Think of a batch as "one deploy's worth of migrations."
 
 Two things protect you from common production mistakes:
 
-- **Lock** — before writing, `mmk` acquires an atomic lock in MongoDB so two deploys can't run
+- **Lock** — before writing, `migronaut` acquires an atomic lock in MongoDB so two deploys can't run
   migrations at the same time. It auto-expires and renews while a long migration runs. See
-  [`mmk unlock`](/commands/unlock).
-- **Checksum** — `mmk` stores a SHA-256 hash of each file when it runs. If a file is edited *after*
-  it was applied, `mmk status` flags it as a mismatch, and `--strict` mode will refuse to continue —
+  [`migronaut unlock`](/commands/unlock).
+- **Checksum** — `migronaut` stores a SHA-256 hash of each file when it runs. If a file is edited *after*
+  it was applied, `migronaut status` flags it as a mismatch, and `--strict` mode will refuse to continue —
   catching accidental edits to history.
 
 ## Putting it together
@@ -74,7 +74,7 @@ Two things protect you from common production mistakes:
 A typical run looks like this:
 
 ```
-mmk up
+migronaut up
   ├─ acquire lock
   ├─ read changelog → find pending files
   ├─ for each pending file (in order):

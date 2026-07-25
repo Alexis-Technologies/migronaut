@@ -1,4 +1,4 @@
-import type { MigrationContext } from 'mongo-migrate-kit';
+import type { MigrationContext } from '@alexify/migronaut';
 
 export const description = '';
 

@@ -7,10 +7,12 @@ import { type CliOptions, withMigrator } from '../shared.js';
 export function registerInit(program: Command): void {
   program
     .command('init')
-    .description('Create an mmk config file in the current directory (mmk.config.js by default)')
-    .option('--ts', 'Generate mmk.config.ts instead of mmk.config.js')
-    .option('--json', 'Generate mmk.config.json instead of mmk.config.js')
-    .option('--js', 'Generate mmk.config.js (the default)')
+    .description(
+      'Create a migronaut config file in the current directory (migronaut.config.js by default)',
+    )
+    .option('--ts', 'Generate migronaut.config.ts instead of migronaut.config.js')
+    .option('--json', 'Generate migronaut.config.json instead of migronaut.config.js')
+    .option('--js', 'Generate migronaut.config.js (the default)')
     .option(
       '--secret-provider',
       'Generate a config that loads the connection from a secret manager (js/ts only)',

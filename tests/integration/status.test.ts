@@ -4,7 +4,7 @@ import { type TestMongo, startTestMongo } from '../helpers/mongo.js';
 import { insertMigration, makeMigrator, makeProject } from '../helpers/project.js';
 
 let mongo: TestMongo;
-const DB = 'mmk_status_test';
+const DB = 'migronaut_status_test';
 
 beforeAll(async () => {
   mongo = await startTestMongo(DB);

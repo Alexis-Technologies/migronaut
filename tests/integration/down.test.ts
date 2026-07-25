@@ -11,7 +11,7 @@ import { insertMigration, makeMigrator, makeProject } from '../helpers/project.j
 import { makeRecord } from '../helpers/records.js';
 
 let mongo: TestMongo;
-const DB = 'mmk_down_test';
+const DB = 'migronaut_down_test';
 
 beforeAll(async () => {
   mongo = await startTestMongo(DB);
@@ -43,7 +43,7 @@ describe('MigratorKit.down (integration)', () => {
     setup();
     // Simulate a tampered changelog record whose name escapes the migrations dir.
     // The down preflight must reject it before loading/executing any file.
-    const collection = new Changelog('_mmk_migrations');
+    const collection = new Changelog('_migronaut_migrations');
     await migrator.connect();
     await collection.markApplied(mongo.db, makeRecord({ name: '../../evil.js', batch: 1 }));
     await expect(migrator.down('../../evil.js')).rejects.toBeInstanceOf(MigrationInvalidNameError);
@@ -81,11 +81,11 @@ describe('MigratorKit.down (integration)', () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await migrator.up();
     await migrator.down('0001-a.ts');
-    const changelog = new Changelog('_mmk_migrations');
+    const changelog = new Changelog('_migronaut_migrations');
     const record = await changelog.getByName(mongo.db, '0001-a.ts');
     expect(record?.status).toBe('reverted');
     expect(record?.revertedAt).toBeInstanceOf(Date);
-    expect(await mongo.db.collection('_mmk_migrations').countDocuments()).toBe(1);
+    expect(await mongo.db.collection('_migronaut_migrations').countDocuments()).toBe(1);
   });
 
   it('should report nothing to rollback when no batch is applied', async () => {

@@ -9,7 +9,7 @@ let mongo: TestMongo;
 const COLLECTION = 'tx_items';
 
 beforeAll(async () => {
-  mongo = await startTestMongo('mmk_tx_test');
+  mongo = await startTestMongo('migronaut_tx_test');
 });
 
 afterAll(async () => {

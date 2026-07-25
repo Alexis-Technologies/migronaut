@@ -9,7 +9,7 @@ first-class.
 ::: code-group
 
 ```ts [TypeScript]
-import type { MigrationContext } from 'mongo-migrate-kit';
+import type { MigrationContext } from '@alexify/migronaut';
 
 export const description = 'Add unique index on users.email';
 export const useTransaction = true;
@@ -50,7 +50,7 @@ module.exports = {
 :::
 
 ::: tip Generate the scaffold
-Don't write the boilerplate by hand — run `mmk create add-users-email-index`. The generated file
+Don't write the boilerplate by hand — run `migronaut create add-users-email-index`. The generated file
 type follows your `createExtension` config, or pass `--ts` / `--js` to choose.
 :::
 
@@ -89,7 +89,7 @@ export async function up({ db, session }: MigrationContext): Promise<void> {
 | `up` | `(ctx) => Promise<void>` | **Required.** Applies the migration. |
 | `down` | `(ctx) => Promise<void>` | **Required.** Reverts the migration. |
 | `useTransaction` | `boolean` | Wrap this file in a MongoDB transaction. |
-| `description` | `string` | Shown in the `mmk status` table. |
+| `description` | `string` | Shown in the `migronaut status` table. |
 
 If `up` or `down` is missing or not a function, the loader throws `MigrationInvalidExportError`.
 
@@ -101,7 +101,7 @@ config for `0001-`, `0002-` numbering instead.
 
 ## Running TypeScript migrations
 
-`mmk` runs under your installed Node — it does **not** bundle a TypeScript loader. How a `.ts`
+`migronaut` runs under your installed Node — it does **not** bundle a TypeScript loader. How a `.ts`
 migration loads depends on your Node version:
 
 | Your Node | `.ts` migrations | Setup needed |
@@ -117,7 +117,7 @@ zero setup.
 
 ### Using `.ts` on Node < 22.18
 
-Install [`tsx`](https://github.com/privatenumber/tsx) and run `mmk` under it so its loader is
+Install [`tsx`](https://github.com/privatenumber/tsx) and run `migronaut` under it so its loader is
 registered before the migration is imported:
 
 ```bash
@@ -127,13 +127,13 @@ npm install -D tsx
 ```json
 {
   "scripts": {
-    "migrate": "node --import tsx node_modules/mongo-migrate-kit/dist/mmk.cjs up"
+    "migrate": "node --import tsx node_modules/migronaut/dist/migronaut.cjs up"
   }
 }
 ```
 
-`tsx` is *your* dev dependency here — `mmk` doesn't ship it. The same applies when you call the
+`tsx` is *your* dev dependency here — `migronaut` doesn't ship it. The same applies when you call the
 library programmatically: run your script under Node ≥ 22.18 or with a TypeScript loader registered.
 
-If a `.ts` file can't be loaded, `mmk` throws a clear error explaining these options — see
+If a `.ts` file can't be loaded, `migronaut` throws a clear error explaining these options — see
 [Troubleshooting](/guide/troubleshooting#a-ts-migration-won-t-load).

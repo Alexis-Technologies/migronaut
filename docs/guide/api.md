@@ -1,10 +1,10 @@
 # Programmatic API
 
-Everything the `mmk` CLI does is available programmatically through the `MigratorKit` class — useful
+Everything the `migronaut` CLI does is available programmatically through the `MigratorKit` class — useful
 for running migrations from app startup, a deploy script, or tests.
 
 ```ts
-import { MigratorKit } from 'mongo-migrate-kit';
+import { MigratorKit } from '@alexify/migronaut';
 
 const migrator = new MigratorKit({
   uri: 'mongodb://localhost:27017',
@@ -22,10 +22,10 @@ console.log(results); // → RunResult[]
 ## `new MigratorKit(config?, options?)`
 
 ```ts
-constructor(config?: Partial<MmkConfig>, options?: MigratorKitOptions)
+constructor(config?: Partial<MigronautConfig>, options?: MigratorKitOptions)
 ```
 
-- `config` — any subset of [`MmkConfig`](/guide/configuration#all-options). Anything omitted falls
+- `config` — any subset of [`MigronautConfig`](/guide/configuration#all-options). Anything omitted falls
   back to env vars, a config file, then defaults — the same precedence as the CLI.
 - `options` — runtime extras such as a `logger`, a `configPath`, or a `progress` reporter.
 
@@ -113,21 +113,21 @@ interface StatusRow {
 }
 ```
 
-All public types are exported from the package — `MmkConfig`, `MigrationContext`,
+All public types are exported from the package — `MigronautConfig`, `MigrationContext`,
 `MigrationRecord`, `RunResult`, `StatusRow`, `ImportResult`, `LockInfo`, and more. See the
 [error classes](#errors) below and the [Error Codes reference](/reference/error-codes).
 
 ## Errors
 
-Every error extends `MmkError`, which carries a typed `code` and an optional `context`:
+Every error extends `MigronautError`, which carries a typed `code` and an optional `context`:
 
 ```ts
-import { MmkError } from 'mongo-migrate-kit';
+import { MigronautError } from '@alexify/migronaut';
 
 try {
   await migrator.up();
 } catch (err) {
-  if (err instanceof MmkError) {
+  if (err instanceof MigronautError) {
     console.error(err.code, err.message, err.context);
   }
 }

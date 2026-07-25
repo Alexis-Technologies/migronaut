@@ -4,13 +4,13 @@ Hooks let you run code around the migration lifecycle — logging, metrics, Slac
 busting, and so on. Define them in your config under `hooks`.
 
 ::: warning Code-only option
-Hooks are functions, so they can only live in a `.ts`/`.js` config — not in `mmk.config.json`.
+Hooks are functions, so they can only live in a `.ts`/`.js` config — not in `migronaut.config.json`.
 :::
 
 ## The five hooks
 
 ```ts
-import type { MigrationHooks } from 'mongo-migrate-kit';
+import type { MigrationHooks } from '@alexify/migronaut';
 
 export default {
   uri: 'mongodb://localhost:27017',

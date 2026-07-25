@@ -24,20 +24,20 @@ function makeDb(): { db: Db; collection: MockCollection } {
 describe('Changelog (mocked DB)', () => {
   it('ensureIndexes should create a unique index on name', async () => {
     const { db, collection } = makeDb();
-    await new Changelog('_mmk_migrations').ensureIndexes(db);
+    await new Changelog('_migronaut_migrations').ensureIndexes(db);
     expect(collection.createIndex).toHaveBeenCalledWith({ name: 1 }, { unique: true });
   });
 
   it('markApplied should upsert keyed on name', async () => {
     const { db, collection } = makeDb();
     const record = makeRecord({ name: 'a.ts' });
-    await new Changelog('_mmk_migrations').markApplied(db, record);
+    await new Changelog('_migronaut_migrations').markApplied(db, record);
     expect(collection.replaceOne).toHaveBeenCalledWith({ name: 'a.ts' }, record, { upsert: true });
   });
 
   it('markReverted should set status and revertedAt without deleting', async () => {
     const { db, collection } = makeDb();
-    await new Changelog('_mmk_migrations').markReverted(db, 'a.ts');
+    await new Changelog('_migronaut_migrations').markReverted(db, 'a.ts');
     const [filter, update] = collection.updateOne.mock.calls[0];
     expect(filter).toEqual({ name: 'a.ts', status: 'applied' });
     expect(update.$set.status).toBe('reverted');
@@ -47,7 +47,7 @@ describe('Changelog (mocked DB)', () => {
   it('getByName should query findOne by name', async () => {
     const { db, collection } = makeDb();
     collection.findOne.mockResolvedValueOnce(makeRecord({ name: 'a.ts' }));
-    const found = await new Changelog('_mmk_migrations').getByName(db, 'a.ts');
+    const found = await new Changelog('_migronaut_migrations').getByName(db, 'a.ts');
     expect(collection.findOne).toHaveBeenCalledWith({ name: 'a.ts' });
     expect(found?.name).toBe('a.ts');
   });

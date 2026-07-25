@@ -4,11 +4,11 @@ import { pathToFileURL } from 'node:url';
 import * as dotenv from 'dotenv';
 import { z } from 'zod';
 import { ConfigInvalidError } from '../errors/index.js';
-import type { MmkConfig, MmkConfigInput } from '../types/index.js';
+import type { MigronautConfig, MigronautConfigInput } from '../types/index.js';
 
 /** Default values applied when no flag, env var, or config-file value is present */
 export const DEFAULT_CONFIG: Pick<
-  MmkConfig,
+  MigronautConfig,
   | 'migrationsDir'
   | 'migrationsCollection'
   | 'lockCollection'
@@ -20,8 +20,8 @@ export const DEFAULT_CONFIG: Pick<
   | 'sequential'
 > = {
   migrationsDir: './migrations',
-  migrationsCollection: '_mmk_migrations',
-  lockCollection: '_mmk_locks',
+  migrationsCollection: '_migronaut_migrations',
+  lockCollection: '_migronaut_locks',
   lockTTLSeconds: 60,
   strict: false,
   useTransaction: false,
@@ -31,12 +31,12 @@ export const DEFAULT_CONFIG: Pick<
 };
 
 /** Candidate config file names, checked in priority order within the cwd */
-const CONFIG_FILE_NAMES = ['mmk.config.ts', 'mmk.config.js', 'mmk.config.json'];
+const CONFIG_FILE_NAMES = ['migronaut.config.ts', 'migronaut.config.js', 'migronaut.config.json'];
 
 /** Options accepted by {@link loadConfig} */
 export interface LoadConfigOptions {
   /** CLI flag overrides — highest priority */
-  flags?: Partial<MmkConfig>;
+  flags?: Partial<MigronautConfig>;
   /** Explicit config file path — overrides auto-discovery */
   configPath?: string;
   /** Working directory used for discovery and dotenv. Default: process.cwd() */
@@ -83,23 +83,27 @@ function mergeDefined<T extends object>(target: Partial<T>, source: Partial<T>):
   return target;
 }
 
-/** Build a partial config from the MMK_* environment variables */
-function readEnvConfig(): Partial<MmkConfig> {
+/** Build a partial config from the MIGRONAUT_* environment variables */
+function readEnvConfig(): Partial<MigronautConfig> {
   const env = process.env;
-  const result: Partial<MmkConfig> = {};
-  if (env.MMK_URI !== undefined) result.uri = env.MMK_URI;
-  if (env.MMK_DB !== undefined) result.dbName = env.MMK_DB;
-  if (env.MMK_MIGRATIONS_DIR !== undefined) result.migrationsDir = env.MMK_MIGRATIONS_DIR;
-  if (env.MMK_COLLECTION !== undefined) result.migrationsCollection = env.MMK_COLLECTION;
-  if (env.MMK_LOCK_COLLECTION !== undefined) result.lockCollection = env.MMK_LOCK_COLLECTION;
-  if (env.MMK_LOCK_TTL !== undefined) result.lockTTLSeconds = Number(env.MMK_LOCK_TTL);
-  if (env.MMK_STRICT !== undefined) result.strict = parseBoolean(env.MMK_STRICT);
-  if (env.MMK_USE_TRANSACTION !== undefined) {
-    result.useTransaction = parseBoolean(env.MMK_USE_TRANSACTION);
+  const result: Partial<MigronautConfig> = {};
+  if (env.MIGRONAUT_URI !== undefined) result.uri = env.MIGRONAUT_URI;
+  if (env.MIGRONAUT_DB !== undefined) result.dbName = env.MIGRONAUT_DB;
+  if (env.MIGRONAUT_MIGRATIONS_DIR !== undefined)
+    result.migrationsDir = env.MIGRONAUT_MIGRATIONS_DIR;
+  if (env.MIGRONAUT_COLLECTION !== undefined)
+    result.migrationsCollection = env.MIGRONAUT_COLLECTION;
+  if (env.MIGRONAUT_LOCK_COLLECTION !== undefined)
+    result.lockCollection = env.MIGRONAUT_LOCK_COLLECTION;
+  if (env.MIGRONAUT_LOCK_TTL !== undefined) result.lockTTLSeconds = Number(env.MIGRONAUT_LOCK_TTL);
+  if (env.MIGRONAUT_STRICT !== undefined) result.strict = parseBoolean(env.MIGRONAUT_STRICT);
+  if (env.MIGRONAUT_USE_TRANSACTION !== undefined) {
+    result.useTransaction = parseBoolean(env.MIGRONAUT_USE_TRANSACTION);
   }
-  if (env.MMK_SEQUENTIAL !== undefined) result.sequential = parseBoolean(env.MMK_SEQUENTIAL);
-  if (env.MMK_CREATE_EXTENSION === 'ts' || env.MMK_CREATE_EXTENSION === 'js') {
-    result.createExtension = env.MMK_CREATE_EXTENSION;
+  if (env.MIGRONAUT_SEQUENTIAL !== undefined)
+    result.sequential = parseBoolean(env.MIGRONAUT_SEQUENTIAL);
+  if (env.MIGRONAUT_CREATE_EXTENSION === 'ts' || env.MIGRONAUT_CREATE_EXTENSION === 'js') {
+    result.createExtension = env.MIGRONAUT_CREATE_EXTENSION;
   }
   return result;
 }
@@ -123,15 +127,15 @@ function discoverConfigFile(cwd: string): string | null {
  * lets users fetch values from a secret manager. A factory that throws is
  * surfaced as a {@link ConfigInvalidError}. JSON configs are always objects.
  */
-async function loadConfigFile(filepath: string): Promise<Partial<MmkConfig>> {
+async function loadConfigFile(filepath: string): Promise<Partial<MigronautConfig>> {
   if (filepath.endsWith('.json')) {
     const raw = readFileSync(filepath, 'utf8');
-    return JSON.parse(raw) as Partial<MmkConfig>;
+    return JSON.parse(raw) as Partial<MigronautConfig>;
   }
   const mod = (await import(pathToFileURL(filepath).href)) as {
-    default?: MmkConfigInput;
+    default?: MigronautConfigInput;
   } & Record<string, unknown>;
-  const exported = (mod.default ?? mod) as MmkConfigInput;
+  const exported = (mod.default ?? mod) as MigronautConfigInput;
 
   if (typeof exported === 'function') {
     try {
@@ -147,17 +151,17 @@ async function loadConfigFile(filepath: string): Promise<Partial<MmkConfig>> {
 }
 
 /**
- * Resolve the final {@link MmkConfig} by merging, in priority order:
+ * Resolve the final {@link MigronautConfig} by merging, in priority order:
  * CLI flags > environment variables > config file > defaults.
  *
  * Throws {@link ConfigInvalidError} when the merged result fails validation.
  */
-export async function loadConfig(options: LoadConfigOptions = {}): Promise<MmkConfig> {
+export async function loadConfig(options: LoadConfigOptions = {}): Promise<MigronautConfig> {
   const cwd = options.cwd ?? process.cwd();
 
   dotenv.config({ path: path.join(cwd, '.env'), override: false });
 
-  const merged: Partial<MmkConfig> = { ...DEFAULT_CONFIG };
+  const merged: Partial<MigronautConfig> = { ...DEFAULT_CONFIG };
 
   const configFilePath = options.configPath
     ? path.resolve(cwd, options.configPath)
@@ -196,7 +200,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<MmkCo
     });
   }
 
-  const config = merged as MmkConfig;
+  const config = merged as MigronautConfig;
 
   if (config.logger) {
     if (configFilePath) {

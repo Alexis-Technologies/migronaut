@@ -1,23 +1,23 @@
-# mmk down
+# migronaut down
 
 Roll back migrations — the last batch, a specific batch, the last N, or a single file.
 
 ```bash
-mmk down [file] [options]
+migronaut down [file] [options]
 ```
 
 ## Usage
 
 ```bash
-mmk down                 # roll back the last batch
-mmk down <file>          # roll back a single migration by filename
-mmk down --batch <n>     # roll back every migration in batch n
-mmk down --steps <n>     # roll back the last N migrations, newest first
+migronaut down                 # roll back the last batch
+migronaut down <file>          # roll back a single migration by filename
+migronaut down --batch <n>     # roll back every migration in batch n
+migronaut down --steps <n>     # roll back the last N migrations, newest first
 ```
 
 ## How it works
 
-With no argument, `mmk down` reverts the **most recent batch** — every migration that shares the
+With no argument, `migronaut down` reverts the **most recent batch** — every migration that shares the
 highest batch number — by calling each file's `down()` in reverse order.
 
 ```
@@ -51,7 +51,7 @@ error before connecting to the database.
 (ordered by `appliedAt`), regardless of which batch they belong to:
 
 ```bash
-mmk down --steps 2   # undo the two most recently applied migrations
+migronaut down --steps 2   # undo the two most recently applied migrations
 ```
 
 This differs from the default (revert the whole last *batch*) and from `--batch <n>` (revert one
@@ -59,8 +59,8 @@ specific batch).
 
 ## Forward-only / imported migrations
 
-Migrations adopted via [`mmk import`](/commands/import) are tagged `origin: 'migrate-mongo'` and are
-**not reversible**. `mmk down` preflights this and throws `IrreversibleMigrationError` **before**
+Migrations adopted via [`migronaut import`](/commands/import) are tagged `origin: 'migrate-mongo'` and are
+**not reversible**. `migronaut down` preflights this and throws `IrreversibleMigrationError` **before**
 touching anything, so the collection is never left half-reverted.
 
 ## Exit codes

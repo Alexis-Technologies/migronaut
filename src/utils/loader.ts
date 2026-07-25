@@ -44,7 +44,7 @@ export function tsLoadErrorOrNull(
   }
   const name = path.basename(filepath);
   return new MigrationInvalidExportError(
-    `Cannot load TypeScript migration "${name}" — this Node runtime cannot import .ts files. Use Node >= 22.18, run mmk under a TypeScript loader (e.g. tsx), or author the migration as .js.`,
+    `Cannot load TypeScript migration "${name}" — this Node runtime cannot import .ts files. Use Node >= 22.18, run migronaut under a TypeScript loader (e.g. tsx), or author the migration as .js.`,
     { filepath, cause: error instanceof Error ? error.message : String(error) },
   );
 }

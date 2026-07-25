@@ -27,7 +27,7 @@ import {
 let tmp: string;
 
 beforeEach(() => {
-  tmp = mkdtempSync(path.join(tmpdir(), 'mmk-template-'));
+  tmp = mkdtempSync(path.join(tmpdir(), 'migronaut-template-'));
 });
 
 afterEach(() => {
@@ -111,9 +111,9 @@ describe('createMigrationFile', () => {
 });
 
 describe('config templates', () => {
-  it('should fill the TS template with provided values and the MmkConfig type', () => {
+  it('should fill the TS template with provided values and the MigronautConfig type', () => {
     const tpl = defaultConfigTs({ uri: 'mongodb://db:1', dbName: 'shop' });
-    expect(tpl).toContain("import type { MmkConfig } from 'mongo-migrate-kit'");
+    expect(tpl).toContain("import type { MigronautConfig } from '@alexify/migronaut'");
     expect(tpl).toContain("uri: 'mongodb://db:1'");
     expect(tpl).toContain("dbName: 'shop'");
     expect(tpl).toContain('export default config');
@@ -129,13 +129,13 @@ describe('config templates', () => {
   it('should produce valid parseable JSON', () => {
     const parsed = JSON.parse(defaultConfigJson({ dbName: 'shop' }));
     expect(parsed.dbName).toBe('shop');
-    expect(parsed.migrationsCollection).toBe('_mmk_migrations');
+    expect(parsed.migrationsCollection).toBe('_migronaut_migrations');
   });
 
   it('should dispatch on format', () => {
     expect(configTemplateContent('js')).toContain('const config = {');
     expect(configTemplateContent('json')).toContain('"lockTTLSeconds": 60');
-    expect(configTemplateContent('ts')).toContain('Partial<MmkConfig>');
+    expect(configTemplateContent('ts')).toContain('Partial<MigronautConfig>');
   });
 
   it('should seed createExtension to match the config file language', () => {
@@ -180,11 +180,11 @@ describe('secret-provider config templates', () => {
     expect(tpl).toContain('@google-cloud/secret-manager');
   });
 
-  it('should emit a typed async factory for TS with the MmkConfig type', () => {
+  it('should emit a typed async factory for TS with the MigronautConfig type', () => {
     const tpl = secretConfigTs();
-    expect(tpl).toContain("import type { MmkConfig } from 'mongo-migrate-kit'");
+    expect(tpl).toContain("import type { MigronautConfig } from '@alexify/migronaut'");
     expect(tpl).toContain('async function loadMongoSecret(): Promise<{ uri: string');
-    expect(tpl).toContain('Promise<Partial<MmkConfig>>');
+    expect(tpl).toContain('Promise<Partial<MigronautConfig>>');
     expect(tpl).toContain("createExtension: 'ts'");
   });
 
@@ -205,15 +205,15 @@ describe('secret-provider config templates', () => {
 });
 
 describe('createConfigFile', () => {
-  it('should write mmk.config.ts by default and return its path', () => {
+  it('should write migronaut.config.ts by default and return its path', () => {
     const file = createConfigFile({ dir: tmp, format: 'ts', force: false });
-    expect(file).toBe(path.join(tmp, 'mmk.config.ts'));
-    expect(readFileSync(file, 'utf8')).toContain('Partial<MmkConfig>');
+    expect(file).toBe(path.join(tmp, 'migronaut.config.ts'));
+    expect(readFileSync(file, 'utf8')).toContain('Partial<MigronautConfig>');
   });
 
-  it('should write mmk.config.json when format is json', () => {
+  it('should write migronaut.config.json when format is json', () => {
     const file = createConfigFile({ dir: tmp, format: 'json', force: false });
-    expect(file).toBe(path.join(tmp, 'mmk.config.json'));
+    expect(file).toBe(path.join(tmp, 'migronaut.config.json'));
   });
 
   it('should throw ConfigFileExistsError when the file exists without force', () => {

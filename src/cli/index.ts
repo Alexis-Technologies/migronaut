@@ -15,15 +15,15 @@ export function buildProgram(): Command {
   const program = new Command();
 
   program
-    .name('mmk')
+    .name('migronaut')
     .description('Elegant, fast, TypeScript-first MongoDB migrations for Node.js')
-    .option('--uri <uri>', 'MongoDB connection URI (overrides MMK_URI)')
-    .option('--db <name>', 'Database name (overrides MMK_DB)')
-    .option('--dir <path>', 'Migrations directory (overrides MMK_MIGRATIONS_DIR)')
+    .option('--uri <uri>', 'MongoDB connection URI (overrides MIGRONAUT_URI)')
+    .option('--db <name>', 'Database name (overrides MIGRONAUT_DB)')
+    .option('--dir <path>', 'Migrations directory (overrides MIGRONAUT_MIGRATIONS_DIR)')
     .option('--config <path>', 'Path to a config file (overrides auto-discovery)')
     // Injected from package.json at build time (see tsup.config.ts); falls back
     // to a dev sentinel when run unbundled (e.g. via tsx).
-    .version(process.env.MMK_VERSION ?? '0.0.0-dev');
+    .version(process.env.MIGRONAUT_VERSION ?? '0.0.0-dev');
 
   registerInit(program);
   registerImport(program);

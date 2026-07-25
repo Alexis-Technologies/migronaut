@@ -31,13 +31,13 @@ Here's what was on it after a week:
 
 None of these are exotic. They're the things you reach for the moment a project gets real. I kept waiting for them to show up. They didn't. So I built them.
 
-The result is `mongo-migrate-kit`. The CLI is called `mmk`.
+The result is `migronaut`. The CLI is called `migronaut`.
 
 ## How it compares
 
-I'll let the table do the talking. This is `migrate-mongo` versus `mongo-migrate-kit`:
+I'll let the table do the talking. This is `migrate-mongo` versus `migronaut`:
 
-| Capability | `migrate-mongo` | `mongo-migrate-kit` |
+| Capability | `migrate-mongo` | `migronaut` |
 |---|:---:|:---:|
 | `up` / `down` / `create` / `status` | ✅ | ✅ |
 | Dry-run preview | ❌ | ✅ |
@@ -48,7 +48,7 @@ I'll let the table do the talking. This is `migrate-mongo` versus `mongo-migrate
 | Lifecycle hooks | ❌ | ✅ |
 | First-class TypeScript | community setup | ✅ built-in |
 | History preserved on rollback | ❌ *(entry removed)* | ✅ *(never deleted)* |
-| Adopt an existing `migrate-mongo` changelog | — | ✅ `mmk import` |
+| Adopt an existing `migrate-mongo` changelog | — | ✅ `migronaut import` |
 
 That last row is the one I care about most. Because a better tool is useless if switching to it is painful.
 
@@ -61,42 +61,42 @@ I'd been burned by this before. "Just re-run everything against the new tool" is
 So I made the switch a single, boring, safe command:
 
 ```bash
-mmk import
+migronaut import
 ```
 
-That's it. It reads your existing `migrate-mongo` changelog and records that history in `mmk`, so `mmk` knows exactly what's already been applied. Then:
+That's it. It reads your existing `migrate-mongo` changelog and records that history in `migronaut`, so `migronaut` knows exactly what's already been applied. Then:
 
 ```bash
-mmk up
+migronaut up
 ```
 
 runs only the migrations you've added since. Your old ones are recognized as already done.
 
-Here's what `mmk import` actually does, because I know you're suspicious (good):
+Here's what `migronaut import` actually does, because I know you're suspicious (good):
 
 - It **reads** your `migrate-mongo` changelog. It never writes to it. Your old tool's data is left completely alone.
 - It maps each entry over: the filename, when it was applied, and the checksum (it reuses `migrate-mongo`'s stored hash if it still matches the file on disk, otherwise recomputes it).
-- Files that are on disk but not yet in the changelog stay **pending** — they run on your next `mmk up`, exactly like you'd want.
+- Files that are on disk but not yet in the changelog stay **pending** — they run on your next `migronaut up`, exactly like you'd want.
 
 And if you want to see it before you trust it:
 
 ```bash
-mmk import --dry-run
+migronaut import --dry-run
 ```
 
 This previews the whole mapping and writes nothing. I built this first, honestly, because I didn't trust *my own tool* until I could see the plan.
 
 ## One honest caveat
 
-Imported migrations are forward-only. You can't roll them back with `mmk`.
+Imported migrations are forward-only. You can't roll them back with `migronaut`.
 
-There's a real reason. `migrate-mongo` files use a positional `up(db, client)` signature. `mmk` passes a single context object instead. Running an old file's `down` under the new runner could behave in ways I can't guarantee are safe, so I'd rather refuse it loudly than corrupt your data quietly:
+There's a real reason. `migrate-mongo` files use a positional `up(db, client)` signature. `migronaut` passes a single context object instead. Running an old file's `down` under the new runner could behave in ways I can't guarantee are safe, so I'd rather refuse it loudly than corrupt your data quietly:
 
 ```text
 ✖ Cannot roll back 1 migrate-mongo-imported migration(s): 20260101-add-index.js
 ```
 
-If you need an old migration to be reversible under `mmk`, you re-write that one file in the native format. New migrations you write going forward are fully reversible. I'd rather be upfront about this than pretend the seam doesn't exist.
+If you need an old migration to be reversible under `migronaut`, you re-write that one file in the native format. New migrations you write going forward are fully reversible. I'd rather be upfront about this than pretend the seam doesn't exist.
 
 ## Was it worth building?
 
@@ -107,12 +107,12 @@ A dry run before every production migration. Single-file rollbacks when one thin
 If you're on `migrate-mongo` and you've felt any of the gaps in that table, give it ten minutes:
 
 ```bash
-npm install mongo-migrate-kit mongodb
-mmk import --dry-run    # look before you leap
-mmk import              # adopt your history
-mmk up                  # carry on as normal
+npm install @alexify/migronaut mongodb
+migronaut import --dry-run    # look before you leap
+migronaut import              # adopt your history
+migronaut up                  # carry on as normal
 ```
 
 It won't touch your old changelog. Worst case, you delete one collection and you're back where you started.
 
-GitHub and npm: **mongo-migrate-kit**. If it saves you a Friday, a star helps other people find it.
+GitHub and npm: **migronaut**. If it saves you a Friday, a star helps other people find it.

@@ -7,7 +7,7 @@ import { renderImportTable } from '../table.js';
 export function registerImport(program: Command): void {
   program
     .command('import')
-    .description('Adopt an existing migrate-mongo changelog into the mmk changelog')
+    .description('Adopt an existing migrate-mongo changelog into the migronaut changelog')
     .option('--from <collection>', 'Source collection to read (default: changelog)')
     .option(
       '--to <collection>',

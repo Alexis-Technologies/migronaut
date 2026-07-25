@@ -18,55 +18,55 @@ Available on every command, highest precedence:
 
 | Command | Description |
 |---|---|
-| [`mmk up`](/commands/up) | Run all pending migrations |
-| `mmk up <file>` | Run a single migration |
-| `mmk up --step` | Apply each file as its own batch |
-| `mmk up <file> --force --yes` | Re-run an already-applied file |
-| `mmk up --strict` | Abort on a checksum mismatch |
-| `mmk up --no-lock` | Skip the lock (dev only) |
-| [`mmk down`](/commands/down) | Roll back the last batch |
-| `mmk down <file>` | Roll back a single migration |
-| `mmk down --batch <n>` | Roll back a specific batch |
-| `mmk down --steps <n>` | Roll back the last N migrations |
-| [`mmk redo`](/commands/redo) | Down + up the last applied migration |
-| `mmk redo <file>` | Down + up a specific migration |
+| [`migronaut up`](/commands/up) | Run all pending migrations |
+| `migronaut up <file>` | Run a single migration |
+| `migronaut up --step` | Apply each file as its own batch |
+| `migronaut up <file> --force --yes` | Re-run an already-applied file |
+| `migronaut up --strict` | Abort on a checksum mismatch |
+| `migronaut up --no-lock` | Skip the lock (dev only) |
+| [`migronaut down`](/commands/down) | Roll back the last batch |
+| `migronaut down <file>` | Roll back a single migration |
+| `migronaut down --batch <n>` | Roll back a specific batch |
+| `migronaut down --steps <n>` | Roll back the last N migrations |
+| [`migronaut redo`](/commands/redo) | Down + up the last applied migration |
+| `migronaut redo <file>` | Down + up a specific migration |
 
 ## Inspecting
 
 | Command | Description |
 |---|---|
-| [`mmk status`](/commands/status) | Full status table |
-| `mmk status --check` | Exit 1 if any migration is pending (CI gate) |
-| `mmk list --pending` | Only pending migrations |
-| `mmk list --applied` | Only applied migrations |
-| [`mmk dry-run up`](/commands/dry-run) | Preview what would apply |
-| `mmk dry-run down` | Preview what would revert |
-| `mmk dry-run down --steps <n>` | Preview reverting the last N |
+| [`migronaut status`](/commands/status) | Full status table |
+| `migronaut status --check` | Exit 1 if any migration is pending (CI gate) |
+| `migronaut list --pending` | Only pending migrations |
+| `migronaut list --applied` | Only applied migrations |
+| [`migronaut dry-run up`](/commands/dry-run) | Preview what would apply |
+| `migronaut dry-run down` | Preview what would revert |
+| `migronaut dry-run down --steps <n>` | Preview reverting the last N |
 
 ## Authoring
 
 | Command | Description |
 |---|---|
-| [`mmk create <name>`](/commands/create) | Create a migration (default `.js`) |
-| `mmk create <name> --ts` | Create a `.ts` migration |
-| `mmk create <name> --js` | Create a `.js` migration |
-| `mmk create <name> --template <path>` | Use a custom template |
-| [`mmk init`](/commands/create#mmk-init) | Generate `mmk.config.js` |
-| `mmk init --ts` / `--json` | Generate `.ts` / `.json` config |
-| `mmk init --secret-provider` | Generate a secret-manager config |
-| `mmk init --force` | Overwrite an existing config |
+| [`migronaut create <name>`](/commands/create) | Create a migration (default `.js`) |
+| `migronaut create <name> --ts` | Create a `.ts` migration |
+| `migronaut create <name> --js` | Create a `.js` migration |
+| `migronaut create <name> --template <path>` | Use a custom template |
+| [`migronaut init`](/commands/create#migronaut-init) | Generate `migronaut.config.js` |
+| `migronaut init --ts` / `--json` | Generate `.ts` / `.json` config |
+| `migronaut init --secret-provider` | Generate a secret-manager config |
+| `migronaut init --force` | Overwrite an existing config |
 
 ## Operations
 
 | Command | Description |
 |---|---|
-| [`mmk import`](/commands/import) | Adopt a migrate-mongo changelog |
-| `mmk import --from <c>` / `--to <c>` | Source / target collection |
-| `mmk import --dry-run` | Preview the mapping |
-| `mmk import --trust-hash` | Reuse migrate-mongo's `fileHash` |
-| `mmk import --force` | Import into a non-empty changelog |
-| [`mmk unlock`](/commands/unlock) | Force-release a stuck lock |
-| `mmk unlock --yes` | Release without confirmation |
+| [`migronaut import`](/commands/import) | Adopt a migrate-mongo changelog |
+| `migronaut import --from <c>` / `--to <c>` | Source / target collection |
+| `migronaut import --dry-run` | Preview the mapping |
+| `migronaut import --trust-hash` | Reuse migrate-mongo's `fileHash` |
+| `migronaut import --force` | Import into a non-empty changelog |
+| [`migronaut unlock`](/commands/unlock) | Force-release a stuck lock |
+| `migronaut unlock --yes` | Release without confirmation |
 
 ## Exit codes
 

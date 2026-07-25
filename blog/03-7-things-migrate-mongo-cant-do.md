@@ -2,7 +2,7 @@
 
 I used `migrate-mongo` for years. It's a solid, simple tool. But every one of the gaps below cost me real time, real stress, or a real late-night incident at some point. This is the honest list.
 
-For each one, I'll show what went wrong and what I do now instead. (The "instead" is `mongo-migrate-kit`, a tool I built after living through all of these. Fair warning.)
+For each one, I'll show what went wrong and what I do now instead. (The "instead" is `migronaut`, a tool I built after living through all of these. Fair warning.)
 
 ## 1. You can't roll back a single migration
 
@@ -15,13 +15,13 @@ So I either roll back all three (including two that were fine) or I do it by han
 **What I do now:**
 
 ```bash
-mmk down 20260101-the-broken-one.js
+migronaut down 20260101-the-broken-one.js
 ```
 
 Roll back exactly one file. Or roll back a whole batch by number if you do want all three:
 
 ```bash
-mmk down --batch 3
+migronaut down --batch 3
 ```
 
 ## 2. You can't preview a migration before it runs
@@ -33,8 +33,8 @@ In production, that's a leap of faith every single time. Which migrations are pe
 **What I do now** — every command has a dry run that touches nothing:
 
 ```bash
-mmk dry-run up
-mmk dry-run down
+migronaut dry-run up
+migronaut dry-run down
 ```
 
 It prints the exact plan and writes nothing to the database. I run this before every production deploy now. It costs two seconds and has saved me more than once.
@@ -45,12 +45,12 @@ Here's a fun one. Two CI jobs kicked off close together. Both ran migrations. Ag
 
 You can imagine the mess. Half-applied state, a confused changelog, an afternoon of cleanup. `migrate-mongo` has no concurrency lock, so nothing stopped them.
 
-**What I do now:** `mmk` takes an atomic lock in the database before running. If a second run starts while the first holds the lock, it stops and tells you who's holding it. Nothing to configure — it's on by default. (A stale lock past its TTL gets reclaimed automatically, and the lock is always released even if a migration throws.)
+**What I do now:** `migronaut` takes an atomic lock in the database before running. If a second run starts while the first holds the lock, it stops and tells you who's holding it. Nothing to configure — it's on by default. (A stale lock past its TTL gets reclaimed automatically, and the lock is always released even if a migration throws.)
 
 For local development where you don't care, you can skip it:
 
 ```bash
-mmk up --no-lock
+migronaut up --no-lock
 ```
 
 ## 4. You can't tell if a migration file was edited after it ran
@@ -59,16 +59,16 @@ Someone edits an already-applied migration. Maybe to "fix" it. Maybe by accident
 
 `migrate-mongo` has no idea. The changelog just says the filename ran. Whether the file still contains the same code? Not tracked. So your environments quietly drift apart and nobody knows until something breaks differently in staging and prod.
 
-**What I do now:** `mmk` stores a SHA-256 checksum of every migration when it runs. On later runs it compares, and shows you drift right in the status table. You can make it strict so a mismatch stops everything:
+**What I do now:** `migronaut` stores a SHA-256 checksum of every migration when it runs. On later runs it compares, and shows you drift right in the status table. You can make it strict so a mismatch stops everything:
 
 ```bash
-mmk up --strict
+migronaut up --strict
 ```
 
 And if you *meant* to change and re-run a file, you say so explicitly:
 
 ```bash
-mmk up 20260101-add-index.js --force
+migronaut up 20260101-add-index.js --force
 ```
 
 ## 5. There's no redo
@@ -80,13 +80,13 @@ In `migrate-mongo` that's two commands every cycle, `down` then `up`, and you'd 
 **What I do now:**
 
 ```bash
-mmk redo
+migronaut redo
 ```
 
 One command. Undo the last applied migration, run it again. Or redo a specific file:
 
 ```bash
-mmk redo 20260101-add-index.js
+migronaut redo 20260101-add-index.js
 ```
 
 Small thing. I use it constantly.
@@ -97,7 +97,7 @@ When you roll back in `migrate-mongo`, the changelog entry is removed. The recor
 
 For an audit trail, that's the opposite of what you want. "Did this migration run last Tuesday and get rolled back, or did it never run?" You can't answer that if the evidence was deleted.
 
-**What I do now:** `mmk` never deletes a record. A rollback *updates* the entry — it sets the status to `reverted` and stamps the time it happened. The history stays complete. Every record keeps its batch, status, applied time, reverted time, duration, checksum, environment, and who ran it. When something goes wrong months later, the full story is still there.
+**What I do now:** `migronaut` never deletes a record. A rollback *updates* the entry — it sets the status to `reverted` and stamps the time it happened. The history stays complete. Every record keeps its batch, status, applied time, reverted time, duration, checksum, environment, and who ran it. When something goes wrong months later, the full story is still there.
 
 ## 7. TypeScript is a setup chore
 
@@ -106,7 +106,7 @@ Plenty of teams write migrations in TypeScript. With `migrate-mongo` that means 
 **What I do now:** TypeScript is built in. So is plain JavaScript, in both ESM and CommonJS. A `.ts` migration just runs. The context is fully typed:
 
 ```ts
-import type { MigrationContext } from 'mongo-migrate-kit';
+import type { MigrationContext } from '@alexify/migronaut';
 
 export async function up({ db }: MigrationContext): Promise<void> {
   await db.collection('users').createIndex({ email: 1 }, { unique: true });
@@ -128,10 +128,10 @@ But every gap above is something that bites *as a project gets bigger*. More mig
 If any of these felt familiar, the switch is easier than you'd think, because the tool I built to fix them can adopt your existing `migrate-mongo` history in one command:
 
 ```bash
-npm install mongo-migrate-kit mongodb
-mmk import --dry-run    # preview, writes nothing
-mmk import              # adopt your history (your old changelog is never touched)
-mmk up                  # carry on
+npm install @alexify/migronaut mongodb
+migronaut import --dry-run    # preview, writes nothing
+migronaut import              # adopt your history (your old changelog is never touched)
+migronaut up                  # carry on
 ```
 
-It's on npm and GitHub as **mongo-migrate-kit**. If this list saved you from learning any of these the hard way, a star helps the next person find it too.
+It's on npm and GitHub as **migronaut**. If this list saved you from learning any of these the hard way, a star helps the next person find it too.

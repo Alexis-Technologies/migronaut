@@ -10,7 +10,7 @@ import {
 } from '../helpers/project.js';
 
 let mongo: TestMongo;
-const DB = 'mmk_hooks_test';
+const DB = 'migronaut_hooks_test';
 
 beforeAll(async () => {
   mongo = await startTestMongo(DB);
@@ -61,7 +61,7 @@ describe('lifecycle hooks (integration)', () => {
     migrator = makeMigrator(mongo.uri, DB, project.dir);
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await migrator.up(undefined, { noLock: true });
-    expect(await mongo.db.collection('_mmk_locks').countDocuments()).toBe(0);
+    expect(await mongo.db.collection('_migronaut_locks').countDocuments()).toBe(0);
     expect(await mongo.db.collection('things').countDocuments()).toBe(1);
   });
 });

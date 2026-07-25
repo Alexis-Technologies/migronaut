@@ -12,8 +12,8 @@ import { insertMigration, makeMigrator, makeProject } from '../helpers/project.j
 import { makeRecord } from '../helpers/records.js';
 
 let mongo: TestMongo;
-const DB = 'mmk_import_test';
-const TARGET = '_mmk_migrations';
+const DB = 'migronaut_import_test';
+const TARGET = '_migronaut_migrations';
 
 beforeAll(async () => {
   mongo = await startTestMongo(DB);
@@ -60,7 +60,7 @@ describe('MigratorKit.import (integration)', () => {
     expect(await targetRecords()).toHaveLength(0);
   });
 
-  it('should map migrate-mongo docs into the mmk changelog', async () => {
+  it('should map migrate-mongo docs into the migronaut changelog', async () => {
     setup();
     project.write('20260101000000-a.js', insertMigration('things', 'a'));
     await seedChangelog([
@@ -84,7 +84,7 @@ describe('MigratorKit.import (integration)', () => {
       status: 'applied',
       duration: 0,
       environment: 'imported',
-      executedBy: 'mmk-import',
+      executedBy: 'migronaut-import',
     });
   });
 

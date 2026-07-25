@@ -1,8 +1,8 @@
-# Switching from migrate-mongo to mongo-migrate-kit: A Zero-Downtime, Non-Destructive Guide
+# Switching from migrate-mongo to migronaut: A Zero-Downtime, Non-Destructive Guide
 
 If you're looking for a `migrate-mongo` alternative, the scariest question isn't "is the new tool better?" It's "how do I switch without breaking everything that already works?"
 
-This guide answers that. We'll move an existing project from `migrate-mongo` to `mongo-migrate-kit` step by step. No re-running old migrations. No data loss. No editing your old changelog. If anything looks off at any point, you can stop and you've lost nothing.
+This guide answers that. We'll move an existing project from `migrate-mongo` to `migronaut` step by step. No re-running old migrations. No data loss. No editing your old changelog. If anything looks off at any point, you can stop and you've lost nothing.
 
 Let's go.
 
@@ -16,26 +16,26 @@ You'll need:
 
 That's it. You don't need to uninstall `migrate-mongo` yet. We'll leave it in place until you're confident.
 
-## Step 1 — Install mongo-migrate-kit
+## Step 1 — Install migronaut
 
 ```bash
-npm install mongo-migrate-kit
+npm install @alexify/migronaut
 npm install mongodb        # required peer dependency
 ```
 
-The CLI is `mmk`. You can run it with `npx mmk` if you'd rather not install it globally.
+The CLI is `migronaut`. You can run it with `npx migronaut` if you'd rather not install it globally.
 
 ## Step 2 — Point it at the same database
 
-`mmk` needs to know your connection string and database name. You have two ways to do this. Pick whichever fits your setup.
+`migronaut` needs to know your connection string and database name. You have two ways to do this. Pick whichever fits your setup.
 
 **Option A — a config file.** Generate one:
 
 ```bash
-npx mmk init
+npx migronaut init
 ```
 
-This creates an `mmk.config.js` in your project, fully commented. Open it and set your connection:
+This creates an `migronaut.config.js` in your project, fully commented. Open it and set your connection:
 
 ```js
 export default {
@@ -45,34 +45,34 @@ export default {
 };
 ```
 
-Use `mmk init --ts` if you want a TypeScript config instead.
+Use `migronaut init --ts` if you want a TypeScript config instead.
 
-**Option B — no file at all.** `mmk` reads environment variables, so you can skip the config file completely:
+**Option B — no file at all.** `migronaut` reads environment variables, so you can skip the config file completely:
 
 ```bash
-export MMK_URI="mongodb://localhost:27017"
-export MMK_DB="my_app"
-export MMK_MIGRATIONS_DIR="./migrations"
+export MIGRONAUT_URI="mongodb://localhost:27017"
+export MIGRONAUT_DB="my_app"
+export MIGRONAUT_MIGRATIONS_DIR="./migrations"
 ```
 
-The important thing in both cases: point `mmk` at the **same database** `migrate-mongo` has been using. That's how it can see your existing history.
+The important thing in both cases: point `migronaut` at the **same database** `migrate-mongo` has been using. That's how it can see your existing history.
 
 ## Step 3 — Preview the import (this writes nothing)
 
-This is the step that makes the whole switch safe. Before changing anything, ask `mmk` to show you exactly what it plans to do:
+This is the step that makes the whole switch safe. Before changing anything, ask `migronaut` to show you exactly what it plans to do:
 
 ```bash
-npx mmk import --dry-run
+npx migronaut import --dry-run
 ```
 
-`mmk` reads your `migrate-mongo` changelog and prints a table of every migration it found and how it'll record it. It does **not** write anything. It does **not** touch your `migrate-mongo` data.
+`migronaut` reads your `migrate-mongo` changelog and prints a table of every migration it found and how it'll record it. It does **not** write anything. It does **not** touch your `migrate-mongo` data.
 
 Read the table. Does the list of migrations match what `migrate-mongo status` shows? Good. That's what we want.
 
-By default `mmk` reads a collection named `changelog` (that's `migrate-mongo`'s default). If your project renamed it, tell `mmk` where to look:
+By default `migronaut` reads a collection named `changelog` (that's `migrate-mongo`'s default). If your project renamed it, tell `migronaut` where to look:
 
 ```bash
-npx mmk import --dry-run --from my_changelog_collection
+npx migronaut import --dry-run --from my_changelog_collection
 ```
 
 ## Step 4 — Run the import for real
@@ -80,23 +80,23 @@ npx mmk import --dry-run --from my_changelog_collection
 Happy with the preview? Run it without `--dry-run`:
 
 ```bash
-npx mmk import
+npx migronaut import
 ```
 
 Here's exactly what happens, so there are no surprises:
 
-- `mmk` **reads** your `migrate-mongo` changelog and records that history in its own changelog (a collection called `_mmk_migrations` by default). Your old changelog is **never modified**.
+- `migronaut` **reads** your `migrate-mongo` changelog and records that history in its own changelog (a collection called `_migronaut_migrations` by default). Your old changelog is **never modified**.
 - For each migration, it copies the filename, the applied date, and a checksum. It reuses `migrate-mongo`'s stored hash when it still matches the file on disk, and recomputes a fresh SHA-256 from disk otherwise.
-- Migration files that exist on disk but aren't in the changelog yet are left **pending**. They'll run on your next `mmk up`. This is correct — those are the new ones you haven't applied.
+- Migration files that exist on disk but aren't in the changelog yet are left **pending**. They'll run on your next `migronaut up`. This is correct — those are the new ones you haven't applied.
 
-It's a one-time, forward-only step. After this, `mmk` knows your past.
+It's a one-time, forward-only step. After this, `migronaut` knows your past.
 
 ## Step 5 — Confirm
 
 Check the status:
 
 ```bash
-npx mmk status
+npx migronaut status
 ```
 
 You should see all your previously-applied migrations marked as applied, with their dates, and any not-yet-run files marked pending. This should line up with what `migrate-mongo status` was telling you.
@@ -104,12 +104,12 @@ You should see all your previously-applied migrations marked as applied, with th
 Now run anything pending — these are migrations you wrote but hadn't applied yet:
 
 ```bash
-npx mmk up
+npx migronaut up
 ```
 
-`mmk` runs only the new ones. It does not re-run the old ones, because the import told it they're already done. No re-created indexes. No duplicate seed data. Nothing touched that shouldn't be.
+`migronaut` runs only the new ones. It does not re-run the old ones, because the import told it they're already done. No re-created indexes. No duplicate seed data. Nothing touched that shouldn't be.
 
-That's the migration. You're now on `mmk`.
+That's the migration. You're now on `migronaut`.
 
 ## What you get on the other side
 
@@ -118,46 +118,46 @@ Now that you're moved over, here's what's new in your day-to-day.
 **Preview before you run.** Every command has a dry run:
 
 ```bash
-npx mmk dry-run up
-npx mmk dry-run down
+npx migronaut dry-run up
+npx migronaut dry-run down
 ```
 
 **Run or roll back a single file** instead of "all" or "the last one":
 
 ```bash
-npx mmk up 20260101-add-index.js
-npx mmk down 20260101-add-index.js
+npx migronaut up 20260101-add-index.js
+npx migronaut down 20260101-add-index.js
 ```
 
 **Roll back a whole batch** by number:
 
 ```bash
-npx mmk down --batch 3
+npx migronaut down --batch 3
 ```
 
 **Redo** — undo and re-apply in one step, great while developing a migration:
 
 ```bash
-npx mmk redo
+npx migronaut redo
 ```
 
 **A lock** so two deploys can't migrate at the same time, and **checksums** that warn you if an already-applied migration file got edited. Both are on automatically.
 
 ## One thing to know about rollbacks
 
-The migrations you *imported* from `migrate-mongo` are forward-only — `mmk` won't roll them back.
+The migrations you *imported* from `migrate-mongo` are forward-only — `migronaut` won't roll them back.
 
-The reason is technical but it matters: `migrate-mongo` migrations use an `up(db, client)` signature, while `mmk` passes a single context object. Rather than run an old file's `down` in a way it can't fully guarantee, `mmk` refuses and tells you clearly:
+The reason is technical but it matters: `migrate-mongo` migrations use an `up(db, client)` signature, while `migronaut` passes a single context object. Rather than run an old file's `down` in a way it can't fully guarantee, `migronaut` refuses and tells you clearly:
 
 ```text
 ✖ Cannot roll back 1 migrate-mongo-imported migration(s): 20260101-add-index.js
 ```
 
-Every migration you write *after* switching is fully reversible. And if you genuinely need an old one to roll back under `mmk`, you just rewrite that single file in the native format (named `up`/`down` exports taking one context argument).
+Every migration you write *after* switching is fully reversible. And if you genuinely need an old one to roll back under `migronaut`, you just rewrite that single file in the native format (named `up`/`down` exports taking one context argument).
 
 ## Writing migrations from here on
 
-A `mmk` migration is an `up` and a `down`, like you're used to. The only change from `migrate-mongo` is the function signature — one context object instead of two arguments:
+A `migronaut` migration is an `up` and a `down`, like you're used to. The only change from `migrate-mongo` is the function signature — one context object instead of two arguments:
 
 ```js
 export const description = 'Add unique index on users.email';
@@ -174,15 +174,15 @@ export async function down({ db }) {
 Create a new one with:
 
 ```bash
-npx mmk create "add users email index"
+npx migronaut create "add users email index"
 ```
 
 ## If you want to back out
 
-You won't break anything by trying this. `mmk import` never writes to your `migrate-mongo` changelog. If you decide to go back, you drop the `_mmk_migrations` collection and you're exactly where you started, with `migrate-mongo` still working.
+You won't break anything by trying this. `migronaut import` never writes to your `migrate-mongo` changelog. If you decide to go back, you drop the `_migronaut_migrations` collection and you're exactly where you started, with `migrate-mongo` still working.
 
 That's the whole point. A switch you can't undo isn't a switch, it's a gamble. This one isn't.
 
 ---
 
-`mongo-migrate-kit` is on npm and GitHub under that name. If this guide saved you a stressful afternoon, a star helps others find it.
+`migronaut` is on npm and GitHub under that name. If this guide saved you a stressful afternoon, a star helps others find it.

@@ -1,24 +1,24 @@
-# mmk unlock
+# migronaut unlock
 
 Force-release a stuck concurrency lock left behind by a crashed migration run.
 
 ```bash
-mmk unlock [options]
+migronaut unlock [options]
 ```
 
 ## Why it exists
 
-Every write command acquires an atomic MongoDB lock (in the `_mmk_locks` collection) so two deploys
+Every write command acquires an atomic MongoDB lock (in the `_migronaut_locks` collection) so two deploys
 can't run migrations at once. The lock auto-expires after `lockTTLSeconds` and renews on a heartbeat
 while a migration runs. But if a process is killed mid-run, a lock can linger until its TTL elapses —
-`mmk unlock` clears it immediately.
+`migronaut unlock` clears it immediately.
 
 ## Usage
 
 ```bash
-mmk unlock          # show the current holder, then prompt for confirmation
-mmk unlock --yes    # force-release without prompting
-mmk unlock --json   # machine-readable { released, holder }
+migronaut unlock          # show the current holder, then prompt for confirmation
+migronaut unlock --yes    # force-release without prompting
+migronaut unlock --json   # machine-readable { released, holder }
 ```
 
 It first shows who holds the lock:

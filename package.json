@@ -1,5 +1,5 @@
 {
-  "name": "mongo-migrate-kit",
+  "name": "@alexify/migronaut",
   "version": "1.2.2",
   "description": "Elegant, fast, TypeScript-first MongoDB migrations for Node.js",
   "license": "MIT",
@@ -7,11 +7,11 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/guptasantosh327/mongo-migrate-kit.git"
+    "url": "git+https://github.com/Alexis-Technologies/migronaut.git"
   },
-  "homepage": "https://mongo-migrate-kit.vercel.app/",
+  "homepage": "https://migronaut.vercel.app/",
   "bugs": {
-    "url": "https://github.com/guptasantosh327/mongo-migrate-kit/issues"
+    "url": "https://github.com/Alexis-Technologies/migronaut/issues"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -20,7 +20,7 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "mmk": "dist/mmk.cjs"
+    "migronaut": "dist/migronaut.cjs"
   },
   "exports": {
     ".": {

@@ -1,13 +1,13 @@
-# mmk status &amp; mmk list
+# migronaut status &amp; migronaut list
 
 Inspect the state of every migration.
 
-## mmk status
+## migronaut status
 
 Render a full status table of all known migrations — applied and pending.
 
 ```bash
-mmk status [options]
+migronaut status [options]
 ```
 
 ```
@@ -35,16 +35,16 @@ Plus the [global flags](/guide/configuration#global-cli-flags).
 ### CI deploy gate
 
 ```bash
-mmk status --check || echo "Database has pending migrations — blocking deploy"
+migronaut status --check || echo "Database has pending migrations — blocking deploy"
 ```
 
-## mmk list
+## migronaut list
 
 A filtered, simpler view.
 
 ```bash
-mmk list --pending     # only migrations not yet applied
-mmk list --applied     # only applied migrations
+migronaut list --pending     # only migrations not yet applied
+migronaut list --applied     # only applied migrations
 ```
 
 | Option | Description |

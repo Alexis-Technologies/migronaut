@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MigratorKit } from '../../src/core/migrator.js';
-import type { MmkConfig } from '../../src/types/index.js';
+import type { MigronautConfig } from '../../src/types/index.js';
 import { type TestProject, makeProject } from '../helpers/project.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -13,7 +13,7 @@ let project: TestProject;
 afterEach(() => project?.cleanup());
 
 /** Build a MigratorKit pointed at a fresh throwaway dir (no DB needed for create) */
-function migrator(overrides: Partial<MmkConfig> = {}): MigratorKit {
+function migrator(overrides: Partial<MigronautConfig> = {}): MigratorKit {
   project = makeProject();
   return new MigratorKit({ migrationsDir: project.dir, logger: null, ...overrides });
 }

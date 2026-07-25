@@ -7,20 +7,20 @@ Install the package and the MongoDB driver (a peer dependency):
 ::: code-group
 
 ```bash [npm]
-npm install mongo-migrate-kit mongodb
+npm install @alexify/migronaut mongodb
 ```
 
 ```bash [pnpm]
-pnpm add mongo-migrate-kit mongodb
+pnpm add migronaut mongodb
 ```
 
 ```bash [yarn]
-yarn add mongo-migrate-kit mongodb
+yarn add migronaut mongodb
 ```
 
 :::
 
-The CLI binary is `mmk`. Run it with your package manager's runner (`npx mmk …`) or add scripts to
+The CLI binary is `migronaut`. Run it with your package manager's runner (`npx migronaut …`) or add scripts to
 `package.json`.
 
 ::: tip Requirements
@@ -30,24 +30,24 @@ migrations use Mongoose models.
 
 ## 1. Create a config file
 
-`mmk init` generates a fully-commented config in your project. The default is `mmk.config.js`:
+`migronaut init` generates a fully-commented config in your project. The default is `migronaut.config.js`:
 
 ```bash
-npx mmk init
+npx migronaut init
 ```
 
 ::: code-group
 
 ```bash [JavaScript (default)]
-npx mmk init          # → mmk.config.js
+npx migronaut init          # → migronaut.config.js
 ```
 
 ```bash [TypeScript]
-npx mmk init --ts     # → mmk.config.ts
+npx migronaut init --ts     # → migronaut.config.ts
 ```
 
 ```bash [JSON]
-npx mmk init --json   # → mmk.config.json
+npx migronaut init --json   # → migronaut.config.json
 ```
 
 :::
@@ -55,23 +55,23 @@ npx mmk init --json   # → mmk.config.json
 A minimal config looks like this:
 
 ```js
-// mmk.config.js
+// migronaut.config.js
 export default {
-  uri: process.env.MMK_URI ?? 'mongodb://localhost:27017',
+  uri: process.env.MIGRONAUT_URI ?? 'mongodb://localhost:27017',
   dbName: 'my_app',
   migrationsDir: './migrations',
 };
 ```
 
 ::: info No config file? No problem.
-A config file is **never required** — every option has an `MMK_*` environment variable, so env vars
+A config file is **never required** — every option has an `MIGRONAUT_*` environment variable, so env vars
 alone are sufficient. See [Configuration](/guide/configuration).
 :::
 
 ## 2. Create your first migration
 
 ```bash
-npx mmk create add-users-email-index
+npx migronaut create add-users-email-index
 ```
 
 This writes a timestamped file into your migrations directory, e.g.
@@ -80,7 +80,7 @@ This writes a timestamped file into your migrations directory, e.g.
 ::: code-group
 
 ```ts [TypeScript]
-import type { MigrationContext } from 'mongo-migrate-kit';
+import type { MigrationContext } from '@alexify/migronaut';
 
 export const description = 'Add unique index on users.email';
 
@@ -108,7 +108,7 @@ export async function down({ db }) {
 ## 3. Run it
 
 ```bash
-npx mmk up
+npx migronaut up
 ```
 
 ```
@@ -118,9 +118,9 @@ npx mmk up
 ## 4. Inspect and roll back
 
 ```bash
-npx mmk status          # full status table
-npx mmk dry-run up      # preview what would run, touches nothing
-npx mmk down            # roll back the last batch
+npx migronaut status          # full status table
+npx migronaut dry-run up      # preview what would run, touches nothing
+npx migronaut down            # roll back the last batch
 ```
 
 ## Recommended package.json scripts
@@ -128,10 +128,10 @@ npx mmk down            # roll back the last batch
 ```json
 {
   "scripts": {
-    "migrate": "mmk up",
-    "migrate:down": "mmk down",
-    "migrate:status": "mmk status",
-    "migrate:create": "mmk create"
+    "migrate": "migronaut up",
+    "migrate:down": "migronaut down",
+    "migrate:status": "migronaut status",
+    "migrate:create": "migronaut create"
   }
 }
 ```

@@ -1,8 +1,8 @@
 import chalk from 'chalk';
-import type { MmkLogger } from '../types/index.js';
+import type { MigronautLogger } from '../types/index.js';
 
 /** A logger whose methods are all no-ops — used to silence all output */
-export const silentLogger: MmkLogger = {
+export const silentLogger: MigronautLogger = {
   info: () => {},
   success: () => {},
   warn: () => {},
@@ -17,7 +17,7 @@ export const silentLogger: MmkLogger = {
  * always write to stderr. Pass `process.stderr` as `stream` to keep stdout clean
  * for machine-readable output (e.g. `--json` mode routes all human lines here).
  */
-export function createLogger(stream: NodeJS.WritableStream = process.stdout): MmkLogger {
+export function createLogger(stream: NodeJS.WritableStream = process.stdout): MigronautLogger {
   const writeOut = (msg: string): void => {
     stream.write(`${msg}\n`);
   };
@@ -37,7 +37,7 @@ export function createLogger(stream: NodeJS.WritableStream = process.stdout): Mm
  * Resolve the effective logger from a config value:
  * `null` → silent, `undefined` → default chalk logger, otherwise the custom logger.
  */
-export function resolveLogger(logger: MmkLogger | null | undefined): MmkLogger {
+export function resolveLogger(logger: MigronautLogger | null | undefined): MigronautLogger {
   if (logger === null) {
     return silentLogger;
   }

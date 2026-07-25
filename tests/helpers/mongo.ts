@@ -15,7 +15,7 @@ export interface TestMongo {
  * Start an in-memory MongoDB replica set and connect a client.
  * A replica set (not a standalone) is required so transactions work in tests.
  */
-export async function startTestMongo(dbName = 'mmk_test'): Promise<TestMongo> {
+export async function startTestMongo(dbName = 'migronaut_test'): Promise<TestMongo> {
   const replSet = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   const uri = replSet.getUri();
   const client = new MongoClient(uri);

@@ -5,25 +5,25 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG, loadConfig } from '../../src/core/config.js';
 import { ConfigInvalidError } from '../../src/errors/index.js';
 
-const MMK_ENV_KEYS = [
-  'MMK_URI',
-  'MMK_DB',
-  'MMK_MIGRATIONS_DIR',
-  'MMK_COLLECTION',
-  'MMK_LOCK_COLLECTION',
-  'MMK_LOCK_TTL',
-  'MMK_STRICT',
-  'MMK_USE_TRANSACTION',
-  'MMK_SEQUENTIAL',
-  'MMK_CREATE_EXTENSION',
+const MIGRONAUT_ENV_KEYS = [
+  'MIGRONAUT_URI',
+  'MIGRONAUT_DB',
+  'MIGRONAUT_MIGRATIONS_DIR',
+  'MIGRONAUT_COLLECTION',
+  'MIGRONAUT_LOCK_COLLECTION',
+  'MIGRONAUT_LOCK_TTL',
+  'MIGRONAUT_STRICT',
+  'MIGRONAUT_USE_TRANSACTION',
+  'MIGRONAUT_SEQUENTIAL',
+  'MIGRONAUT_CREATE_EXTENSION',
 ];
 
 let tmp: string;
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
-  tmp = mkdtempSync(path.join(tmpdir(), 'mmk-config-'));
-  for (const key of MMK_ENV_KEYS) {
+  tmp = mkdtempSync(path.join(tmpdir(), 'migronaut-config-'));
+  for (const key of MIGRONAUT_ENV_KEYS) {
     savedEnv[key] = process.env[key];
     delete process.env[key];
   }
@@ -31,7 +31,7 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
-  for (const key of MMK_ENV_KEYS) {
+  for (const key of MIGRONAUT_ENV_KEYS) {
     if (savedEnv[key] === undefined) {
       delete process.env[key];
     } else {
@@ -47,8 +47,8 @@ describe('loadConfig', () => {
       flags: { uri: 'mongodb://localhost:27017', dbName: 'test' },
     });
     expect(config.migrationsDir).toBe(DEFAULT_CONFIG.migrationsDir);
-    expect(config.migrationsCollection).toBe('_mmk_migrations');
-    expect(config.lockCollection).toBe('_mmk_locks');
+    expect(config.migrationsCollection).toBe('_migronaut_migrations');
+    expect(config.lockCollection).toBe('_migronaut_locks');
     expect(config.lockTTLSeconds).toBe(60);
     expect(config.strict).toBe(false);
     expect(config.useTransaction).toBe(false);
@@ -63,10 +63,10 @@ describe('loadConfig', () => {
     expect(config.dbName).toBe('');
   });
 
-  it('should let MMK_CREATE_EXTENSION override the default', async () => {
-    process.env.MMK_URI = 'mongodb://env-host:27017';
-    process.env.MMK_DB = 'env-db';
-    process.env.MMK_CREATE_EXTENSION = 'ts';
+  it('should let MIGRONAUT_CREATE_EXTENSION override the default', async () => {
+    process.env.MIGRONAUT_URI = 'mongodb://env-host:27017';
+    process.env.MIGRONAUT_DB = 'env-db';
+    process.env.MIGRONAUT_CREATE_EXTENSION = 'ts';
     const config = await loadConfig({ cwd: tmp });
     expect(config.createExtension).toBe('ts');
   });
@@ -82,16 +82,16 @@ describe('loadConfig', () => {
   });
 
   it('should work entirely from env vars with no config file', async () => {
-    process.env.MMK_URI = 'mongodb://env-host:27017';
-    process.env.MMK_DB = 'env-db';
+    process.env.MIGRONAUT_URI = 'mongodb://env-host:27017';
+    process.env.MIGRONAUT_DB = 'env-db';
     const config = await loadConfig({ cwd: tmp });
     expect(config.uri).toBe('mongodb://env-host:27017');
     expect(config.dbName).toBe('env-db');
   });
 
   it('should let CLI flags override env vars', async () => {
-    process.env.MMK_URI = 'mongodb://env-host:27017';
-    process.env.MMK_DB = 'env-db';
+    process.env.MIGRONAUT_URI = 'mongodb://env-host:27017';
+    process.env.MIGRONAUT_DB = 'env-db';
     const config = await loadConfig({
       cwd: tmp,
       flags: { uri: 'mongodb://flag-host:27017' },
@@ -102,25 +102,25 @@ describe('loadConfig', () => {
 
   it('should let env vars override config file', async () => {
     writeFileSync(
-      path.join(tmp, 'mmk.config.json'),
+      path.join(tmp, 'migronaut.config.json'),
       JSON.stringify({ uri: 'mongodb://file-host:27017', dbName: 'file-db' }),
     );
-    process.env.MMK_DB = 'env-db';
+    process.env.MIGRONAUT_DB = 'env-db';
     const config = await loadConfig({ cwd: tmp });
     expect(config.uri).toBe('mongodb://file-host:27017');
     expect(config.dbName).toBe('env-db');
   });
 
   it('should treat the config file as optional', async () => {
-    process.env.MMK_URI = 'mongodb://env-host:27017';
-    process.env.MMK_DB = 'env-db';
+    process.env.MIGRONAUT_URI = 'mongodb://env-host:27017';
+    process.env.MIGRONAUT_DB = 'env-db';
     const config = await loadConfig({ cwd: tmp });
     expect(config.uri).toBe('mongodb://env-host:27017');
   });
 
   it('should load values from a JSON config file', async () => {
     writeFileSync(
-      path.join(tmp, 'mmk.config.json'),
+      path.join(tmp, 'migronaut.config.json'),
       JSON.stringify({
         uri: 'mongodb://file-host:27017',
         dbName: 'file-db',
@@ -161,11 +161,11 @@ describe('loadConfig', () => {
   });
 
   it('should parse boolean env vars', async () => {
-    process.env.MMK_URI = 'mongodb://env-host:27017';
-    process.env.MMK_DB = 'env-db';
-    process.env.MMK_STRICT = 'true';
-    process.env.MMK_USE_TRANSACTION = '1';
-    process.env.MMK_SEQUENTIAL = 'no';
+    process.env.MIGRONAUT_URI = 'mongodb://env-host:27017';
+    process.env.MIGRONAUT_DB = 'env-db';
+    process.env.MIGRONAUT_STRICT = 'true';
+    process.env.MIGRONAUT_USE_TRANSACTION = '1';
+    process.env.MIGRONAUT_SEQUENTIAL = 'no';
     const config = await loadConfig({ cwd: tmp });
     expect(config.strict).toBe(true);
     expect(config.useTransaction).toBe(true);
@@ -174,7 +174,7 @@ describe('loadConfig', () => {
 
   it('should resolve a synchronous function (factory) config file', async () => {
     writeFileSync(
-      path.join(tmp, 'mmk.config.js'),
+      path.join(tmp, 'migronaut.config.js'),
       "module.exports = () => ({ uri: 'mongodb://fn-host:27017', dbName: 'fn-db' });\n",
     );
     const config = await loadConfig({ cwd: tmp });
@@ -184,7 +184,7 @@ describe('loadConfig', () => {
 
   it('should resolve an async function config file (e.g. a secret fetch)', async () => {
     writeFileSync(
-      path.join(tmp, 'mmk.config.js'),
+      path.join(tmp, 'migronaut.config.js'),
       `module.exports = async () => {
   await new Promise((resolve) => setTimeout(resolve, 1));
   return { uri: 'mongodb://secret-host:27017', dbName: 'secret-db', strict: true };
@@ -198,10 +198,10 @@ describe('loadConfig', () => {
 
   it('should let env vars override a value returned by a function config', async () => {
     writeFileSync(
-      path.join(tmp, 'mmk.config.js'),
+      path.join(tmp, 'migronaut.config.js'),
       "module.exports = () => ({ uri: 'mongodb://fn-host:27017', dbName: 'fn-db' });\n",
     );
-    process.env.MMK_URI = 'mongodb://env-host:27017';
+    process.env.MIGRONAUT_URI = 'mongodb://env-host:27017';
     const config = await loadConfig({ cwd: tmp });
     expect(config.uri).toBe('mongodb://env-host:27017');
     expect(config.dbName).toBe('fn-db');
@@ -209,7 +209,7 @@ describe('loadConfig', () => {
 
   it('should wrap a throwing config factory in ConfigInvalidError', async () => {
     writeFileSync(
-      path.join(tmp, 'mmk.config.js'),
+      path.join(tmp, 'migronaut.config.js'),
       "module.exports = async () => { throw new Error('secret fetch failed'); };\n",
     );
     await expect(loadConfig({ cwd: tmp })).rejects.toBeInstanceOf(ConfigInvalidError);
@@ -218,7 +218,7 @@ describe('loadConfig', () => {
   it('should load env vars from a .env file via dotenv', async () => {
     writeFileSync(
       path.join(tmp, '.env'),
-      'MMK_URI=mongodb://dotenv-host:27017\nMMK_DB=dotenv-db\n',
+      'MIGRONAUT_URI=mongodb://dotenv-host:27017\nMIGRONAUT_DB=dotenv-db\n',
     );
     const config = await loadConfig({ cwd: tmp });
     expect(config.uri).toBe('mongodb://dotenv-host:27017');

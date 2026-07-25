@@ -41,7 +41,7 @@ export function nextSequenceIndex(dir: string, extensions: string[]): number {
 
 /** The built-in TypeScript migration template */
 export function defaultTemplateTs(): string {
-  return `import type { MigrationContext } from 'mongo-migrate-kit';
+  return `import type { MigrationContext } from '@alexify/migronaut';
 
 export const description = '';
 
@@ -59,12 +59,12 @@ export async function down({ db }: MigrationContext): Promise<void> {
 export function defaultTemplateJs(): string {
   return `export const description = '';
 
-/** @param {import('mongo-migrate-kit').MigrationContext} ctx */
+/** @param {import('@alexify/migronaut').MigrationContext} ctx */
 export async function up({ db }) {
   // TODO: implement migration
 }
 
-/** @param {import('mongo-migrate-kit').MigrationContext} ctx */
+/** @param {import('@alexify/migronaut').MigrationContext} ctx */
 export async function down({ db }) {
   // TODO: implement rollback
 }
@@ -145,7 +145,7 @@ function configFields(values: ConfigValues): {
 function configBody(values: ConfigValues, createExtension: MigrationExtension): string {
   const { uri, dbName, migrationsDir } = configFields(values);
   return `  // ── Connection ──────────────────────────────────────────────
-  // To load these from a secret manager instead, run: mmk init --secret-provider
+  // To load these from a secret manager instead, run: migronaut init --secret-provider
   uri: '${uri}',
   dbName: '${dbName}',
 
@@ -153,17 +153,17 @@ function configBody(values: ConfigValues, createExtension: MigrationExtension): 
   migrationsDir: '${migrationsDir}',
   // Extensions scanned when discovering migrations.
   fileExtensions: ['.ts', '.js'],
-  // File type \`mmk create\` generates by default ('ts' | 'js').
+  // File type \`migronaut create\` generates by default ('ts' | 'js').
   // Override for a single run with --js / --ts.
   createExtension: '${createExtension}',
   // Use 0001-style sequential numbering instead of timestamps.
   sequential: false,
-  // Path to a custom template used by \`mmk create\`.
+  // Path to a custom template used by \`migronaut create\`.
   // templatePath: './migration.template.ts',
 
   // ── Bookkeeping collections ─────────────────────────────────
-  migrationsCollection: '_mmk_migrations',
-  lockCollection: '_mmk_locks',
+  migrationsCollection: '_migronaut_migrations',
+  lockCollection: '_migronaut_locks',
   // Seconds before a held lock is considered stale and reclaimable.
   lockTTLSeconds: 60,
 
@@ -186,14 +186,14 @@ function configBody(values: ConfigValues, createExtension: MigrationExtension): 
 
 /** The built-in TypeScript config template */
 export function defaultConfigTs(values: ConfigValues = {}): string {
-  return `import type { MmkConfig } from 'mongo-migrate-kit';
+  return `import type { MigronautConfig } from '@alexify/migronaut';
 
 /**
- * mongo-migrate-kit configuration.
- * Precedence (highest first): CLI flags > MMK_* env vars > this file > defaults.
+ * migronaut configuration.
+ * Precedence (highest first): CLI flags > MIGRONAUT_* env vars > this file > defaults.
  * Every field is optional; the values below are the built-in defaults.
  */
-const config: Partial<MmkConfig> = {
+const config: Partial<MigronautConfig> = {
 ${configBody(values, 'ts')}
 };
 
@@ -204,11 +204,11 @@ export default config;
 /** The built-in JavaScript (ESM) config template */
 export function defaultConfigJs(values: ConfigValues = {}): string {
   return `/**
- * mongo-migrate-kit configuration.
- * Precedence (highest first): CLI flags > MMK_* env vars > this file > defaults.
+ * migronaut configuration.
+ * Precedence (highest first): CLI flags > MIGRONAUT_* env vars > this file > defaults.
  * Every field is optional; the values below are the built-in defaults.
  *
- * @type {Partial<import('mongo-migrate-kit').MmkConfig>}
+ * @type {Partial<import('@alexify/migronaut').MigronautConfig>}
  */
 const config = {
 ${configBody(values, 'js')}
@@ -232,8 +232,8 @@ export function defaultConfigJson(values: ConfigValues = {}): string {
     fileExtensions: ['.ts', '.js'],
     createExtension: 'js',
     sequential: false,
-    migrationsCollection: '_mmk_migrations',
-    lockCollection: '_mmk_locks',
+    migrationsCollection: '_migronaut_migrations',
+    lockCollection: '_migronaut_locks',
     lockTTLSeconds: 60,
     strict: false,
     useTransaction: false,
@@ -247,13 +247,13 @@ export function defaultConfigJson(values: ConfigValues = {}): string {
  * provider works by editing `loadMongoSecret()`.
  */
 const SECRET_PROVIDER_GUIDE = `/**
- * mongo-migrate-kit configuration — loads the connection from a secret manager.
+ * migronaut configuration — loads the connection from a secret manager.
  *
  * This config exports an async FUNCTION (not a plain object), so the MongoDB
- * connection is fetched at runtime on every \`mmk\` command. The value stays in
+ * connection is fetched at runtime on every \`migronaut\` command. The value stays in
  * memory and is never written to disk, so this file is safe to commit.
  *
- * Precedence (highest first): CLI flags > MMK_* env vars > this file > defaults.
+ * Precedence (highest first): CLI flags > MIGRONAUT_* env vars > this file > defaults.
  *
  * ── Provider-agnostic ────────────────────────────────────────────────────────
  * The example below uses AWS Secrets Manager, but ANY source works — change
@@ -281,8 +281,8 @@ function secretConfigOptions(createExtension: MigrationExtension, migrationsDir:
     sequential: false,
 
     // ── Bookkeeping collections ─────────────────────────────
-    migrationsCollection: '_mmk_migrations',
-    lockCollection: '_mmk_locks',
+    migrationsCollection: '_migronaut_migrations',
+    lockCollection: '_migronaut_locks',
     lockTTLSeconds: 60,
 
     // ── Behavior ────────────────────────────────────────────
@@ -322,7 +322,7 @@ async function loadMongoSecret() {
   return JSON.parse(res.SecretString);
 }
 
-/** @type {() => Promise<Partial<import('mongo-migrate-kit').MmkConfig>>} */
+/** @type {() => Promise<Partial<import('@alexify/migronaut').MigronautConfig>>} */
 export default async () => {
   const secret = await loadMongoSecret();
 
@@ -341,7 +341,7 @@ ${secretConfigOptions('js', migrationsDir)}
 export function secretConfigTs(values: ConfigValues = {}): string {
   const { migrationsDir } = configFields(values);
   return `${SECRET_PROVIDER_GUIDE}
-import type { MmkConfig } from 'mongo-migrate-kit';
+import type { MigronautConfig } from '@alexify/migronaut';
 // Install the SDK for your provider, e.g.:
 //   npm install @aws-sdk/client-secrets-manager
 import {
@@ -369,7 +369,7 @@ async function loadMongoSecret(): Promise<{ uri: string; dbName: string }> {
   return JSON.parse(res.SecretString);
 }
 
-export default async (): Promise<Partial<MmkConfig>> => {
+export default async (): Promise<Partial<MigronautConfig>> => {
   const secret = await loadMongoSecret();
 
   return {
@@ -425,11 +425,11 @@ export interface CreateConfigFileOptions {
 }
 
 /**
- * Create an `mmk.config.<format>` file on disk and return its absolute path.
+ * Create an `migronaut.config.<format>` file on disk and return its absolute path.
  * Throws {@link ConfigFileExistsError} if the file exists and `force` is false.
  */
 export function createConfigFile(options: CreateConfigFileOptions): string {
-  const filepath = path.join(options.dir, `mmk.config.${options.format}`);
+  const filepath = path.join(options.dir, `migronaut.config.${options.format}`);
   if (existsSync(filepath) && !options.force) {
     throw new ConfigFileExistsError('Config file already exists', { path: filepath });
   }

@@ -10,40 +10,40 @@ import {
   MigrationExecutionFailedError,
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
-  MmkError,
+  MigronautError,
   NotAppliedError,
 } from '../../src/errors/index.js';
-import type { MmkErrorCode } from '../../src/types/index.js';
+import type { MigronautErrorCode } from '../../src/types/index.js';
 
-describe('MmkError', () => {
+describe('MigronautError', () => {
   it('should set code, message and context', () => {
-    const err = new MmkError('CONFIG_INVALID', 'Bad config', { field: 'uri' });
+    const err = new MigronautError('CONFIG_INVALID', 'Bad config', { field: 'uri' });
     expect(err.code).toBe('CONFIG_INVALID');
     expect(err.message).toBe('Bad config');
     expect(err.context).toEqual({ field: 'uri' });
-    expect(err.name).toBe('MmkError');
+    expect(err.name).toBe('MigronautError');
   });
 
   it('should be an instance of Error', () => {
-    const err = new MmkError('CONFIG_INVALID', 'Bad config');
+    const err = new MigronautError('CONFIG_INVALID', 'Bad config');
     expect(err).toBeInstanceOf(Error);
   });
 
   it('should leave context undefined when not provided', () => {
-    const err = new MmkError('CONFIG_INVALID', 'Bad config');
+    const err = new MigronautError('CONFIG_INVALID', 'Bad config');
     expect(err.context).toBeUndefined();
   });
 
   it('should capture a stack trace', () => {
-    const err = new MmkError('CONFIG_INVALID', 'Bad config');
+    const err = new MigronautError('CONFIG_INVALID', 'Bad config');
     expect(err.stack).toBeDefined();
   });
 });
 
 describe('domain error classes', () => {
   const cases: Array<{
-    Ctor: new (msg: string, ctx?: Record<string, unknown>) => MmkError;
-    code: MmkErrorCode;
+    Ctor: new (msg: string, ctx?: Record<string, unknown>) => MigronautError;
+    code: MigronautErrorCode;
     name: string;
   }> = [
     { Ctor: LockAlreadyHeldError, code: 'LOCK_ALREADY_HELD', name: 'LockAlreadyHeldError' },
@@ -72,9 +72,9 @@ describe('domain error classes', () => {
   ];
 
   for (const { Ctor, code, name } of cases) {
-    it(`${name} should carry code ${code} and extend MmkError`, () => {
+    it(`${name} should carry code ${code} and extend MigronautError`, () => {
       const err = new Ctor('Something happened', { detail: 1 });
-      expect(err).toBeInstanceOf(MmkError);
+      expect(err).toBeInstanceOf(MigronautError);
       expect(err).toBeInstanceOf(Error);
       expect(err.code).toBe(code);
       expect(err.name).toBe(name);
@@ -82,12 +82,12 @@ describe('domain error classes', () => {
       expect(err.context).toEqual({ detail: 1 });
     });
 
-    it(`${name} should be catchable as MmkError with its code`, () => {
+    it(`${name} should be catchable as MigronautError with its code`, () => {
       try {
         throw new Ctor('boom');
       } catch (e) {
-        expect(e).toBeInstanceOf(MmkError);
-        expect((e as MmkError).code).toBe(code);
+        expect(e).toBeInstanceOf(MigronautError);
+        expect((e as MigronautError).code).toBe(code);
       }
     });
   }

@@ -1,24 +1,24 @@
-# mmk up
+# migronaut up
 
 Run pending migrations — all of them, or a single named file.
 
 ```bash
-mmk up [file] [options]
+migronaut up [file] [options]
 ```
 
 ## Usage
 
 ```bash
-mmk up                      # run all pending migrations (one shared batch)
-mmk up <file>               # run a single migration by filename
-mmk up --step               # apply each pending file as its own batch
-mmk up <file> --force --yes  # re-run an already-applied file (non-interactive)
+migronaut up                      # run all pending migrations (one shared batch)
+migronaut up <file>               # run a single migration by filename
+migronaut up --step               # apply each pending file as its own batch
+migronaut up <file> --force --yes  # re-run an already-applied file (non-interactive)
 ```
 
 ## How it works
 
-With no argument, `mmk up` resolves every file in the migrations directory that isn't already
-applied, sorted ascending, and runs them as **one batch**. A later `mmk down` reverts that whole
+With no argument, `migronaut up` resolves every file in the migrations directory that isn't already
+applied, sorted ascending, and runs them as **one batch**. A later `migronaut down` reverts that whole
 batch together.
 
 ```
@@ -49,21 +49,21 @@ Plus the [global flags](/guide/configuration#global-cli-flags): `--uri`, `--db`,
 ## `--step` vs. the default batch model
 
 ```bash
-mmk up          # files A, B, C → batch 5 (all together)
-mmk up --step   # A → batch 5, B → batch 6, C → batch 7 (each its own batch)
+migronaut up          # files A, B, C → batch 5 (all together)
+migronaut up --step   # A → batch 5, B → batch 6, C → batch 7 (each its own batch)
 ```
 
 Use `--step` when you want to peel migrations off individually later with
-[`mmk down --steps`](/commands/down).
+[`migronaut down --steps`](/commands/down).
 
 ## Re-running an applied migration
 
 By default an already-applied file is skipped. `--force` re-runs its `up()` and re-records it as a new
-batch. It requires a specific file (a bare `mmk up --force` exits 1) and asks for `y/N` confirmation
+batch. It requires a specific file (a bare `migronaut up --force` exits 1) and asks for `y/N` confirmation
 first — pass `--yes` to confirm non-interactively:
 
 ```bash
-mmk up 20260605120000-add-users-index.js --force --yes
+migronaut up 20260605120000-add-users-index.js --force --yes
 ```
 
 ::: warning

@@ -1,8 +1,8 @@
 import { createInterface } from 'node:readline/promises';
 import ora from 'ora';
 import { MigratorKit, type MigratorKitOptions } from '../core/migrator.js';
-import { MmkError } from '../errors/index.js';
-import type { MmkConfig, ProgressReporter, StatusRow } from '../types/index.js';
+import { MigronautError } from '../errors/index.js';
+import type { MigronautConfig, ProgressReporter, StatusRow } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 
 /** Shape of the merged global + command options provided by commander */
@@ -22,8 +22,8 @@ export function emitJson(value: unknown): void {
 }
 
 /** Build the partial config passed to MigratorKit from CLI flags */
-export function partialFromOpts(opts: CliOptions): Partial<MmkConfig> {
-  const partial: Partial<MmkConfig> = {};
+export function partialFromOpts(opts: CliOptions): Partial<MigronautConfig> {
+  const partial: Partial<MigronautConfig> = {};
   if (opts.uri) partial.uri = opts.uri;
   if (opts.db) partial.dbName = opts.db;
   if (opts.dir) partial.migrationsDir = opts.dir;
@@ -102,9 +102,9 @@ export async function withMigrator(
     const message = error instanceof Error ? error.message : String(error);
     if (json) {
       emitJson({
-        error: { ...(error instanceof MmkError ? { code: error.code } : {}), message },
+        error: { ...(error instanceof MigronautError ? { code: error.code } : {}), message },
       });
-    } else if (error instanceof MmkError) {
+    } else if (error instanceof MigronautError) {
       logger.error(`✖ ${error.code}: ${error.message}`);
     } else {
       logger.error(`✖ ${message}`);

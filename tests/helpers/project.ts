@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { MigratorKit } from '../../src/core/migrator.js';
-import type { MmkConfig } from '../../src/types/index.js';
+import type { MigronautConfig } from '../../src/types/index.js';
 
 const TMP_ROOT = path.join(process.cwd(), 'tests', '.tmp');
 
@@ -61,7 +61,7 @@ export function makeMigrator(
   uri: string,
   dbName: string,
   dir: string,
-  overrides: Partial<MmkConfig> = {},
+  overrides: Partial<MigronautConfig> = {},
 ): MigratorKit {
   return new MigratorKit({
     uri,

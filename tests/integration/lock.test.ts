@@ -5,10 +5,10 @@ import { silentLogger } from '../../src/utils/logger.js';
 import { type TestMongo, startTestMongo } from '../helpers/mongo.js';
 
 let mongo: TestMongo;
-const COLLECTION = '_mmk_locks';
+const COLLECTION = '_migronaut_locks';
 
 beforeAll(async () => {
-  mongo = await startTestMongo('mmk_lock_test');
+  mongo = await startTestMongo('migronaut_lock_test');
 });
 
 afterAll(async () => {

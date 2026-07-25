@@ -1,21 +1,21 @@
-# mmk redo
+# migronaut redo
 
 Roll back then re-apply a migration in one step — the last applied, or a specific file.
 
 ```bash
-mmk redo [file] [options]
+migronaut redo [file] [options]
 ```
 
 ## Usage
 
 ```bash
-mmk redo            # down + up the most recently applied migration
-mmk redo <file>     # down + up a specific migration
+migronaut redo            # down + up the most recently applied migration
+migronaut redo <file>     # down + up a specific migration
 ```
 
 ## How it works
 
-`mmk redo` runs `down()` then `up()` for the target. It's the fast loop for iterating on a migration
+`migronaut redo` runs `down()` then `up()` for the target. It's the fast loop for iterating on a migration
 during development:
 
 ```

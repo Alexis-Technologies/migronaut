@@ -1,13 +1,13 @@
-import type { MmkConfig } from 'mongo-migrate-kit';
+import type { MigronautConfig } from '@alexify/migronaut';
 
 /**
- * mongo-migrate-kit configuration.
- * Precedence (highest first): CLI flags > MMK_* env vars > this file > defaults.
+ * migronaut configuration.
+ * Precedence (highest first): CLI flags > MIGRONAUT_* env vars > this file > defaults.
  * Every field is optional; the values below are the built-in defaults.
  */
-const config: Partial<MmkConfig> = {
+const config: Partial<MigronautConfig> = {
   // ── Connection ──────────────────────────────────────────────
-  // To load these from a secret manager instead, run: mmk init --secret-provider
+  // To load these from a secret manager instead, run: migronaut init --secret-provider
   uri: 'mongodb://localhost:27017',
   dbName: 'myapp',
 
@@ -15,17 +15,17 @@ const config: Partial<MmkConfig> = {
   migrationsDir: './migrations',
   // Extensions scanned when discovering migrations.
   fileExtensions: ['.ts', '.js'],
-  // File type `mmk create` generates by default ('ts' | 'js').
+  // File type `migronaut create` generates by default ('ts' | 'js').
   // Override for a single run with --js / --ts.
   createExtension: 'ts',
   // Use 0001-style sequential numbering instead of timestamps.
   sequential: false,
-  // Path to a custom template used by `mmk create`.
+  // Path to a custom template used by `migronaut create`.
   // templatePath: './migration.template.ts',
 
   // ── Bookkeeping collections ─────────────────────────────────
-  migrationsCollection: '_mmk_migrations',
-  lockCollection: '_mmk_locks',
+  migrationsCollection: '_migronaut_migrations',
+  lockCollection: '_migronaut_locks',
   // Seconds before a held lock is considered stale and reclaimable.
   lockTTLSeconds: 60,
 

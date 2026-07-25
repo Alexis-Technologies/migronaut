@@ -5,7 +5,7 @@ import { type TestMongo, startTestMongo } from '../helpers/mongo.js';
 import { insertMigration, makeMigrator, makeProject } from '../helpers/project.js';
 
 let mongo: TestMongo;
-const DB = 'mmk_redo_test';
+const DB = 'migronaut_redo_test';
 
 beforeAll(async () => {
   mongo = await startTestMongo(DB);
@@ -42,7 +42,7 @@ describe('MigratorKit.redo (integration)', () => {
     expect(results.map((r) => r.status)).toEqual(['reverted', 'applied']);
     expect(results.every((r) => r.file === '0002-b.ts')).toBe(true);
     // still applied afterwards
-    const changelog = new Changelog('_mmk_migrations');
+    const changelog = new Changelog('_migronaut_migrations');
     const record = await changelog.getByName(mongo.db, '0002-b.ts');
     expect(record?.status).toBe('applied');
   });

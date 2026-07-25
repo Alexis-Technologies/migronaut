@@ -8,7 +8,7 @@ import { failingMigration, insertMigration, makeProject } from '../helpers/proje
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.join(here, '..', '..');
-const binPath = path.join(repoRoot, 'bin', 'mmk.ts');
+const binPath = path.join(repoRoot, 'bin', 'migronaut.ts');
 
 interface CliResult {
   code: number;
@@ -46,7 +46,7 @@ function runCli(
 }
 
 let mongo: TestMongo;
-const DB = 'mmk_cli_test';
+const DB = 'migronaut_cli_test';
 
 beforeAll(async () => {
   mongo = await startTestMongo(DB);
@@ -71,7 +71,7 @@ function baseArgs(extra: string[]): string[] {
   return ['--uri', mongo.uri, '--db', DB, '--dir', project.dir, ...extra];
 }
 
-describe('mmk CLI (integration)', () => {
+describe('migronaut CLI (integration)', () => {
   it('should exit 0 when up succeeds', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     const result = await runCli(baseArgs(['up']));
@@ -112,7 +112,7 @@ describe('mmk CLI (integration)', () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('--force requires a specific migration file');
     // nothing applied
-    expect(await mongo.db.collection('_mmk_migrations').countDocuments()).toBe(0);
+    expect(await mongo.db.collection('_migronaut_migrations').countDocuments()).toBe(0);
   });
 
   it('should refuse up <file> --force --json without --yes (no silent re-run)', async () => {
@@ -147,7 +147,7 @@ describe('mmk CLI (integration)', () => {
     const up = await runCli(baseArgs(['up', '--step']));
     expect(up.code).toBe(0);
     const batches = (
-      await mongo.db.collection('_mmk_migrations').find().sort({ name: 1 }).toArray()
+      await mongo.db.collection('_migronaut_migrations').find().sort({ name: 1 }).toArray()
     ).map((d) => d.batch);
     expect(batches).toEqual([1, 2, 3]);
 
@@ -181,7 +181,7 @@ describe('mmk CLI (integration)', () => {
       '});',
       '',
     ].join('\n');
-    writeFileSync(path.join(cwdDir, 'mmk.config.js'), factory);
+    writeFileSync(path.join(cwdDir, 'migronaut.config.js'), factory);
     const result = await runCli(['up'], {}, cwdDir);
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('Applied');
@@ -203,7 +203,7 @@ describe('mmk CLI (integration)', () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('0001-a.ts');
     // DB untouched
-    expect(await mongo.db.collection('_mmk_migrations').countDocuments()).toBe(0);
+    expect(await mongo.db.collection('_migronaut_migrations').countDocuments()).toBe(0);
   });
 
   it('should preview a step rollback with dry-run down --steps and write nothing', async () => {
@@ -218,30 +218,30 @@ describe('mmk CLI (integration)', () => {
     expect(await mongo.db.collection('things').countDocuments()).toBe(2);
   });
 
-  it('should create a mmk.config.js by default with init', async () => {
+  it('should create a migronaut.config.js by default with init', async () => {
     const result = await runCli(['init', '--db', 'shop'], {}, project.dir);
     expect(result.code).toBe(0);
-    const configPath = path.join(project.dir, 'mmk.config.js');
+    const configPath = path.join(project.dir, 'migronaut.config.js');
     expect(existsSync(configPath)).toBe(true);
-    expect(existsSync(path.join(project.dir, 'mmk.config.ts'))).toBe(false);
+    expect(existsSync(path.join(project.dir, 'migronaut.config.ts'))).toBe(false);
     const contents = readFileSync(configPath, 'utf8');
     expect(contents).toContain("dbName: 'shop'");
     expect(contents).toContain("createExtension: 'js'");
   });
 
-  it('should create a mmk.config.ts with createExtension ts when init --ts is passed', async () => {
+  it('should create a migronaut.config.ts with createExtension ts when init --ts is passed', async () => {
     const result = await runCli(['init', '--ts'], {}, project.dir);
     expect(result.code).toBe(0);
-    const tsPath = path.join(project.dir, 'mmk.config.ts');
+    const tsPath = path.join(project.dir, 'migronaut.config.ts');
     expect(existsSync(tsPath)).toBe(true);
-    expect(existsSync(path.join(project.dir, 'mmk.config.js'))).toBe(false);
+    expect(existsSync(path.join(project.dir, 'migronaut.config.js'))).toBe(false);
     expect(readFileSync(tsPath, 'utf8')).toContain("createExtension: 'ts'");
   });
 
-  it('should generate a secret-provider mmk.config.js with init --secret-provider', async () => {
+  it('should generate a secret-provider migronaut.config.js with init --secret-provider', async () => {
     const result = await runCli(['init', '--secret-provider'], {}, project.dir);
     expect(result.code).toBe(0);
-    const contents = readFileSync(path.join(project.dir, 'mmk.config.js'), 'utf8');
+    const contents = readFileSync(path.join(project.dir, 'migronaut.config.js'), 'utf8');
     expect(contents).toContain('async function loadMongoSecret');
     expect(contents).toContain('export default async () =>');
     expect(contents).toContain('@aws-sdk/client-secrets-manager');
@@ -249,19 +249,19 @@ describe('mmk CLI (integration)', () => {
     expect(contents).toContain('Provider-agnostic');
   });
 
-  it('should generate a secret-provider mmk.config.ts with init --ts --secret-provider', async () => {
+  it('should generate a secret-provider migronaut.config.ts with init --ts --secret-provider', async () => {
     const result = await runCli(['init', '--ts', '--secret-provider'], {}, project.dir);
     expect(result.code).toBe(0);
-    const contents = readFileSync(path.join(project.dir, 'mmk.config.ts'), 'utf8');
+    const contents = readFileSync(path.join(project.dir, 'migronaut.config.ts'), 'utf8');
     expect(contents).toContain('async function loadMongoSecret');
-    expect(contents).toContain("import type { MmkConfig } from 'mongo-migrate-kit'");
+    expect(contents).toContain("import type { MigronautConfig } from '@alexify/migronaut'");
   });
 
   it('should reject init --json --secret-provider and exit 1', async () => {
     const result = await runCli(['init', '--json', '--secret-provider'], {}, project.dir);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('secret-provider');
-    expect(existsSync(path.join(project.dir, 'mmk.config.json'))).toBe(false);
+    expect(existsSync(path.join(project.dir, 'migronaut.config.json'))).toBe(false);
   });
 
   it('should exit 1 when init finds an existing config without --force', async () => {
@@ -299,7 +299,7 @@ describe('mmk CLI (integration)', () => {
     // proves the value came from the config. --dir keeps the output location
     // deterministic instead of relying on the config's migrationsDir.
     writeFileSync(
-      path.join(project.dir, 'mmk.config.json'),
+      path.join(project.dir, 'migronaut.config.json'),
       JSON.stringify({ createExtension: 'ts' }),
     );
     const result = await runCli(['create', 'from config', '--dir', project.dir], {}, project.dir);
@@ -347,7 +347,7 @@ describe('mmk CLI (integration)', () => {
     expect(clean.code).toBe(0);
   });
 
-  // ── mmk unlock (feature 3) ───────────────────────────────────────────────
+  // ── migronaut unlock (feature 3) ───────────────────────────────────────────────
   it('should report no lock held and exit 0', async () => {
     const result = await runCli(baseArgs(['unlock', '--json']));
     expect(result.code).toBe(0);
@@ -355,8 +355,8 @@ describe('mmk CLI (integration)', () => {
   });
 
   it('should force-release a held lock with unlock --yes', async () => {
-    await mongo.db.collection('_mmk_locks').insertOne({
-      _id: 'mmk_lock',
+    await mongo.db.collection('_migronaut_locks').insertOne({
+      _id: 'migronaut_lock',
       lockedAt: new Date(),
       pid: 4242,
       host: 'crashed-host',
@@ -365,12 +365,12 @@ describe('mmk CLI (integration)', () => {
     });
     const result = await runCli(baseArgs(['unlock', '--yes']));
     expect(result.code).toBe(0);
-    expect(await mongo.db.collection('_mmk_locks').countDocuments()).toBe(0);
+    expect(await mongo.db.collection('_migronaut_locks').countDocuments()).toBe(0);
   });
 
   it('should return the released holder as JSON with unlock --json', async () => {
-    await mongo.db.collection('_mmk_locks').insertOne({
-      _id: 'mmk_lock',
+    await mongo.db.collection('_migronaut_locks').insertOne({
+      _id: 'migronaut_lock',
       lockedAt: new Date(),
       pid: 4242,
       host: 'crashed-host',
@@ -382,12 +382,12 @@ describe('mmk CLI (integration)', () => {
     const parsed = JSON.parse(result.stdout) as { released: boolean; holder: { pid: number } };
     expect(parsed.released).toBe(true);
     expect(parsed.holder.pid).toBe(4242);
-    expect(await mongo.db.collection('_mmk_locks').countDocuments()).toBe(0);
+    expect(await mongo.db.collection('_migronaut_locks').countDocuments()).toBe(0);
   });
 
   it('should let --ts override a js createExtension from config', async () => {
     writeFileSync(
-      path.join(project.dir, 'mmk.config.json'),
+      path.join(project.dir, 'migronaut.config.json'),
       JSON.stringify({ createExtension: 'js' }),
     );
     const result = await runCli(

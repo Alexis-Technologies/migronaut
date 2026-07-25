@@ -6,8 +6,8 @@ import { type TestMongo, startTestMongo } from '../helpers/mongo.js';
 import { failingMigration, insertMigration, makeProject } from '../helpers/project.js';
 
 let mongo: TestMongo;
-const DB = 'mmk_run_test';
-const LOCK_COLLECTION = '_mmk_locks';
+const DB = 'migronaut_run_test';
+const LOCK_COLLECTION = '_migronaut_locks';
 
 beforeAll(async () => {
   mongo = await startTestMongo(DB);
@@ -35,7 +35,7 @@ function config(): { uri: string; dbName: string; migrationsDir: string; logger:
 /** Insert a fresh (non-stale) lock document so acquisition is blocked */
 async function holdLock(): Promise<void> {
   await mongo.db.collection(LOCK_COLLECTION).insertOne({
-    _id: 'mmk_lock',
+    _id: 'migronaut_lock',
     lockedAt: new Date(),
     pid: 999_999,
     host: os.hostname(),
@@ -98,7 +98,7 @@ describe('runMigrations (programmatic entry point)', () => {
     // Release the peer's lock shortly after we start waiting.
     const release = (async (): Promise<void> => {
       await new Promise((r) => setTimeout(r, 150));
-      await mongo.db.collection(LOCK_COLLECTION).deleteOne({ _id: 'mmk_lock' });
+      await mongo.db.collection(LOCK_COLLECTION).deleteOne({ _id: 'migronaut_lock' });
     })();
 
     const [summary] = await Promise.all([

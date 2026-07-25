@@ -3,7 +3,7 @@ import type { MigrationRecord } from '../types/index.js';
 
 /**
  * Reads and writes migration records in the changelog collection
- * (`_mmk_migrations` by default).
+ * (`_migronaut_migrations` by default).
  *
  * Records are an append-mostly audit trail: reverting a migration updates its
  * status to `'reverted'` and stamps `revertedAt` — it never deletes the record.

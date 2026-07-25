@@ -1,7 +1,7 @@
-# Architecture & Contributor Guide — `mongo-migrate-kit`
+# Architecture & Contributor Guide — `migronaut`
 
 > **Audience:** maintainers and new contributors who need to *understand and change* the codebase
-> (not end-users — they have the [docs site](https://mongo-migrate-kit.vercel.app/) and `README.md`).
+> (not end-users — they have the [docs site](https://migronaut.vercel.app/) and `README.md`).
 >
 > **What this is:** a systematic, ground-up explanation of how the library is built, why each piece
 > exists, how data flows through it, and every non-obvious nuance you need to make a safe change.
@@ -18,7 +18,7 @@ Node ≥ 20 (to develop & test) · runtime deps: `commander`, `chalk@4`, `cli-ta
 1. [The 5-minute mental model](#1-the-5-minute-mental-model)
 2. [Repository layout](#2-repository-layout)
 3. [The layered architecture](#3-the-layered-architecture)
-4. [End-to-end: what happens when you run `mmk up`](#4-end-to-end-what-happens-when-you-run-mmk-up)
+4. [End-to-end: what happens when you run `migronaut up`](#4-end-to-end-what-happens-when-you-run-migronaut-up)
 5. [Module reference](#5-module-reference)
 6. [Deep dives on the subtle subsystems](#6-deep-dives-on-the-subtle-subsystems)
 7. [Cross-cutting conventions](#7-cross-cutting-conventions)
@@ -32,9 +32,9 @@ Node ≥ 20 (to develop & test) · runtime deps: `commander`, `chalk@4`, `cli-ta
 
 ## 1. The 5-minute mental model
 
-mongo-migrate-kit is a MongoDB migration tool with two faces over **one engine**:
+migronaut is a MongoDB migration tool with two faces over **one engine**:
 
-- **A CLI** (`mmk`) — what most users run.
+- **A CLI** (`migronaut`) — what most users run.
 - **A programmatic API** (`MigratorKit` + helper functions) — for app startup, serverless, tests.
 
 Both faces are thin. All real logic lives in **one orchestrator class**, [`MigratorKit`](src/core/migrator.ts),
@@ -42,7 +42,7 @@ which coordinates a handful of small, single-responsibility modules:
 
 ```
             ┌────────────────────────────────────────────────┐
-   mmk CLI ─┤                                                  │
+   migronaut CLI ─┤                                                  │
             │              MigratorKit (orchestrator)          ├─ MongoDB
   your code ┤                                                  │
             └───┬──────┬───────┬────────┬────────┬────────┬───┘
@@ -68,12 +68,12 @@ If you internalize those three, the rest is detail.
 src/
 ├── index.ts                 # Public API barrel — the ONLY thing users import
 ├── types/index.ts           # ALL shared types & interfaces (single source)
-├── errors/index.ts          # MmkError base + one subclass per error code
+├── errors/index.ts          # MigronautError base + one subclass per error code
 ├── core/                    # The engine
 │   ├── migrator.ts          # MigratorKit — orchestrates everything (the heart)
 │   ├── config.ts            # Config loader + zod validation + precedence
 │   ├── lock.ts              # MongoDB distributed lock + heartbeat + runWithLock()
-│   ├── changelog.ts         # Read/write the _mmk_migrations collection
+│   ├── changelog.ts         # Read/write the _migronaut_migrations collection
 │   ├── runner.ts            # Execute ONE migration up()/down() (+ transactions)
 │   ├── context.ts           # Build the MigrationContext passed to each migration
 │   ├── import.ts            # PURE migrate-mongo → MigrationRecord mapping
@@ -90,7 +90,7 @@ src/
     ├── table.ts             # cli-table3 renderers (status/list/import)
     └── commands/*.ts        # One file per command — thin wrappers over MigratorKit
 
-bin/mmk.ts                   # CLI shebang entry → calls cli/index.ts run()
+bin/migronaut.ts                   # CLI shebang entry → calls cli/index.ts run()
 tests/                       # unit/ (mocked) + integration/ (mongodb-memory-server)
 docs/                        # VitePress user-facing site (dev-only, never published to npm)
 ```
@@ -119,17 +119,17 @@ what lets the same engine power both the CLI and `runMigrations()`.
 
 ---
 
-## 4. End-to-end: what happens when you run `mmk up`
+## 4. End-to-end: what happens when you run `migronaut up`
 
-Trace this once and you understand the whole system. Command: `mmk up --strict`.
+Trace this once and you understand the whole system. Command: `migronaut up --strict`.
 
 ```
-bin/mmk.ts
+bin/migronaut.ts
   └─ run(process.argv)                              [cli/index.ts]
        └─ commander parses → up command action      [cli/commands/up.ts]
             ├─ pre-flight validation (--force/--json rules) — presentation only
             └─ withMigrator(opts, fn, {spinner})    [cli/shared.ts]
-                 ├─ partialFromOpts(opts) → Partial<MmkConfig>   (flags only)
+                 ├─ partialFromOpts(opts) → Partial<MigronautConfig>   (flags only)
                  ├─ new MigratorKit(partial, {progress: spinnerReporter})
                  ├─ migrator.connect()              ← spinner: "Connecting…"
                  └─ fn(migrator):
@@ -174,26 +174,26 @@ Each entry: **responsibility · key exports · nuances you must know.**
 
 ### `src/types/index.ts` — the shared vocabulary
 - **Responsibility:** every cross-module type. No type is defined inline elsewhere.
-- **Key types:** `MmkConfig`, `MmkConfigInput` (object *or* factory fn), `MigrationContext`,
-  `MigrationModule`, `MigrationRecord`, `MigrationHooks`, `MmkLogger`, `RunResult`, `StatusRow`,
-  `ProgressReporter`, `LockInfo`, `MmkErrorCode`, the import types.
+- **Key types:** `MigronautConfig`, `MigronautConfigInput` (object *or* factory fn), `MigrationContext`,
+  `MigrationModule`, `MigrationRecord`, `MigrationHooks`, `MigronautLogger`, `RunResult`, `StatusRow`,
+  `ProgressReporter`, `LockInfo`, `MigronautErrorCode`, the import types.
 - **Nuances:** `MigrationContext.session` is an *intentional* addition beyond the original spec —
   it's how transactions reach your migration. `MigrationRecord.origin` marks migrate-mongo imports
   as forward-only. When you add a config field, it goes here **and** in the zod schema **and** the
   defaults **and** (if env-settable) the env reader.
 
 ### `src/errors/index.ts` — the error model
-- **Responsibility:** `MmkError` base class (carries a typed `code` + `context`) and exactly one
-  subclass per `MmkErrorCode`.
+- **Responsibility:** `MigronautError` base class (carries a typed `code` + `context`) and exactly one
+  subclass per `MigronautErrorCode`.
 - **Nuances:** never `throw new Error(...)` anywhere in `src/`. Always a domain error. The `code` is
   what the CLI prints (`✖ LOCK_ALREADY_HELD: …`) and what `--json` emits as `error.code`. Adding an
-  error = add the literal to `MmkErrorCode` in types, add the subclass here, export from
+  error = add the literal to `MigronautErrorCode` in types, add the subclass here, export from
   [index.ts](src/index.ts) if it's part of the public surface.
 
 ### `src/core/config.ts` — configuration resolution
-- **Responsibility:** merge config from all sources, validate, return a complete `MmkConfig`.
+- **Responsibility:** merge config from all sources, validate, return a complete `MigronautConfig`.
 - **Key exports:** `loadConfig(options)`, `DEFAULT_CONFIG`.
-- **Precedence (highest wins):** `flags` → `MMK_*` env vars → config file → `DEFAULT_CONFIG`,
+- **Precedence (highest wins):** `flags` → `MIGRONAUT_*` env vars → config file → `DEFAULT_CONFIG`,
   implemented as successive `mergeDefined()` calls onto a defaults base ([config.ts:160-178](src/core/config.ts#L160-L178)).
 - **Nuances:**
   - `dotenv.config({ override: false })` runs first so a real env var beats `.env`.
@@ -211,7 +211,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
   anything here.
 
 ### `src/core/changelog.ts` — the audit trail
-- **Responsibility:** read/write `MigrationRecord`s in `_mmk_migrations`.
+- **Responsibility:** read/write `MigrationRecord`s in `_migronaut_migrations`.
 - **Key methods:** `getAll`, `getAppliedNames`, `getByName`, `getLastBatch`, `getByBatch`, `count`,
   `getForeignDocs` (raw read for import), `markApplied`, `markReverted`, `ensureIndexes`.
 - **Nuances:**
@@ -280,7 +280,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **shared.ts** — the CLI's workhorse:
   - `withMigrator(opts, fn, {spinner, json})` — constructs `MigratorKit`, drives the ora spinner,
     routes output for `--json`, runs `fn`, **always disconnects**, maps errors to exit code 1.
-  - `partialFromOpts` — flags → `Partial<MmkConfig>`.
+  - `partialFromOpts` — flags → `Partial<MigronautConfig>`.
   - `emitJson` — one JSON doc to stdout.
   - `confirm` — `y/N` prompt via `node:readline/promises`.
 - **table.ts** — cli-table3 renderers for human output.
@@ -288,9 +288,9 @@ Each entry: **responsibility · key exports · nuances you must know.**
   pre-flight checks, then call `withMigrator`. Look at [up.ts](src/cli/commands/up.ts) as the
   canonical example (force/yes/json pre-flight rules + delegation).
 
-### `bin/mmk.ts`
+### `bin/migronaut.ts`
 - Six lines: import `run`, call it with `process.argv`, print + exit 1 on an unhandled throw. The
-  shipped binary is the **CJS** build of this (`dist/mmk.cjs`) with a `#!/usr/bin/env node` banner.
+  shipped binary is the **CJS** build of this (`dist/migronaut.cjs`) with a `#!/usr/bin/env node` banner.
 
 ---
 
@@ -300,7 +300,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
 The whole function is [`loadConfig`](src/core/config.ts#L155-L208). Order of operations:
 1. `dotenv.config({ override:false })` — load `.env` without clobbering real env.
 2. Start from `{...DEFAULT_CONFIG}`.
-3. If a config file is found (explicit `--config` path, else discover `mmk.config.{ts,js,json}` in
+3. If a config file is found (explicit `--config` path, else discover `migronaut.config.{ts,js,json}` in
    cwd), load it (awaiting a factory if exported) and `mergeDefined` onto the base.
 4. `mergeDefined(readEnvConfig())` — env beats file.
 5. `mergeDefined(flags)` — flags beat env.
@@ -311,13 +311,13 @@ The whole function is [`loadConfig`](src/core/config.ts#L155-L208). Order of ope
 with `undefined`. This is why precedence works cleanly.
 
 ### 6.2 The lock (the most important thing to get right)
-File: [lock.ts](src/core/lock.ts). The lock is a single document `{_id:'mmk_lock'}` in
-`_mmk_locks`. Three mechanisms combine:
+File: [lock.ts](src/core/lock.ts). The lock is a single document `{_id:'migronaut_lock'}` in
+`_migronaut_locks`. Three mechanisms combine:
 
 **(a) Atomic test-and-set with stale reclaim** — `acquire()`:
 ```
 updateOne(
-  { _id:'mmk_lock', lockedAt: { $lt: now - ttl } },   // matches only a stale/absent lock
+  { _id:'migronaut_lock', lockedAt: { $lt: now - ttl } },   // matches only a stale/absent lock
   { $set: { ...holderInfo, owner: randomUUID() } },
   { upsert:true }
 )
@@ -337,7 +337,7 @@ returns `false` if we've lost it (logging a warning). The interval is `.unref()`
 the process alive, and is `clearInterval`-ed in `finally` ([lock.ts:170-195](src/core/lock.ts#L170-L195)).
 
 **Release** — `deleteOne({_id, owner})`, owner-scoped so we never delete a lock since reclaimed by
-someone else. `forceRelease()` (for `mmk unlock`) deletes unconditionally by `_id`.
+someone else. `forceRelease()` (for `migronaut unlock`) deletes unconditionally by `_id`.
 
 > **Why TTL + heartbeat instead of just TTL?** TTL alone means a migration longer than `lockTTLSeconds`
 > would let its own lock go stale and be stolen mid-run. The heartbeat refreshes it; the TTL is only
@@ -368,7 +368,7 @@ stripping) or under a user-provided loader. On older Node, `import('foo.ts')` th
 `MigrationInvalidExportError` ("use Node ≥ 22.18 / a TS loader / a .js file") instead of a cryptic
 Node error. This is why `createExtension` defaults to `'js'`. The real-world behavior is verified by
 [tests/integration/runtime-ts.test.ts](tests/integration/runtime-ts.test.ts), which runs the built
-`dist/mmk.cjs` under plain node.
+`dist/migronaut.cjs` under plain node.
 
 ### 6.5 The programmatic API (run.ts)
 File: [run.ts](src/core/run.ts).
@@ -390,9 +390,9 @@ These are enforced (biome + review). Violating them is how a PR gets bounced.
 
 - **Types:** `strict` TS, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`. No `any` (use
   `unknown` + narrowing). Explicit return types on public functions. JSDoc on public methods.
-- **Errors:** never `throw new Error`. Always a `MmkError` subclass with a typed `code`. Never
+- **Errors:** never `throw new Error`. Always a `MigronautError` subclass with a typed `code`. Never
   swallow — rethrow or route to `onError`.
-- **Logging:** never `console.*`. Always the injected `MmkLogger`. Core resolves it via
+- **Logging:** never `console.*`. Always the injected `MigronautLogger`. Core resolves it via
   `resolveLogger`; the CLI builds stream-targeted loggers. `null` logger = silent (used in all tests).
 - **Imports/exports:** named exports only (config files are the sole default-export exception).
   Internal `.js` import specifiers (NodeNext) even though sources are `.ts`.
@@ -420,7 +420,7 @@ The high-impact ones for code changes:
 - **Path traversal is blocked centrally in `filepath()`** — every user-supplied migration name (even
   one read back from a tampered changelog) is validated there.
 - **`--json` is per-command, not global**, and is *not* on `init` (where `--json` means "generate
-  mmk.config.json"). In JSON mode, human/progress output goes to stderr; stdout is one JSON doc.
+  migronaut.config.json"). In JSON mode, human/progress output goes to stderr; stdout is one JSON doc.
 - **`down --steps` preserves selection order** (newest-first) via a `preserveOrder` flag, instead of
   the usual filename-desc sort.
 
@@ -458,9 +458,9 @@ npx vitest run --coverage --coverage.include='src/core/run.ts'  # coverage for o
 ## 10. Build, typecheck, lint, release
 
 - **Build:** `npm run build` → tsup produces, into `dist/`: the library as **CJS + ESM + `.d.ts`**
-  (from `src/index.ts`) and the CLI as **CJS only** (from `bin/mmk.ts`, with the shebang banner).
-  See [tsup.config.ts](tsup.config.ts). The `mmk` version string is injected at build time
-  (`MMK_VERSION`); unbundled dev runs fall back to `0.0.0-dev`.
+  (from `src/index.ts`) and the CLI as **CJS only** (from `bin/migronaut.ts`, with the shebang banner).
+  See [tsup.config.ts](tsup.config.ts). The `migronaut` version string is injected at build time
+  (`MIGRONAUT_VERSION`); unbundled dev runs fall back to `0.0.0-dev`.
 - **Typecheck:** `npx tsc --noEmit` (covers `src/` + `bin/`).
 - **Lint/format:** `npx biome check src/ bin/ tests/` (and `biome format --write` to fix).
 - **Published artifact:** only `dist/`, `README.md`, `CHANGELOG.md` (the `files` field). The `docs/`
@@ -472,11 +472,11 @@ npx vitest run --coverage --coverage.include='src/core/run.ts'  # coverage for o
 
 ## 11. Recipe: how to add a new command/feature
 
-Concrete worked path — say you're adding `mmk verify` (re-checks all checksums):
+Concrete worked path — say you're adding `migronaut verify` (re-checks all checksums):
 
 1. **Types** ([src/types/index.ts](src/types/index.ts)) — add any new result/option type and, if
-   needed, a new `MmkErrorCode` literal.
-2. **Errors** ([src/errors/index.ts](src/errors/index.ts)) — add the matching `MmkError` subclass.
+   needed, a new `MigronautErrorCode` literal.
+2. **Errors** ([src/errors/index.ts](src/errors/index.ts)) — add the matching `MigronautError` subclass.
 3. **Core logic** ([src/core/migrator.ts](src/core/migrator.ts)) — add a public method `verify()`.
    If it touches the DB and mutates, wrap the worker in `runWithLock`; if it's read-only (this one
    is), just `ensureConfig()` + `connect()`. Reuse existing mechanism modules — don't reimplement
@@ -501,7 +501,7 @@ it *looks* or *exits* → the CLI layer.
 
 - **Batch** — a group of migrations applied together, sharing a `batch` number; the unit `down`
   reverts by default.
-- **Changelog** — the `_mmk_migrations` collection; the append-mostly audit trail of `MigrationRecord`s.
+- **Changelog** — the `_migronaut_migrations` collection; the append-mostly audit trail of `MigrationRecord`s.
 - **Checksum** — SHA-256 of a migration file at apply time; re-checked later to detect tampering.
 - **Context** — the `{ db, client, mongoose?, session? }` object passed into every `up`/`down`.
 - **Heartbeat** — the periodic `renew()` that keeps a long migration's lock fresh.

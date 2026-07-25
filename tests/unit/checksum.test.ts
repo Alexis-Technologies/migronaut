@@ -8,7 +8,7 @@ let tmp: string;
 let file: string;
 
 beforeEach(() => {
-  tmp = mkdtempSync(path.join(tmpdir(), 'mmk-checksum-'));
+  tmp = mkdtempSync(path.join(tmpdir(), 'migronaut-checksum-'));
   file = path.join(tmp, 'migration.ts');
   writeFileSync(file, 'export const a = 1;\n');
 });

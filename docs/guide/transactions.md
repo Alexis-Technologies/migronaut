@@ -1,6 +1,6 @@
 # Transactions
 
-`mongo-migrate-kit` can wrap a migration in a MongoDB session + transaction so that **either every
+`migronaut` can wrap a migration in a MongoDB session + transaction so that **either every
 operation commits, or none do**. This is opt-in and works at two levels.
 
 ::: warning Requires a replica set
@@ -15,7 +15,7 @@ Export `useTransaction = true` from a migration:
 ::: code-group
 
 ```ts [TypeScript]
-import type { MigrationContext } from 'mongo-migrate-kit';
+import type { MigrationContext } from '@alexify/migronaut';
 
 export const useTransaction = true;
 
@@ -51,7 +51,7 @@ Set `useTransaction: true` in your config to wrap **every** migration in a trans
 per-file `useTransaction` still overrides the global setting.
 
 ```js
-// mmk.config.js
+// migronaut.config.js
 export default {
   uri: 'mongodb://localhost:27017',
   dbName: 'my_app',

@@ -34,12 +34,12 @@ export type MigrationStatus = 'applied' | 'reverted';
 
 /**
  * Where a changelog record originated. `'migrate-mongo'` marks a record adopted
- * via `mmk import`; such records are forward-only and cannot be reverted by mmk.
- * Absent (or `'mmk'`) means a natively-applied, reversible migration.
+ * via `migronaut import`; such records are forward-only and cannot be reverted by migronaut.
+ * Absent (or `'migronaut'`) means a natively-applied, reversible migration.
  */
-export type MigrationOrigin = 'mmk' | 'migrate-mongo';
+export type MigrationOrigin = 'migronaut' | 'migrate-mongo';
 
-/** A single record in the _mmk_migrations changelog collection */
+/** A single record in the _migronaut_migrations changelog collection */
 export interface MigrationRecord {
   /** Migration filename e.g. 20240526143021-add-users-index.ts */
   name: string;
@@ -60,7 +60,7 @@ export interface MigrationRecord {
   description?: string;
   /**
    * Origin of this record. Set to `'migrate-mongo'` for records adopted via
-   * `mmk import` — these are not reversible by mmk. Absent for native records.
+   * `migronaut import` — these are not reversible by migronaut. Absent for native records.
    */
   origin?: MigrationOrigin;
 }
@@ -83,16 +83,16 @@ export interface MigrationHooks {
 /** File type a created migration is written as */
 export type MigrationExtension = 'ts' | 'js';
 
-export interface MmkConfig {
+export interface MigronautConfig {
   /** MongoDB connection URI */
   uri: string;
   /** Database name */
   dbName: string;
   /** Path to migrations directory. Default: './migrations' */
   migrationsDir: string;
-  /** Collection name for migration records. Default: '_mmk_migrations' */
+  /** Collection name for migration records. Default: '_migronaut_migrations' */
   migrationsCollection: string;
-  /** Collection name for distributed lock. Default: '_mmk_locks' */
+  /** Collection name for distributed lock. Default: '_migronaut_locks' */
   lockCollection: string;
   /** How long (seconds) a lock is considered stale. Default: 60 */
   lockTTLSeconds: number;
@@ -106,7 +106,7 @@ export interface MmkConfig {
   /** File extensions to scan. Default: ['.ts', '.js'] */
   fileExtensions: string[];
   /**
-   * File type `mmk create` generates by default. Overridden per run by the
+   * File type `migronaut create` generates by default. Overridden per run by the
    * `--js` / `--ts` flags. Default: 'js'
    */
   createExtension: MigrationExtension;
@@ -118,11 +118,11 @@ export interface MmkConfig {
   mongoose?: Mongoose;
   hooks?: MigrationHooks;
   /** Custom logger — set to null to silence all output (useful in tests) */
-  logger?: MmkLogger | null;
+  logger?: MigronautLogger | null;
 }
 
 /**
- * What a config file (`mmk.config.{ts,js}`) may export: either a config object
+ * What a config file (`migronaut.config.{ts,js}`) may export: either a config object
  * or a (sync or async) factory that returns one. The factory form is resolved
  * at load time, so you can fetch values — e.g. a connection `uri` from AWS
  * Secrets Manager or Google Secret Manager — without ever writing them to disk.
@@ -130,13 +130,13 @@ export interface MmkConfig {
  * The fetched value lives in memory for that command only; the config file
  * itself is never rewritten. JSON config files cannot use the factory form.
  */
-export type MmkConfigInput =
-  | Partial<MmkConfig>
-  | (() => Partial<MmkConfig> | Promise<Partial<MmkConfig>>);
+export type MigronautConfigInput =
+  | Partial<MigronautConfig>
+  | (() => Partial<MigronautConfig> | Promise<Partial<MigronautConfig>>);
 
 // ─── Logger ───────────────────────────────────────────────────────────────────
 
-export interface MmkLogger {
+export interface MigronautLogger {
   info: (msg: string) => void;
   success: (msg: string) => void;
   warn: (msg: string) => void;
@@ -202,7 +202,7 @@ export interface MigrateMongoDoc {
 /** How an imported record's checksum was resolved */
 export type ImportChecksumSource = 'reused' | 'recomputed' | 'missing';
 
-/** One mapped row produced by `mmk import` */
+/** One mapped row produced by `migronaut import` */
 export interface ImportRow {
   file: string;
   batch: number;
@@ -211,11 +211,11 @@ export interface ImportRow {
   checksumSource: ImportChecksumSource;
 }
 
-/** Outcome of an `mmk import` run */
+/** Outcome of an `migronaut import` run */
 export interface ImportResult {
   /** Source collection that was read (e.g. `changelog`) */
   source: string;
-  /** Target collection records were written to (e.g. `_mmk_migrations`) */
+  /** Target collection records were written to (e.g. `_migronaut_migrations`) */
   target: string;
   /** Number of records written (0 when `dryRun` is true) */
   imported: number;
@@ -243,7 +243,7 @@ export interface LockInfo {
 
 // ─── Error Codes ──────────────────────────────────────────────────────────────
 
-export type MmkErrorCode =
+export type MigronautErrorCode =
   | 'LOCK_ALREADY_HELD'
   | 'LOCK_RELEASE_FAILED'
   | 'CHECKSUM_MISMATCH'
