@@ -1,4 +1,4 @@
-const { existsSync } = require('node:fs');
+const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { MigrationFileNotFoundError, MigrationInvalidExportError } = require('../errors/index.js');
@@ -56,7 +56,9 @@ function tsLoadErrorOrNull(filepath, error) {
  * @throws {MigrationInvalidExportError} when up/down are not both functions
  */
 async function loadMigrationFile(filepath) {
-  if (!existsSync(filepath)) {
+  try {
+    await fs.access(filepath);
+  } catch {
     throw new MigrationFileNotFoundError('Migration file not found', { filepath });
   }
 

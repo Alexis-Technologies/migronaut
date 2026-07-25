@@ -1,4 +1,4 @@
-const { existsSync, readFileSync, readdirSync, writeFileSync } = require('node:fs');
+const fs = require('node:fs/promises');
 const path = require('node:path');
 const {
   ConfigFileExistsError,
@@ -28,13 +28,23 @@ function buildPrefix(options) {
 }
 
 /** Count existing migration files in a directory to derive the next sequence index */
-function nextSequenceIndex(dir, extensions) {
-  if (!existsSync(dir)) {
-    return 1;
+async function nextSequenceIndex(dir, extensions) {
+  let files;
+  try {
+    files = await fs.readdir(dir);
+  } catch (error) {
+    if (error.code === 'ENOENT') return 1;
+    throw error;
   }
-  const count = readdirSync(dir).filter((file) =>
-    extensions.some((ext) => file.endsWith(ext)),
-  ).length;
+  let count = 0;
+  for (const file of files) {
+    for (const ext of extensions) {
+      if (file.endsWith(ext)) {
+        count += 1;
+        break;
+      }
+    }
+  }
   return count + 1;
 }
 
@@ -71,12 +81,16 @@ export async function down({ db }) {
 }
 
 /** Resolve template file contents — a custom template if provided, else the built-in */
-function resolveTemplateContent(templatePath, js) {
+async function resolveTemplateContent(templatePath, js) {
   if (templatePath) {
-    if (!existsSync(templatePath)) {
-      throw new MigrationFileNotFoundError('Template file not found', { templatePath });
+    try {
+      return await fs.readFile(templatePath, 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        throw new MigrationFileNotFoundError('Template file not found', { templatePath });
+      }
+      throw error;
     }
-    return readFileSync(templatePath, 'utf8');
   }
   return js ? defaultTemplateJs() : defaultTemplateTs();
 }
@@ -85,14 +99,14 @@ function resolveTemplateContent(templatePath, js) {
  * Create a new migration file on disk and return its absolute path.
  * The directory must already exist.
  */
-function createMigrationFile(options) {
+async function createMigrationFile(options) {
   const ext = options.js ? '.js' : '.ts';
-  const index = nextSequenceIndex(options.dir, ['.ts', '.js']);
+  const index = await nextSequenceIndex(options.dir, ['.ts', '.js']);
   const prefix = buildPrefix({ sequential: options.sequential, index });
   const filename = `${prefix}-${slugify(options.name)}${ext}`;
   const filepath = path.join(options.dir, filename);
-  const content = resolveTemplateContent(options.templatePath, options.js);
-  writeFileSync(filepath, content, 'utf8');
+  const content = await resolveTemplateContent(options.templatePath, options.js);
+  await fs.writeFile(filepath, content, 'utf8');
   return filepath;
 }
 
@@ -381,17 +395,23 @@ function configTemplateContent(format, values = {}, secretProvider = false) {
  * Create an `migronaut.config.<format>` file on disk and return its absolute path.
  * Throws ConfigFileExistsError if the file exists and `force` is false.
  */
-function createConfigFile(options) {
+async function createConfigFile(options) {
   const filepath = path.join(options.dir, `migronaut.config.${options.format}`);
-  if (existsSync(filepath) && !options.force) {
-    throw new ConfigFileExistsError('Config file already exists', { path: filepath });
+  if (!options.force) {
+    const exists = await fs
+      .access(filepath)
+      .then(() => true)
+      .catch(() => false);
+    if (exists) {
+      throw new ConfigFileExistsError('Config file already exists', { path: filepath });
+    }
   }
   const content = configTemplateContent(
     options.format,
     options.values ?? {},
     options.secretProvider ?? false,
   );
-  writeFileSync(filepath, content, 'utf8');
+  await fs.writeFile(filepath, content, 'utf8');
   return filepath;
 }
 

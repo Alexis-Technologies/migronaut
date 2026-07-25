@@ -82,37 +82,37 @@ describe('applyEnvFile', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('should load keys into the target env object', () => {
+  it('should load keys into the target env object', async () => {
     const file = path.join(tmp, '.env');
     writeFileSync(file, 'FOO=bar\nBAZ=qux\n');
     const env = {};
-    applyEnvFile(file, env);
+    await applyEnvFile(file, env);
     assert.strictEqual(env.FOO, 'bar');
     assert.strictEqual(env.BAZ, 'qux');
   });
 
-  it('should never override keys that are already set', () => {
+  it('should never override keys that are already set', async () => {
     const file = path.join(tmp, '.env');
     writeFileSync(file, 'FOO=from-file\nBAZ=from-file\n');
     const env = { FOO: 'from-process' };
-    applyEnvFile(file, env);
+    await applyEnvFile(file, env);
     assert.strictEqual(env.FOO, 'from-process');
     assert.strictEqual(env.BAZ, 'from-file');
   });
 
-  it('should be a no-op when the file does not exist', () => {
+  it('should be a no-op when the file does not exist', async () => {
     const env = {};
-    applyEnvFile(path.join(tmp, 'missing.env'), env);
+    await applyEnvFile(path.join(tmp, 'missing.env'), env);
     assert.deepStrictEqual(env, {});
   });
 
-  it('should default to process.env as the target', () => {
+  it('should default to process.env as the target', async () => {
     const key = 'MIGRONAUT_ENV_TEST_UNIQUE_KEY';
     const file = path.join(tmp, '.env');
     writeFileSync(file, `${key}=loaded\n`);
     delete process.env[key];
     try {
-      applyEnvFile(file);
+      await applyEnvFile(file);
       assert.strictEqual(process.env[key], 'loaded');
     } finally {
       delete process.env[key];

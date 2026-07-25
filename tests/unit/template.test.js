@@ -56,15 +56,15 @@ describe('buildPrefix', () => {
 });
 
 describe('nextSequenceIndex', () => {
-  it('should return 1 for a missing directory', () => {
-    assert.strictEqual(nextSequenceIndex(path.join(tmp, 'nope'), ['.ts', '.js']), 1);
+  it('should return 1 for a missing directory', async () => {
+    assert.strictEqual(await nextSequenceIndex(path.join(tmp, 'nope'), ['.ts', '.js']), 1);
   });
 
-  it('should count existing migration files', () => {
+  it('should count existing migration files', async () => {
     writeFileSync(path.join(tmp, '0001-a.ts'), '');
     writeFileSync(path.join(tmp, '0002-b.js'), '');
     writeFileSync(path.join(tmp, 'README.md'), '');
-    assert.strictEqual(nextSequenceIndex(tmp, ['.ts', '.js']), 3);
+    assert.strictEqual(await nextSequenceIndex(tmp, ['.ts', '.js']), 3);
   });
 });
 
@@ -84,14 +84,14 @@ describe('default templates', () => {
 });
 
 describe('resolveTemplateContent', () => {
-  it('should read a custom template when provided', () => {
+  it('should read a custom template when provided', async () => {
     const custom = path.join(tmp, 'my-template.ts');
     writeFileSync(custom, '// custom');
-    assert.strictEqual(resolveTemplateContent(custom, false), '// custom');
+    assert.strictEqual(await resolveTemplateContent(custom, false), '// custom');
   });
 
-  it('should throw MigrationFileNotFoundError for a missing custom template', () => {
-    assert.throws(
+  it('should throw MigrationFileNotFoundError for a missing custom template', async () => {
+    await assert.rejects(
       () => resolveTemplateContent(path.join(tmp, 'missing.ts'), false),
       MigrationFileNotFoundError,
     );
@@ -99,15 +99,20 @@ describe('resolveTemplateContent', () => {
 });
 
 describe('createMigrationFile', () => {
-  it('should create a timestamped .ts file by default', () => {
-    const file = createMigrationFile({ dir: tmp, name: 'Add Index', sequential: false, js: false });
+  it('should create a timestamped .ts file by default', async () => {
+    const file = await createMigrationFile({
+      dir: tmp,
+      name: 'Add Index',
+      sequential: false,
+      js: false,
+    });
     assert.strictEqual(existsSync(file), true);
     assert.match(file, /\d{14}-add-index\.ts$/);
     assert.ok(readFileSync(file, 'utf8').includes('export async function up'));
   });
 
-  it('should create a sequential .js file when requested', () => {
-    const file = createMigrationFile({ dir: tmp, name: 'First', sequential: true, js: true });
+  it('should create a sequential .js file when requested', async () => {
+    const file = await createMigrationFile({ dir: tmp, name: 'First', sequential: true, js: true });
     assert.match(file, /0001-first\.js$/);
   });
 });
@@ -209,29 +214,29 @@ describe('secret-provider config templates', () => {
 });
 
 describe('createConfigFile', () => {
-  it('should write migronaut.config.ts by default and return its path', () => {
-    const file = createConfigFile({ dir: tmp, format: 'ts', force: false });
+  it('should write migronaut.config.ts by default and return its path', async () => {
+    const file = await createConfigFile({ dir: tmp, format: 'ts', force: false });
     assert.strictEqual(file, path.join(tmp, 'migronaut.config.ts'));
     assert.ok(readFileSync(file, 'utf8').includes('Partial<MigronautConfig>'));
   });
 
-  it('should write migronaut.config.json when format is json', () => {
-    const file = createConfigFile({ dir: tmp, format: 'json', force: false });
+  it('should write migronaut.config.json when format is json', async () => {
+    const file = await createConfigFile({ dir: tmp, format: 'json', force: false });
     assert.strictEqual(file, path.join(tmp, 'migronaut.config.json'));
   });
 
-  it('should throw ConfigFileExistsError when the file exists without force', () => {
-    createConfigFile({ dir: tmp, format: 'ts', force: false });
-    assert.throws(
+  it('should throw ConfigFileExistsError when the file exists without force', async () => {
+    await createConfigFile({ dir: tmp, format: 'ts', force: false });
+    await assert.rejects(
       () => createConfigFile({ dir: tmp, format: 'ts', force: false }),
       ConfigFileExistsError,
     );
   });
 
-  it('should overwrite an existing file when force is true', () => {
-    const file = createConfigFile({ dir: tmp, format: 'ts', force: false });
+  it('should overwrite an existing file when force is true', async () => {
+    const file = await createConfigFile({ dir: tmp, format: 'ts', force: false });
     writeFileSync(file, '// stale');
-    createConfigFile({ dir: tmp, format: 'ts', force: true, values: { dbName: 'fresh' } });
+    await createConfigFile({ dir: tmp, format: 'ts', force: true, values: { dbName: 'fresh' } });
     assert.ok(readFileSync(file, 'utf8').includes("dbName: 'fresh'"));
   });
 });

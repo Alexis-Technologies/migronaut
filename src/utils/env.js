@@ -1,4 +1,4 @@
-const { existsSync, readFileSync } = require('node:fs');
+const fs = require('node:fs/promises');
 const util = require('node:util');
 
 const QUOTES = ["'", '"', '`'];
@@ -51,9 +51,14 @@ function parseEnvContent(content) {
  * already set (dotenv's `override: false` semantics). A missing file is a
  * silent no-op.
  */
-function applyEnvFile(filePath, env = process.env) {
-  if (!existsSync(filePath)) return;
-  const content = readFileSync(filePath, 'utf8');
+async function applyEnvFile(filePath, env = process.env) {
+  let content;
+  try {
+    content = await fs.readFile(filePath, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
   const hasNativeParser = typeof util.parseEnv === 'function';
   const parsed = hasNativeParser ? util.parseEnv(content) : parseEnvContent(content);
   for (const key of Object.keys(parsed)) {

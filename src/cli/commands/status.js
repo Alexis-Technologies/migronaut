@@ -23,7 +23,10 @@ function registerStatus(program) {
             createLogger().info(renderStatusTable(rows));
           }
           if (opts.check) {
-            const pending = rows.filter((row) => row.status === 'pending').length;
+            let pending = 0;
+            for (const row of rows) {
+              if (row.status === 'pending') pending += 1;
+            }
             if (pending > 0) {
               // .error writes to stderr, so JSON stdout stays a single clean document.
               createLogger().error(`✖ ${pending} pending migration(s)`);

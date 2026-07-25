@@ -19,30 +19,30 @@ afterEach(() => {
 });
 
 describe('computeChecksum', () => {
-  it('should produce a deterministic SHA-256 hex digest', () => {
-    const first = computeChecksum(file);
-    const second = computeChecksum(file);
+  it('should produce a deterministic SHA-256 hex digest', async () => {
+    const first = await computeChecksum(file);
+    const second = await computeChecksum(file);
     assert.strictEqual(first, second);
     assert.match(first, /^[a-f0-9]{64}$/);
   });
 
-  it('should produce a different digest when file contents change', () => {
-    const before = computeChecksum(file);
+  it('should produce a different digest when file contents change', async () => {
+    const before = await computeChecksum(file);
     writeFileSync(file, 'export const a = 2;\n');
-    const after = computeChecksum(file);
+    const after = await computeChecksum(file);
     assert.notStrictEqual(after, before);
   });
 });
 
 describe('verifyChecksum', () => {
-  it('should return true when the stored checksum matches', () => {
-    const stored = computeChecksum(file);
-    assert.strictEqual(verifyChecksum(file, stored), true);
+  it('should return true when the stored checksum matches', async () => {
+    const stored = await computeChecksum(file);
+    assert.strictEqual(await verifyChecksum(file, stored), true);
   });
 
-  it('should return false when the file has been tampered with', () => {
-    const stored = computeChecksum(file);
+  it('should return false when the file has been tampered with', async () => {
+    const stored = await computeChecksum(file);
     writeFileSync(file, 'export const a = 999;\n');
-    assert.strictEqual(verifyChecksum(file, stored), false);
+    assert.strictEqual(await verifyChecksum(file, stored), false);
   });
 });

@@ -1,4 +1,4 @@
-const { existsSync, mkdirSync, readdirSync } = require('node:fs');
+const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { MongoClient } = require('mongodb');
@@ -178,21 +178,35 @@ class MigratorKit {
   }
 
   /** List migration files on disk, sorted ascending */
-  #listMigrationFiles() {
+  async #listMigrationFiles() {
     const dir = this.#migrationsPath();
-    if (!existsSync(dir)) {
-      return [];
-    }
     const extensions = this.#config?.fileExtensions ?? ['.ts', '.js'];
-    return readdirSync(dir)
-      .filter((file) => extensions.some((ext) => file.endsWith(ext)))
-      .sort();
+    let files;
+    try {
+      files = await fs.readdir(dir);
+    } catch (error) {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    }
+    const matches = [];
+    for (const file of files) {
+      for (const ext of extensions) {
+        if (file.endsWith(ext)) {
+          matches.push(file);
+          break;
+        }
+      }
+    }
+    return matches.sort();
   }
 
   /** Compute the next batch number (monotonic across the full history) */
   async #nextBatch() {
     const records = await this.#requireChangelog().getAll(this.#requireDb());
-    const maxBatch = records.reduce((max, record) => Math.max(max, record.batch), 0);
+    let maxBatch = 0;
+    for (const record of records) {
+      if (record.batch > maxBatch) maxBatch = record.batch;
+    }
     return maxBatch + 1;
   }
 
@@ -220,8 +234,11 @@ class MigratorKit {
    * by name desc), ignoring batch grouping. Shared by `down --steps` and its dry-run.
    */
   #selectLastApplied(records, steps) {
-    return records
-      .filter((record) => record.status === 'applied')
+    const applied = [];
+    for (const record of records) {
+      if (record.status === 'applied') applied.push(record);
+    }
+    return applied
       .sort((a, b) => {
         const byTime = b.appliedAt.getTime() - a.appliedAt.getTime();
         return byTime !== 0 ? byTime : b.name.localeCompare(a.name);
@@ -252,12 +269,19 @@ class MigratorKit {
 
     let targets;
     if (filename) {
-      if (!existsSync(this.#filepath(filename))) {
+      const filepath = this.#filepath(filename);
+      try {
+        await fs.access(filepath);
+      } catch {
         throw new MigrationFileNotFoundError('Migration file not found', { filename });
       }
       targets = [filename];
     } else {
-      targets = this.#listMigrationFiles().filter((file) => !appliedNames.has(file));
+      const files = await this.#listMigrationFiles();
+      targets = [];
+      for (const file of files) {
+        if (!appliedNames.has(file)) targets.push(file);
+      }
     }
 
     if (targets.length === 0) {
@@ -279,7 +303,7 @@ class MigratorKit {
     for (const name of targets) {
       await config.hooks?.beforeEach?.(name, context);
       const filepath = this.#filepath(name);
-      const checksum = computeChecksum(filepath);
+      const checksum = await computeChecksum(filepath);
 
       if (appliedNames.has(name)) {
         if (!force) {
@@ -392,7 +416,10 @@ class MigratorKit {
         return [];
       }
       const records = await changelog.getByBatch(db, batch);
-      toRevert = records.filter((record) => record.status === 'applied');
+      toRevert = [];
+      for (const record of records) {
+        if (record.status === 'applied') toRevert.push(record);
+      }
     }
 
     if (toRevert.length === 0) {
@@ -405,12 +432,12 @@ class MigratorKit {
     // reason so the changelog and collection are never left half-reverted.
     this.#assertReversible(toRevert);
 
-    const names = preserveOrder
-      ? toRevert.map((record) => record.name)
-      : toRevert
-          .map((record) => record.name)
-          .sort()
-          .reverse();
+    const names = [];
+    for (const record of toRevert) names.push(record.name);
+    if (!preserveOrder) {
+      names.sort();
+      names.reverse();
+    }
 
     const context = buildContext(this.#client, db, config.mongoose);
     const results = [];
@@ -460,11 +487,13 @@ class MigratorKit {
    * collection. Throws before any migration runs or the changelog is touched.
    */
   #assertReversible(records) {
-    const blocked = records.filter((record) => record.origin === 'migrate-mongo');
-    if (blocked.length === 0) {
+    const names = [];
+    for (const record of records) {
+      if (record.origin === 'migrate-mongo') names.push(record.name);
+    }
+    if (names.length === 0) {
       return;
     }
-    const names = blocked.map((record) => record.name);
     this.#logger.error(
       `✖ Cannot roll back ${names.length} migrate-mongo-imported migration(s): ${names.join(', ')}`,
     );
@@ -488,7 +517,10 @@ class MigratorKit {
     let target = filename;
     if (!target) {
       const records = await changelog.getAll(this.#requireDb());
-      const applied = records.filter((record) => record.status === 'applied');
+      const applied = [];
+      for (const record of records) {
+        if (record.status === 'applied') applied.push(record);
+      }
       if (applied.length === 0) {
         this.#logger.info('Nothing to redo');
         return [];
@@ -516,19 +548,32 @@ class MigratorKit {
     const logger = this.#logger;
 
     const records = await changelog.getAll(db);
-    const recordByName = new Map(records.map((record) => [record.name, record]));
+    const recordByName = new Map();
+    for (const record of records) {
+      recordByName.set(record.name, record);
+    }
 
     let names;
     if (direction === 'up') {
-      const applied = new Set(
-        records.filter((record) => record.status === 'applied').map((record) => record.name),
-      );
-      names = filename
-        ? [filename]
-        : this.#listMigrationFiles().filter((file) => !applied.has(file));
+      const applied = new Set();
+      for (const record of records) {
+        if (record.status === 'applied') applied.add(record.name);
+      }
+      if (filename) {
+        names = [filename];
+      } else {
+        const files = await this.#listMigrationFiles();
+        names = [];
+        for (const file of files) {
+          if (!applied.has(file)) names.push(file);
+        }
+      }
     } else if (options.steps !== undefined) {
       // Mirror `down --steps`: the last N applied migrations, newest first.
-      names = this.#selectLastApplied(records, options.steps).map((record) => record.name);
+      names = [];
+      for (const record of this.#selectLastApplied(records, options.steps)) {
+        names.push(record.name);
+      }
     } else {
       const lastBatch = await changelog.getLastBatch(db);
       if (filename) {
@@ -536,13 +581,18 @@ class MigratorKit {
       } else if (lastBatch === null) {
         names = [];
       } else {
-        names = (await changelog.getByBatch(db, lastBatch))
-          .filter((record) => record.status === 'applied')
-          .map((record) => record.name);
+        names = [];
+        for (const record of await changelog.getByBatch(db, lastBatch)) {
+          if (record.status === 'applied') names.push(record.name);
+        }
       }
     }
 
-    const rows = names.map((name) => this.#buildStatusRow(name, recordByName.get(name)));
+    const rowPromises = [];
+    for (const name of names) {
+      rowPromises.push(this.#buildStatusRow(name, recordByName.get(name)));
+    }
+    const rows = await Promise.all(rowPromises);
     logger.info(`◎ Dry-run  Would ${direction === 'up' ? 'apply' : 'revert'}: ${rows.length}`);
     return rows;
   }
@@ -552,10 +602,17 @@ class MigratorKit {
     await this.#ensureConfig();
     await this.connect();
     const records = await this.#requireChangelog().getAll(this.#requireDb());
-    const recordByName = new Map(records.map((record) => [record.name, record]));
+    const recordByName = new Map();
+    for (const record of records) recordByName.set(record.name, record);
 
-    const names = new Set([...this.#listMigrationFiles(), ...recordByName.keys()]);
-    return [...names].sort().map((name) => this.#buildStatusRow(name, recordByName.get(name)));
+    const names = new Set(recordByName.keys());
+    for (const file of await this.#listMigrationFiles()) names.add(file);
+    const sortedNames = [...names].sort();
+    const rowPromises = [];
+    for (const name of sortedNames) {
+      rowPromises.push(this.#buildStatusRow(name, recordByName.get(name)));
+    }
+    return Promise.all(rowPromises);
   }
 
   /** Filtered list of migrations */
@@ -564,18 +621,25 @@ class MigratorKit {
     if (filter === 'all') {
       return rows;
     }
-    return rows.filter((row) => row.status === filter);
+    const filtered = [];
+    for (const row of rows) {
+      if (row.status === filter) filtered.push(row);
+    }
+    return filtered;
   }
 
   /** Build a StatusRow for a migration, verifying checksum when possible */
-  #buildStatusRow(name, record) {
+  async #buildStatusRow(name, record) {
     const filepath = this.#filepath(name);
-    const fileExists = existsSync(filepath);
+    const fileExists = await fs
+      .access(filepath)
+      .then(() => true)
+      .catch(() => false);
     const isApplied = record?.status === 'applied';
 
     let checksumOk = null;
     if (isApplied && record && fileExists) {
-      checksumOk = computeChecksum(filepath) === record.checksum;
+      checksumOk = (await computeChecksum(filepath)) === record.checksum;
     }
 
     return {
@@ -593,12 +657,10 @@ class MigratorKit {
   async create(name, options = {}) {
     const config = await this.#ensureConfig(false);
     const dir = this.#migrationsPath();
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
+    await fs.mkdir(dir, { recursive: true });
     const templatePath = options.template ?? config.templatePath;
     const js = options.js ?? config.createExtension === 'js';
-    const filepath = createMigrationFile({
+    const filepath = await createMigrationFile({
       dir,
       name,
       sequential: config.sequential,
@@ -616,7 +678,7 @@ class MigratorKit {
     if (this.#partialConfig.dbName) values.dbName = this.#partialConfig.dbName;
     if (this.#partialConfig.migrationsDir) values.migrationsDir = this.#partialConfig.migrationsDir;
 
-    const filepath = createConfigFile({
+    const filepath = await createConfigFile({
       dir: process.cwd(),
       format: options.format ?? 'js',
       force: options.force ?? false,
@@ -659,11 +721,16 @@ class MigratorKit {
     // already points there, otherwise bind a fresh one (and ensure its index).
     const targetChangelog =
       target === config.migrationsCollection ? changelog : new Changelog(target);
-    if (targetChangelog !== changelog && !dryRun) {
-      await targetChangelog.ensureIndexes(db);
-    }
-
-    const rawDocs = await changelog.getForeignDocs(db, source);
+    // ensureIndexes (target) and getForeignDocs (source) touch unrelated
+    // collections — independent, safe to run concurrently.
+    const ensureIndexesPromise =
+      targetChangelog !== changelog && !dryRun
+        ? targetChangelog.ensureIndexes(db)
+        : Promise.resolve();
+    const [, rawDocs] = await Promise.all([
+      ensureIndexesPromise,
+      changelog.getForeignDocs(db, source),
+    ]);
     if (rawDocs.length === 0) {
       logger.info(`Nothing to import from "${source}"`);
       return { source, target, imported: 0, skipped: 0, dryRun, rows: [] };
@@ -691,18 +758,22 @@ class MigratorKit {
     // Continue batch numbering after the batches already in the target so imported
     // records never collide with existing ones. Records this import will overwrite
     // (same name) are excluded, keeping a forced re-import's batch numbers stable.
-    const incomingNames = new Set(valid.map((doc) => doc.fileName));
-    const batchOffset = existing
-      .filter((record) => !incomingNames.has(record.name))
-      .reduce((max, record) => Math.max(max, record.batch), 0);
+    const incomingNames = new Set();
+    for (const doc of valid) incomingNames.add(doc.fileName);
+    let batchOffset = 0;
+    for (const record of existing) {
+      if (!incomingNames.has(record.name) && record.batch > batchOffset) {
+        batchOffset = record.batch;
+      }
+    }
 
     const rowSources = new Map();
-    const records = mapMigrateMongoDocs(valid, {
+    const records = await mapMigrateMongoDocs(valid, {
       environment: 'imported',
       executedBy: 'migronaut-import',
       batchOffset,
-      resolveChecksum: (fileName, fileHash) => {
-        const resolved = this.#resolveImportChecksum(
+      resolveChecksum: async (fileName, fileHash) => {
+        const resolved = await this.#resolveImportChecksum(
           fileName,
           fileHash,
           options.trustHash ?? false,
@@ -715,13 +786,16 @@ class MigratorKit {
       },
     });
 
-    const rows = records.map((record) => ({
-      file: record.name,
-      batch: record.batch,
-      appliedAt: record.appliedAt,
-      checksum: record.checksum,
-      checksumSource: rowSources.get(record.name) ?? 'missing',
-    }));
+    const rows = [];
+    for (const record of records) {
+      rows.push({
+        file: record.name,
+        batch: record.batch,
+        appliedAt: record.appliedAt,
+        checksum: record.checksum,
+        checksumSource: rowSources.get(record.name) ?? 'missing',
+      });
+    }
 
     if (dryRun) {
       logger.info(
@@ -730,9 +804,11 @@ class MigratorKit {
       return { source, target, imported: 0, skipped, dryRun, rows };
     }
 
-    for (const record of records) {
-      await targetChangelog.markApplied(db, record);
-    }
+    // Independent upserts keyed by unique `name` — safe to run concurrently.
+    // Promise.all (not allSettled) preserves the previous loop's fail-fast behavior.
+    const writes = [];
+    for (const record of records) writes.push(targetChangelog.markApplied(db, record));
+    await Promise.all(writes);
 
     logger.info(`✔ Imported ${records.length} record(s) from "${source}" → "${target}"`);
     return { source, target, imported: records.length, skipped, dryRun, rows };
@@ -744,15 +820,18 @@ class MigratorKit {
    * when it matches a freshly computed hash (algorithms align), else recompute
    * from disk; when the file is missing, fall back to the source hash or empty.
    */
-  #resolveImportChecksum(fileName, fileHash, trustHash) {
+  async #resolveImportChecksum(fileName, fileHash, trustHash) {
     const filepath = this.#filepath(fileName);
-    const exists = existsSync(filepath);
 
     if (trustHash && fileHash) {
       return { checksum: fileHash, source: 'reused' };
     }
+    const exists = await fs
+      .access(filepath)
+      .then(() => true)
+      .catch(() => false);
     if (exists) {
-      const recomputed = computeChecksum(filepath);
+      const recomputed = await computeChecksum(filepath);
       if (fileHash && fileHash === recomputed) {
         return { checksum: fileHash, source: 'reused' };
       }

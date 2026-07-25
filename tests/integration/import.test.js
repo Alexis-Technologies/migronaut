@@ -148,7 +148,7 @@ describe('MigratorKit.import (integration)', () => {
     setup();
     const body = insertMigration('things', 'a');
     project.write('20260101000000-a.js', body);
-    const realHash = computeChecksum(`${project.dir}/20260101000000-a.js`);
+    const realHash = await computeChecksum(`${project.dir}/20260101000000-a.js`);
     await seedChangelog([
       { fileName: '20260101000000-a.js', appliedAt: new Date(), fileHash: realHash },
     ]);

@@ -15,7 +15,8 @@ function padCell(text, width) {
 
 /** Build a horizontal border line for the given column widths */
 function borderLine(widths, left, mid, right) {
-  const segments = widths.map((width) => '─'.repeat(width + 2));
+  const segments = [];
+  for (const width of widths) segments.push('─'.repeat(width + 2));
   return left + segments.join(mid) + right;
 }
 
@@ -25,23 +26,33 @@ function borderLine(widths, left, mid, right) {
  * from width so colored cells never skew the alignment.
  */
 function renderTable(head, rows) {
-  const widths = head.map((title, index) => {
-    let width = visibleWidth(title);
+  const widths = [];
+  for (let index = 0; index < head.length; index++) {
+    let width = visibleWidth(head[index]);
     for (const row of rows) {
       const cellWidth = visibleWidth(row[index]);
       if (cellWidth > width) width = cellWidth;
     }
-    return width;
-  });
-  const renderRow = (cells) =>
-    `│ ${cells.map((cell, index) => padCell(cell, widths[index])).join(' │ ')} │`;
+    widths.push(width);
+  }
+  const renderRow = (cells) => {
+    const padded = [];
+    for (let index = 0; index < cells.length; index++) {
+      padded.push(padCell(cells[index], widths[index]));
+    }
+    return `│ ${padded.join(' │ ')} │`;
+  };
+  const coloredHead = [];
+  for (const title of head) {
+    coloredHead.push(colors.cyan(title));
+  }
   const lines = [
     borderLine(widths, '┌', '┬', '┐'),
-    renderRow(head.map((title) => colors.cyan(title))),
+    renderRow(coloredHead),
     borderLine(widths, '├', '┼', '┤'),
-    ...rows.map(renderRow),
-    borderLine(widths, '└', '┴', '┘'),
   ];
+  for (const row of rows) lines.push(renderRow(row));
+  lines.push(borderLine(widths, '└', '┴', '┘'));
   return lines.join('\n');
 }
 
@@ -59,14 +70,17 @@ function statusCell(status) {
 /** Render status rows as a human-readable table string */
 function renderStatusTable(rows) {
   const head = ['Migration', 'Status', 'Batch', 'Applied At', 'Duration', 'Checksum'];
-  const cells = rows.map((row) => [
-    row.file,
-    statusCell(row.status),
-    row.batch === null ? '' : String(row.batch),
-    row.appliedAt ? formatDateTime(row.appliedAt) : '',
-    row.duration === null ? '' : `${row.duration}ms`,
-    checksumCell(row.checksumOk),
-  ]);
+  const cells = [];
+  for (const row of rows) {
+    cells.push([
+      row.file,
+      statusCell(row.status),
+      row.batch === null ? '' : String(row.batch),
+      row.appliedAt ? formatDateTime(row.appliedAt) : '',
+      row.duration === null ? '' : `${row.duration}ms`,
+      checksumCell(row.checksumOk),
+    ]);
+  }
   return renderTable(head, cells);
 }
 
@@ -80,12 +94,15 @@ function checksumSourceCell(source) {
 /** Render mapped import rows as a human-readable table string */
 function renderImportTable(rows) {
   const head = ['Migration', 'Batch', 'Applied At', 'Checksum'];
-  const cells = rows.map((row) => [
-    row.file,
-    String(row.batch),
-    formatDateTime(row.appliedAt),
-    checksumSourceCell(row.checksumSource),
-  ]);
+  const cells = [];
+  for (const row of rows) {
+    cells.push([
+      row.file,
+      String(row.batch),
+      formatDateTime(row.appliedAt),
+      checksumSourceCell(row.checksumSource),
+    ]);
+  }
   return renderTable(head, cells);
 }
 

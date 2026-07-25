@@ -47,7 +47,9 @@ class Changelog {
       .sort({ name: 1 })
       .project({ name: 1, _id: 0 })
       .toArray();
-    return docs.map((doc) => doc.name);
+    const names = [];
+    for (const doc of docs) names.push(doc.name);
+    return names;
   }
 
   /** Return a single record by migration name, or null */

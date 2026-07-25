@@ -1,4 +1,4 @@
-const { existsSync, readFileSync } = require('node:fs');
+const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { ConfigInvalidError } = require('../errors/index.js');
@@ -25,8 +25,13 @@ const isNonEmptyString = (value) => typeof value === 'string' && value.length > 
 const isBoolean = (value) => typeof value === 'boolean';
 const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
 const isExtension = (value) => value === 'ts' || value === 'js';
-const isStringList = (value) =>
-  Array.isArray(value) && value.length > 0 && value.every(isNonEmptyString);
+function isStringList(value) {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  for (const item of value) {
+    if (!isNonEmptyString(item)) return false;
+  }
+  return true;
+}
 
 /**
  * Validation spec for every checked config key: predicate + failure message.
@@ -124,13 +129,30 @@ function readEnvConfig() {
   return result;
 }
 
-/** Locate a config file in `cwd`, returning its absolute path or null */
-function discoverConfigFile(cwd) {
-  for (const name of CONFIG_FILE_NAMES) {
-    const candidate = path.join(cwd, name);
-    if (existsSync(candidate)) {
-      return candidate;
-    }
+/** Returns true when `filepath` exists on disk */
+async function pathExists(filepath) {
+  try {
+    await fs.access(filepath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Locate a config file in `cwd`, returning its absolute path or null.
+ * Candidates are checked concurrently, then the first one that exists (in
+ * `CONFIG_FILE_NAMES` priority order) wins — preserves the original
+ * short-circuit priority without serializing the stat calls.
+ */
+async function discoverConfigFile(cwd) {
+  const candidates = [];
+  for (const name of CONFIG_FILE_NAMES) candidates.push(path.join(cwd, name));
+  const checks = [];
+  for (const candidate of candidates) checks.push(pathExists(candidate));
+  const found = await Promise.all(checks);
+  for (let i = 0; i < candidates.length; i++) {
+    if (found[i]) return candidates[i];
   }
   return null;
 }
@@ -145,7 +167,7 @@ function discoverConfigFile(cwd) {
  */
 async function loadConfigFile(filepath) {
   if (filepath.endsWith('.json')) {
-    const raw = readFileSync(filepath, 'utf8');
+    const raw = await fs.readFile(filepath, 'utf8');
     return JSON.parse(raw);
   }
   const mod = await import(pathToFileURL(filepath).href);
@@ -173,16 +195,16 @@ async function loadConfigFile(filepath) {
 async function loadConfig(options = {}) {
   const cwd = options.cwd ?? process.cwd();
 
-  applyEnvFile(path.join(cwd, '.env'));
+  await applyEnvFile(path.join(cwd, '.env'));
 
   const merged = { ...DEFAULT_CONFIG };
 
   const configFilePath = options.configPath
     ? path.resolve(cwd, options.configPath)
-    : discoverConfigFile(cwd);
+    : await discoverConfigFile(cwd);
 
   if (configFilePath) {
-    if (!existsSync(configFilePath)) {
+    if (!(await pathExists(configFilePath))) {
       throw new ConfigInvalidError('Config file not found', { path: configFilePath });
     }
     const fileConfig = await loadConfigFile(configFilePath);

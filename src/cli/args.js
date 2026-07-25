@@ -9,8 +9,14 @@ const padLabel = (label, width) => label + ' '.repeat(width - label.length);
 /** Render one aligned `label  description` section of a help screen */
 function renderSection(title, rows) {
   if (rows.length === 0) return [];
-  const width = Math.max(...rows.map((row) => row[0].length));
-  const lines = rows.map((row) => `  ${padLabel(row[0], width)}  ${row[1]}`);
+  let width = 0;
+  for (const row of rows) {
+    if (row[0].length > width) width = row[0].length;
+  }
+  const lines = [];
+  for (const row of rows) {
+    lines.push(`  ${padLabel(row[0], width)}  ${row[1]}`);
+  }
   return ['', `${title}:`, ...lines];
 }
 
@@ -149,7 +155,13 @@ class Command {
         continue;
       }
       if (command === null) {
-        const sub = this.#commands.find((candidate) => candidate.#name === token);
+        let sub = null;
+        for (const candidate of this.#commands) {
+          if (candidate.#name === token) {
+            sub = candidate;
+            break;
+          }
+        }
         if (!sub) return this.#fail(`unknown command '${token}'`);
         command = sub;
         command.#values = {};
@@ -195,9 +207,16 @@ class Command {
   #findOption(command, token) {
     const lookup = (owner) => {
       if (owner === null) return null;
-      const option = owner.#options.find((candidate) =>
-        token.startsWith('--') ? candidate.long === token : candidate.short === token.slice(1),
-      );
+      let option = null;
+      for (const candidate of owner.#options) {
+        const matches = token.startsWith('--')
+          ? candidate.long === token
+          : candidate.short === token.slice(1);
+        if (matches) {
+          option = candidate;
+          break;
+        }
+      }
       return option ? { owner, option } : null;
     };
     return lookup(command) ?? lookup(this);
@@ -210,9 +229,11 @@ class Command {
 
   /** Usage suffix for a command's positional arguments, e.g. ` <direction> [file]` */
   #argsUsage(command) {
-    return command.#arguments
-      .map((spec) => (spec.required ? ` <${spec.name}>` : ` [${spec.name}]`))
-      .join('');
+    let usage = '';
+    for (const spec of command.#arguments) {
+      usage += spec.required ? ` <${spec.name}>` : ` [${spec.name}]`;
+    }
+    return usage;
   }
 
   #helpText(target) {
@@ -223,10 +244,16 @@ class Command {
     const lines = [usage];
     if (target.#description) lines.push('', target.#description);
 
-    const argumentRows = target.#arguments.map((spec) => [spec.name, spec.description]);
+    const argumentRows = [];
+    for (const spec of target.#arguments) {
+      argumentRows.push([spec.name, spec.description]);
+    }
     lines.push(...renderSection('Arguments', argumentRows));
 
-    const optionRows = target.#options.map((option) => [option.flags, option.description]);
+    const optionRows = [];
+    for (const option of target.#options) {
+      optionRows.push([option.flags, option.description]);
+    }
     if (isRoot && this.#version !== null) {
       optionRows.push(['-V, --version', 'output the version number']);
     }
@@ -234,10 +261,11 @@ class Command {
     lines.push(...renderSection('Options', optionRows));
 
     if (isRoot) {
-      const commandRows = this.#commands.map((sub) => {
+      const commandRows = [];
+      for (const sub of this.#commands) {
         const options = sub.#options.length > 0 ? ' [options]' : '';
-        return [`${sub.#name}${options}${this.#argsUsage(sub)}`, sub.#description];
-      });
+        commandRows.push([`${sub.#name}${options}${this.#argsUsage(sub)}`, sub.#description]);
+      }
       lines.push(...renderSection('Commands', commandRows));
     }
     return lines.join('\n');
