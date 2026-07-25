@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Elegant, fast, TypeScript-first MongoDB migrations for Node.js",
   "license": "MIT",
-  "author": "guptasantosh327@gmail.com",
+  "author": "Alex Dolid <dolid.sasha@gmail.com>",
   "type": "module",
   "repository": {
     "type": "git",
