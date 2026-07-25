@@ -7,7 +7,7 @@
 > exists, how data flows through it, and every non-obvious nuance you need to make a safe change.
 >
 
-**Snapshot at time of writing:** v1.2.2 · 246 test cases across 35 files · Node ≥ 18 (published) /
+**Snapshot at time of writing:** v1.0.0 · 246 test cases across 35 files · Node ≥ 18 (published) /
 Node ≥ 20 (to develop & test) · runtime deps: `commander`, `chalk@4`, `cli-table3`, `ora@5`,
 `dotenv`, `zod` · peer deps: `mongodb`, optional `mongoose`.
 
