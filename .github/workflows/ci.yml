@@ -18,8 +18,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm format:check
-      # Smoke: the CLI you test IS the CLI you ship — no build step in between.
-      - run: node bin/migronaut.js --help
+      # Smoke: keeps the bundle-size script working and its numbers visible in CI logs.
+      - run: pnpm size
 
   test:
     runs-on: ubuntu-latest

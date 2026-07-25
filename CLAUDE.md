@@ -109,14 +109,15 @@ When adding new code, follow the right-hand column — there should be no more `
 ## Commands
 
 ```bash
-pnpm run lint              # oxlint src bin tests
-pnpm run format              # oxfmt src bin tests
-pnpm run format:check          # oxfmt --check src bin tests
+pnpm run lint              # oxlint src bin scripts tests
+pnpm run format              # oxfmt src bin scripts tests
+pnpm run format:check          # oxfmt --check src bin scripts tests
 pnpm test                        # node --test (unit + integration, ~265 tests)
 node --test tests/integration/up.test.js   # single file
 pnpm run test:coverage             # node --test under c8, gated at 90/90/85
 pnpm run test:types                  # tsd — checks index.d.ts against tests/types/*.test-d.ts
 node bin/migronaut.js --help           # run the CLI directly — no build, ever
+pnpm run size                            # esbuild bundle-size report (library + CLI), no publish artifact
 pnpm run docs:dev                        # vitepress dev docs
 ```
 
