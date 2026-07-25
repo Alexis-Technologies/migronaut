@@ -1,7 +1,7 @@
 {
   "name": "@alexify/migronaut",
   "version": "1.0.0",
-  "description": "Elegant, fast, TypeScript-first MongoDB migrations for Node.js",
+  "description": "Elegant, fast, fully-typed MongoDB migrations for Node.js",
   "license": "MIT",
   "author": "Alex Dolid <dolid.sasha@gmail.com>",
   "repository": {

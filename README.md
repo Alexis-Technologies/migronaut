@@ -4,7 +4,7 @@
 
 # migronaut
 
-**Elegant, fast, TypeScript-first MongoDB migrations for Node.js.**
+**Elegant, fast, fully-typed MongoDB migrations for Node.js.**
 
 _A modern, drop-in replacement for `migrate-mongo` etc._
 

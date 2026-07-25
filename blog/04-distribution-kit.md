@@ -184,7 +184,7 @@ Body: same as above, but open with the MongoDB-specific bits (lock document in a
 via session, checksum tamper detection) since that crowd cares about the DB internals more than the CLI.
 
 ### r/typescript — title
-`A TypeScript-first MongoDB migration toolkit (no ts-node setup, fully typed context)`
+`A fully-typed MongoDB migration toolkit for Node.js (no build step, no ts-node setup)`
 Body: lead with the TypeScript angle — strict types, typed `MigrationContext`, typed errors with codes,
 `.ts`/ESM/CJS all first-class — then mention the feature list.
 

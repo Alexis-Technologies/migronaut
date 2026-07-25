@@ -16,7 +16,7 @@ function buildProgram() {
 
   program
     .name('migronaut')
-    .description('Elegant, fast, TypeScript-first MongoDB migrations for Node.js')
+    .description('Elegant, fast, fully-typed MongoDB migrations for Node.js')
     .option('--uri <uri>', 'MongoDB connection URI (overrides MIGRONAUT_URI)')
     .option('--db <name>', 'Database name (overrides MIGRONAUT_DB)')
     .option('--dir <path>', 'Migrations directory (overrides MIGRONAUT_MIGRATIONS_DIR)')
