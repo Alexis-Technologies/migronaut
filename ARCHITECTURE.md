@@ -386,7 +386,9 @@ File: [run.ts](src/core/run.ts).
 
 ## 7. Cross-cutting conventions
 
-These are enforced (biome + review). Violating them is how a PR gets bounced.
+These are enforced by oxlint/oxfmt + review. Violating them is how a PR gets bounced. Note: `no
+any`, `never console.*`, and consistent `import type` usage are **not currently lint-enforced**
+(oxlint's config here has no `typescript` plugin) — catch these in review.
 
 - **Types:** `strict` TS, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`. No `any` (use
   `unknown` + narrowing). Explicit return types on public functions. JSDoc on public methods.
@@ -396,7 +398,7 @@ These are enforced (biome + review). Violating them is how a PR gets bounced.
   `resolveLogger`; the CLI builds stream-targeted loggers. `null` logger = silent (used in all tests).
 - **Imports/exports:** named exports only (config files are the sole default-export exception).
   Internal `.js` import specifiers (NodeNext) even though sources are `.ts`.
-- **Style:** biome — single quotes, semicolons, 100-col, sorted imports, no unused.
+- **Style:** oxfmt/oxlint — single quotes, semicolons, 100-col, no unused vars/imports.
 - **Public surface:** anything users should touch must be re-exported from [src/index.ts](src/index.ts).
   If it's not there, it's private.
 
@@ -462,7 +464,8 @@ npx vitest run --coverage --coverage.include='src/core/run.ts'  # coverage for o
   See [tsup.config.ts](tsup.config.ts). The `migronaut` version string is injected at build time
   (`MIGRONAUT_VERSION`); unbundled dev runs fall back to `0.0.0-dev`.
 - **Typecheck:** `npx tsc --noEmit` (covers `src/` + `bin/`).
-- **Lint/format:** `npx biome check src/ bin/ tests/` (and `biome format --write` to fix).
+- **Lint/format:** `npx oxlint src bin tests` (and `npx oxfmt src bin tests` to fix formatting,
+  `npx oxfmt --check src bin tests` to verify without writing).
 - **Published artifact:** only `dist/`, `README.md`, `CHANGELOG.md` (the `files` field). The `docs/`
   site and this `ARCHITECTURE.md` live in the repo but are **never** shipped to npm (the `files`
   field is `dist`-scoped).
@@ -491,7 +494,7 @@ Concrete worked path — say you're adding `migronaut verify` (re-checks all che
    Both in the same PR.
 9. **Docs** — update `README.md` and add `docs/commands/verify.md` for the user site. Update the
    relevant section of this file if you introduced a nuance.
-10. **Verify:** `tsc --noEmit` → `biome check` → `vitest run` → `npm run build`.
+10. **Verify:** `tsc --noEmit` → `oxlint` → `oxfmt --check` → `vitest run` → `npm run build`.
 
 **Where logic goes (decision rule):** mutation sequencing → a `runX` worker in `migrator.ts`; a
 reusable mechanism (hashing, locking, mapping) → its own `core/`/`utils/` module; anything about how

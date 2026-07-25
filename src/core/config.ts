@@ -89,19 +89,23 @@ function readEnvConfig(): Partial<MigronautConfig> {
   const result: Partial<MigronautConfig> = {};
   if (env.MIGRONAUT_URI !== undefined) result.uri = env.MIGRONAUT_URI;
   if (env.MIGRONAUT_DB !== undefined) result.dbName = env.MIGRONAUT_DB;
-  if (env.MIGRONAUT_MIGRATIONS_DIR !== undefined)
+  if (env.MIGRONAUT_MIGRATIONS_DIR !== undefined) {
     result.migrationsDir = env.MIGRONAUT_MIGRATIONS_DIR;
-  if (env.MIGRONAUT_COLLECTION !== undefined)
+  }
+  if (env.MIGRONAUT_COLLECTION !== undefined) {
     result.migrationsCollection = env.MIGRONAUT_COLLECTION;
-  if (env.MIGRONAUT_LOCK_COLLECTION !== undefined)
+  }
+  if (env.MIGRONAUT_LOCK_COLLECTION !== undefined) {
     result.lockCollection = env.MIGRONAUT_LOCK_COLLECTION;
+  }
   if (env.MIGRONAUT_LOCK_TTL !== undefined) result.lockTTLSeconds = Number(env.MIGRONAUT_LOCK_TTL);
   if (env.MIGRONAUT_STRICT !== undefined) result.strict = parseBoolean(env.MIGRONAUT_STRICT);
   if (env.MIGRONAUT_USE_TRANSACTION !== undefined) {
     result.useTransaction = parseBoolean(env.MIGRONAUT_USE_TRANSACTION);
   }
-  if (env.MIGRONAUT_SEQUENTIAL !== undefined)
+  if (env.MIGRONAUT_SEQUENTIAL !== undefined) {
     result.sequential = parseBoolean(env.MIGRONAUT_SEQUENTIAL);
+  }
   if (env.MIGRONAUT_CREATE_EXTENSION === 'ts' || env.MIGRONAUT_CREATE_EXTENSION === 'js') {
     result.createExtension = env.MIGRONAUT_CREATE_EXTENSION;
   }

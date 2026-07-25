@@ -4,7 +4,8 @@ tests
 coverage
 .github
 .vscode
-biome.json
+.oxlintrc.json
+.oxfmtrc.json
 tsconfig.json
 tsup.config.ts
 vitest.config.ts

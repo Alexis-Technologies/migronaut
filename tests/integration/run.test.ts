@@ -97,7 +97,7 @@ describe('runMigrations (programmatic entry point)', () => {
 
     // Release the peer's lock shortly after we start waiting.
     const release = (async (): Promise<void> => {
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((resolve) => setTimeout(resolve, 150));
       await mongo.db.collection(LOCK_COLLECTION).deleteOne({ _id: 'migronaut_lock' });
     })();
 

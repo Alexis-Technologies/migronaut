@@ -77,17 +77,18 @@ When adding new code, follow the right-hand column — there should be no more `
 
 ```bash
 npm run typecheck      # tsc --noEmit
-npm run lint            # biome check src/
-npm run format           # biome format --write src/
+npm run lint            # oxlint src bin tests
+npm run format           # oxfmt src bin tests
+npm run format:check      # oxfmt --check src bin tests
 npm test                  # vitest run (unit + integration, ~250 tests)
 npx vitest run tests/integration/up.test.ts   # single file
 npm run build              # tsup → dist/ (library CJS+ESM+d.ts, CLI CJS-only)
 npm run docs:dev            # vitepress dev docs
 ```
 
-`prepublishOnly` runs typecheck + lint + test + build — treat that as the pre-merge gate.
+`prepublishOnly` runs typecheck + lint + format:check + test + build — treat that as the pre-merge gate.
 
-## Conventions (enforced by biome + review)
+## Conventions (enforced by oxlint/oxfmt + review)
 
 - Strict TypeScript, no `any` (use `unknown` + narrowing), explicit return types on public
   functions, `noUncheckedIndexedAccess` / `exactOptionalPropertyTypes` on.
@@ -95,7 +96,9 @@ npm run docs:dev            # vitepress dev docs
 - Never `console.*` — always the injected `MigronautLogger` (`null` = silent, used in tests).
 - Named exports only; config files (`migronaut.config.ts`) are the sole default-export exception.
 - Internal imports use `.js` specifiers (NodeNext) even though sources are `.ts`.
-- Single quotes, semicolons, 100-col lines, sorted/no-unused imports (biome-enforced).
+- Single quotes, semicolons, 100-col lines, no unused vars/imports (oxlint/oxfmt-enforced). `no
+  any`, `no console.*`, and consistent `import type` usage are review-only conventions — not
+  currently lint-enforced (the `.oxlintrc.json` `typescript` plugin isn't enabled).
 - Anything user-facing must be re-exported from `src/index.ts`, or it's private.
 - Conventional Commits (`feat(scope):`, `fix(scope):`, `test:`, …).
 

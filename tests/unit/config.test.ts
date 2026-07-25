@@ -75,7 +75,6 @@ describe('loadConfig', () => {
     await expect(
       loadConfig({
         cwd: tmp,
-        // biome-ignore lint/suspicious/noExplicitAny: testing an invalid value
         flags: { uri: 'mongodb://x:27017', dbName: 'x', createExtension: 'py' as any },
       }),
     ).rejects.toBeInstanceOf(ConfigInvalidError);

@@ -11,11 +11,7 @@ export type {
 
 // Programmatic entry points (app startup / serverless / test setup)
 export { pendingMigrations, runMigrations } from './core/run.js';
-export type {
-  MigrationSummary,
-  OnLockHeld,
-  RunMigrationsOptions,
-} from './core/run.js';
+export type { MigrationSummary, OnLockHeld, RunMigrationsOptions } from './core/run.js';
 export type { ConfigFormat } from './utils/template.js';
 
 // Types

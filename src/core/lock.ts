@@ -174,7 +174,7 @@ export async function runWithLock<T>(
   // open on its own.
   const intervalMs = Math.max(1, Math.floor(lock.ttlMs / 2));
   const heartbeat = setInterval(() => {
-    void lock
+    lock
       .renew()
       .then((held) => {
         if (!held) {
