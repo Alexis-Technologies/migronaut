@@ -214,8 +214,40 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(existsSync(configPath), true);
     assert.strictEqual(existsSync(path.join(project.dir, 'migronaut.config.ts')), false);
     const contents = readFileSync(configPath, 'utf8');
-    assert.ok(contents.includes("dbName: 'shop'"));
+    assert.ok(contents.includes('dbName: "shop"'));
     assert.ok(contents.includes("createExtension: 'js'"));
+  });
+
+  it('should mask URI credentials in the generated config and warn about it', async () => {
+    const result = await runCli(
+      ['init', '--uri', 'mongodb://admin:hunter2@db.example.com:27017', '--db', 'shop'],
+      {},
+      project.dir,
+    );
+    assert.strictEqual(result.code, 0);
+    const contents = readFileSync(path.join(project.dir, 'migronaut.config.js'), 'utf8');
+    assert.ok(!contents.includes('hunter2'), 'password must not be written to disk');
+    assert.ok(contents.includes('mongodb://admin:****@db.example.com:27017'));
+    assert.ok(`${result.stdout}${result.stderr}`.includes('credentials'));
+  });
+
+  it('should generate a config that still loads when a value contains a quote', async () => {
+    // A raw interpolation would either inject code or produce an unparseable
+    // file. Generate with a quote-bearing dir, then run a command with no flags
+    // so it can only work by reading that generated config back.
+    const quotedDir = path.join(project.dir, "sh'op");
+    mkdirSync(quotedDir);
+    const init = await runCli(
+      ['init', '--uri', mongo.uri, '--db', DB, '--dir', quotedDir],
+      {},
+      project.dir,
+    );
+    assert.strictEqual(init.code, 0);
+    const contents = readFileSync(path.join(project.dir, 'migronaut.config.js'), 'utf8');
+    assert.ok(contents.includes(JSON.stringify(quotedDir)));
+
+    const status = await runCli(['status'], {}, project.dir);
+    assert.strictEqual(status.code, 0, `${status.stdout}${status.stderr}`);
   });
 
   it('should create a migronaut.config.ts with createExtension ts when init --ts is passed', async () => {

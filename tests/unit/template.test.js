@@ -1,6 +1,7 @@
 const { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const assert = require('node:assert/strict');
 const { afterEach, beforeEach, describe, it } = require('node:test');
 const {
@@ -18,6 +19,7 @@ const {
   defaultConfigTs,
   defaultTemplateJs,
   defaultTemplateTs,
+  maskUriCredentials,
   nextSequenceIndex,
   resolveTemplateContent,
   secretConfigJs,
@@ -96,6 +98,63 @@ describe('resolveTemplateContent', () => {
       MigrationFileNotFoundError,
     );
   });
+
+  it('should refuse a template file with an unsupported extension', async () => {
+    const secret = path.join(tmp, 'id_rsa');
+    writeFileSync(secret, 'PRIVATE KEY');
+    await assert.rejects(() => resolveTemplateContent(secret, false), ConfigInvalidError);
+  });
+
+  it('should refuse a template file larger than the size cap', async () => {
+    const big = path.join(tmp, 'huge.js');
+    writeFileSync(big, 'x'.repeat(1024 * 1024 + 1));
+    await assert.rejects(() => resolveTemplateContent(big, true), ConfigInvalidError);
+  });
+
+  it('should accept every supported template extension', async () => {
+    for (const ext of ['.ts', '.js', '.cjs', '.mjs']) {
+      const file = path.join(tmp, `tpl${ext}`);
+      writeFileSync(file, `// ${ext}`);
+      assert.strictEqual(await resolveTemplateContent(file, false), `// ${ext}`);
+    }
+  });
+});
+
+describe('maskUriCredentials', () => {
+  it('should mask the password while keeping the username', () => {
+    const result = maskUriCredentials('mongodb://alice:s3cret@db.example.com:27017/shop');
+    assert.strictEqual(result.uri, 'mongodb://alice:****@db.example.com:27017/shop');
+    assert.strictEqual(result.hasCredentials, true);
+    assert.strictEqual(result.masked, true);
+  });
+
+  it('should mask mongodb+srv URIs', () => {
+    assert.strictEqual(
+      maskUriCredentials('mongodb+srv://u:p@cluster.mongodb.net/db').uri,
+      'mongodb+srv://u:****@cluster.mongodb.net/db',
+    );
+  });
+
+  it('should leave a credential-free URI untouched', () => {
+    const uri = 'mongodb://localhost:27017/shop';
+    assert.deepStrictEqual(maskUriCredentials(uri), {
+      uri,
+      hasCredentials: false,
+      masked: false,
+    });
+  });
+
+  it('should not mangle a multi-host URI (unparseable by new URL)', () => {
+    const uri = 'mongodb://h1:27017,h2:27017/db?replicaSet=rs0';
+    assert.strictEqual(maskUriCredentials(uri).uri, uri);
+    assert.strictEqual(maskUriCredentials(uri).hasCredentials, false);
+  });
+
+  it('should report a username-only URI as credentialed but unmasked', () => {
+    const result = maskUriCredentials('mongodb://alice@db:27017/shop');
+    assert.strictEqual(result.hasCredentials, true);
+    assert.strictEqual(result.masked, false);
+  });
 });
 
 describe('createMigrationFile', () => {
@@ -121,16 +180,16 @@ describe('config templates', () => {
   it('should fill the TS template with provided values and the MigronautConfig type', () => {
     const tpl = defaultConfigTs({ uri: 'mongodb://db:1', dbName: 'shop' });
     assert.ok(tpl.includes("import type { MigronautConfig } from '@alexify/migronaut'"));
-    assert.ok(tpl.includes("uri: 'mongodb://db:1'"));
-    assert.ok(tpl.includes("dbName: 'shop'"));
+    assert.ok(tpl.includes('uri: "mongodb://db:1"'));
+    assert.ok(tpl.includes('dbName: "shop"'));
     assert.ok(tpl.includes('export default config'));
   });
 
   it('should fall back to defaults for omitted values', () => {
     const tpl = defaultConfigTs();
-    assert.ok(tpl.includes("uri: 'mongodb://localhost:27017'"));
-    assert.ok(tpl.includes("dbName: 'myapp'"));
-    assert.ok(tpl.includes("migrationsDir: './migrations'"));
+    assert.ok(tpl.includes('uri: "mongodb://localhost:27017"'));
+    assert.ok(tpl.includes('dbName: "myapp"'));
+    assert.ok(tpl.includes('migrationsDir: "./migrations"'));
   });
 
   it('should produce valid parseable JSON', () => {
@@ -171,6 +230,69 @@ describe('config templates', () => {
   });
 });
 
+describe('config template injection safety', () => {
+  // A generated config is later import()ed and executed, so a value that breaks
+  // out of its string literal is arbitrary code execution.
+  const payload = "x', evil: (() => { throw new Error('INJECTED'); })(), z: '";
+
+  for (const [name, render] of [
+    ['ts', (v) => defaultConfigTs(v)],
+    ['js', (v) => defaultConfigJs(v)],
+  ]) {
+    it(`should neutralize a quote-breaking dbName in the ${name} template`, () => {
+      const tpl = render({ dbName: payload });
+      // The payload survives as inert data on one line, never as a second key.
+      assert.ok(tpl.includes(`dbName: ${JSON.stringify(payload)},`));
+      assert.match(tpl, /^\s*dbName: .*,$/m);
+      assert.ok(!/^\s*evil:/m.test(tpl));
+    });
+
+    it(`should keep the ${name} template loadable for quote/newline/backtick values`, async () => {
+      // Built by concatenation so the placeholder reaches the template as data.
+      const dangerousName = 'line1\nline2`' + '${' + 'danger}';
+      const dangerousDir = './a"b\\c\'d/migrations';
+      const tpl = render({
+        uri: 'mongodb://plain-host:27017',
+        dbName: dangerousName,
+        migrationsDir: dangerousDir,
+      });
+      // Strip the TS-only bits so both variants load as plain ESM, then import
+      // the file the way loadConfigFile does in production.
+      const body = tpl.replace(/^import type .*$/m, '').replace(': Partial<MigronautConfig>', '');
+      const file = path.join(tmp, `loaded-${name}.mjs`);
+      writeFileSync(file, body);
+      const loaded = await import(pathToFileURL(file).href);
+      assert.strictEqual(loaded.default.dbName, dangerousName);
+      assert.strictEqual(loaded.default.migrationsDir, dangerousDir);
+      assert.strictEqual(loaded.default.uri, 'mongodb://plain-host:27017');
+    });
+  }
+
+  it('should neutralize a quote-breaking migrationsDir in secret-provider templates', () => {
+    const tpl = secretConfigJs({ migrationsDir: payload });
+    assert.ok(tpl.includes(`migrationsDir: ${JSON.stringify(payload)},`));
+    assert.ok(!/^\s*evil:/m.test(tpl));
+  });
+});
+
+describe('config template credential masking', () => {
+  it('should mask the password in the generated js/ts config and explain why', () => {
+    const tpl = defaultConfigJs({ uri: 'mongodb://admin:hunter2@db:27017' });
+    assert.ok(tpl.includes('uri: "mongodb://admin:****@db:27017"'));
+    assert.ok(!tpl.includes('hunter2'));
+    assert.ok(tpl.includes('masked at generation time'));
+  });
+
+  it('should mask the password in the generated json config', () => {
+    const parsed = JSON.parse(defaultConfigJson({ uri: 'mongodb://admin:hunter2@db:27017' }));
+    assert.strictEqual(parsed.uri, 'mongodb://admin:****@db:27017');
+  });
+
+  it('should not add the masking note when the URI carries no password', () => {
+    assert.ok(!defaultConfigJs({ uri: 'mongodb://localhost:27017' }).includes('masked at'));
+  });
+});
+
 describe('secret-provider config templates', () => {
   it('should emit an async factory that fetches from a secret manager (JS)', () => {
     const tpl = secretConfigJs();
@@ -198,7 +320,7 @@ describe('secret-provider config templates', () => {
   it('should seed migrationsDir from provided values', () => {
     assert.ok(
       secretConfigJs({ migrationsDir: './db/migrations' }).includes(
-        "migrationsDir: './db/migrations'",
+        'migrationsDir: "./db/migrations"',
       ),
     );
   });
@@ -237,6 +359,6 @@ describe('createConfigFile', () => {
     const file = await createConfigFile({ dir: tmp, format: 'ts', force: false });
     writeFileSync(file, '// stale');
     await createConfigFile({ dir: tmp, format: 'ts', force: true, values: { dbName: 'fresh' } });
-    assert.ok(readFileSync(file, 'utf8').includes("dbName: 'fresh'"));
+    assert.ok(readFileSync(file, 'utf8').includes('dbName: "fresh"'));
   });
 });

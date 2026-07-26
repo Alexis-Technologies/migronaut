@@ -15,12 +15,16 @@ const {
 const { computeChecksum } = require('../utils/checksum.js');
 const { loadMigrationFile } = require('../utils/loader.js');
 const { resolveLogger } = require('../utils/logger.js');
-const { createConfigFile, createMigrationFile } = require('../utils/template.js');
+const {
+  createConfigFile,
+  createMigrationFile,
+  maskUriCredentials,
+} = require('../utils/template.js');
 const { Changelog } = require('./changelog.js');
-const { loadConfig } = require('./config.js');
+const { isCollectionName, loadConfig } = require('./config.js');
 const { buildContext } = require('./context.js');
 const { isMigrateMongoDoc, mapMigrateMongoDocs } = require('./import.js');
-const { MigrationLock, runWithLock } = require('./lock.js');
+const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
 const { runMigration } = require('./runner.js');
 
 /** Default source collection name used by migrate-mongo */
@@ -89,14 +93,6 @@ class MigratorKit {
     }
   }
 
-  /** Map an internal lock document to the public LockInfo shape */
-  #toLockInfo(doc) {
-    if (!doc) {
-      return null;
-    }
-    return { lockedAt: doc.lockedAt, pid: doc.pid, host: doc.host, executedBy: doc.executedBy };
-  }
-
   /** Build a lock bound to the configured collection (assumes connected) */
   #buildLock() {
     const config = this.#config;
@@ -110,7 +106,7 @@ class MigratorKit {
   async lockInfo() {
     await this.#ensureConfig();
     await this.connect();
-    return this.#toLockInfo(await this.#buildLock().inspect());
+    return toLockInfo(await this.#buildLock().inspect());
   }
 
   /**
@@ -121,7 +117,7 @@ class MigratorKit {
   async forceUnlock() {
     await this.#ensureConfig();
     await this.connect();
-    return this.#toLockInfo(await this.#buildLock().forceRelease());
+    return toLockInfo(await this.#buildLock().forceRelease());
   }
 
   /** Internal accessors that assume a successful connect() */
@@ -152,9 +148,23 @@ class MigratorKit {
    * resolve (and `loadMigrationFile` execute) a file outside the migrations
    * directory. A final containment check guards against any residual escape.
    */
+  /**
+   * Reject non-string filenames before they reach a changelog query or a path
+   * join. A programmatic caller passing e.g. `{ $ne: null }` would otherwise
+   * become a query-operator injection in `findOne({ name })`.
+   */
+  #assertFilename(filename) {
+    if (filename !== undefined && typeof filename !== 'string') {
+      throw new MigrationInvalidNameError('Migration name must be a string', {
+        name: filename,
+      });
+    }
+  }
+
   #filepath(name) {
     const dir = this.#migrationsPath();
     if (
+      typeof name !== 'string' ||
       name.length === 0 ||
       name === '.' ||
       name === '..' ||
@@ -248,6 +258,7 @@ class MigratorKit {
 
   /** Run all pending migrations, or a specific named file */
   async up(filename, options = {}) {
+    this.#assertFilename(filename);
     const config = await this.#ensureConfig();
     await this.connect();
     const lock = new MigrationLock(this.#requireDb(), config.lockCollection, config.lockTTLSeconds);
@@ -378,6 +389,7 @@ class MigratorKit {
 
   /** Rollback the last batch, a specific batch, a specific file, or the last N steps */
   async down(filename, options = {}) {
+    this.#assertFilename(filename);
     this.#assertStepsValid(options.steps, filename, options.batch);
     const config = await this.#ensureConfig();
     await this.connect();
@@ -510,6 +522,7 @@ class MigratorKit {
 
   /** Rollback then re-apply: the last applied migration, or a specific file */
   async redo(filename) {
+    this.#assertFilename(filename);
     await this.#ensureConfig();
     await this.connect();
     const changelog = this.#requireChangelog();
@@ -540,6 +553,7 @@ class MigratorKit {
 
   /** Preview what would run — never writes to the database */
   async dryRun(direction, filename, options = {}) {
+    this.#assertFilename(filename);
     this.#assertStepsValid(options.steps, filename);
     await this.#ensureConfig();
     await this.connect();
@@ -678,6 +692,13 @@ class MigratorKit {
     if (this.#partialConfig.dbName) values.dbName = this.#partialConfig.dbName;
     if (this.#partialConfig.migrationsDir) values.migrationsDir = this.#partialConfig.migrationsDir;
 
+    if (values.uri && maskUriCredentials(values.uri).hasCredentials) {
+      this.#logger.warn(
+        '⚠ The URI contains credentials — the password was masked in the generated file. ' +
+          'Provide the real value via MIGRONAUT_URI, a gitignored .env, or --secret-provider.',
+      );
+    }
+
     const filepath = await createConfigFile({
       dir: process.cwd(),
       format: options.format ?? 'js',
@@ -697,6 +718,14 @@ class MigratorKit {
    * file signatures, so `down`/`redo` on imported files is unsupported.
    */
   async import(options = {}) {
+    // Validate before connecting: a bad --from/--to must not cost a round trip
+    // or take the lock. Defaults come from the already-validated config.
+    if (options.from !== undefined && !isCollectionName(options.from)) {
+      throw new ConfigInvalidError('Invalid source collection name', { from: options.from });
+    }
+    if (options.to !== undefined && !isCollectionName(options.to)) {
+      throw new ConfigInvalidError('Invalid target collection name', { to: options.to });
+    }
     const config = await this.#ensureConfig();
     await this.connect();
     const lock = new MigrationLock(this.#requireDb(), config.lockCollection, config.lockTTLSeconds);

@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { describe, it, mock } = require('node:test');
-const { LOCK_ID, MigrationLock, runWithLock } = require('../../src/core/lock.js');
+const { LOCK_ID, MigrationLock, runWithLock, toLockInfo } = require('../../src/core/lock.js');
 const { LockAlreadyHeldError, LockReleaseFailedError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 
@@ -48,6 +48,47 @@ describe('MigrationLock.acquire', () => {
     await assert.rejects(lock.acquire(), LockAlreadyHeldError);
   });
 
+  it('should not leak the owner token in the LockAlreadyHeldError context', async () => {
+    const { db, collection } = makeDb();
+    // eslint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
+    collection.updateOne.mock.mockImplementationOnce(() => Promise.reject({ code: 11000 }));
+    const lockedAt = new Date();
+    collection.findOne.mock.mockImplementationOnce(() =>
+      Promise.resolve({
+        _id: LOCK_ID,
+        owner: 'secret-owner-token',
+        lockedAt,
+        pid: 999,
+        host: 'ci-runner',
+        executedBy: 'deploy',
+      }),
+    );
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await assert.rejects(lock.acquire(), (error) => {
+      assert.deepStrictEqual(error.context.holder, {
+        lockedAt,
+        pid: 999,
+        host: 'ci-runner',
+        executedBy: 'deploy',
+      });
+      assert.ok(!JSON.stringify(error.context).includes('secret-owner-token'));
+      return true;
+    });
+  });
+
+  it('should not leak the owner token when losing the stale-reclaim race', async () => {
+    const { db, collection } = makeDb();
+    collection.findOne.mock.mockImplementationOnce(() =>
+      Promise.resolve({ _id: LOCK_ID, owner: 'other-writer', pid: 7 }),
+    );
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await assert.rejects(lock.acquire(), (error) => {
+      assert.ok(!JSON.stringify(error.context).includes('other-writer'));
+      assert.strictEqual(error.context.holder.pid, 7);
+      return true;
+    });
+  });
+
   it('should rethrow non-duplicate-key errors', async () => {
     const { db, collection } = makeDb();
     collection.updateOne.mock.mockImplementationOnce(() =>
@@ -72,6 +113,28 @@ describe('MigrationLock.acquire', () => {
     collection.findOne.mock.mockImplementationOnce(() => Promise.resolve(null));
     const lock = new MigrationLock(db, '_migronaut_locks', 60);
     await assert.rejects(lock.acquire(), LockAlreadyHeldError);
+  });
+});
+
+describe('toLockInfo', () => {
+  it('should strip the owner token and _id from a lock document', () => {
+    const lockedAt = new Date();
+    assert.deepStrictEqual(
+      toLockInfo({
+        _id: LOCK_ID,
+        owner: 'secret-owner-token',
+        lockedAt,
+        pid: 42,
+        host: 'box',
+        executedBy: 'alex',
+      }),
+      { lockedAt, pid: 42, host: 'box', executedBy: 'alex' },
+    );
+  });
+
+  it('should return null for a missing document', () => {
+    assert.strictEqual(toLockInfo(null), null);
+    assert.strictEqual(toLockInfo(undefined), null);
   });
 });
 

@@ -25,6 +25,21 @@ const isNonEmptyString = (value) => typeof value === 'string' && value.length > 
 const isBoolean = (value) => typeof value === 'boolean';
 const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
 const isExtension = (value) => value === 'ts' || value === 'js';
+
+/**
+ * Collection names we accept for the changelog/lock collections and
+ * `import --from/--to`: non-empty, no `$` or NUL (invalid server-side), and
+ * outside the reserved `system.` namespace — so a flag can never point a
+ * read or write at a system collection.
+ */
+function isCollectionName(value) {
+  return (
+    isNonEmptyString(value) &&
+    !value.includes('$') &&
+    !value.includes('\0') &&
+    !value.startsWith('system.')
+  );
+}
 function isStringList(value) {
   if (!Array.isArray(value) || value.length === 0) return false;
   for (const item of value) {
@@ -43,8 +58,16 @@ const CONFIG_KEYS = [
   { path: 'uri', check: isNonEmptyString, message: 'uri is required' },
   { path: 'dbName', check: isNonEmptyString, message: 'dbName is required' },
   { path: 'migrationsDir', check: isNonEmptyString, message: 'must be a non-empty string' },
-  { path: 'migrationsCollection', check: isNonEmptyString, message: 'must be a non-empty string' },
-  { path: 'lockCollection', check: isNonEmptyString, message: 'must be a non-empty string' },
+  {
+    path: 'migrationsCollection',
+    check: isCollectionName,
+    message: "must be a valid collection name (no '$'/NUL, not system.*)",
+  },
+  {
+    path: 'lockCollection',
+    check: isCollectionName,
+    message: "must be a valid collection name (no '$'/NUL, not system.*)",
+  },
   { path: 'lockTTLSeconds', check: isPositiveInteger, message: 'must be a positive integer' },
   { path: 'strict', check: isBoolean, message: 'must be a boolean' },
   { path: 'useTransaction', check: isBoolean, message: 'must be a boolean' },
@@ -83,15 +106,35 @@ function validateConfig(config, options = {}) {
   return issues;
 }
 
-/** Parse a string into a boolean. 'true'/'1'/'yes' (case-insensitive) → true */
-function parseBoolean(value) {
+const TRUE_BOOLEAN_STRINGS = new Set(['true', '1', 'yes']);
+const FALSE_BOOLEAN_STRINGS = new Set(['false', '0', 'no']);
+
+/**
+ * Parse a string into a boolean. Unrecognized values throw instead of silently
+ * becoming false — a typo like MIGRONAUT_STRICT=on must never disable a safety
+ * setting (fail closed).
+ */
+function parseBoolean(value, name) {
   const normalized = value.trim().toLowerCase();
-  return normalized === 'true' || normalized === '1' || normalized === 'yes';
+  if (TRUE_BOOLEAN_STRINGS.has(normalized)) return true;
+  if (FALSE_BOOLEAN_STRINGS.has(normalized)) return false;
+  throw new ConfigInvalidError(`${name} must be 'true'/'1'/'yes' or 'false'/'0'/'no'`, {
+    name,
+    value,
+  });
 }
+
+/**
+ * Keys never copied from parsed input: JSON.parse creates `__proto__` as an own
+ * enumerable property, so merging it would poison the prototype of the merged
+ * config and let a JSON config file override values it never declared.
+ */
+const UNSAFE_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /** Copy only the defined keys from `source` onto `target`, mutating and returning target */
 function mergeDefined(target, source) {
   for (const key of Object.keys(source)) {
+    if (UNSAFE_MERGE_KEYS.has(key)) continue;
     const value = source[key];
     if (value !== undefined) {
       target[key] = value;
@@ -116,12 +159,17 @@ function readEnvConfig() {
     result.lockCollection = env.MIGRONAUT_LOCK_COLLECTION;
   }
   if (env.MIGRONAUT_LOCK_TTL !== undefined) result.lockTTLSeconds = Number(env.MIGRONAUT_LOCK_TTL);
-  if (env.MIGRONAUT_STRICT !== undefined) result.strict = parseBoolean(env.MIGRONAUT_STRICT);
+  if (env.MIGRONAUT_STRICT !== undefined) {
+    result.strict = parseBoolean(env.MIGRONAUT_STRICT, 'MIGRONAUT_STRICT');
+  }
   if (env.MIGRONAUT_USE_TRANSACTION !== undefined) {
-    result.useTransaction = parseBoolean(env.MIGRONAUT_USE_TRANSACTION);
+    result.useTransaction = parseBoolean(
+      env.MIGRONAUT_USE_TRANSACTION,
+      'MIGRONAUT_USE_TRANSACTION',
+    );
   }
   if (env.MIGRONAUT_SEQUENTIAL !== undefined) {
-    result.sequential = parseBoolean(env.MIGRONAUT_SEQUENTIAL);
+    result.sequential = parseBoolean(env.MIGRONAUT_SEQUENTIAL, 'MIGRONAUT_SEQUENTIAL');
   }
   if (env.MIGRONAUT_CREATE_EXTENSION === 'ts' || env.MIGRONAUT_CREATE_EXTENSION === 'js') {
     result.createExtension = env.MIGRONAUT_CREATE_EXTENSION;
@@ -238,4 +286,4 @@ async function loadConfig(options = {}) {
   return config;
 }
 
-module.exports = { DEFAULT_CONFIG, loadConfig, validateConfig };
+module.exports = { DEFAULT_CONFIG, isCollectionName, loadConfig, validateConfig };

@@ -80,17 +80,38 @@ export async function down({ db }) {
 `;
 }
 
+/** Extensions a custom `--template` file may have — anything else is refused */
+const TEMPLATE_EXTENSIONS = ['.ts', '.js', '.cjs', '.mjs'];
+
+/** Size cap for a custom template — a migration scaffold is never this big */
+const MAX_TEMPLATE_BYTES = 1024 * 1024;
+
 /** Resolve template file contents — a custom template if provided, else the built-in */
 async function resolveTemplateContent(templatePath, js) {
   if (templatePath) {
+    const ext = path.extname(templatePath);
+    if (!TEMPLATE_EXTENSIONS.includes(ext)) {
+      throw new ConfigInvalidError(
+        `Template file must have one of the extensions: ${TEMPLATE_EXTENSIONS.join(', ')}`,
+        { templatePath },
+      );
+    }
+    let stats;
     try {
-      return await fs.readFile(templatePath, 'utf8');
+      stats = await fs.stat(templatePath);
     } catch (error) {
       if (error.code === 'ENOENT') {
         throw new MigrationFileNotFoundError('Template file not found', { templatePath });
       }
       throw error;
     }
+    if (stats.size > MAX_TEMPLATE_BYTES) {
+      throw new ConfigInvalidError('Template file is too large (max 1 MB)', {
+        templatePath,
+        size: stats.size,
+      });
+    }
+    return fs.readFile(templatePath, 'utf8');
   }
   return js ? defaultTemplateJs() : defaultTemplateTs();
 }
@@ -112,10 +133,33 @@ async function createMigrationFile(options) {
 
 // ─── Config File Creation ───────────────────────────────────────────────────────
 
+/**
+ * Mask the password in a connection URI (`user:secret@` → `user:****@`) so a
+ * generated config file never carries plaintext credentials. Regex-based, not
+ * `new URL()` — multi-host mongodb URIs (`mongodb://h1:27017,h2:27017/db`) fail
+ * WHATWG URL parsing. `hasCredentials` is true whenever a userinfo part exists;
+ * `masked` only when a non-empty password was actually replaced.
+ */
+function maskUriCredentials(uri) {
+  const match = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^@/]+)@(.*)$/.exec(uri);
+  if (!match) {
+    return { uri, hasCredentials: false, masked: false };
+  }
+  const [, scheme, userinfo, rest] = match;
+  const colon = userinfo.indexOf(':');
+  if (colon === -1 || colon === userinfo.length - 1) {
+    return { uri, hasCredentials: true, masked: false };
+  }
+  const username = userinfo.slice(0, colon);
+  return { uri: `${scheme}${username}:****@${rest}`, hasCredentials: true, masked: true };
+}
+
 /** Merge caller-supplied config values over the built-in defaults */
 function configFields(values) {
+  const { uri, masked } = maskUriCredentials(values.uri ?? 'mongodb://localhost:27017');
   return {
-    uri: values.uri ?? 'mongodb://localhost:27017',
+    uri,
+    uriMasked: masked,
     dbName: values.dbName ?? 'myapp',
     migrationsDir: values.migrationsDir ?? './migrations',
   };
@@ -128,14 +172,21 @@ function configFields(values) {
  * file's own language (a `.ts` config defaults to TS migrations, `.js` to JS).
  */
 function configBody(values, createExtension) {
-  const { uri, dbName, migrationsDir } = configFields(values);
+  const { uri, uriMasked, dbName, migrationsDir } = configFields(values);
+  // User values go through JSON.stringify — never raw interpolation — so a
+  // quote/backslash/newline in a URI or db name cannot break out of the string
+  // literal and inject code into the generated (and later executed) config.
+  const maskNote = uriMasked
+    ? '\n  // NOTE: the password below was masked at generation time — provide the real\n' +
+      '  // value via MIGRONAUT_URI or a gitignored .env instead of committing it here.'
+    : '';
   return `  // ── Connection ──────────────────────────────────────────────
-  // To load these from a secret manager instead, run: migronaut init --secret-provider
-  uri: '${uri}',
-  dbName: '${dbName}',
+  // To load these from a secret manager instead, run: migronaut init --secret-provider${maskNote}
+  uri: ${JSON.stringify(uri)},
+  dbName: ${JSON.stringify(dbName)},
 
   // ── Migration files ─────────────────────────────────────────
-  migrationsDir: '${migrationsDir}',
+  migrationsDir: ${JSON.stringify(migrationsDir)},
   // Extensions scanned when discovering migrations.
   fileExtensions: ['.ts', '.js'],
   // File type \`migronaut create\` generates by default ('ts' | 'js').
@@ -260,7 +311,7 @@ const SECRET_PROVIDER_GUIDE = `/**
  */
 function secretConfigOptions(createExtension, migrationsDir) {
   return `    // ── Migration files ─────────────────────────────────────
-    migrationsDir: '${migrationsDir}',
+    migrationsDir: ${JSON.stringify(migrationsDir)},
     fileExtensions: ['.ts', '.js'],
     createExtension: '${createExtension}',
     sequential: false,
@@ -423,6 +474,7 @@ module.exports = {
   defaultTemplateJs,
   resolveTemplateContent,
   createMigrationFile,
+  maskUriCredentials,
   defaultConfigTs,
   defaultConfigJs,
   defaultConfigJson,

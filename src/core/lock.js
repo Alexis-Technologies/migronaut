@@ -11,6 +11,16 @@ function isDuplicateKeyError(error) {
 }
 
 /**
+ * Map a raw lock document to the public LockInfo shape. Strips internal fields —
+ * most importantly the `owner` token, which proves lock ownership and must never
+ * leak into error context or CLI output.
+ */
+function toLockInfo(doc) {
+  if (!doc) return null;
+  return { lockedAt: doc.lockedAt, pid: doc.pid, host: doc.host, executedBy: doc.executedBy };
+}
+
+/**
  * MongoDB-native distributed lock backed by a single document, using an atomic
  * upsert as a test-and-set. A lock older than `ttlSeconds` is considered stale
  * and may be reclaimed.
@@ -61,7 +71,7 @@ class MigrationLock {
       if (isDuplicateKeyError(error)) {
         const holder = await collection.findOne({ _id: LOCK_ID });
         throw new LockAlreadyHeldError('Migration lock is already held', {
-          holder: holder ?? undefined,
+          holder: toLockInfo(holder) ?? undefined,
         });
       }
       throw error;
@@ -74,7 +84,7 @@ class MigrationLock {
     const current = await collection.findOne({ _id: LOCK_ID });
     if (!current || current.owner !== owner) {
       throw new LockAlreadyHeldError('Migration lock is already held', {
-        holder: current ?? undefined,
+        holder: toLockInfo(current) ?? undefined,
       });
     }
     this.#owner = owner;
@@ -173,4 +183,4 @@ async function runWithLock(lock, options, fn) {
   }
 }
 
-module.exports = { LOCK_ID, MigrationLock, runWithLock };
+module.exports = { LOCK_ID, MigrationLock, runWithLock, toLockInfo };

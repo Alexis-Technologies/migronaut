@@ -3,7 +3,12 @@ const { tmpdir } = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { afterEach, beforeEach, describe, it } = require('node:test');
-const { DEFAULT_CONFIG, loadConfig, validateConfig } = require('../../src/core/config.js');
+const {
+  DEFAULT_CONFIG,
+  isCollectionName,
+  loadConfig,
+  validateConfig,
+} = require('../../src/core/config.js');
 const { ConfigInvalidError } = require('../../src/errors/index.js');
 
 /** A fully valid config for validateConfig tests — override per case */
@@ -183,6 +188,74 @@ describe('loadConfig', () => {
     assert.strictEqual(config.sequential, false);
   });
 
+  it('should accept every documented boolean spelling', async () => {
+    for (const [value, expected] of [
+      ['true', true],
+      ['TRUE', true],
+      ['1', true],
+      ['yes', true],
+      [' Yes ', true],
+      ['false', false],
+      ['0', false],
+      ['no', false],
+    ]) {
+      process.env.MIGRONAUT_STRICT = value;
+      const config = await loadConfig({
+        cwd: tmp,
+        flags: { uri: 'mongodb://x:27017', dbName: 'x' },
+      });
+      assert.strictEqual(config.strict, expected, `MIGRONAUT_STRICT=${value}`);
+    }
+  });
+
+  it('should reject an unrecognized boolean env var instead of silently disabling it', async () => {
+    // Fail closed: `MIGRONAUT_STRICT=on` must never quietly turn checksum
+    // enforcement off.
+    process.env.MIGRONAUT_STRICT = 'on';
+    await assert.rejects(
+      loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } }),
+      (error) => {
+        assert.ok(error instanceof ConfigInvalidError);
+        assert.strictEqual(error.context.name, 'MIGRONAUT_STRICT');
+        assert.strictEqual(error.context.value, 'on');
+        return true;
+      },
+    );
+  });
+
+  it('should reject unrecognized values for every boolean env var', async () => {
+    for (const key of ['MIGRONAUT_STRICT', 'MIGRONAUT_USE_TRANSACTION', 'MIGRONAUT_SEQUENTIAL']) {
+      process.env[key] = 'maybe';
+      await assert.rejects(
+        loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } }),
+        ConfigInvalidError,
+      );
+      delete process.env[key];
+    }
+  });
+
+  it('should not let a JSON config poison the prototype via __proto__', async () => {
+    writeFileSync(
+      path.join(tmp, 'migronaut.config.json'),
+      JSON.stringify({ __proto__: { uri: 'mongodb://attacker:27017' }, dbName: 'shop' }),
+    );
+    const config = await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://legit:27017' } });
+    assert.strictEqual(config.uri, 'mongodb://legit:27017');
+    assert.strictEqual(config.dbName, 'shop');
+    assert.strictEqual(Object.getPrototypeOf(config), Object.prototype);
+    assert.strictEqual({}.uri, undefined);
+  });
+
+  it('should ignore constructor/prototype keys from a JSON config', async () => {
+    writeFileSync(
+      path.join(tmp, 'migronaut.config.json'),
+      '{"constructor": "boom", "prototype": "boom", "dbName": "shop"}',
+    );
+    const config = await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://legit:27017' } });
+    assert.strictEqual(config.dbName, 'shop');
+    assert.strictEqual(typeof config.constructor, 'function');
+  });
+
   it('should resolve a synchronous function (factory) config file', async () => {
     writeFileSync(
       path.join(tmp, 'migronaut.config.js'),
@@ -237,6 +310,20 @@ describe('loadConfig', () => {
   });
 });
 
+describe('isCollectionName', () => {
+  it('should accept ordinary collection names', () => {
+    for (const name of ['changelog', '_migronaut_migrations', 'a.b', 'Mixed-Case_1']) {
+      assert.strictEqual(isCollectionName(name), true, name);
+    }
+  });
+
+  it('should reject empty, $-bearing, NUL-bearing and system.* names', () => {
+    for (const name of ['', 'a$b', 'a\0b', 'system.users', 'system.', null, 42, undefined]) {
+      assert.strictEqual(isCollectionName(name), false, String(name));
+    }
+  });
+});
+
 describe('validateConfig', () => {
   it('should return no issues for a valid config', () => {
     assert.deepStrictEqual(validateConfig(validConfig()), []);
@@ -277,6 +364,19 @@ describe('validateConfig', () => {
   it('should report a non-boolean strict', () => {
     const issues = validateConfig(validConfig({ strict: 'yes' }));
     assert.deepStrictEqual(issues, [{ path: 'strict', message: 'must be a boolean' }]);
+  });
+
+  it('should reject bookkeeping collections in the system namespace', () => {
+    for (const key of ['migrationsCollection', 'lockCollection']) {
+      const issues = validateConfig(validConfig({ [key]: 'system.users' }));
+      assert.strictEqual(issues.length, 1);
+      assert.strictEqual(issues[0].path, key);
+    }
+  });
+
+  it('should reject collection names containing $ or NUL', () => {
+    assert.strictEqual(validateConfig(validConfig({ lockCollection: 'a$b' })).length, 1);
+    assert.strictEqual(validateConfig(validConfig({ lockCollection: 'a\0b' })).length, 1);
   });
 
   it('should report an empty templatePath but allow an absent one', () => {
