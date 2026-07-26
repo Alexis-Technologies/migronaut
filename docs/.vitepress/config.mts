@@ -160,12 +160,14 @@ export default defineConfig({
             { text: 'migronaut status / list', link: '/commands/status' },
             { text: 'migronaut create / init', link: '/commands/create' },
             { text: 'migronaut dry-run', link: '/commands/dry-run' },
+            { text: 'migronaut audit', link: '/commands/audit' },
           ],
         },
         {
           text: 'Operations',
           items: [
             { text: 'migronaut import', link: '/commands/import' },
+            { text: 'migronaut lock', link: '/commands/lock' },
             { text: 'migronaut unlock', link: '/commands/unlock' },
           ],
         },

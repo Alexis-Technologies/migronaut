@@ -67,6 +67,38 @@ loader is registered. `migronaut` runs under your Node and does not bundle a loa
 See [Running TypeScript migrations](/guide/writing-migrations#running-typescript-migrations) for the
 full breakdown.
 
+## "MODULE_TYPELESS_PACKAGE_JSON" warning on every command
+
+```
+(node:48213) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///app/migronaut.config.js
+is not specified and it doesn't parse as CommonJS. Reparsing as ES module because
+export syntax was detected.
+```
+
+**Why:** Node's, not migronaut's. Your config or migration file uses ESM syntax (`export default`,
+`export async function up`), but the nearest `package.json` has no `"type"` field. Node has to parse
+the file twice to find out which module system it is, and warns each time. migronaut loads these files
+with dynamic `import()` — the one mechanism that handles `.ts`, `.mjs`, `.cjs` and `.js` uniformly —
+so the file reaches Node exactly as you wrote it.
+
+It is only a warning: nothing is broken, and every command still works.
+
+**Fix:** make the module type explicit, whichever suits the project:
+
+- **Declare it once** — add `"type": "module"` to your `package.json` if the project is ESM.
+- **Rename the file** — `migronaut.config.mjs` (or `.mts`) is unambiguously ESM, `.cjs` unambiguously
+  CommonJS. Both load fine.
+- **Use CommonJS syntax** in a `"type"`-less project:
+  ```js
+  // migronaut.config.js
+  module.exports = { uri: 'mongodb://localhost:27017', dbName: 'my_app' };
+  ```
+  In a `.ts` config, `import type { MigronautConfig } from '@alexify/migronaut'` disappears during
+  type-stripping, so it can be paired with `module.exports` and stays warning-free.
+
+`migronaut init` and `migronaut create` already generate whichever syntax matches the `"type"` of your
+nearest `package.json`, so files they create never trigger this.
+
 ## "Transaction numbers are only allowed on a replica set"
 
 **Why:** you set `useTransaction` but your MongoDB is a standalone server. Transactions require a

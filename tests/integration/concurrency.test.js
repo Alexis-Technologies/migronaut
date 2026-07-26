@@ -114,16 +114,32 @@ function startCli(args) {
   return { child, exited };
 }
 
-/** Resolve once a lock document exists — i.e. the run is inside its lock */
-async function waitForLock(timeoutMs = 20_000) {
+/** Poll `query` on `collection` until it matches, or fail with `label` */
+async function waitForDoc(collection, query, label, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const lock = await mongo.db.collection(LOCK_COLLECTION).findOne({ _id: LOCK_ID });
-    if (lock) return lock;
+    const doc = await mongo.db.collection(collection).findOne(query);
+    if (doc) return doc;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error('timed out waiting for the lock to be acquired');
+  throw new Error(`timed out waiting for ${label}`);
 }
+
+/** Resolve once a lock document exists — i.e. the run is inside its lock */
+const waitForLock = () => waitForDoc(LOCK_COLLECTION, { _id: LOCK_ID }, 'the lock to be acquired');
+
+/**
+ * Resolve once the blocking migration's marker lands — i.e. `up()` is genuinely
+ * executing.
+ *
+ * Holding the lock is not the same thing: migronaut checks for an abort *before*
+ * each migration, so a signal that arrives between acquiring the lock and
+ * starting the first file correctly stops the run with nothing applied. Tests
+ * about interrupting a migration in flight have to wait for the migration, not
+ * the lock, or they race that window.
+ */
+const waitForMigrationStarted = (collection, value) =>
+  waitForDoc(collection, { marker: value }, 'the migration to start');
 
 /** A migration that blocks until a sentinel document appears */
 function blockingMigration(collection, value) {
@@ -210,7 +226,10 @@ describe('crash and signal handling (integration)', () => {
     project.write('0002-b.ts', insertMigration('things', 'b'));
 
     const first = startCli(['up']);
-    await waitForLock();
+    // Wait for the migration itself, not just the lock: SIGTERM before the first
+    // file starts is a legitimate zero-migration abort, and asserting on
+    // `0001-slow.ts` would then race that window.
+    await waitForMigrationStarted('things', 'slow');
     first.child.kill('SIGTERM');
     // The in-flight migration is allowed to finish, so let it.
     await release();

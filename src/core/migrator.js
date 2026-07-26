@@ -427,10 +427,6 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * `--to` names a point in the sequence, so it cannot be combined with the
-   * other ways of choosing targets.
-   */
-  /**
    * Keep only the pending migrations up to and including `to`.
    *
    * `to` must name a migration that exists; it may already be applied (then
@@ -450,6 +446,10 @@ class MigratorKit extends EventEmitter {
     return kept;
   }
 
+  /**
+   * `--to` names a point in the sequence, so it cannot be combined with the
+   * other ways of choosing targets.
+   */
   #assertToValid(to, filename, options = {}) {
     if (to === undefined) return;
     this.#assertFilename(to);
