@@ -16,14 +16,19 @@ class Changelog {
     return db.collection(this.#collectionName);
   }
 
-  /** Create the unique index on `name`. Safe to call repeatedly */
+  /**
+   * Create the indexes the read paths actually use. Safe to call repeatedly.
+   *
+   * Beyond the unique `name` index: `{status, batch}` serves the applied-set
+   * and highest-batch lookups (the latter would otherwise be a blocking
+   * in-memory sort, capped at 32 MB), and `{batch}` serves rollback by batch.
+   */
   async ensureIndexes(db) {
-    await this.#coll(db).createIndex({ name: 1 }, { unique: true });
-  }
-
-  /** Count records currently in the changelog collection */
-  async count(db) {
-    return this.#coll(db).countDocuments();
+    await this.#coll(db).createIndexes([
+      { key: { name: 1 }, name: 'name_unique', unique: true },
+      { key: { status: 1, batch: -1 }, name: 'status_batch' },
+      { key: { batch: 1 }, name: 'batch' },
+    ]);
   }
 
   /**
@@ -57,14 +62,35 @@ class Changelog {
     return this.#coll(db).findOne({ name });
   }
 
+  /** Return every currently-applied record, sorted by name ascending */
+  async getApplied(db) {
+    return this.#coll(db).find({ status: 'applied' }).sort({ name: 1 }).toArray();
+  }
+
   /** Return the highest batch number among currently-applied migrations, or null */
   async getLastBatch(db) {
     const docs = await this.#coll(db)
       .find({ status: 'applied' })
       .sort({ batch: -1 })
       .limit(1)
+      .project({ batch: 1, _id: 0 })
       .toArray();
     return docs[0]?.batch ?? null;
+  }
+
+  /**
+   * Highest batch number ever used, including reverted records — the basis for
+   * the next batch, so numbers stay monotonic across rollbacks. An indexed
+   * sort+limit, not a full scan.
+   */
+  async getMaxBatch(db) {
+    const docs = await this.#coll(db)
+      .find({})
+      .sort({ batch: -1 })
+      .limit(1)
+      .project({ batch: 1, _id: 0 })
+      .toArray();
+    return docs[0]?.batch ?? 0;
   }
 
   /** Return all records belonging to a given batch */

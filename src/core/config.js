@@ -102,6 +102,7 @@ const CONFIG_KEYS = [
     message: 'must be a non-empty string or false',
     optional: true,
   },
+  { path: 'ensureIndexes', check: isBoolean, message: 'must be a boolean', optional: true },
 ];
 
 /**
@@ -232,7 +233,7 @@ async function discoverConfigFile(cwd) {
  * lets users fetch values from a secret manager. A factory that throws is
  * surfaced as a ConfigInvalidError. JSON configs are always objects.
  */
-async function loadConfigFile(filepath) {
+async function loadConfigFile(filepath, lenient = false) {
   if (filepath.endsWith('.json')) {
     const raw = await fs.readFile(filepath, 'utf8');
     return JSON.parse(raw);
@@ -244,6 +245,12 @@ async function loadConfigFile(filepath) {
     try {
       return await exported();
     } catch (error) {
+      if (lenient) {
+        // The caller does not need the connection (e.g. `create`), so a failing
+        // secret-manager round trip degrades to "no values from this file"
+        // rather than stopping an otherwise offline command.
+        return null;
+      }
       throw new ConfigInvalidError(
         'Config factory function failed to resolve',
         { path: filepath, cause: error instanceof Error ? error.message : String(error) },
@@ -257,6 +264,11 @@ async function loadConfigFile(filepath) {
 /**
  * Resolve the final MigronautConfig by merging, in priority order:
  * CLI flags > environment variables > config file > defaults.
+ *
+ * With `lenient: true`, a config file whose exported factory throws is skipped
+ * with a warning instead of aborting — for commands that never open a
+ * connection (`create`), which otherwise fail because a secret manager is
+ * unreachable.
  *
  * Throws ConfigInvalidError when the merged result fails validation.
  */
@@ -279,8 +291,16 @@ async function loadConfig(options = {}) {
     if (!(await pathExists(configFilePath))) {
       throw new ConfigInvalidError('Config file not found', { path: configFilePath });
     }
-    const fileConfig = await loadConfigFile(configFilePath);
-    mergeDefined(merged, fileConfig);
+    const fileConfig = await loadConfigFile(configFilePath, options.lenient ?? false);
+    // null means a lenient run whose factory failed — nothing usable from the
+    // file, so fall through to env vars, flags and defaults.
+    if (fileConfig === null) {
+      resolveLogger(options.flags?.logger).warn(
+        `⚠ Could not resolve ${path.basename(configFilePath)} — continuing without it`,
+      );
+    } else {
+      mergeDefined(merged, fileConfig);
+    }
   }
 
   mergeDefined(merged, readEnvConfig());

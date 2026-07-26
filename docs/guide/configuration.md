@@ -94,6 +94,7 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `environment` | `string` | `NODE_ENV` → `'production'` | Value stamped on the `environment` field of changelog records |
 | `onLockLost` | `'abort' \| 'warn'` | `'abort'` | What to do if the lock is lost mid-run |
 | `envFile` | `string \| false` | `'.env'` | `.env` file to load, or `false` to load none |
+| `ensureIndexes` | `boolean` | `true` | Create the changelog indexes on first connect |
 | `mongoose` | `Mongoose` | — | Mongoose instance, if your migrations use it |
 | `hooks` | `MigrationHooks` | — | [Lifecycle hooks](/guide/hooks) |
 | `logger` | `MigronautLogger \| null` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` silences all output |

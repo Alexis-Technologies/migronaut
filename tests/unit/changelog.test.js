@@ -5,7 +5,7 @@ const { makeRecord } = require('../helpers/records.js');
 
 function makeDb() {
   const collection = {
-    createIndex: mock.fn(() => Promise.resolve('name_1')),
+    createIndexes: mock.fn(() => Promise.resolve(['name_unique'])),
     replaceOne: mock.fn(() => Promise.resolve({})),
     updateOne: mock.fn(() => Promise.resolve({})),
     findOne: mock.fn(() => Promise.resolve(null)),
@@ -15,12 +15,16 @@ function makeDb() {
 }
 
 describe('Changelog (mocked DB)', () => {
-  it('ensureIndexes should create a unique index on name', async () => {
+  it('ensureIndexes should create the indexes the read paths use', async () => {
     const { db, collection } = makeDb();
     await new Changelog('_migronaut_migrations').ensureIndexes(db);
-    assert.deepStrictEqual(collection.createIndex.mock.calls[0].arguments, [
-      { name: 1 },
-      { unique: true },
+    // One round trip for all three, not one call each.
+    assert.strictEqual(collection.createIndexes.mock.callCount(), 1);
+    const [specs] = collection.createIndexes.mock.calls[0].arguments;
+    assert.deepStrictEqual(specs, [
+      { key: { name: 1 }, name: 'name_unique', unique: true },
+      { key: { status: 1, batch: -1 }, name: 'status_batch' },
+      { key: { batch: 1 }, name: 'batch' },
     ]);
   });
 

@@ -1,7 +1,9 @@
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { MongoClient } = require('mongodb');
+// `mongodb` is required lazily inside connect(): loading the driver costs ~60ms
+// and pulls in ~150 modules, which `--help`, `--version`, `init` and `create`
+// have no use for.
 const {
   ChecksumMismatchError,
   ConfigInvalidError,
@@ -16,6 +18,7 @@ const {
   RunAbortedError,
 } = require('../errors/index.js');
 const { computeChecksum } = require('../utils/checksum.js');
+const { mapLimit } = require('../utils/concurrency.js');
 const { loadMigrationFile } = require('../utils/loader.js');
 const { resolveLogger } = require('../utils/logger.js');
 const {
@@ -33,6 +36,12 @@ const { runMigration } = require('./runner.js');
 
 /** Default source collection name used by migrate-mongo */
 const MIGRATE_MONGO_COLLECTION = 'changelog';
+
+/** Simultaneous file reads — keeps a large migrations dir clear of EMFILE */
+const FS_CONCURRENCY = 16;
+
+/** Simultaneous changelog writes during an import */
+const WRITE_CONCURRENCY = 8;
 
 /**
  * The main orchestration class. Every CLI command delegates here. Holds a
@@ -52,6 +61,10 @@ class MigratorKit {
   #stopRequested;
   /** Correlation id for the run in flight — ties logs, lock and changelog together */
   #runId;
+  /** Whether changelog indexes have already been ensured on this instance */
+  #indexesEnsured = false;
+  /** Memoized resolved logger — resolveLogger allocates on every call otherwise */
+  #resolvedLogger;
 
   constructor(config = {}, options = {}) {
     this.#partialConfig = config;
@@ -78,11 +91,12 @@ class MigratorKit {
   }
 
   /** Resolve and cache the full configuration */
-  async #ensureConfig(requireDb = true) {
+  async #ensureConfig(requireDb = true, lenient = false) {
     if (!this.#config) {
       this.#config = await loadConfig({
         flags: this.#partialConfig,
         requireDb,
+        ...(lenient ? { lenient: true } : {}),
         ...(this.#configPath ? { configPath: this.#configPath } : {}),
       });
     }
@@ -90,7 +104,10 @@ class MigratorKit {
   }
 
   get #logger() {
-    return resolveLogger(this.#config?.logger);
+    // Memoized: with no user logger, resolveLogger builds a fresh logger (and
+    // two color palettes) on every read — and this is read per log line.
+    this.#resolvedLogger ??= resolveLogger(this.#config?.logger);
+    return this.#resolvedLogger;
   }
 
   /**
@@ -120,11 +137,18 @@ class MigratorKit {
       return;
     }
     try {
+      const { MongoClient } = require('mongodb');
       this.#client = new MongoClient(config.uri);
       await this.#client.connect();
       this.#db = this.#client.db(config.dbName);
       this.#changelog = new Changelog(config.migrationsCollection);
-      await this.#changelog.ensureIndexes(this.#db);
+      // Once per instance, not once per connect: re-issuing createIndexes on
+      // every command is a wasted round trip. `ensureIndexes: false` skips it
+      // entirely, for deployments where the app user cannot create indexes.
+      if (!this.#indexesEnsured && (config.ensureIndexes ?? true)) {
+        await this.#changelog.ensureIndexes(this.#db);
+        this.#indexesEnsured = true;
+      }
     } catch (error) {
       // Close and forget the half-built client. Leaving it assigned would leak
       // its connection pool, since a retry of connect() overwrites the field.
@@ -321,12 +345,7 @@ class MigratorKit {
 
   /** Compute the next batch number (monotonic across the full history) */
   async #nextBatch() {
-    const records = await this.#requireChangelog().getAll(this.#requireDb());
-    let maxBatch = 0;
-    for (const record of records) {
-      if (record.batch > maxBatch) maxBatch = record.batch;
-    }
-    return maxBatch + 1;
+    return (await this.#requireChangelog().getMaxBatch(this.#requireDb())) + 1;
   }
 
   /**
@@ -634,7 +653,7 @@ class MigratorKit {
       toRevert = [record];
     } else if (options.steps !== undefined) {
       // Revert the last N applied migrations, newest first, ignoring batches.
-      toRevert = this.#selectLastApplied(await changelog.getAll(db), options.steps);
+      toRevert = this.#selectLastApplied(await changelog.getApplied(db), options.steps);
       preserveOrder = true;
     } else {
       const batch = options.batch ?? (await changelog.getLastBatch(db));
@@ -785,11 +804,7 @@ class MigratorKit {
 
     let target = filename;
     if (!target) {
-      const records = await changelog.getAll(this.#requireDb());
-      const applied = [];
-      for (const record of records) {
-        if (record.status === 'applied') applied.push(record);
-      }
+      const applied = await changelog.getApplied(this.#requireDb());
       if (applied.length === 0) {
         this.#logger.info('Nothing to redo');
         return [];
@@ -822,7 +837,9 @@ class MigratorKit {
     const changelog = this.#requireChangelog();
     const logger = this.#logger;
 
-    const records = await changelog.getAll(db);
+    // A preview only ever reports pending files or applied records, so the
+    // reverted history is dead weight here.
+    const records = await changelog.getApplied(db);
     const recordByName = new Map();
     for (const record of records) {
       recordByName.set(record.name, record);
@@ -830,10 +847,7 @@ class MigratorKit {
 
     let names;
     if (direction === 'up') {
-      const applied = new Set();
-      for (const record of records) {
-        if (record.status === 'applied') applied.add(record.name);
-      }
+      const applied = new Set(recordByName.keys());
       if (filename) {
         // Same preflight as a real `up`, so a preview never invents a pending
         // row for a file that does not exist.
@@ -873,11 +887,9 @@ class MigratorKit {
       }
     }
 
-    const rowPromises = [];
-    for (const name of names) {
-      rowPromises.push(this.#buildStatusRow(name, recordByName.get(name)));
-    }
-    const rows = await Promise.all(rowPromises);
+    const rows = await mapLimit(names, FS_CONCURRENCY, (name) =>
+      this.#buildStatusRow(name, recordByName.get(name)),
+    );
     logger.info(`◎ Dry-run  Would ${direction === 'up' ? 'apply' : 'revert'}: ${rows.length}`);
     return rows;
   }
@@ -893,15 +905,18 @@ class MigratorKit {
     const names = new Set(recordByName.keys());
     for (const file of await this.#listMigrationFiles()) names.add(file);
     const sortedNames = [...names].sort();
-    const rowPromises = [];
-    for (const name of sortedNames) {
-      rowPromises.push(this.#buildStatusRow(name, recordByName.get(name)));
-    }
-    return Promise.all(rowPromises);
+    // Each row may read and hash a file; unbounded fan-out over thousands of
+    // migrations exhausts the descriptor limit.
+    return mapLimit(sortedNames, FS_CONCURRENCY, (name) =>
+      this.#buildStatusRow(name, recordByName.get(name)),
+    );
   }
 
   /** Filtered list of migrations */
   async list(filter) {
+    if (filter === 'pending') {
+      return this.#listPending();
+    }
     const rows = await this.status();
     if (filter === 'all') {
       return rows;
@@ -911,6 +926,34 @@ class MigratorKit {
       if (row.status === filter) filtered.push(row);
     }
     return filtered;
+  }
+
+  /**
+   * Pending migrations, without touching the applied ones.
+   *
+   * Going through `status()` would read and SHA-256 every applied file only to
+   * discard those rows — turning `pendingMigrations()`, which exists to be a
+   * cheap readiness probe, into a full re-hash of the migration history on
+   * every health check. A pending row has no record, so `checksumOk` is always
+   * null and there is nothing to hash.
+   */
+  async #listPending() {
+    await this.#ensureConfig();
+    await this.connect();
+    const applied = new Set(await this.#requireChangelog().getAppliedNames(this.#requireDb()));
+    const rows = [];
+    for (const file of await this.#listMigrationFiles()) {
+      if (applied.has(file)) continue;
+      rows.push({
+        file,
+        status: 'pending',
+        batch: null,
+        appliedAt: null,
+        duration: null,
+        checksumOk: null,
+      });
+    }
+    return rows;
   }
 
   /** Build a StatusRow for a migration, verifying checksum when possible */
@@ -938,9 +981,15 @@ class MigratorKit {
     };
   }
 
-  /** Create a new migration file and return its absolute path */
+  /**
+   * Create a new migration file and return its absolute path.
+   *
+   * Resolved leniently: writing a file needs no database, so a config whose
+   * factory fetches a connection from a secret manager must not make `create`
+   * fail (or reach the network at all) when that manager is unreachable.
+   */
   async create(name, options = {}) {
-    const config = await this.#ensureConfig(false);
+    const config = await this.#ensureConfig(false, true);
     const dir = this.#migrationsPath();
     await fs.mkdir(dir, { recursive: true });
     const templatePath = options.template ?? config.templatePath;
@@ -1100,11 +1149,9 @@ class MigratorKit {
       return { source, target, imported: 0, skipped, dryRun, rows };
     }
 
-    // Independent upserts keyed by unique `name` — safe to run concurrently.
-    // Promise.all (not allSettled) preserves the previous loop's fail-fast behavior.
-    const writes = [];
-    for (const record of records) writes.push(targetChangelog.markApplied(db, record));
-    await Promise.all(writes);
+    // Independent upserts keyed by unique `name` — safe to run concurrently,
+    // but paced so importing a large changelog does not flood the pool.
+    await mapLimit(records, WRITE_CONCURRENCY, (record) => targetChangelog.markApplied(db, record));
 
     logger.info(`✔ Imported ${records.length} record(s) from "${source}" → "${target}"`);
     return { source, target, imported: records.length, skipped, dryRun, rows };

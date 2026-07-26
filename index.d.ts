@@ -149,6 +149,12 @@ export interface MigronautConfig {
   strict: boolean;
   /** Wrap all migrations in transactions globally. Can be overridden per file. Default: false */
   useTransaction: boolean;
+  /**
+   * Create the changelog indexes on first connect. Default: true. Set false
+   * when the application user has no index-creation rights and the indexes are
+   * provisioned out of band.
+   */
+  ensureIndexes?: boolean;
   /** File extensions to scan. Default: ['.ts', '.js'] */
   fileExtensions: string[];
   /**

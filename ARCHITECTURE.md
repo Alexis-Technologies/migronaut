@@ -227,7 +227,8 @@ Each entry: **responsibility · key exports · nuances you must know.**
 ### `src/core/changelog.js` — the audit trail
 - **Responsibility:** read/write `MigrationRecord`s in `_migronaut_migrations`.
 - **Key methods:** `getAll`, `getAppliedNames`, `getByName`, `getLastBatch`, `getByBatch`,
-  `getForeignDocs` (raw read for import), `markApplied`, `markReverted`, `ensureIndexes`.
+  `getApplied`, `getMaxBatch`, `getForeignDocs` (raw read for import), `markApplied`,
+  `markReverted`, `ensureIndexes`.
 - **Nuances:**
   - `markApplied` is an **`updateOne(..., {upsert:true})` keyed on `name`** — *not* `insertOne`. This
     is deliberate: `redo` / `up --force` / `import` must overwrite a record without violating the
@@ -240,7 +241,14 @@ Each entry: **responsibility · key exports · nuances you must know.**
     changelog write **commits inside the migration's transaction** — without that, a crash between
     the commit and the record leaves a migration applied but unrecorded, and the next `up` runs it
     again.
-  - `ensureIndexes` creates the unique index on `name`; called on every `connect()`.
+  - `ensureIndexes` creates the three indexes the read paths use — unique `name`,
+    `{status, batch}` (applied-set and highest-batch lookups) and `{batch}` (rollback by
+    batch) — in one `createIndexes` round trip. Called once per `MigratorKit` instance, not
+    once per `connect()`, and skipped entirely by `ensureIndexes: false` for deployments
+    where the app user cannot create indexes.
+  - `getMaxBatch` is an indexed `sort({batch:-1}).limit(1)`, not a scan: the next batch
+    number must be derived without loading the whole changelog, and it counts reverted
+    records so a rolled-back batch number is never handed out twice.
 
 ### `src/core/runner.js` — single-migration execution
 - **Responsibility:** run exactly one `up()` or `down()`, optionally inside a transaction, time it,
