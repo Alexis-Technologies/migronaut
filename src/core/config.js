@@ -103,6 +103,19 @@ const CONFIG_KEYS = [
     optional: true,
   },
   { path: 'ensureIndexes', check: isBoolean, message: 'must be a boolean', optional: true },
+  {
+    path: 'clientOptions',
+    check: (value) => typeof value === 'object' && value !== null && !Array.isArray(value),
+    message: 'must be an object',
+    optional: true,
+  },
+  {
+    path: 'timeoutMs',
+    check: isPositiveInteger,
+    message: 'must be a positive integer',
+    optional: true,
+  },
+  { path: 'reloadMigrations', check: isBoolean, message: 'must be a boolean', optional: true },
 ];
 
 /**
@@ -112,10 +125,14 @@ const CONFIG_KEYS = [
  */
 function validateConfig(config, options = {}) {
   const requireDb = options.requireDb ?? true;
+  // An injected client already carries the connection, so a `uri` would be
+  // ignored — requiring one would only be busywork.
+  const hasClient = typeof config.client === 'object' && config.client !== null;
   const issues = [];
   for (const spec of CONFIG_KEYS) {
     const value = config[spec.path];
     if (spec.optional && value === undefined) continue;
+    if (hasClient && spec.path === 'uri') continue;
     if (!requireDb && (spec.path === 'uri' || spec.path === 'dbName')) {
       if (typeof value !== 'string') issues.push({ path: spec.path, message: 'must be a string' });
       continue;

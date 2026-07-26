@@ -95,6 +95,10 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `onLockLost` | `'abort' \| 'warn'` | `'abort'` | What to do if the lock is lost mid-run |
 | `envFile` | `string \| false` | `'.env'` | `.env` file to load, or `false` to load none |
 | `ensureIndexes` | `boolean` | `true` | Create the changelog indexes on first connect |
+| `clientOptions` | `MongoClientOptions` | — | Driver options: TLS, AWS IAM / X.509 auth, proxies, pool sizing |
+| `client` | `MongoClient` | — | An already-connected client to reuse; migronaut never closes it |
+| `timeoutMs` | `number` | — | Stop the run when one migration exceeds this (best-effort) |
+| `reloadMigrations` | `boolean` | `false` | Bypass the ESM module cache (long-lived processes only) |
 | `mongoose` | `Mongoose` | — | Mongoose instance, if your migrations use it |
 | `hooks` | `MigrationHooks` | — | [Lifecycle hooks](/guide/hooks) |
 | `logger` | `MigronautLogger \| null` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` silences all output |

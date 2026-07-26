@@ -119,6 +119,18 @@ class MigrationExecutionFailedError extends MigronautError {
   }
 }
 
+/**
+ * Thrown when a migration exceeds its `timeoutMs`. Best-effort: the migration's
+ * own work cannot be cancelled, but the run stops instead of hanging, letting
+ * the lock's TTL expire so other instances are not blocked forever.
+ */
+class MigrationTimeoutError extends MigronautError {
+  constructor(message, context, options) {
+    super('MIGRATION_TIMEOUT', message, context, options);
+    this.name = 'MigrationTimeoutError';
+  }
+}
+
 /** Thrown when the merged configuration fails validation */
 class ConfigInvalidError extends MigronautError {
   constructor(message, context, options) {
@@ -180,6 +192,7 @@ module.exports = {
   MigrationInvalidNameError,
   MigrationInvalidExportError,
   MigrationExecutionFailedError,
+  MigrationTimeoutError,
   ConfigInvalidError,
   ConfigFileExistsError,
   ConnectionFailedError,

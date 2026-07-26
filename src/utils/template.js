@@ -291,6 +291,8 @@ export default config;
 function defaultConfigJson(values = {}) {
   const { uri, dbName, migrationsDir } = configFields(values);
   const config = {
+    // Editors use this to offer completion and validate the file as you type.
+    $schema: 'https://migronaut.vercel.app/migronaut.schema.json',
     uri,
     dbName,
     migrationsDir,

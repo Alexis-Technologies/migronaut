@@ -38,6 +38,7 @@ const EXIT_CODES = {
   RUN_ABORTED: 11,
   HOOK_FAILED: 12,
   MIGRATION_IRREVERSIBLE: 13,
+  MIGRATION_TIMEOUT: 14,
 };
 
 /** The exit code for a failure — see {@link EXIT_CODES} */
@@ -131,7 +132,9 @@ async function withMigrator(opts, fn, options = {}) {
   const logger = createLogger(json ? process.stderr : process.stdout, level);
   const detachSignals = attachSignalHandlers(migrator, spinner, logger);
   try {
-    if (spinner) {
+    // `connect: false` leaves connecting to the command itself — `audit` reports
+    // a failed connection as one of its checks rather than dying on it.
+    if (spinner && options.connect !== false) {
       spinner.start('Connecting to MongoDB…');
       try {
         await migrator.connect();

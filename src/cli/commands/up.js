@@ -8,6 +8,7 @@ function registerUp(program) {
     .description('Run all pending migrations, or a single named file')
     .argument('[file]', 'Specific migration file to run')
     .option('--no-lock', 'Skip the concurrency lock (dev only)')
+    .option('--to <file>', 'Apply pending migrations up to and including this file')
     .option('--strict', 'Abort on checksum mismatch')
     .option('-f, --force', 'Re-run an already-applied migration (requires a file)')
     .option('-y, --yes', 'Confirm --force non-interactively (required with --json)')
@@ -52,6 +53,7 @@ function registerUp(program) {
             noLock: opts.lock === false,
             ...(opts.force ? { force: true } : {}),
             ...(opts.step ? { step: true } : {}),
+            ...(opts.to ? { to: opts.to } : {}),
           });
           if (opts.json) {
             emitJson(results);

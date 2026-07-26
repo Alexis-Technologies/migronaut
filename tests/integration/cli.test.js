@@ -159,6 +159,53 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(noEnv.code, 0);
   });
 
+  it('should report a connection failure as an audit check, not a crash', async () => {
+    // audit must diagnose, not die: an unreachable database is exactly what an
+    // operator runs it to find out about.
+    const result = await runCli([
+      '--uri',
+      'mongodb://127.0.0.1:1/x?serverSelectionTimeoutMS=300',
+      '--db',
+      'x',
+      '--dir',
+      project.dir,
+      'audit',
+      '--json',
+    ]);
+    assert.strictEqual(result.code, 1);
+    const report = JSON.parse(result.stdout);
+    assert.strictEqual(report.ok, false);
+    const connection = report.checks.find((check) => check.name === 'connection');
+    assert.strictEqual(connection.status, 'fail');
+  });
+
+  it('should render an audit checklist and exit 0 on a healthy setup', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await runCli(baseArgs(['up']));
+    const result = await runCli(baseArgs(['audit']));
+    assert.strictEqual(result.code, 0);
+    assert.match(result.stdout, /config/);
+    assert.match(result.stdout, /No problems found/);
+  });
+
+  it('should report lock state with the lock command', async () => {
+    const result = await runCli(baseArgs(['lock', '--json']));
+    assert.strictEqual(result.code, 0);
+    assert.deepStrictEqual(JSON.parse(result.stdout), { held: false, holder: null });
+  });
+
+  it('should apply up to a target with --to', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    project.write('0003-c.ts', insertMigration('things', 'c'));
+    const result = await runCli(baseArgs(['up', '--to', '0002-b.ts', '--json']));
+    assert.strictEqual(result.code, 0);
+    assert.deepStrictEqual(
+      JSON.parse(result.stdout).map((r) => r.file),
+      ['0001-a.ts', '0002-b.ts'],
+    );
+  });
+
   it('should re-run an applied migration with up <file> --force after a yes confirmation', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await runCli(baseArgs(['up']));

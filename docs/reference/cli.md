@@ -25,6 +25,8 @@ Available on every command, highest precedence:
 |---|---|
 | [`migronaut up`](/commands/up) | Run all pending migrations |
 | `migronaut up <file>` | Run a single migration |
+| `migronaut up --to <file>` | Apply pending migrations up to and including that file |
+| `migronaut down --to <file>` | Revert everything applied after that file (it stays applied) |
 | `migronaut up --step` | Apply each file as its own batch |
 | `migronaut up <file> --force --yes` | Re-run an already-applied file |
 | `migronaut up --strict` | Abort on a checksum mismatch |
@@ -70,6 +72,10 @@ Available on every command, highest precedence:
 | `migronaut import --dry-run` | Preview the mapping |
 | `migronaut import --trust-hash` | Reuse migrate-mongo's `fileHash` |
 | `migronaut import --force` | Import into a non-empty changelog |
+| `migronaut lock` | Show who holds the migration lock |
+| `migronaut lock --json` | Machine-readable `{ held, holder }` |
+| `migronaut audit` | Check config, connectivity, transactions, indexes, lock, checksums |
+| `migronaut audit --json` | Machine-readable report; exit 1 when a check fails |
 | [`migronaut unlock`](/commands/unlock) | Force-release a stuck lock |
 | `migronaut unlock --yes` | Release without confirmation |
 
@@ -94,4 +100,5 @@ working unchanged.
 | `11` | `RUN_ABORTED` — stopped by SIGINT/SIGTERM |
 | `12` | `HOOK_FAILED` — a lifecycle hook threw |
 | `13` | `MIGRATION_IRREVERSIBLE` — an imported migrate-mongo record |
+| `14` | `MIGRATION_TIMEOUT` — a migration exceeded `timeoutMs` |
 | `130` / `143` | Killed by a second SIGINT / SIGTERM |

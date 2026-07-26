@@ -1,4 +1,5 @@
-import type { ClientSession, Db, MongoClient } from 'mongodb';
+import { EventEmitter } from 'node:events';
+import type { ClientSession, Db, MongoClient, MongoClientOptions } from 'mongodb';
 
 // ─── Migration File Contract ───────────────────────────────────────────────────
 
@@ -28,6 +29,12 @@ export interface MigrationContext {
    * Pass it to your operations (e.g. `{ session }`) so they join the transaction.
    */
   session?: ClientSession;
+  /**
+   * Aborted when the run is stopping — the lock was lost, `stop()` was called,
+   * or a SIGINT/SIGTERM arrived. A long migration can watch this to exit early;
+   * migronaut cannot interrupt a running function by itself.
+   */
+  signal?: AbortSignal;
 }
 
 /** Shape of an imported migration file module */
@@ -36,6 +43,8 @@ export interface MigrationModule {
   down: (ctx: MigrationContext) => Promise<void>;
   /** If true, wraps this migration in a MongoDB session + transaction */
   useTransaction?: boolean;
+  /** Overrides `MigronautConfig.timeoutMs` for this migration only */
+  timeoutMs?: number;
   /** Optional description shown in status table */
   description?: string;
 }
@@ -130,8 +139,20 @@ export interface MigrationHooks {
 export type MigrationExtension = 'ts' | 'js';
 
 export interface MigronautConfig {
-  /** MongoDB connection URI */
+  /** MongoDB connection URI. Not required when `client` is supplied */
   uri: string;
+  /**
+   * Driver options passed to `new MongoClient(uri, options)` — the escape hatch
+   * for everything a connection string cannot express: TLS certificates,
+   * AWS IAM / X.509 authentication, proxies, pool sizing, read preferences.
+   */
+  clientOptions?: MongoClientOptions;
+  /**
+   * An already-connected client to reuse instead of opening one. Ownership
+   * stays with the caller: `disconnect()` leaves it open, so migrations at
+   * application startup can share the app's own pool.
+   */
+  client?: MongoClient;
   /** Database name */
   dbName: string;
   /** Path to migrations directory. Default: './migrations' */
@@ -166,6 +187,21 @@ export interface MigronautConfig {
   sequential: boolean;
   /** Path to a custom migration template file */
   templatePath?: string;
+  /**
+   * Abort the run when a single migration exceeds this many milliseconds.
+   * Best-effort: the migration's own work cannot be cancelled, but the run
+   * stops instead of hanging, which also lets the lock's TTL expire so other
+   * instances are not blocked forever. A migration can watch `ctx.signal` to
+   * bail out itself. Override per file with `export const timeoutMs`.
+   */
+  timeoutMs?: number;
+  /**
+   * Bypass Node's ESM module cache when loading migration files. Only useful in
+   * a long-lived process that runs migrations more than once (a test runner, a
+   * dev server) — each load then leaks a module, which a one-shot CLI never
+   * needs to care about. Default: false
+   */
+  reloadMigrations?: boolean;
   /**
    * `.env` file loaded before the config is resolved (it is what supplies the
    * `MIGRONAUT_*` variables). Relative to the working directory. Default:
@@ -349,6 +385,7 @@ export type MigronautErrorCode =
   | 'MIGRATION_INVALID_NAME'
   | 'MIGRATION_INVALID_EXPORT'
   | 'MIGRATION_EXECUTION_FAILED'
+  | 'MIGRATION_TIMEOUT'
   | 'CONFIG_INVALID'
   | 'CONFIG_FILE_EXISTS'
   | 'CONNECTION_FAILED'
@@ -380,6 +417,12 @@ export interface UpOptions {
    * `migrate --step`.
    */
   step?: boolean;
+  /**
+   * Apply pending migrations up to and including this file, then stop. Useful
+   * for staged rollouts and for reproducing a database at a known point.
+   * Mutually exclusive with a filename and `steps`.
+   */
+  to?: string;
 }
 
 /** Options for {@link MigratorKit.down} */
@@ -394,6 +437,69 @@ export interface DownOptions {
    * `migrate:rollback --step=N`. Mutually exclusive with `batch` and a filename.
    */
   steps?: number;
+  /**
+   * Revert everything applied *after* this migration; the named one stays
+   * applied. Exclusive, so `up --to X` then `down --to X` is a round trip back
+   * to the same state. Mutually exclusive with `batch`, `steps` and a filename.
+   */
+  to?: string;
+}
+
+/** Payload common to every lifecycle event */
+export interface MigronautEventBase {
+  /** Correlation id of the run, matching the lock owner and changelog records */
+  runId?: string;
+}
+
+export interface MigrationEvent extends MigronautEventBase {
+  migration: string;
+  direction: 'up' | 'down';
+  batch?: number;
+  durationMs?: number;
+  error?: unknown;
+}
+
+export interface RunEndEvent extends MigronautEventBase {
+  success: boolean;
+  error?: unknown;
+}
+
+export interface LockEvent extends MigronautEventBase {
+  owner?: string;
+  reason?: string;
+}
+
+/**
+ * Lifecycle events emitted by {@link MigratorKit}. Subscribe to feed metrics or
+ * alerting without parsing log lines; a listener that throws is contained and
+ * never fails the run.
+ */
+export interface MigronautEvents {
+  'run:start': (event: MigronautEventBase) => void;
+  'run:end': (event: RunEndEvent) => void;
+  'migration:start': (event: MigrationEvent) => void;
+  'migration:success': (event: MigrationEvent) => void;
+  'migration:error': (event: MigrationEvent) => void;
+  'lock:acquired': (event: LockEvent) => void;
+  'lock:released': (event: LockEvent) => void;
+  'lock:lost': (event: LockEvent) => void;
+}
+
+/** One check performed by {@link MigratorKit.audit} */
+export interface AuditCheck {
+  /** e.g. 'config', 'connection', 'transactions', 'indexes', 'lock', 'checksums' */
+  name: string;
+  status: 'pass' | 'warn' | 'fail';
+  detail: string;
+}
+
+/** Result of {@link MigratorKit.audit} — read-only; nothing is changed */
+export interface AuditReport {
+  /** True when no check failed. Warnings do not clear this flag */
+  ok: boolean;
+  failed: number;
+  warnings: number;
+  checks: AuditCheck[];
 }
 
 /** Options for {@link MigratorKit.redo} */
@@ -455,8 +561,11 @@ export interface MigratorKitOptions {
 /**
  * The main orchestration class. Every CLI command delegates here. Holds a
  * partial config that is resolved (merged with env/file/defaults) on first use.
+ *
+ * Extends Node's EventEmitter — see {@link MigronautEvents} for the lifecycle
+ * events you can subscribe to.
  */
-export class MigratorKit {
+export class MigratorKit extends EventEmitter {
   constructor(config?: Partial<MigronautConfig>, options?: MigratorKitOptions);
 
   /** Connect to MongoDB and ensure changelog indexes exist */
@@ -484,6 +593,9 @@ export class MigratorKit {
    * while the migration is reverted.
    */
   redo(filename?: string, options?: RedoOptions): Promise<RunResult[]>;
+  on<E extends keyof MigronautEvents>(event: E, listener: MigronautEvents[E]): this;
+  once<E extends keyof MigronautEvents>(event: E, listener: MigronautEvents[E]): this;
+  off<E extends keyof MigronautEvents>(event: E, listener: MigronautEvents[E]): this;
   /**
    * Stop the run in progress: the migration currently executing finishes, the
    * remaining ones are skipped, the lock is released, and the in-flight call
@@ -499,6 +611,12 @@ export class MigratorKit {
   ): Promise<StatusRow[]>;
   /** Full migration status for all known files and records */
   status(): Promise<StatusRow[]>;
+  /**
+   * Read-only health check: configuration, connectivity, transaction support,
+   * changelog indexes, lock state, checksum drift and runtime. Reports
+   * problems; fixes none of them.
+   */
+  audit(): Promise<AuditReport>;
   /** Filtered list of migrations */
   list(filter: 'all' | 'pending' | 'applied'): Promise<StatusRow[]>;
   /** Create a new migration file and return its absolute path */
@@ -641,6 +759,14 @@ export class LockLostError extends MigronautError {
  * or a SIGINT/SIGTERM. `context.results` lists what was applied first.
  */
 export class RunAbortedError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>);
+}
+
+/**
+ * Thrown when a migration exceeds its `timeoutMs`. Best-effort: the migration's
+ * own work keeps running, but the run stops rather than hanging.
+ */
+export class MigrationTimeoutError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>);
 }
 

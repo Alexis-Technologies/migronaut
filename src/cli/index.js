@@ -1,10 +1,12 @@
 const { Command } = require('./args.js');
+const { registerAudit } = require('./commands/audit.js');
 const { registerCreate } = require('./commands/create.js');
 const { registerDown } = require('./commands/down.js');
 const { registerDryRun } = require('./commands/dry-run.js');
 const { registerImport } = require('./commands/import.js');
 const { registerInit } = require('./commands/init.js');
 const { registerList } = require('./commands/list.js');
+const { registerLock } = require('./commands/lock.js');
 const { registerRedo } = require('./commands/redo.js');
 const { registerStatus } = require('./commands/status.js');
 const { registerUnlock } = require('./commands/unlock.js');
@@ -38,6 +40,8 @@ function buildProgram() {
   registerList(program);
   registerDryRun(program);
   registerCreate(program);
+  registerLock(program);
+  registerAudit(program);
   registerUnlock(program);
 
   return program;

@@ -47,6 +47,7 @@ can tell how far the run got. The exit code identifies the failure — see
 | `MIGRATION_INVALID_NAME` | `MigrationInvalidNameError` | A migration name escapes the migrations dir, or isn't a string | Use a bare filename, not a path |
 | `MIGRATION_INVALID_EXPORT` | `MigrationInvalidExportError` | A file is missing `up`/`down` functions | Export both `up` and `down` |
 | `MIGRATION_EXECUTION_FAILED` | `MigrationExecutionFailedError` | A migration's `up`/`down` threw | Read the cause; fix the migration logic |
+| `MIGRATION_TIMEOUT` | `MigrationTimeoutError` | A migration ran longer than `timeoutMs` | Raise the limit, or make the migration watch `ctx.signal` |
 | `CONFIG_INVALID` | `ConfigInvalidError` | Config failed validation | Check required fields and types |
 | `CONFIG_FILE_EXISTS` | `ConfigFileExistsError` | `migronaut init` found an existing config | Use `--force` to overwrite |
 | `CONNECTION_FAILED` | `ConnectionFailedError` | Couldn't connect to MongoDB | Verify `uri`/`dbName` and that Mongo is up |

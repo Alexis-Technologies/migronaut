@@ -182,10 +182,12 @@ async function runWithLock(lock, options, fn) {
   }
 
   await lock.acquire(options.owner);
+  options.onLockAcquired?.();
 
   const abortOnLoss = (options.onLockLost ?? 'abort') === 'abort';
   const loseLock = (reason) => {
     options.logger.warn(`⚠ Lost the migration lock mid-run (${reason})`);
+    options.onLockLostEvent?.(reason);
     if (abortOnLoss && !controller.signal.aborted) {
       controller.abort(
         new LockLostError('Lost the migration lock mid-run', { reason, aborted: true }),
@@ -243,6 +245,7 @@ async function runWithLock(lock, options, fn) {
 
   try {
     await lock.release();
+    options.onLockReleased?.();
   } catch (releaseError) {
     // Never let a release failure replace the reason the run failed: that would
     // report "Failed to release migration lock" instead of the actual migration

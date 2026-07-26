@@ -56,16 +56,23 @@ function tsLoadErrorOrNull(filepath, error) {
  * @throws {MigrationFileNotFoundError} when the file does not exist
  * @throws {MigrationInvalidExportError} when up/down are not both functions
  */
-async function loadMigrationFile(filepath) {
+async function loadMigrationFile(filepath, options = {}) {
   try {
     await fs.access(filepath);
   } catch {
     throw new MigrationFileNotFoundError('Migration file not found', { filepath });
   }
 
+  // Node caches ESM modules by URL forever. A one-shot CLI never notices, but a
+  // long-lived process (a test runner, a dev server re-running migrations)
+  // would keep executing the version it first imported; a unique query string
+  // forces a fresh evaluation. Off by default — it leaks a module per load.
+  const url = pathToFileURL(filepath).href;
+  const href = options.reload ? `${url}?migronaut=${Date.now()}` : url;
+
   let imported;
   try {
-    imported = await import(pathToFileURL(filepath).href);
+    imported = await import(href);
   } catch (error) {
     const tsError = tsLoadErrorOrNull(filepath, error);
     if (tsError) {
@@ -86,6 +93,9 @@ async function loadMigrationFile(filepath) {
 
   if (typeof resolved.useTransaction === 'boolean') {
     migration.useTransaction = resolved.useTransaction;
+  }
+  if (Number.isInteger(resolved.timeoutMs) && resolved.timeoutMs > 0) {
+    migration.timeoutMs = resolved.timeoutMs;
   }
   if (typeof resolved.description === 'string') {
     migration.description = resolved.description;

@@ -1,4 +1,5 @@
 const { randomUUID } = require('node:crypto');
+const { EventEmitter } = require('node:events');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 // `mongodb` is required lazily inside connect(): loading the driver costs ~60ms
@@ -43,11 +44,20 @@ const FS_CONCURRENCY = 16;
 /** Simultaneous changelog writes during an import */
 const WRITE_CONCURRENCY = 8;
 
+/** Message of an unknown thrown value, for report text */
+const errorText = (error) => (error instanceof Error ? error.message : String(error));
+
 /**
  * The main orchestration class. Every CLI command delegates here. Holds a
  * partial config that is resolved (merged with env/file/defaults) on first use.
+ *
+ * Also an EventEmitter: subscribe with `kit.on('migration:success', …)` to feed
+ * metrics or alerting without parsing log lines. Events complement
+ * {@link MigrationHooks} — hooks are configured up front and run user database
+ * logic in the migration's flow; listeners attach from outside, may be several,
+ * and a listener that throws is contained rather than failing the run.
  */
-class MigratorKit {
+class MigratorKit extends EventEmitter {
   #partialConfig;
   #configPath;
   #progress;
@@ -65,11 +75,30 @@ class MigratorKit {
   #indexesEnsured = false;
   /** Memoized resolved logger — resolveLogger allocates on every call otherwise */
   #resolvedLogger;
+  /** False when the client was injected by the caller, who keeps ownership of it */
+  #ownsClient = true;
 
   constructor(config = {}, options = {}) {
+    super();
     this.#partialConfig = config;
     this.#configPath = options.configPath;
     this.#progress = options.progress;
+  }
+
+  /**
+   * Emit a lifecycle event without letting a listener affect the run.
+   *
+   * A throwing listener is swallowed (observability must never break a
+   * migration), and `error` is deliberately not used as an event name: an
+   * EventEmitter with no `error` listener throws, which would turn a reported
+   * failure into a second, unrelated one.
+   */
+  #emit(event, payload) {
+    try {
+      this.emit(event, { ...(this.#runId ? { runId: this.#runId } : {}), ...payload });
+    } catch {
+      // A listener's failure is its own problem.
+    }
   }
 
   /**
@@ -137,9 +166,19 @@ class MigratorKit {
       return;
     }
     try {
-      const { MongoClient } = require('mongodb');
-      this.#client = new MongoClient(config.uri);
-      await this.#client.connect();
+      if (config.client) {
+        // A client the caller owns: reuse its pool (and whatever auth, TLS or
+        // proxying it was built with) and never close it — see disconnect().
+        this.#client = config.client;
+        this.#ownsClient = false;
+      } else {
+        const { MongoClient } = require('mongodb');
+        // clientOptions is the escape hatch for everything a URI cannot carry:
+        // TLS certificates, AWS IAM / X.509 auth, proxies, pool sizing.
+        this.#client = new MongoClient(config.uri, config.clientOptions);
+        this.#ownsClient = true;
+        await this.#client.connect();
+      }
       this.#db = this.#client.db(config.dbName);
       this.#changelog = new Changelog(config.migrationsCollection);
       // Once per instance, not once per connect: re-issuing createIndexes on
@@ -152,7 +191,7 @@ class MigratorKit {
     } catch (error) {
       // Close and forget the half-built client. Leaving it assigned would leak
       // its connection pool, since a retry of connect() overwrites the field.
-      const dangling = this.#client;
+      const dangling = this.#ownsClient ? this.#client : undefined;
       this.#client = undefined;
       this.#db = undefined;
       this.#changelog = undefined;
@@ -165,13 +204,20 @@ class MigratorKit {
     }
   }
 
-  /** Disconnect from MongoDB */
+  /**
+   * Disconnect from MongoDB.
+   *
+   * An injected `config.client` is left open: the application handed it over to
+   * be reused, and closing it here would take down its connection pool for
+   * everything else using it.
+   */
   async disconnect() {
-    if (this.#client) {
-      await this.#client.close();
-      this.#client = undefined;
-      this.#db = undefined;
-    }
+    if (!this.#client) return;
+    const client = this.#client;
+    const owned = this.#ownsClient;
+    this.#client = undefined;
+    this.#db = undefined;
+    if (owned) await client.close();
   }
 
   /** Build a lock bound to the configured collection (assumes connected) */
@@ -204,18 +250,31 @@ class MigratorKit {
       this.#stopRequested = undefined;
       this.#abort(pending);
     }
+    this.#emit('run:start', {});
+    let failure;
     try {
-      return await runWithLock(
+      const result = await runWithLock(
         this.#buildLock(),
         {
           logger: this.#logger,
           onLockLost: this.#config?.onLockLost ?? 'abort',
           owner: this.#runId,
+          onLockAcquired: () => this.#emit('lock:acquired', { owner: this.#runId }),
+          onLockReleased: () => this.#emit('lock:released', { owner: this.#runId }),
+          onLockLostEvent: (reason) => this.#emit('lock:lost', { reason }),
           ...(options.noLock ? { noLock: true } : {}),
         },
         (lockSignal) => fn(AbortSignal.any([lockSignal, stopper.signal])),
       );
+      return result;
+    } catch (error) {
+      failure = error;
+      throw error;
     } finally {
+      this.#emit('run:end', {
+        success: failure === undefined,
+        ...(failure ? { error: failure } : {}),
+      });
       this.#abort = undefined;
       this.#runId = undefined;
     }
@@ -368,6 +427,50 @@ class MigratorKit {
   }
 
   /**
+   * `--to` names a point in the sequence, so it cannot be combined with the
+   * other ways of choosing targets.
+   */
+  /**
+   * Keep only the pending migrations up to and including `to`.
+   *
+   * `to` must name a migration that exists; it may already be applied (then
+   * nothing before it is pending either, and the result is empty), which is
+   * what makes `up --to X` idempotent — running it twice is a no-op rather
+   * than an error.
+   */
+  #truncateAtTarget(pending, allFiles, to) {
+    if (!allFiles.includes(to)) {
+      throw new MigrationFileNotFoundError('Migration file not found', { to });
+    }
+    const kept = [];
+    for (const file of pending) {
+      if (file > to) break;
+      kept.push(file);
+    }
+    return kept;
+  }
+
+  #assertToValid(to, filename, options = {}) {
+    if (to === undefined) return;
+    this.#assertFilename(to);
+    if (filename) {
+      throw new ConfigInvalidError('Cannot combine a filename with --to', { filename, to });
+    }
+    if (options.steps !== undefined) {
+      throw new ConfigInvalidError('Cannot combine --steps with --to', {
+        steps: options.steps,
+        to,
+      });
+    }
+    if (options.batch !== undefined) {
+      throw new ConfigInvalidError('Cannot combine --batch with --to', {
+        batch: options.batch,
+        to,
+      });
+    }
+  }
+
+  /**
    * Validate `--batch`. Without this a typo (`--batch abc` → NaN) matches no
    * records, so the run prints "Nothing to rollback" and exits 0 — the worst
    * possible answer to a mistyped rollback.
@@ -399,6 +502,7 @@ class MigratorKit {
   /** Run all pending migrations, or a specific named file */
   async up(filename, options = {}) {
     this.#assertFilename(filename);
+    this.#assertToValid(options.to, filename, options);
     await this.#ensureConfig();
     await this.connect();
     return this.#withLock(options, (signal) => this.#runUp(filename, options, signal));
@@ -428,6 +532,9 @@ class MigratorKit {
       for (const file of files) {
         if (!appliedNames.has(file)) targets.push(file);
       }
+      if (options.to !== undefined) {
+        targets = this.#truncateAtTarget(targets, files, options.to);
+      }
       // Pending files are the only targets here, so the per-target checksum
       // check below can never see an applied one. Verify them up front instead,
       // otherwise `up --strict` over a bulk run would police nothing.
@@ -439,7 +546,7 @@ class MigratorKit {
       return [];
     }
 
-    const context = buildContext(this.#client, db, config.mongoose);
+    const context = buildContext(this.#client, db, config.mongoose, signal);
     const results = [];
     // Without --step every file in this run shares one batch. With --step each
     // applied file gets its own sequential batch (base, base+1, …) so a later
@@ -497,7 +604,9 @@ class MigratorKit {
           context,
           { direction: 'up', index, total: targets.length },
         ]);
-        const migration = await loadMigrationFile(filepath);
+        const migration = await loadMigrationFile(filepath, {
+          reload: config.reloadMigrations ?? false,
+        });
         const useTransaction = migration.useTransaction ?? config.useTransaction;
 
         const batch = options.step ? baseBatch + appliedCount : baseBatch;
@@ -515,6 +624,7 @@ class MigratorKit {
         };
 
         this.#progress?.onStart(name, 'up');
+        this.#emit('migration:start', { migration: name, direction: 'up', batch });
         try {
           // The changelog write happens inside runMigration so that, under
           // useTransaction, it commits atomically with the migration itself.
@@ -525,12 +635,19 @@ class MigratorKit {
             context,
             useTransaction,
             logger,
+            ...(config.timeoutMs ? { timeoutMs: config.timeoutMs } : {}),
             onSuccess: (elapsed, session) =>
               changelog.markApplied(db, { ...recordBase, duration: elapsed }, session),
             ...(config.hooks ? { hooks: config.hooks } : {}),
           });
           this.#progress?.onStop('success');
           appliedCount += 1;
+          this.#emit('migration:success', {
+            migration: name,
+            direction: 'up',
+            batch,
+            durationMs: duration,
+          });
 
           logger.info(
             `✔ Applied  ${name}   [${duration}ms]`,
@@ -545,6 +662,7 @@ class MigratorKit {
           ]);
         } catch (error) {
           this.#progress?.onStop('error');
+          this.#emit('migration:error', { migration: name, direction: 'up', error });
           logger.error(
             `✖ Error    ${name}`,
             this.#fields({
@@ -630,6 +748,7 @@ class MigratorKit {
     this.#assertFilename(filename);
     this.#assertStepsValid(options.steps, filename, options.batch);
     this.#assertBatchValid(options.batch);
+    this.#assertToValid(options.to, filename, options);
     await this.#ensureConfig();
     await this.connect();
     return this.#withLock(options, (signal) => this.#runDown(filename, options, signal));
@@ -655,6 +774,18 @@ class MigratorKit {
       // Revert the last N applied migrations, newest first, ignoring batches.
       toRevert = this.#selectLastApplied(await changelog.getApplied(db), options.steps);
       preserveOrder = true;
+    } else if (options.to !== undefined) {
+      // Roll the database back *to* that point: everything applied after the
+      // named migration goes, the named one stays. Exclusive, so `up --to X`
+      // followed by `down --to X` is a round trip back to the same state.
+      const applied = await changelog.getApplied(db);
+      if (!applied.some((record) => record.name === options.to)) {
+        throw new NotAppliedError('Migration is not applied', { to: options.to });
+      }
+      toRevert = [];
+      for (const record of applied) {
+        if (record.name > options.to) toRevert.push(record);
+      }
     } else {
       const batch = options.batch ?? (await changelog.getLastBatch(db));
       if (batch === null) {
@@ -700,10 +831,13 @@ class MigratorKit {
           context,
           { direction: 'down', index, total: names.length },
         ]);
-        const migration = await loadMigrationFile(this.#filepath(name));
+        const migration = await loadMigrationFile(this.#filepath(name), {
+          reload: config.reloadMigrations ?? false,
+        });
         const useTransaction = migration.useTransaction ?? config.useTransaction;
 
         this.#progress?.onStart(name, 'down');
+        this.#emit('migration:start', { migration: name, direction: 'down' });
         try {
           const { duration } = await runMigration({
             name,
@@ -712,11 +846,17 @@ class MigratorKit {
             context,
             useTransaction,
             logger,
+            ...(config.timeoutMs ? { timeoutMs: config.timeoutMs } : {}),
             onSuccess: (_elapsed, session) => changelog.markReverted(db, name, session),
             ...(config.hooks ? { hooks: config.hooks } : {}),
           });
           this.#progress?.onStop('success');
           revertedCount += 1;
+          this.#emit('migration:success', {
+            migration: name,
+            direction: 'down',
+            durationMs: duration,
+          });
           logger.info(
             `↩ Reverted ${name}   [${duration}ms]`,
             this.#fields({ migration: name, direction: 'down', durationMs: duration }),
@@ -730,6 +870,7 @@ class MigratorKit {
           ]);
         } catch (error) {
           this.#progress?.onStop('error');
+          this.#emit('migration:error', { migration: name, direction: 'down', error });
           logger.error(
             `✖ Error    ${name}`,
             this.#fields({
@@ -910,6 +1051,129 @@ class MigratorKit {
     return mapLimit(sortedNames, FS_CONCURRENCY, (name) =>
       this.#buildStatusRow(name, recordByName.get(name)),
     );
+  }
+
+  /**
+   * Read-only health check of the setup: configuration, connectivity,
+   * transaction support, indexes, lock state and checksum drift.
+   *
+   * Fixes nothing — it reports, so an operator can see in one command why a
+   * migration would fail before running one. Every check is independent: a
+   * failure in one is recorded and the rest still run.
+   */
+  async audit() {
+    const checks = [];
+    const record = (name, status, detail) => checks.push({ name, status, detail });
+
+    // 1. Configuration. Everything downstream depends on it, so a failure here
+    //    is fatal to the audit itself.
+    let config;
+    try {
+      config = await this.#ensureConfig();
+      record('config', 'pass', `Loaded (database "${config.dbName}")`);
+    } catch (error) {
+      record('config', 'fail', error instanceof Error ? error.message : String(error));
+      return this.#auditReport(checks);
+    }
+
+    // 2. Connectivity.
+    try {
+      await this.connect();
+      record('connection', 'pass', config.client ? 'Using the injected client' : 'Connected');
+    } catch (error) {
+      record('connection', 'fail', error instanceof Error ? error.message : String(error));
+      return this.#auditReport(checks);
+    }
+
+    const db = this.#requireDb();
+
+    // 3. Transactions need a replica set or a sharded cluster; on a standalone
+    //    server `useTransaction: true` fails at run time with a driver error
+    //    that says nothing about the configuration.
+    try {
+      const info = await db.admin().command({ hello: 1 });
+      const supportsTransactions = Boolean(info.setName) || info.msg === 'isdbgrid';
+      if (supportsTransactions) {
+        record('transactions', 'pass', info.setName ? `Replica set "${info.setName}"` : 'Sharded');
+      } else if (config.useTransaction) {
+        record('transactions', 'fail', 'useTransaction is on, but this is a standalone server');
+      } else {
+        record('transactions', 'warn', 'Standalone server — useTransaction is unavailable');
+      }
+    } catch (error) {
+      record('transactions', 'warn', `Could not determine topology: ${errorText(error)}`);
+    }
+
+    // 4. Indexes. Missing ones do not break correctness, only performance.
+    try {
+      const present = new Set(
+        (await db.collection(config.migrationsCollection).indexes()).map((index) => index.name),
+      );
+      const missing = ['name_unique', 'status_batch', 'batch'].filter((name) => !present.has(name));
+      if (missing.length === 0) record('indexes', 'pass', 'All changelog indexes present');
+      else record('indexes', 'warn', `Missing: ${missing.join(', ')}`);
+    } catch (error) {
+      record('indexes', 'warn', `Could not read indexes: ${errorText(error)}`);
+    }
+
+    // 5. Lock. A held lock is not itself a problem — a stale one is.
+    try {
+      const holder = toLockInfo(await this.#buildLock().inspect());
+      if (!holder) {
+        record('lock', 'pass', 'No lock held');
+      } else {
+        const ageSeconds = Math.round((Date.now() - holder.lockedAt.getTime()) / 1000);
+        const stale = ageSeconds > config.lockTTLSeconds;
+        record(
+          'lock',
+          stale ? 'warn' : 'pass',
+          `Held by pid ${holder.pid} on ${holder.host} for ${ageSeconds}s` +
+            (stale ? ' — past its TTL, likely from a crashed run (migronaut unlock)' : ''),
+        );
+      }
+    } catch (error) {
+      record('lock', 'warn', `Could not read the lock: ${errorText(error)}`);
+    }
+
+    // 6. Checksum drift and missing files, from the same rows `status` renders.
+    try {
+      const rows = await this.status();
+      const drifted = rows.filter((row) => row.checksumOk === false).map((row) => row.file);
+      const pending = rows.filter((row) => row.status === 'pending').length;
+      if (drifted.length > 0) {
+        record('checksums', 'fail', `Edited after being applied: ${drifted.join(', ')}`);
+      } else {
+        record('checksums', 'pass', 'No drift among applied migrations');
+      }
+      record('pending', pending === 0 ? 'pass' : 'warn', `${pending} pending migration(s)`);
+    } catch (error) {
+      record('checksums', 'warn', `Could not read status: ${errorText(error)}`);
+    }
+
+    // 7. Runtime. TypeScript migrations need a runtime that can strip types.
+    const nodeVersion = process.versions.node;
+    const wantsTs = (config.fileExtensions ?? []).some((ext) => ext === '.ts');
+    const major = Number(nodeVersion.split('.')[0]);
+    const minor = Number(nodeVersion.split('.')[1]);
+    const stripsTypes = major > 22 || (major === 22 && minor >= 18);
+    if (wantsTs && !stripsTypes) {
+      record(
+        'runtime',
+        'warn',
+        `Node ${nodeVersion} cannot import .ts — use Node >= 22.18 or a loader such as tsx`,
+      );
+    } else {
+      record('runtime', 'pass', `Node ${nodeVersion}`);
+    }
+
+    return this.#auditReport(checks);
+  }
+
+  /** Roll individual checks up into the report shape */
+  #auditReport(checks) {
+    const failed = checks.filter((check) => check.status === 'fail').length;
+    const warnings = checks.filter((check) => check.status === 'warn').length;
+    return { ok: failed === 0, failed, warnings, checks };
   }
 
   /** Filtered list of migrations */

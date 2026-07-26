@@ -1,4 +1,41 @@
-const { MigrationExecutionFailedError } = require('../errors/index.js');
+const { MigrationExecutionFailedError, MigrationTimeoutError } = require('../errors/index.js');
+
+/**
+ * Race a migration against its timeout.
+ *
+ * Best-effort by design: JavaScript cannot cancel a running function, so the
+ * migration keeps executing in the background after this rejects. What the
+ * timeout buys is the *run* stopping instead of hanging forever — which also
+ * lets the lock's TTL expire, so a wedged migration no longer blocks every
+ * other instance indefinitely. Migrations that need real cancellation should
+ * watch `ctx.signal`.
+ */
+async function withTimeout(promise, timeoutMs, name, direction) {
+  if (!timeoutMs) return promise;
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new MigrationTimeoutError(
+              `Migration ${direction} timed out after ${timeoutMs}ms: ${name}`,
+              {
+                name,
+                direction,
+                timeoutMs,
+              },
+            ),
+          );
+        }, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Execute a single migration's `up` or `down` safely.
@@ -20,6 +57,8 @@ const { MigrationExecutionFailedError } = require('../errors/index.js');
 async function runMigration(params) {
   const { name, migration, direction, context, useTransaction, hooks, onSuccess, logger } = params;
   const fn = direction === 'up' ? migration.up : migration.down;
+  // A per-file `export const timeoutMs` overrides the global setting.
+  const timeoutMs = migration.timeoutMs ?? params.timeoutMs;
 
   const start = Date.now();
   let session;
@@ -34,12 +73,12 @@ async function runMigration(params) {
       // a transient failure, so duration is re-measured on each attempt.
       await session.withTransaction(async () => {
         const attemptStart = Date.now();
-        await fn(runtimeContext);
+        await withTimeout(fn(runtimeContext), timeoutMs, name, direction);
         duration = Date.now() - attemptStart;
         await onSuccess?.(duration, session);
       });
     } else {
-      await fn(runtimeContext);
+      await withTimeout(fn(runtimeContext), timeoutMs, name, direction);
       duration = Date.now() - start;
       await onSuccess?.(duration, undefined);
     }
@@ -58,6 +97,7 @@ async function runMigration(params) {
       }
     }
 
+    if (err instanceof MigrationTimeoutError) throw err;
     throw new MigrationExecutionFailedError(
       `Migration ${direction} failed: ${name}`,
       // The message is duplicated into context because that is what survives
