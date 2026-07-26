@@ -3,7 +3,7 @@ const { tmpdir } = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { afterEach, beforeEach, describe, it } = require('node:test');
-const { computeChecksum, verifyChecksum } = require('../../src/utils/checksum.js');
+const { computeChecksum } = require('../../src/utils/checksum.js');
 
 let tmp;
 let file;
@@ -34,15 +34,27 @@ describe('computeChecksum', () => {
   });
 });
 
-describe('verifyChecksum', () => {
-  it('should return true when the stored checksum matches', async () => {
-    const stored = await computeChecksum(file);
-    assert.strictEqual(await verifyChecksum(file, stored), true);
+describe('computeChecksum normalization', () => {
+  // Without normalization a Windows checkout (or `.gitattributes text=auto`)
+  // rewrites every line ending and each applied migration reports drift.
+  it('should hash CRLF and LF versions of a file identically', async () => {
+    writeFileSync(file, 'export const a = 1;\nexport const b = 2;\n');
+    const lf = await computeChecksum(file);
+    writeFileSync(file, 'export const a = 1;\r\nexport const b = 2;\r\n');
+    assert.strictEqual(await computeChecksum(file), lf);
   });
 
-  it('should return false when the file has been tampered with', async () => {
-    const stored = await computeChecksum(file);
-    writeFileSync(file, 'export const a = 999;\n');
-    assert.strictEqual(await verifyChecksum(file, stored), false);
+  it('should ignore a leading UTF-8 BOM', async () => {
+    writeFileSync(file, 'export const a = 1;\n');
+    const plain = await computeChecksum(file);
+    writeFileSync(file, '﻿export const a = 1;\n');
+    assert.strictEqual(await computeChecksum(file), plain);
+  });
+
+  it('should still detect a real content change', async () => {
+    writeFileSync(file, 'export const a = 1;\r\n');
+    const before = await computeChecksum(file);
+    writeFileSync(file, 'export const a = 2;\r\n');
+    assert.notStrictEqual(await computeChecksum(file), before);
   });
 });

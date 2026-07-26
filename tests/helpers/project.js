@@ -45,15 +45,22 @@ export async function down() {}
 `;
 }
 
-/** Build a MigratorKit pointed at the test mongo + project dir, with output silenced */
-function makeMigrator(uri, dbName, dir, overrides = {}) {
-  return new MigratorKit({
-    uri,
-    dbName,
-    migrationsDir: dir,
-    logger: null,
-    ...overrides,
-  });
+/**
+ * Build a MigratorKit pointed at the test mongo + project dir, with output
+ * silenced. `kitOptions` reaches the constructor's second argument (e.g. a
+ * `progress` reporter, which is the deterministic way to act mid-run).
+ */
+function makeMigrator(uri, dbName, dir, overrides = {}, kitOptions = {}) {
+  return new MigratorKit(
+    {
+      uri,
+      dbName,
+      migrationsDir: dir,
+      logger: null,
+      ...overrides,
+    },
+    kitOptions,
+  );
 }
 
 module.exports = { makeProject, insertMigration, failingMigration, makeMigrator };

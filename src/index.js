@@ -1,21 +1,24 @@
 const { MigratorKit } = require('./core/migrator.js');
 const { pendingMigrations, runMigrations } = require('./core/run.js');
 const {
-  AlreadyAppliedError,
   ChecksumMismatchError,
   ConfigFileExistsError,
   ConfigInvalidError,
   ConnectionFailedError,
+  HookFailedError,
   ImportTargetNotEmptyError,
   IrreversibleMigrationError,
   LockAlreadyHeldError,
+  LockLostError,
   LockReleaseFailedError,
   MigrationExecutionFailedError,
+  MigrationFileExistsError,
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
   MigrationInvalidNameError,
   MigronautError,
   NotAppliedError,
+  RunAbortedError,
 } = require('./errors/index.js');
 
 module.exports = {
@@ -27,19 +30,22 @@ module.exports = {
   runMigrations,
 
   // Error classes
-  AlreadyAppliedError,
   ChecksumMismatchError,
   ConfigFileExistsError,
   ConfigInvalidError,
   ConnectionFailedError,
+  HookFailedError,
   ImportTargetNotEmptyError,
   IrreversibleMigrationError,
   LockAlreadyHeldError,
+  LockLostError,
   LockReleaseFailedError,
   MigrationExecutionFailedError,
+  MigrationFileExistsError,
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
   MigrationInvalidNameError,
   MigronautError,
   NotAppliedError,
+  RunAbortedError,
 };

@@ -158,8 +158,10 @@ bin/migronaut.js
                                 │         ├─ loadMigrationFile()             [loader.js]
                                 │         ├─ progress.onStart() (spinner)
                                 │         ├─ runMigration() (txn?)           [runner.js]
-                                │         ├─ markApplied() (upsert)          [changelog.js]
+                                │         │    └─ onSuccess → markApplied()  [changelog.js]
+                                │         │       (inside the txn, so record + data commit together)
                                 │         └─ hooks.afterEach
+                                │      (signal checked between migrations: lost lock / stop())
                                 └─ finally: clearInterval(heartbeat); lock.release()
                  └─ finally: migrator.disconnect()
             └─ on any error: withMigrator prints "✖ CODE: message", process.exitCode = 1
@@ -224,14 +226,20 @@ Each entry: **responsibility · key exports · nuances you must know.**
 
 ### `src/core/changelog.js` — the audit trail
 - **Responsibility:** read/write `MigrationRecord`s in `_migronaut_migrations`.
-- **Key methods:** `getAll`, `getAppliedNames`, `getByName`, `getLastBatch`, `getByBatch`, `count`,
+- **Key methods:** `getAll`, `getAppliedNames`, `getByName`, `getLastBatch`, `getByBatch`,
   `getForeignDocs` (raw read for import), `markApplied`, `markReverted`, `ensureIndexes`.
 - **Nuances:**
-  - `markApplied` is a **`replaceOne(..., {upsert:true})` keyed on `name`** — *not* `insertOne`. This
+  - `markApplied` is an **`updateOne(..., {upsert:true})` keyed on `name`** — *not* `insertOne`. This
     is deliberate: `redo` / `up --force` / `import` must overwrite a record without violating the
-    unique `name` index ([changelog.js:78-79](src/core/changelog.js#L78-L79)).
+    unique `name` index. It uses `$set` (not a whole-document replace) plus
+    `$setOnInsert: {firstAppliedAt}` and `$unset: {revertedAt}`, so a re-apply keeps the original
+    first-applied timestamp and clears the stale revert marker instead of erasing both.
   - `markReverted` **never deletes** — it sets `status:'reverted'` + `revertedAt`. Audit history is
     sacred.
+  - Both accept an optional trailing `session`. The runner passes the migration's own session so the
+    changelog write **commits inside the migration's transaction** — without that, a crash between
+    the commit and the record leaves a migration applied but unrecorded, and the next `up` runs it
+    again.
   - `ensureIndexes` creates the unique index on `name`; called on every `connect()`.
 
 ### `src/core/runner.js` — single-migration execution
@@ -367,8 +375,18 @@ instead of running concurrently ([lock.js:75](src/core/lock.js#L75)).
 
 **(c) Heartbeat (makes long migrations safe)** — `runWithLock` starts a `setInterval` that calls
 `renew()` every `ttlMs/2`. `renew()` is scoped to `{_id, owner}` so it only refreshes *our* lock and
-returns `false` if we've lost it (logging a warning). The interval is `.unref()`-ed so it never keeps
-the process alive, and is `clearInterval`-ed in `finally` ([lock.js:154-171](src/core/lock.js#L154-L171)).
+returns `false` if we've lost it. The interval is `.unref()`-ed so it never keeps the process alive,
+and is `clearInterval`-ed in `finally`; the last in-flight renewal is awaited there too, so no stray
+query outlives the call and lands after the client is closed.
+
+**(d) Losing the lock aborts the run** — `runWithLock` owns an `AbortController` and passes its
+`signal` to the work function. A `renew()` that matches nothing means another process owns the lock,
+so the signal is aborted immediately with a `LockLostError`; a renewal that *errors* is tolerated for
+`MAX_RENEW_FAILURES` attempts first, since a single failure is often a blip. `#runUp`/`#runDown` check
+the signal **between** migrations — the only safe point, where the previous migration has committed
+and the next has not started. Set `onLockLost: 'warn'` to keep the old warn-and-continue behavior.
+`MigratorKit.stop()` (and the CLI's SIGINT/SIGTERM handler) aborts through the same path with a
+`RunAbortedError` carrying the partial results.
 
 **Release** — `deleteOne({_id, owner})`, owner-scoped so we never delete a lock since reclaimed by
 someone else. `forceRelease()` (for `migronaut unlock`) deletes unconditionally by `_id`.

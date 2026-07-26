@@ -100,6 +100,57 @@ describe('runMigration transactions (integration)', () => {
     assert.strictEqual(Number.isFinite(outcome.duration), true);
   });
 
+  it('should roll back the migration when the changelog write fails', async () => {
+    // The whole point of writing the record inside the transaction: bookkeeping
+    // and data move together, so a failure cannot leave a migration applied but
+    // unrecorded (which would silently re-run it on the next `up`).
+    const migration = {
+      up: async (ctx) => {
+        await ctx.db.collection(COLLECTION).insertOne({ v: 4 }, { session: ctx.session });
+      },
+      down: async () => undefined,
+    };
+    await assert.rejects(
+      runMigration({
+        name: 'atomic.ts',
+        migration,
+        direction: 'up',
+        context: context(),
+        useTransaction: true,
+        onSuccess: () => Promise.reject(new Error('changelog unavailable')),
+      }),
+      MigrationExecutionFailedError,
+    );
+    assert.strictEqual(await mongo.db.collection(COLLECTION).countDocuments(), 0);
+  });
+
+  it('should commit the changelog write together with the migration', async () => {
+    const recorded = [];
+    const migration = {
+      up: async (ctx) => {
+        await ctx.db.collection(COLLECTION).insertOne({ v: 5 }, { session: ctx.session });
+      },
+      down: async () => undefined,
+    };
+    await runMigration({
+      name: 'atomic-ok.ts',
+      migration,
+      direction: 'up',
+      context: context(),
+      useTransaction: true,
+      onSuccess: async (duration, session) => {
+        // The session must be the migration's own, or the write lands outside
+        // the transaction and the atomicity guarantee is void.
+        recorded.push({ duration, hasSession: session !== undefined });
+        await mongo.db.collection(COLLECTION).insertOne({ marker: 'changelog' }, { session });
+      },
+    });
+    assert.strictEqual(recorded.length, 1);
+    assert.strictEqual(recorded[0].hasSession, true);
+    assert.strictEqual(typeof recorded[0].duration, 'number');
+    assert.strictEqual(await mongo.db.collection(COLLECTION).countDocuments(), 2);
+  });
+
   it('should call the onError hook before rethrowing', async () => {
     const onError = mock.fn(() => Promise.resolve(undefined));
     const migration = {

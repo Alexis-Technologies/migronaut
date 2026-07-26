@@ -1,12 +1,14 @@
 import { pino } from 'pino';
 import { expectAssignable, expectType } from 'tsd';
 import {
-  AlreadyAppliedError,
   ChecksumMismatchError,
+  HookFailedError,
+  LockLostError,
   MigratorKit,
   MigronautError,
   type MigronautConfig,
   type MigronautLogger,
+  RunAbortedError,
   type RunResult,
   type StatusRow,
   pendingMigrations,
@@ -44,5 +46,23 @@ expectAssignable<Partial<MigronautConfig>>({ logger: pino() });
 expectAssignable<Partial<MigronautConfig>>({ logger: null });
 
 // Error hierarchy
-expectAssignable<MigronautError>(new AlreadyAppliedError('already applied'));
 expectAssignable<MigronautError>(new ChecksumMismatchError('mismatch', { name: 'x' }));
+expectAssignable<MigronautError>(new LockLostError('lock lost'));
+expectAssignable<MigronautError>(new RunAbortedError('stopped'));
+expectAssignable<MigronautError>(new HookFailedError('hook failed'));
+
+// Stopping a run, and redo's options
+expectType<void>(kit.stop());
+expectType<Promise<RunResult[]>>(kit.redo(undefined, { noLock: true }));
+
+// Resilience/audit config keys
+expectAssignable<Partial<MigronautConfig>>({ onLockLost: 'warn', environment: 'staging' });
+
+// Hooks receive direction/index info and afterAll receives the run summary
+expectAssignable<Partial<MigronautConfig>>({
+  hooks: {
+    beforeEach: async (name, _ctx, info) => void `${name}:${info.direction}:${info.index}`,
+    afterEach: async (name, duration, _ctx, info) => void `${name}:${duration}:${info.total}`,
+    afterAll: async (_ctx, summary) => void `${summary.success}:${summary.applied}`,
+  },
+});

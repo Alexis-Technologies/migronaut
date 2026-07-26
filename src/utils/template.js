@@ -3,17 +3,28 @@ const path = require('node:path');
 const {
   ConfigFileExistsError,
   ConfigInvalidError,
+  MigrationFileExistsError,
   MigrationFileNotFoundError,
 } = require('../errors/index.js');
 const { formatStamp } = require('./date.js');
 
-/** Convert an arbitrary migration name into a kebab-case slug */
+/**
+ * Convert an arbitrary migration name into a kebab-case slug. Unicode-aware —
+ * an ASCII-only rule turned "Ünïcödé Ñame" into "n-c-d-ame", quietly mangling
+ * every non-English name.
+ */
 function slugify(name) {
-  return name
+  const slug = name
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
     .replace(/^-+|-+$/g, '');
+  if (slug.length === 0) {
+    throw new ConfigInvalidError('Migration name must contain at least one letter or digit', {
+      name,
+    });
+  }
+  return slug;
 }
 
 /**
@@ -27,7 +38,14 @@ function buildPrefix(options) {
   return formatStamp(new Date());
 }
 
-/** Count existing migration files in a directory to derive the next sequence index */
+/**
+ * Next sequence index for a directory: one past the highest numeric prefix
+ * already present.
+ *
+ * Deliberately not a file count — counting reuses an index after a file is
+ * deleted, producing two migrations with the same prefix, and the new one then
+ * sorts before an already-applied migration.
+ */
 async function nextSequenceIndex(dir, extensions) {
   let files;
   try {
@@ -36,16 +54,17 @@ async function nextSequenceIndex(dir, extensions) {
     if (error.code === 'ENOENT') return 1;
     throw error;
   }
-  let count = 0;
+  let max = 0;
   for (const file of files) {
-    for (const ext of extensions) {
-      if (file.endsWith(ext)) {
-        count += 1;
-        break;
-      }
+    const matchesExtension = extensions.some((ext) => file.endsWith(ext));
+    if (!matchesExtension) continue;
+    const prefix = /^(\d+)-/.exec(file);
+    if (prefix) {
+      const index = Number(prefix[1]);
+      if (index > max) max = index;
     }
   }
-  return count + 1;
+  return max + 1;
 }
 
 /** The built-in TypeScript migration template */
@@ -122,12 +141,22 @@ async function resolveTemplateContent(templatePath, js) {
  */
 async function createMigrationFile(options) {
   const ext = options.js ? '.js' : '.ts';
-  const index = await nextSequenceIndex(options.dir, ['.ts', '.js']);
+  const extensions = options.fileExtensions ?? ['.ts', '.js'];
+  const index = await nextSequenceIndex(options.dir, extensions);
   const prefix = buildPrefix({ sequential: options.sequential, index });
   const filename = `${prefix}-${slugify(options.name)}${ext}`;
   const filepath = path.join(options.dir, filename);
   const content = await resolveTemplateContent(options.templatePath, options.js);
-  await fs.writeFile(filepath, content, 'utf8');
+  try {
+    // 'wx' fails if the path exists — creating a migration must never silently
+    // overwrite hand-written code (two `create`s in the same second collide).
+    await fs.writeFile(filepath, content, { encoding: 'utf8', flag: 'wx' });
+  } catch (error) {
+    if (error.code === 'EEXIST') {
+      throw new MigrationFileExistsError('Migration file already exists', { path: filepath });
+    }
+    throw error;
+  }
   return filepath;
 }
 

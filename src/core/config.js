@@ -84,6 +84,18 @@ const CONFIG_KEYS = [
     message: 'must be a non-empty string',
     optional: true,
   },
+  {
+    path: 'environment',
+    check: isNonEmptyString,
+    message: 'must be a non-empty string',
+    optional: true,
+  },
+  {
+    path: 'onLockLost',
+    check: (value) => value === 'abort' || value === 'warn',
+    message: "must be 'abort' or 'warn'",
+    optional: true,
+  },
 ];
 
 /**
@@ -174,6 +186,7 @@ function readEnvConfig() {
   if (env.MIGRONAUT_CREATE_EXTENSION === 'ts' || env.MIGRONAUT_CREATE_EXTENSION === 'js') {
     result.createExtension = env.MIGRONAUT_CREATE_EXTENSION;
   }
+  if (env.MIGRONAUT_ENVIRONMENT !== undefined) result.environment = env.MIGRONAUT_ENVIRONMENT;
   return result;
 }
 

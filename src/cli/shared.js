@@ -19,6 +19,43 @@ function partialFromOpts(opts) {
   return partial;
 }
 
+/** Exit code convention for a process killed by a signal: 128 + signal number */
+const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
+
+/**
+ * Turn SIGINT/SIGTERM into a graceful stop: the migration in flight finishes,
+ * the rest are skipped, and the lock is released — instead of leaving a
+ * half-applied migration and a lock held until its TTL expires. A second signal
+ * exits immediately for an operator who cannot wait.
+ *
+ * Returns a function that removes the handlers again, so a long-lived process
+ * calling the CLI repeatedly does not accumulate them.
+ */
+function attachSignalHandlers(migrator, spinner, logger) {
+  let stopping = false;
+  const handlers = [];
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    const handler = () => {
+      if (stopping) {
+        spinner?.stop();
+        process.exit(SIGNAL_EXIT_CODES[signal]);
+      }
+      stopping = true;
+      spinner?.stop();
+      logger.warn(
+        `⚠ ${signal} received — finishing the current migration, then stopping. ` +
+          'Press again to exit immediately.',
+      );
+      migrator.stop(`Received ${signal}`);
+    };
+    process.on(signal, handler);
+    handlers.push([signal, handler]);
+  }
+  return () => {
+    for (const [signal, handler] of handlers) process.off(signal, handler);
+  };
+}
+
 /**
  * Construct a MigratorKit from CLI options, run `fn`, always disconnect, and
  * translate failures into a non-zero exit code with a readable message.
@@ -42,7 +79,8 @@ async function withMigrator(opts, fn, options = {}) {
     const reporter = {
       onStart: (name, direction) =>
         spinner.start(`${direction === 'up' ? 'Applying' : 'Reverting'} ${name}…`),
-      // Stop (not succeed) — core logs the ✔/↩ result line right after.
+      // Stop (not succeed) — core logs the ✔/↩/✖ result line right after, so
+      // the outcome argument is deliberately unused here.
       onStop: () => spinner.stop(),
     };
     migratorOptions.progress = reporter;
@@ -50,6 +88,7 @@ async function withMigrator(opts, fn, options = {}) {
   const migrator = new MigratorKit(partial, migratorOptions);
   // Human-facing logger for withMigrator's own messages; stderr in JSON mode.
   const logger = createLogger(json ? process.stderr : process.stdout);
+  const detachSignals = attachSignalHandlers(migrator, spinner, logger);
   try {
     if (spinner) {
       spinner.start('Connecting to MongoDB…');
@@ -77,8 +116,10 @@ async function withMigrator(opts, fn, options = {}) {
     }
     process.exitCode = 1;
   } finally {
+    detachSignals();
     spinner?.stop();
-    await migrator.disconnect();
+    // A failing close must not replace whatever this command was reporting.
+    await migrator.disconnect().catch(() => undefined);
   }
 }
 

@@ -1,18 +1,21 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const {
-  AlreadyAppliedError,
   ChecksumMismatchError,
   ConfigFileExistsError,
   ConfigInvalidError,
   ConnectionFailedError,
+  HookFailedError,
   LockAlreadyHeldError,
+  LockLostError,
   LockReleaseFailedError,
   MigrationExecutionFailedError,
+  MigrationFileExistsError,
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
   MigronautError,
   NotAppliedError,
+  RunAbortedError,
 } = require('../../src/errors/index.js');
 
 describe('MigronautError', () => {
@@ -63,8 +66,15 @@ describe('domain error classes', () => {
     { Ctor: ConfigInvalidError, code: 'CONFIG_INVALID', name: 'ConfigInvalidError' },
     { Ctor: ConfigFileExistsError, code: 'CONFIG_FILE_EXISTS', name: 'ConfigFileExistsError' },
     { Ctor: ConnectionFailedError, code: 'CONNECTION_FAILED', name: 'ConnectionFailedError' },
-    { Ctor: AlreadyAppliedError, code: 'ALREADY_APPLIED', name: 'AlreadyAppliedError' },
     { Ctor: NotAppliedError, code: 'NOT_APPLIED', name: 'NotAppliedError' },
+    { Ctor: LockLostError, code: 'LOCK_LOST', name: 'LockLostError' },
+    { Ctor: RunAbortedError, code: 'RUN_ABORTED', name: 'RunAbortedError' },
+    { Ctor: HookFailedError, code: 'HOOK_FAILED', name: 'HookFailedError' },
+    {
+      Ctor: MigrationFileExistsError,
+      code: 'MIGRATION_FILE_EXISTS',
+      name: 'MigrationFileExistsError',
+    },
   ];
 
   for (const { Ctor, code, name } of cases) {

@@ -3,8 +3,20 @@ const { LockAlreadyHeldError } = require('../errors/index.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { MigratorKit } = require('./migrator.js');
 
-const DEFAULT_LOCK_WAIT_TIMEOUT_MS = 30_000;
+/**
+ * Longer than the default 60s lock TTL on purpose: with a shorter budget, a peer
+ * migration that outlives it makes every waiting instance fail to boot, even
+ * though the peer is healthy and still holding a valid lock.
+ */
+const DEFAULT_LOCK_WAIT_TIMEOUT_MS = 90_000;
 const DEFAULT_LOCK_POLL_INTERVAL_MS = 500;
+/** ±25% jitter so N instances booting together stop polling in lockstep */
+const POLL_JITTER_RATIO = 0.25;
+
+function jitteredDelay(baseMs) {
+  const spread = baseMs * POLL_JITTER_RATIO;
+  return Math.max(1, Math.round(baseMs - spread + Math.random() * spread * 2));
+}
 
 /**
  * Run all pending migrations and return a summary — the blessed one-call entry
@@ -48,29 +60,32 @@ async function runMigrations(config = {}, options = {}) {
 
   try {
     await kit.connect();
-    const deadline = Date.now() + lockWaitTimeoutMs;
+    // The clock starts at the first contention, not before the first attempt —
+    // otherwise a slow initial attempt eats the whole waiting budget.
+    let deadline;
 
     for (;;) {
       try {
         const applied = await kit.up(undefined, noLock ? { noLock: true } : {});
         return { applied, upToDate: applied.length === 0, waited };
       } catch (error) {
-        const canWait =
-          onLockHeld === 'wait' &&
-          error instanceof LockAlreadyHeldError &&
-          Date.now() + lockPollIntervalMs <= deadline;
-        if (!canWait) {
+        if (onLockHeld !== 'wait' || !(error instanceof LockAlreadyHeldError)) {
+          throw error;
+        }
+        deadline ??= Date.now() + lockWaitTimeoutMs;
+        const nextDelay = jitteredDelay(lockPollIntervalMs);
+        if (Date.now() + nextDelay > deadline) {
           throw error;
         }
         if (!waited) {
           logger.info('Migration lock held by another process — waiting for it to release…');
         }
         waited = true;
-        await delay(lockPollIntervalMs);
+        await delay(nextDelay);
       }
     }
   } finally {
-    await kit.disconnect();
+    await kit.disconnect().catch(() => undefined);
   }
 }
 
@@ -96,7 +111,7 @@ async function pendingMigrations(config = {}, options = {}) {
     await kit.connect();
     return await kit.list('pending');
   } finally {
-    await kit.disconnect();
+    await kit.disconnect().catch(() => undefined);
   }
 }
 

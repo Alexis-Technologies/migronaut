@@ -1,7 +1,19 @@
 import type { ClientSession, Db, MongoClient } from 'mongodb';
-import type { Mongoose } from 'mongoose';
 
 // ─── Migration File Contract ───────────────────────────────────────────────────
+
+/**
+ * Structural stand-in for a Mongoose instance.
+ *
+ * Deliberately not `import type { Mongoose } from 'mongoose'`: mongoose is an
+ * *optional* peer, and a hard import makes this declaration file fail to
+ * resolve for the majority of users who never install it. A real `Mongoose` is
+ * assignable to this.
+ */
+export interface MongooseLike {
+  connection: unknown;
+  model: (...args: never[]) => unknown;
+}
 
 /** Context object passed into every migration's up() and down() function */
 export interface MigrationContext {
@@ -10,7 +22,7 @@ export interface MigrationContext {
   /** Native MongoClient instance — use for sessions/transactions */
   client: MongoClient;
   /** Mongoose instance — only present if passed in config */
-  mongoose?: Mongoose;
+  mongoose?: MongooseLike;
   /**
    * Active session, present only when this migration runs inside a transaction.
    * Pass it to your operations (e.g. `{ session }`) so they join the transaction.
@@ -47,6 +59,8 @@ export interface MigrationRecord {
   batch: number;
   status: MigrationStatus;
   appliedAt: Date;
+  /** When this migration was applied the *first* time; survives a re-apply */
+  firstAppliedAt?: Date;
   revertedAt?: Date;
   /** Execution time in milliseconds */
   duration: number;
@@ -67,15 +81,45 @@ export interface MigrationRecord {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
+/** Which migration in the run a per-migration hook is firing for */
+export interface HookInfo {
+  direction: 'up' | 'down';
+  /** Zero-based position within this run's targets */
+  index: number;
+  total: number;
+}
+
+/** Outcome of the run, passed to `afterAll` */
+export interface RunSummary {
+  /** False when the run ended by throwing — `afterAll` runs either way */
+  success: boolean;
+  /** How many migrations were applied (or reverted) before the run ended */
+  applied: number;
+  direction: 'up' | 'down';
+}
+
+/**
+ * Lifecycle hooks. A hook that throws fails the run with a
+ * {@link HookFailedError} — it is never swallowed, and never surfaces as an
+ * untyped Error.
+ */
 export interface MigrationHooks {
   /** Runs once before any migration in the batch starts */
   beforeAll?: (ctx: MigrationContext) => Promise<void>;
-  /** Runs once after all migrations in the batch complete */
-  afterAll?: (ctx: MigrationContext) => Promise<void>;
-  /** Runs before each individual migration */
-  beforeEach?: (name: string, ctx: MigrationContext) => Promise<void>;
+  /**
+   * Runs once after the batch ends — including when it failed, so cleanup and
+   * notification hooks still fire on the path where they matter most.
+   */
+  afterAll?: (ctx: MigrationContext, summary: RunSummary) => Promise<void>;
+  /** Runs before each individual migration. Not fired for skipped migrations */
+  beforeEach?: (name: string, ctx: MigrationContext, info: HookInfo) => Promise<void>;
   /** Runs after each individual migration completes successfully */
-  afterEach?: (name: string, duration: number, ctx: MigrationContext) => Promise<void>;
+  afterEach?: (
+    name: string,
+    duration: number,
+    ctx: MigrationContext,
+    info: HookInfo,
+  ) => Promise<void>;
   /** Runs when a migration throws — receives the error before it propagates */
   onError?: (name: string, error: Error, ctx: MigrationContext) => Promise<void>;
 }
@@ -114,8 +158,23 @@ export interface MigronautConfig {
   sequential: boolean;
   /** Path to a custom migration template file */
   templatePath?: string;
+  /**
+   * Value stamped onto the `environment` field of changelog records. Falls back
+   * to `process.env.NODE_ENV`, then to `'production'` — the safe assumption when
+   * nothing says otherwise.
+   */
+  environment?: string;
+  /**
+   * What to do when the lock is lost mid-run (another process reclaimed it, or
+   * the heartbeat cannot reach the database).
+   *
+   * - `'abort'` (default) — stop after the migration in flight and throw a
+   *   {@link LockLostError}, rather than risk two processes migrating at once.
+   * - `'warn'` — log and keep going.
+   */
+  onLockLost?: 'abort' | 'warn';
   /** Mongoose instance — required only if your migrations use Mongoose models */
-  mongoose?: Mongoose;
+  mongoose?: MongooseLike;
   hooks?: MigrationHooks;
   /** Custom logger — set to null to silence all output (useful in tests) */
   logger?: MigronautLogger | null;
@@ -160,8 +219,11 @@ export interface MigronautLogger {
 export interface ProgressReporter {
   /** A migration's up()/down() is about to execute */
   onStart: (name: string, direction: 'up' | 'down') => void;
-  /** The in-flight migration finished (success or error) — stop any indicator */
-  onStop: () => void;
+  /**
+   * The in-flight migration finished — stop any indicator. `outcome` says
+   * whether it succeeded, for reporters that render more than a spinner.
+   */
+  onStop: (outcome?: 'success' | 'error') => void;
 }
 
 // ─── Results ──────────────────────────────────────────────────────────────────
@@ -250,15 +312,18 @@ export interface LockInfo {
 export type MigronautErrorCode =
   | 'LOCK_ALREADY_HELD'
   | 'LOCK_RELEASE_FAILED'
+  | 'LOCK_LOST'
+  | 'RUN_ABORTED'
+  | 'HOOK_FAILED'
   | 'CHECKSUM_MISMATCH'
   | 'MIGRATION_FILE_NOT_FOUND'
+  | 'MIGRATION_FILE_EXISTS'
   | 'MIGRATION_INVALID_NAME'
   | 'MIGRATION_INVALID_EXPORT'
   | 'MIGRATION_EXECUTION_FAILED'
   | 'CONFIG_INVALID'
   | 'CONFIG_FILE_EXISTS'
   | 'CONNECTION_FAILED'
-  | 'ALREADY_APPLIED'
   | 'NOT_APPLIED'
   | 'IMPORT_TARGET_NOT_EMPTY'
   | 'MIGRATION_IRREVERSIBLE';
@@ -301,6 +366,12 @@ export interface DownOptions {
    * `migrate:rollback --step=N`. Mutually exclusive with `batch` and a filename.
    */
   steps?: number;
+}
+
+/** Options for {@link MigratorKit.redo} */
+export interface RedoOptions {
+  /** Skip lock acquisition (dev only) */
+  noLock?: boolean;
 }
 
 /** Options for {@link MigratorKit.create} */
@@ -379,13 +450,24 @@ export class MigratorKit {
   up(filename?: string, options?: UpOptions): Promise<RunResult[]>;
   /** Rollback the last batch, a specific batch, a specific file, or the last N steps */
   down(filename?: string, options?: DownOptions): Promise<RunResult[]>;
-  /** Rollback then re-apply: the last applied migration, or a specific file */
-  redo(filename?: string): Promise<RunResult[]>;
+  /**
+   * Rollback then re-apply: the last applied migration, or a specific file.
+   * Both directions run under a single lock, so no other process can slip in
+   * while the migration is reverted.
+   */
+  redo(filename?: string, options?: RedoOptions): Promise<RunResult[]>;
+  /**
+   * Stop the run in progress: the migration currently executing finishes, the
+   * remaining ones are skipped, the lock is released, and the in-flight call
+   * rejects with a {@link RunAbortedError} whose `context.results` lists what
+   * was applied. No-op when nothing is running.
+   */
+  stop(reason?: string): void;
   /** Preview what would run — never writes to the database */
   dryRun(
     direction: 'up' | 'down',
     filename?: string,
-    options?: { steps?: number },
+    options?: { steps?: number; batch?: number },
   ): Promise<StatusRow[]>;
   /** Full migration status for all known files and records */
   status(): Promise<StatusRow[]>;
@@ -517,8 +599,30 @@ export class ConnectionFailedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>);
 }
 
-/** Thrown when attempting to apply a migration that is already applied */
-export class AlreadyAppliedError extends MigronautError {
+/**
+ * Thrown when the lock is lost while migrations are still running — another
+ * process reclaimed it, or the heartbeat could not reach the database. Set
+ * `onLockLost: 'warn'` to downgrade this to a warning.
+ */
+export class LockLostError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>);
+}
+
+/**
+ * Thrown when a run is stopped before finishing — via {@link MigratorKit.stop}
+ * or a SIGINT/SIGTERM. `context.results` lists what was applied first.
+ */
+export class RunAbortedError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>);
+}
+
+/** Thrown when a user-supplied lifecycle hook throws */
+export class HookFailedError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>);
+}
+
+/** Thrown when `create` would overwrite an existing migration file */
+export class MigrationFileExistsError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>);
 }
 

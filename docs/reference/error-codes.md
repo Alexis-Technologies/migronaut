@@ -23,15 +23,18 @@ In `--json` mode, the CLI prints `{ "error": { "code", "message" } }` and exits 
 |---|---|---|---|
 | `LOCK_ALREADY_HELD` | `LockAlreadyHeldError` | Another run holds the lock within its TTL | Wait, or [`migronaut unlock`](/commands/unlock) if it's stale |
 | `LOCK_RELEASE_FAILED` | `LockReleaseFailedError` | The lock couldn't be released | Check DB connectivity; retry |
+| `LOCK_LOST` | `LockLostError` | The lock was lost mid-run (reclaimed, or the heartbeat couldn't reach the DB) | Check what else is migrating; re-run `up` once it's clear |
+| `RUN_ABORTED` | `RunAbortedError` | The run was stopped by `stop()` or SIGINT/SIGTERM | See `context.results` for what was applied, then re-run |
+| `HOOK_FAILED` | `HookFailedError` | One of your lifecycle hooks threw | `context.hook` names it; `context.cause` has the message |
 | `CHECKSUM_MISMATCH` | `ChecksumMismatchError` | An applied file was edited (in `--strict`) | Don't edit applied files — write a new migration |
 | `MIGRATION_FILE_NOT_FOUND` | `MigrationFileNotFoundError` | A named migration file doesn't exist | Check the filename and `migrationsDir` |
-| `MIGRATION_INVALID_NAME` | `MigrationInvalidNameError` | A migration name escapes the migrations dir | Use a bare filename, not a path |
+| `MIGRATION_FILE_EXISTS` | `MigrationFileExistsError` | `migronaut create` would overwrite an existing file | Pick a different name, or delete the existing file |
+| `MIGRATION_INVALID_NAME` | `MigrationInvalidNameError` | A migration name escapes the migrations dir, or isn't a string | Use a bare filename, not a path |
 | `MIGRATION_INVALID_EXPORT` | `MigrationInvalidExportError` | A file is missing `up`/`down` functions | Export both `up` and `down` |
 | `MIGRATION_EXECUTION_FAILED` | `MigrationExecutionFailedError` | A migration's `up`/`down` threw | Read the cause; fix the migration logic |
 | `CONFIG_INVALID` | `ConfigInvalidError` | Config failed validation | Check required fields and types |
 | `CONFIG_FILE_EXISTS` | `ConfigFileExistsError` | `migronaut init` found an existing config | Use `--force` to overwrite |
 | `CONNECTION_FAILED` | `ConnectionFailedError` | Couldn't connect to MongoDB | Verify `uri`/`dbName` and that Mongo is up |
-| `ALREADY_APPLIED` | `AlreadyAppliedError` | A target migration is already applied | Use `--force` to re-run intentionally |
 | `NOT_APPLIED` | `NotAppliedError` | Tried to revert a migration that isn't applied | Run `migronaut status` to see what's applied |
 | `IMPORT_TARGET_NOT_EMPTY` | `ImportTargetNotEmptyError` | `migronaut import` target already has records | Use `--force` to import anyway |
 | `MIGRATION_IRREVERSIBLE` | `IrreversibleMigrationError` | Tried to revert an imported migrate-mongo record | Write a new forward migration instead |

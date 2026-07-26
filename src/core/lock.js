@@ -1,6 +1,11 @@
 const { randomUUID } = require('node:crypto');
 const os = require('node:os');
-const { LockAlreadyHeldError, LockReleaseFailedError } = require('../errors/index.js');
+const {
+  LockAlreadyHeldError,
+  LockLostError,
+  LockReleaseFailedError,
+} = require('../errors/index.js');
+const { safeUsername } = require('../utils/user.js');
 
 /** Fixed `_id` of the singleton lock document */
 const LOCK_ID = 'migronaut_lock';
@@ -55,7 +60,7 @@ class MigrationLock {
       lockedAt: new Date(),
       pid: process.pid,
       host: os.hostname(),
-      executedBy: os.userInfo().username,
+      executedBy: safeUsername(),
       owner,
     };
 
@@ -141,46 +146,105 @@ class MigrationLock {
   }
 }
 
+/** Consecutive heartbeat errors tolerated before the lock is presumed lost */
+const MAX_RENEW_FAILURES = 3;
+
 /**
- * Run `fn` while holding the migration lock. The lock is always released in a
- * `finally` block. While `fn` runs, a heartbeat renews the lock every `ttlMs/2`
- * so a migration that takes longer than the TTL never lets its lock go stale
- * and get reclaimed by another process — the original failure mode that made
- * the lock unsafe for long migrations. When `noLock` is true, acquisition is
- * skipped and a loud warning is emitted — intended for local development only.
+ * Run `fn(signal)` while holding the migration lock. The lock is always
+ * released in a `finally` block. While `fn` runs, a heartbeat renews the lock
+ * every `ttlMs/2` so a migration that takes longer than the TTL never lets its
+ * lock go stale and get reclaimed by another process.
+ *
+ * If the lock is nonetheless lost — another process reclaimed it, or the
+ * heartbeat cannot reach the database — the `signal` is aborted with a
+ * LockLostError. `fn` is expected to check it between migrations and stop:
+ * continuing would mean two processes migrating the same database at once.
+ * Set `onLockLost: 'warn'` to keep going with only a warning.
+ *
+ * When `noLock` is true, acquisition is skipped and a loud warning is emitted —
+ * intended for local development only.
  */
 async function runWithLock(lock, options, fn) {
+  const controller = new AbortController();
+
   if (options.noLock) {
     options.logger.warn('⚠ Running without a lock (--no-lock) — concurrent runs are unsafe');
-    return fn();
+    return fn(controller.signal);
   }
 
   await lock.acquire();
+
+  const abortOnLoss = (options.onLockLost ?? 'abort') === 'abort';
+  const loseLock = (reason) => {
+    options.logger.warn(`⚠ Lost the migration lock mid-run (${reason})`);
+    if (abortOnLoss && !controller.signal.aborted) {
+      controller.abort(
+        new LockLostError('Lost the migration lock mid-run', { reason, aborted: true }),
+      );
+    }
+  };
 
   // Renew at half the TTL so the lock is refreshed comfortably before it would
   // be considered stale. unref() keeps the heartbeat from holding the process
   // open on its own.
   const intervalMs = Math.max(1, Math.floor(lock.ttlMs / 2));
+  let consecutiveFailures = 0;
+  let stopped = false;
+  // Tracked so the caller never returns with a renewal still in flight: a
+  // stray query landing after disconnect() fails against a closed client.
+  let inFlight;
   const heartbeat = setInterval(() => {
-    lock
+    inFlight = lock
       .renew()
       .then((held) => {
-        if (!held) {
-          options.logger.warn(
-            '⚠ Lost the migration lock mid-run (renewal failed) — another run may have started',
-          );
-        }
+        consecutiveFailures = 0;
+        // A renewal that finds no matching document means someone else owns the
+        // lock now — unrecoverable, so it aborts on the first occurrence.
+        if (!held && !stopped) loseLock('another run reclaimed it');
       })
-      .catch(() => undefined);
+      .catch((error) => {
+        if (stopped) return;
+        // A failing renewal may just be a blip, so tolerate a few in a row
+        // before concluding the lock is gone.
+        consecutiveFailures += 1;
+        const message = error instanceof Error ? error.message : String(error);
+        options.logger.warn(
+          `⚠ Lock renewal failed (${consecutiveFailures}/${MAX_RENEW_FAILURES}): ${message}`,
+        );
+        if (consecutiveFailures >= MAX_RENEW_FAILURES) loseLock('renewal kept failing');
+      });
   }, intervalMs);
   heartbeat.unref?.();
 
+  let result;
+  let runError;
+  let failed = false;
   try {
-    return await fn();
+    result = await fn(controller.signal);
+  } catch (error) {
+    failed = true;
+    runError = error;
   } finally {
+    stopped = true;
     clearInterval(heartbeat);
-    await lock.release();
+    // Let any renewal already in flight settle, so no stray query outlives this
+    // call and lands after the caller has closed the client.
+    await inFlight;
   }
+
+  try {
+    await lock.release();
+  } catch (releaseError) {
+    // Never let a release failure replace the reason the run failed: that would
+    // report "Failed to release migration lock" instead of the actual migration
+    // error. When the run succeeded, the release failure is the only news.
+    if (!failed) throw releaseError;
+    const message = releaseError instanceof Error ? releaseError.message : String(releaseError);
+    options.logger.warn(`⚠ Failed to release the migration lock: ${message}`);
+  }
+
+  if (failed) throw runError;
+  return result;
 }
 
-module.exports = { LOCK_ID, MigrationLock, runWithLock, toLockInfo };
+module.exports = { LOCK_ID, MAX_RENEW_FAILURES, MigrationLock, runWithLock, toLockInfo };

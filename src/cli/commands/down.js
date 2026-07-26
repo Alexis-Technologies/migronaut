@@ -19,7 +19,9 @@ function registerDown(program) {
         async (migrator) => {
           const results = await migrator.down(file, {
             noLock: opts.lock === false,
-            ...(opts.batch ? { batch: Number(opts.batch) } : {}),
+            // `!== undefined`, not truthiness: `--batch 0` is a mistake worth
+            // reporting, not one to silently drop. Core validates the value.
+            ...(opts.batch !== undefined ? { batch: Number(opts.batch) } : {}),
             ...(opts.steps !== undefined ? { steps: Number(opts.steps) } : {}),
           });
           if (opts.json) {

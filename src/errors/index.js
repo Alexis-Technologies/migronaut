@@ -27,6 +27,45 @@ class LockReleaseFailedError extends MigronautError {
   }
 }
 
+/**
+ * Thrown when the lock is lost while migrations are still running — another
+ * process reclaimed it, or the heartbeat could not reach the database. The run
+ * stops rather than risk two processes migrating the same database at once.
+ */
+class LockLostError extends MigronautError {
+  constructor(message, context) {
+    super('LOCK_LOST', message, context);
+    this.name = 'LockLostError';
+  }
+}
+
+/**
+ * Thrown when a run is stopped before finishing — via `MigratorKit.stop()` or a
+ * SIGINT/SIGTERM. Migrations already applied are listed in `context.results`.
+ */
+class RunAbortedError extends MigronautError {
+  constructor(message, context) {
+    super('RUN_ABORTED', message, context);
+    this.name = 'RunAbortedError';
+  }
+}
+
+/** Thrown when a user-supplied lifecycle hook throws */
+class HookFailedError extends MigronautError {
+  constructor(message, context) {
+    super('HOOK_FAILED', message, context);
+    this.name = 'HookFailedError';
+  }
+}
+
+/** Thrown when `migronaut create` would overwrite an existing migration file */
+class MigrationFileExistsError extends MigronautError {
+  constructor(message, context) {
+    super('MIGRATION_FILE_EXISTS', message, context);
+    this.name = 'MigrationFileExistsError';
+  }
+}
+
 /** Thrown when a file's checksum differs from the one recorded at apply time */
 class ChecksumMismatchError extends MigronautError {
   constructor(message, context) {
@@ -95,14 +134,6 @@ class ConnectionFailedError extends MigronautError {
   }
 }
 
-/** Thrown when attempting to apply a migration that is already applied */
-class AlreadyAppliedError extends MigronautError {
-  constructor(message, context) {
-    super('ALREADY_APPLIED', message, context);
-    this.name = 'AlreadyAppliedError';
-  }
-}
-
 /** Thrown when attempting to revert a migration that was never applied */
 class NotAppliedError extends MigronautError {
   constructor(message, context) {
@@ -131,15 +162,18 @@ module.exports = {
   MigronautError,
   LockAlreadyHeldError,
   LockReleaseFailedError,
+  LockLostError,
+  RunAbortedError,
+  HookFailedError,
   ChecksumMismatchError,
   MigrationFileNotFoundError,
+  MigrationFileExistsError,
   MigrationInvalidNameError,
   MigrationInvalidExportError,
   MigrationExecutionFailedError,
   ConfigInvalidError,
   ConfigFileExistsError,
   ConnectionFailedError,
-  AlreadyAppliedError,
   NotAppliedError,
   ImportTargetNotEmptyError,
   IrreversibleMigrationError,
