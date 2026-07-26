@@ -40,7 +40,7 @@
   ],
   "scripts": {
     "test": "node --test \"tests/unit/**/*.test.js\" \"tests/integration/**/*.test.js\"",
-    "test:coverage": "c8 --all --include 'src/**' --check-coverage --lines 90 --branches 85 --functions 90 --reporter text --reporter lcov node --test \"tests/unit/**/*.test.js\" \"tests/integration/**/*.test.js\"",
+    "test:coverage": "c8 --all --include 'src/**' --check-coverage --lines 90 --branches 90 --functions 90 --reporter text --reporter lcov node --test \"tests/unit/**/*.test.js\" \"tests/integration/**/*.test.js\"",
     "test:types": "tsd",
     "lint": "oxlint src bin scripts tests",
     "format": "oxfmt src bin scripts tests",
