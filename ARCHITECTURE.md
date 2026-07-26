@@ -521,6 +521,11 @@ pnpm run test:types                        # tsd — index.d.ts vs tests/types/*
   fix formatting), `pnpm run format:check` (`oxfmt --check`, no writes).
 - **Bundle-size report (informational only):** `pnpm run size` runs `scripts/size.js`, which uses
   esbuild to report library + CLI bundle size — it does not produce a published artifact.
+- **Benchmarks (informational only, manual):** `pnpm run bench` runs `bench/bench.js`, a
+  zero-dependency `node:perf_hooks` harness measuring ops/sec for the hottest paths
+  (`checksum`, `loader`, `Changelog`, `MigrationLock`) — the DB-bound scenarios spin up a
+  throwaway in-memory MongoDB replica set for the run. Not run in CI; results are hand-copied
+  into the README's Benchmarks section before releases.
 - **Published artifact:** exactly what `files` in [package.json](package.json) lists —
   `index.js`, `index.d.ts`, `bin`, `src`, `README.md`, `CHANGELOG.md`. `docs/`, `blog/`, and this
   `ARCHITECTURE.md` live in the repo but are **never** shipped to npm.

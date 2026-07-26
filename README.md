@@ -653,6 +653,38 @@ positional `(db, client)`.
 
 ---
 
+## Benchmarks
+
+Measured with the zero-dependency harness in [`bench/bench.js`](./bench/bench.js) (in-process
+scenarios: 1s timed run after 2k warmup iterations; DB-bound scenarios against an in-memory
+MongoDB replica set: 500ms timed run after 100 warmup iterations). Reproduce with:
+
+```bash
+pnpm bench
+```
+
+Apple M3 Max, Node v24.14.1:
+
+| Scenario | ops/sec |
+|---|--------:|
+| `computeChecksum` — small migration file (~1 KB) | ~16,000 |
+| `computeChecksum` — large migration file (~100 KB) |  ~8,000 |
+| `loadMigrationFile` — CommonJS default export | ~60,000 |
+| `loadMigrationFile` — ESM named exports | ~60,000 |
+| `loadMigrationFile` — TypeScript (native type-stripping) | ~60,000 |
+| `Changelog.getAll` — 1,000 records |     ~20 |
+| `Changelog.getAppliedNames` — 1,000 records |     ~30 |
+| `Changelog.getLastBatch` — 1,000 records |    ~200 |
+| `Changelog.markApplied` — idempotent upsert |    ~150 |
+| `Changelog.markReverted` — update existing applied record |    ~150 |
+| `MigrationLock.acquire + release` — uncontended round trip |     ~80 |
+| `MigrationLock.renew` — heartbeat update |    ~150 |
+
+Numbers vary by hardware and Node version — treat them as relative guidance, not absolutes. The
+harness exists primarily to catch performance regressions between releases.
+
+---
+
 ## License
 
-[MIT](./LICENSE) © guptasantosh327
+[MIT](./LICENSE) © Alexis Technologies
