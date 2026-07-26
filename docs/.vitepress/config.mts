@@ -41,7 +41,7 @@ const jsonLd = {
   codeRepository: repo,
   license: 'https://opensource.org/licenses/MIT',
   keywords,
-  author: { '@type': 'Person', name: 'Santosh Gupta' },
+  author: { '@type': 'Organization', name: 'Alexis Technologies' },
   offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
 };
 
@@ -60,7 +60,7 @@ export default defineConfig({
     ['link', { rel: 'icon', type: 'image/svg+xml', href: `${base}logo-mark.svg` }],
     ['link', { rel: 'icon', type: 'image/png', href: `${base}favicon.png` }],
     ['meta', { name: 'theme-color', content: '#00ED64' }],
-    ['meta', { name: 'author', content: 'Santosh Gupta' }],
+    ['meta', { name: 'author', content: 'Alexis Technologies' }],
     ['meta', { name: 'keywords', content: keywords }],
     ['meta', { name: 'robots', content: 'index, follow' }],
     ['meta', { property: 'og:type', content: 'website' }],
@@ -184,7 +184,7 @@ export default defineConfig({
 
     footer: {
       message: 'Released under the MIT License.',
-      copyright: 'Copyright © 2026 Santosh Gupta',
+      copyright: 'Copyright © 2026 Alexis Technologies',
     },
 
     docFooter: {

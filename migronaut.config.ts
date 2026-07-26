@@ -4,6 +4,12 @@ import type { MigronautConfig } from '@alexify/migronaut';
  * migronaut configuration.
  * Precedence (highest first): CLI flags > MIGRONAUT_* env vars > this file > defaults.
  * Every field is optional; the values below are the built-in defaults.
+ *
+ * Exported with `module.exports` rather than `export default`: this repository's
+ * package.json has no `"type"` field, so an ESM-syntax config makes Node reparse
+ * the file and print a MODULE_TYPELESS_PACKAGE_JSON warning on every command.
+ * `import type` disappears during type-stripping, so this file is plain
+ * CommonJS at runtime. migronaut's loader accepts either form.
  */
 const config: Partial<MigronautConfig> = {
   // ── Connection ──────────────────────────────────────────────
@@ -46,4 +52,4 @@ const config: Partial<MigronautConfig> = {
   // },
 };
 
-export default config;
+module.exports = config;

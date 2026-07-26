@@ -134,7 +134,7 @@ pnpm run format              # oxfmt src bin scripts tests bench
 pnpm run format:check          # oxfmt --check src bin scripts tests bench
 pnpm test                        # node --test (unit + integration, ~265 tests)
 node --test tests/integration/up.test.js   # single file
-pnpm run test:coverage             # node --test under c8, gated at 90/90/85
+pnpm run test:coverage             # node --test under c8, gated at 90/90/90
 pnpm run test:types                  # tsd — checks index.d.ts against tests/types/*.test-d.ts
 node bin/migronaut.js --help           # run the CLI directly — no build, ever
 pnpm run size                            # esbuild bundle-size report (library + CLI), no publish artifact
@@ -166,7 +166,7 @@ pre-merge gate. There is no `build` script and nothing to run before testing or 
 - `node:test` uses `before`/`after`, not `beforeAll`/`afterAll` (those are Vitest/Jest names —
   don't reintroduce them).
 - Silence the logger (`logger: null`) in tests. No committed `.only`/`.skip`.
-- Coverage gate: 90% lines / 90% functions / 85% branches (`pnpm run test:coverage`, via `c8`).
+- Coverage gate: 90% lines / 90% functions / 90% branches (`pnpm run test:coverage`, via `c8`).
 - The lock-heartbeat integration tests use real timers; running the *full* integration suite in
   parallel (13 concurrent `mongodb-memory-server` replica sets) can make timing-sensitive tests
   flaky under heavy CPU contention — they're stable in isolation. Not a correctness issue.

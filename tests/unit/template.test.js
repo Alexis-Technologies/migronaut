@@ -1,4 +1,11 @@
-const { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -19,6 +26,7 @@ const {
   defaultConfigTs,
   defaultTemplateJs,
   defaultTemplateTs,
+  isEsmProject,
   maskUriCredentials,
   nextSequenceIndex,
   resolveTemplateContent,
@@ -73,15 +81,24 @@ describe('nextSequenceIndex', () => {
 describe('default templates', () => {
   it('should include up and down in the TS template', () => {
     const tpl = defaultTemplateTs();
-    assert.ok(tpl.includes('export async function up'));
-    assert.ok(tpl.includes('export async function down'));
+    assert.ok(tpl.includes('async function up'));
+    assert.ok(tpl.includes('async function down'));
     assert.ok(tpl.includes('MigrationContext'));
   });
 
   it('should include up and down in the JS template', () => {
     const tpl = defaultTemplateJs();
-    assert.ok(tpl.includes('export async function up'));
-    assert.ok(tpl.includes('export async function down'));
+    assert.ok(tpl.includes('async function up'));
+    assert.ok(tpl.includes('async function down'));
+  });
+
+  it('should default to CommonJS and switch to ESM for a module project', () => {
+    // An ESM migration in a CommonJS project makes Node reparse it and warn on
+    // every run — the generator follows the project instead of assuming.
+    assert.ok(defaultTemplateJs().includes('module.exports = { description, up, down };'));
+    assert.ok(defaultTemplateTs().includes('module.exports = { description, up, down };'));
+    assert.ok(defaultTemplateJs(true).includes('export async function up'));
+    assert.ok(defaultTemplateTs(true).includes('export async function up'));
   });
 });
 
@@ -167,7 +184,7 @@ describe('createMigrationFile', () => {
     });
     assert.strictEqual(existsSync(file), true);
     assert.match(file, /\d{14}-add-index\.ts$/);
-    assert.ok(readFileSync(file, 'utf8').includes('export async function up'));
+    assert.ok(readFileSync(file, 'utf8').includes('async function up'));
   });
 
   it('should create a sequential .js file when requested', async () => {
@@ -182,7 +199,8 @@ describe('config templates', () => {
     assert.ok(tpl.includes("import type { MigronautConfig } from '@alexify/migronaut'"));
     assert.ok(tpl.includes('uri: "mongodb://db:1"'));
     assert.ok(tpl.includes('dbName: "shop"'));
-    assert.ok(tpl.includes('export default config'));
+    // CommonJS by default; the ESM form is covered below.
+    assert.ok(tpl.includes('module.exports = config'));
   });
 
   it('should fall back to defaults for omitted values', () => {
@@ -236,8 +254,8 @@ describe('config template injection safety', () => {
   const payload = "x', evil: (() => { throw new Error('INJECTED'); })(), z: '";
 
   for (const [name, render] of [
-    ['ts', (v) => defaultConfigTs(v)],
-    ['js', (v) => defaultConfigJs(v)],
+    ['ts', (v, esm) => defaultConfigTs(v, esm)],
+    ['js', (v, esm) => defaultConfigJs(v, esm)],
   ]) {
     it(`should neutralize a quote-breaking dbName in the ${name} template`, () => {
       const tpl = render({ dbName: payload });
@@ -251,11 +269,15 @@ describe('config template injection safety', () => {
       // Built by concatenation so the placeholder reaches the template as data.
       const dangerousName = 'line1\nline2`' + '${' + 'danger}';
       const dangerousDir = './a"b\\c\'d/migrations';
-      const tpl = render({
-        uri: 'mongodb://plain-host:27017',
-        dbName: dangerousName,
-        migrationsDir: dangerousDir,
-      });
+      const tpl = render(
+        {
+          uri: 'mongodb://plain-host:27017',
+          dbName: dangerousName,
+          migrationsDir: dangerousDir,
+        },
+        // Written out as .mjs below, so render the ESM export form.
+        true,
+      );
       // Strip the TS-only bits so both variants load as plain ESM, then import
       // the file the way loadConfigFile does in production.
       const body = tpl.replace(/^import type .*$/m, '').replace(': Partial<MigronautConfig>', '');
@@ -297,7 +319,7 @@ describe('secret-provider config templates', () => {
   it('should emit an async factory that fetches from a secret manager (JS)', () => {
     const tpl = secretConfigJs();
     assert.ok(tpl.includes('async function loadMongoSecret'));
-    assert.ok(tpl.includes('export default async () =>'));
+    assert.ok(tpl.includes('module.exports = async () =>'));
     assert.ok(tpl.includes('@aws-sdk/client-secrets-manager'));
     assert.ok(tpl.includes('uri: secret.uri'));
     assert.ok(tpl.includes("createExtension: 'js'"));
@@ -360,5 +382,46 @@ describe('createConfigFile', () => {
     writeFileSync(file, '// stale');
     await createConfigFile({ dir: tmp, format: 'ts', force: true, values: { dbName: 'fresh' } });
     assert.ok(readFileSync(file, 'utf8').includes('dbName: "fresh"'));
+  });
+});
+
+describe('config template module system', () => {
+  it('should default to CommonJS, matching a project with no "type" field', () => {
+    // An ESM-syntax config in a CommonJS project makes Node reparse the file
+    // and warn on every command.
+    assert.ok(defaultConfigJs().includes('module.exports = config;'));
+    assert.ok(defaultConfigTs().includes('module.exports = config;'));
+    assert.ok(secretConfigJs().includes('module.exports = async () =>'));
+    assert.ok(secretConfigTs().includes('module.exports = async ('));
+  });
+
+  it('should emit ESM syntax for a "type": "module" project', () => {
+    assert.ok(defaultConfigJs({}, true).includes('export default config;'));
+    assert.ok(defaultConfigTs({}, true).includes('export default config;'));
+    assert.ok(secretConfigJs({}, true).includes('export default async () =>'));
+  });
+});
+
+describe('isEsmProject', () => {
+  it('should report false when package.json has no type field', async () => {
+    writeFileSync(path.join(tmp, 'package.json'), '{"name":"app"}');
+    assert.strictEqual(await isEsmProject(tmp), false);
+  });
+
+  it('should report true for "type": "module"', async () => {
+    writeFileSync(path.join(tmp, 'package.json'), '{"name":"app","type":"module"}');
+    assert.strictEqual(await isEsmProject(tmp), true);
+  });
+
+  it('should walk up to the nearest package.json', async () => {
+    writeFileSync(path.join(tmp, 'package.json'), '{"name":"app","type":"module"}');
+    const nested = path.join(tmp, 'db', 'config');
+    mkdirSync(nested, { recursive: true });
+    assert.strictEqual(await isEsmProject(nested), true);
+  });
+
+  it('should default to CommonJS when the manifest is unreadable', async () => {
+    writeFileSync(path.join(tmp, 'package.json'), 'not json at all');
+    assert.strictEqual(await isEsmProject(tmp), false);
   });
 });

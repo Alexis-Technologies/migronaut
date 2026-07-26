@@ -5,9 +5,25 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only by default: nothing here writes to the repository.
+permissions:
+  contents: read
+
+# A new push to the same branch supersedes the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The integration tests download a MongoDB binary; cache it across runs and
+  # pin the version so the whole suite always runs against the same server.
+  MONGOMS_VERSION: 7.0.14
+  MONGOMS_DOWNLOAD_DIR: ${{ github.workspace }}/.cache/mongodb-binaries
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -21,13 +37,33 @@ jobs:
       # Smoke: keeps the bundle-size script working and its numbers visible in CI logs.
       - run: pnpm size
 
-  test:
+  types:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run test:types
+      # Compiles index.d.ts on its own — the hand-written type surface has no
+      # other compiler pass over it.
+      - run: pnpm run check:dts
+
+  # The engines floor (>=18) and Windows path handling both need real coverage;
+  # the unit suite is what runs everywhere, since mongodb-memory-server's
+  # replica-set startup is unreliable on Node 18 and slow on Windows.
+  unit:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
-        # mongodb-memory-server's replica-set startup is the practical floor here,
-        # not the test runner — node:test itself works on the package's >=18 engines floor.
-        node-version: [20, 22, 24]
+        os: [ubuntu-latest, windows-latest]
+        node-version: [18, 20, 22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -36,5 +72,50 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm run test:unit
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - name: Cache the MongoDB binary
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MONGOMS_DOWNLOAD_DIR }}
+          key: mongodb-${{ runner.os }}-${{ env.MONGOMS_VERSION }}
+      - run: pnpm install --frozen-lockfile
+      # Runs the integration tests serially (see the test:coverage script):
+      # each boots its own replica set, and running them concurrently collides
+      # on ports and starves the timing-sensitive lock tests.
       - run: pnpm run test:coverage
-      - run: pnpm run test:types
+      - name: Upload coverage
+        if: matrix.node-version == 22
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/lcov.info
+          retention-days: 14
+
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # A broken docs build should fail the PR, not the deploy that follows it.
+      - run: pnpm run docs:build

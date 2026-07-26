@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo-icon-b-alt2.png" alt="@alexify/migronaut" width="420" />
+<img src="https://raw.githubusercontent.com/Alexis-Technologies/migronaut/main/assets/logo-icon-b-alt2.png" alt="@alexify/migronaut" width="420" />
 
 # migronaut
 
@@ -9,6 +9,7 @@
 _A modern, drop-in replacement for `migrate-mongo` etc._
 
 [![npm version](https://img.shields.io/npm/v/%40alexify%2Fmigronaut?style=flat-square&color=1E9E57&logo=npm&logoColor=white)](https://www.npmjs.com/package/@alexify/migronaut)
+[![CI](https://img.shields.io/github/actions/workflow/status/Alexis-Technologies/migronaut/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/Alexis-Technologies/migronaut/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-online-1E9E57?style=flat-square&logo=readthedocs&logoColor=white)](https://migronaut.vercel.app/)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A518-1E9E57?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![Known Vulnerabilities](https://snyk.io/test/npm/@alexify/migronaut/badge.svg)](https://snyk.io/test/npm/@alexify/migronaut)

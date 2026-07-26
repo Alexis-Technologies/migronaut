@@ -8,6 +8,9 @@ const TMP_ROOT = path.join(process.cwd(), 'tests', '.tmp');
 function makeProject() {
   mkdirSync(TMP_ROOT, { recursive: true });
   const dir = mkdtempSync(path.join(TMP_ROOT, 'proj-'));
+  // The migration bodies below use ESM syntax; declaring the type makes that
+  // unambiguous to Node instead of triggering a reparse warning per file.
+  writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}\n', 'utf8');
   return {
     dir,
     write: (name, body) => {

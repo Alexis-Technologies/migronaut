@@ -67,9 +67,16 @@ async function nextSequenceIndex(dir, extensions) {
   return max + 1;
 }
 
-/** The built-in TypeScript migration template */
-function defaultTemplateTs() {
-  return `import type { MigrationContext } from '@alexify/migronaut';
+/**
+ * The built-in TypeScript migration template.
+ *
+ * Like the config templates, the export form follows the project's module
+ * system: an ESM migration in a CommonJS project makes Node reparse the file
+ * and warn on every run. migronaut's loader accepts either form.
+ */
+function defaultTemplateTs(esm = false) {
+  if (esm) {
+    return `import type { MigrationContext } from '@alexify/migronaut';
 
 export const description = '';
 
@@ -81,11 +88,27 @@ export async function down({ db }: MigrationContext): Promise<void> {
   // TODO: implement rollback
 }
 `;
+  }
+  return `import type { MigrationContext } from '@alexify/migronaut';
+
+const description = '';
+
+async function up({ db }: MigrationContext): Promise<void> {
+  // TODO: implement migration
 }
 
-/** The built-in JavaScript (ESM) migration template */
-function defaultTemplateJs() {
-  return `export const description = '';
+async function down({ db }: MigrationContext): Promise<void> {
+  // TODO: implement rollback
+}
+
+module.exports = { description, up, down };
+`;
+}
+
+/** The built-in JavaScript migration template */
+function defaultTemplateJs(esm = false) {
+  if (esm) {
+    return `export const description = '';
 
 /** @param {import('@alexify/migronaut').MigrationContext} ctx */
 export async function up({ db }) {
@@ -97,6 +120,21 @@ export async function down({ db }) {
   // TODO: implement rollback
 }
 `;
+  }
+  return `const description = '';
+
+/** @param {import('@alexify/migronaut').MigrationContext} ctx */
+async function up({ db }) {
+  // TODO: implement migration
+}
+
+/** @param {import('@alexify/migronaut').MigrationContext} ctx */
+async function down({ db }) {
+  // TODO: implement rollback
+}
+
+module.exports = { description, up, down };
+`;
 }
 
 /** Extensions a custom `--template` file may have — anything else is refused */
@@ -106,7 +144,7 @@ const TEMPLATE_EXTENSIONS = ['.ts', '.js', '.cjs', '.mjs'];
 const MAX_TEMPLATE_BYTES = 1024 * 1024;
 
 /** Resolve template file contents — a custom template if provided, else the built-in */
-async function resolveTemplateContent(templatePath, js) {
+async function resolveTemplateContent(templatePath, js, esm = false) {
   if (templatePath) {
     const ext = path.extname(templatePath);
     if (!TEMPLATE_EXTENSIONS.includes(ext)) {
@@ -132,7 +170,7 @@ async function resolveTemplateContent(templatePath, js) {
     }
     return fs.readFile(templatePath, 'utf8');
   }
-  return js ? defaultTemplateJs() : defaultTemplateTs();
+  return js ? defaultTemplateJs(esm) : defaultTemplateTs(esm);
 }
 
 /**
@@ -146,7 +184,13 @@ async function createMigrationFile(options) {
   const prefix = buildPrefix({ sequential: options.sequential, index });
   const filename = `${prefix}-${slugify(options.name)}${ext}`;
   const filepath = path.join(options.dir, filename);
-  const content = await resolveTemplateContent(options.templatePath, options.js);
+  const content = await resolveTemplateContent(
+    options.templatePath,
+    options.js,
+    // Match the project's module system, so a generated migration never makes
+    // Node reparse it and warn.
+    await isEsmProject(options.dir),
+  );
   try {
     // 'wx' fails if the path exists — creating a migration must never silently
     // overwrite hand-written code (two `create`s in the same second collide).
@@ -159,6 +203,34 @@ async function createMigrationFile(options) {
   }
   return filepath;
 }
+
+/**
+ * Whether files in `dir` are treated as ESM, by walking up to the nearest
+ * package.json and reading its `"type"`.
+ *
+ * A generated config that uses `export default` in a CommonJS project makes
+ * Node reparse it and warn (MODULE_TYPELESS_PACKAGE_JSON) on every single
+ * command — so the generator matches the project instead of assuming.
+ * Defaults to CommonJS, which is what an absent `"type"` means.
+ */
+async function isEsmProject(dir) {
+  let current = path.resolve(dir);
+  for (;;) {
+    try {
+      const raw = await fs.readFile(path.join(current, 'package.json'), 'utf8');
+      return JSON.parse(raw).type === 'module';
+    } catch {
+      // No package.json here (or unreadable) — keep walking up.
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
+/** The export statement matching the project's module system */
+const exportStatement = (esm, expression) =>
+  esm ? `export default ${expression};` : `module.exports = ${expression};`;
 
 // ─── Config File Creation ───────────────────────────────────────────────────────
 
@@ -250,7 +322,7 @@ function configBody(values, createExtension) {
 }
 
 /** The built-in TypeScript config template */
-function defaultConfigTs(values = {}) {
+function defaultConfigTs(values = {}, esm = false) {
   return `import type { MigronautConfig } from '@alexify/migronaut';
 
 /**
@@ -262,12 +334,12 @@ const config: Partial<MigronautConfig> = {
 ${configBody(values, 'ts')}
 };
 
-export default config;
+${exportStatement(esm, 'config')}
 `;
 }
 
 /** The built-in JavaScript (ESM) config template */
-function defaultConfigJs(values = {}) {
+function defaultConfigJs(values = {}, esm = false) {
   return `/**
  * migronaut configuration.
  * Precedence (highest first): CLI flags > MIGRONAUT_* env vars > this file > defaults.
@@ -279,7 +351,7 @@ const config = {
 ${configBody(values, 'js')}
 };
 
-export default config;
+${exportStatement(esm, 'config')}
 `;
 }
 
@@ -358,7 +430,7 @@ function secretConfigOptions(createExtension, migrationsDir) {
 }
 
 /** Secret-provider JavaScript (ESM) config template */
-function secretConfigJs(values = {}) {
+function secretConfigJs(values = {}, esm = false) {
   const { migrationsDir } = configFields(values);
   return `${SECRET_PROVIDER_GUIDE}
 
@@ -390,7 +462,9 @@ async function loadMongoSecret() {
 }
 
 /** @type {() => Promise<Partial<import('@alexify/migronaut').MigronautConfig>>} */
-export default async () => {
+${exportStatement(
+  esm,
+  `async () => {
   const secret = await loadMongoSecret();
 
   return {
@@ -400,12 +474,13 @@ export default async () => {
 
 ${secretConfigOptions('js', migrationsDir)}
   };
-};
+}`,
+)}
 `;
 }
 
 /** Secret-provider TypeScript config template */
-function secretConfigTs(values = {}) {
+function secretConfigTs(values = {}, esm = false) {
   const { migrationsDir } = configFields(values);
   return `${SECRET_PROVIDER_GUIDE}
 import type { MigronautConfig } from '@alexify/migronaut';
@@ -436,7 +511,9 @@ async function loadMongoSecret(): Promise<{ uri: string; dbName: string }> {
   return JSON.parse(res.SecretString);
 }
 
-export default async (): Promise<Partial<MigronautConfig>> => {
+${exportStatement(
+  esm,
+  `async (): Promise<Partial<MigronautConfig>> => {
   const secret = await loadMongoSecret();
 
   return {
@@ -446,7 +523,8 @@ export default async (): Promise<Partial<MigronautConfig>> => {
 
 ${secretConfigOptions('ts', migrationsDir)}
   };
-};
+}`,
+)}
 `;
 }
 
@@ -455,22 +533,22 @@ ${secretConfigOptions('ts', migrationsDir)}
  * `secretProvider` is true a runtime secret-loading template is emitted instead
  * of the static object form — only valid for `js`/`ts` (JSON cannot hold code).
  */
-function configTemplateContent(format, values = {}, secretProvider = false) {
+function configTemplateContent(format, values = {}, secretProvider = false, esm = false) {
   if (secretProvider) {
     if (format === 'json') {
       throw new ConfigInvalidError('Secret-provider configs are only available for js/ts', {
         format,
       });
     }
-    return format === 'ts' ? secretConfigTs(values) : secretConfigJs(values);
+    return format === 'ts' ? secretConfigTs(values, esm) : secretConfigJs(values, esm);
   }
   if (format === 'js') {
-    return defaultConfigJs(values);
+    return defaultConfigJs(values, esm);
   }
   if (format === 'json') {
     return defaultConfigJson(values);
   }
-  return defaultConfigTs(values);
+  return defaultConfigTs(values, esm);
 }
 
 /**
@@ -492,12 +570,16 @@ async function createConfigFile(options) {
     options.format,
     options.values ?? {},
     options.secretProvider ?? false,
+    // Match the project's module system, so the generated file never triggers
+    // Node's reparse warning.
+    await isEsmProject(options.dir),
   );
   await fs.writeFile(filepath, content, 'utf8');
   return filepath;
 }
 
 module.exports = {
+  isEsmProject,
   slugify,
   buildPrefix,
   nextSequenceIndex,

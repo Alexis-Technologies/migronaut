@@ -7,7 +7,7 @@
 > existing migrate-mongo changelog.
 
 Key facts:
-- Package (npm): `migronaut` — install with `npm install migronaut mongodb`
+- Package (npm): `@alexify/migronaut` — install with `npm install @alexify/migronaut mongodb`
 - CLI binary: `migronaut`
 - Requires Node.js >= 18 and MongoDB >= 5.0; supports TypeScript, ESM, and CommonJS
 - License: MIT

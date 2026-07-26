@@ -397,6 +397,7 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(result.code, 0);
     const contents = readFileSync(path.join(project.dir, 'migronaut.config.js'), 'utf8');
     assert.ok(contents.includes('async function loadMongoSecret'));
+    // makeProject() declares "type": "module", so the generator emits ESM.
     assert.ok(contents.includes('export default async () =>'));
     assert.ok(contents.includes('@aws-sdk/client-secrets-manager'));
     // provider-agnostic guidance is present
