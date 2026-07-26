@@ -98,3 +98,33 @@ describe('domain error classes', () => {
     });
   }
 });
+
+describe('error cause chaining', () => {
+  it('should keep the original Error (and its stack) as cause', () => {
+    const root = new Error('the real reason');
+    const wrapped = new MigronautError('CONFIG_INVALID', 'Invalid configuration', undefined, {
+      cause: root,
+    });
+    assert.strictEqual(wrapped.cause, root);
+    // The stack still points at where the failure actually happened.
+    assert.match(wrapped.cause.stack, /the real reason/);
+  });
+
+  it('should leave cause undefined when none is given', () => {
+    assert.strictEqual(new NotAppliedError('nope').cause, undefined);
+  });
+
+  it('should chain the cause through a subclass', () => {
+    const root = new TypeError('bad input');
+    const err = new HookFailedError(
+      'The beforeAll hook failed',
+      { hook: 'beforeAll' },
+      {
+        cause: root,
+      },
+    );
+    assert.strictEqual(err.cause, root);
+    assert.strictEqual(err.context.hook, 'beforeAll');
+    assert.strictEqual(err.code, 'HOOK_FAILED');
+  });
+});

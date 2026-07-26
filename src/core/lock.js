@@ -43,6 +43,11 @@ class MigrationLock {
     this.#ttlSeconds = ttlSeconds;
   }
 
+  /** The token identifying this holder, or undefined when the lock is not held */
+  get owner() {
+    return this.#owner;
+  }
+
   /** TTL in milliseconds — used to size the renewal heartbeat */
   get ttlMs() {
     return this.#ttlSeconds * 1000;
@@ -52,10 +57,12 @@ class MigrationLock {
    * Acquire the lock, reclaiming it if the existing one is stale.
    * @throws {LockAlreadyHeldError} when another process holds a fresh lock
    */
-  async acquire() {
+  async acquire(token) {
     const collection = this.#db.collection(this.#collectionName);
     const staleThreshold = new Date(Date.now() - this.#ttlSeconds * 1000);
-    const owner = randomUUID();
+    // The caller may supply the run id so the lock document, the changelog
+    // records and the log lines of one run all carry the same token.
+    const owner = token ?? randomUUID();
     const lockFields = {
       lockedAt: new Date(),
       pid: process.pid,
@@ -139,9 +146,11 @@ class MigrationLock {
       await this.#db.collection(this.#collectionName).deleteOne(filter);
       this.#owner = undefined;
     } catch (error) {
-      throw new LockReleaseFailedError('Failed to release migration lock', {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      throw new LockReleaseFailedError(
+        'Failed to release migration lock',
+        { error: error instanceof Error ? error.message : String(error) },
+        { cause: error },
+      );
     }
   }
 }
@@ -172,7 +181,7 @@ async function runWithLock(lock, options, fn) {
     return fn(controller.signal);
   }
 
-  await lock.acquire();
+  await lock.acquire(options.owner);
 
   const abortOnLoss = (options.onLockLost ?? 'abort') === 'abort';
   const loseLock = (reason) => {

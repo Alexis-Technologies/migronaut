@@ -15,7 +15,22 @@ try {
 }
 ```
 
-In `--json` mode, the CLI prints `{ "error": { "code", "message" } }` and exits 1.
+Every error also carries `cause` — the original `Error`, with its stack — when it
+wraps one, so `err.cause.stack` still points into your own migration. Pass
+`--verbose` to have the CLI print it.
+
+In `--json` mode the CLI prints:
+
+```json
+{
+  "error": { "code": "MIGRATION_EXECUTION_FAILED", "message": "…", "context": { "…": "…" } },
+  "partial": [{ "file": "0001-a.ts", "status": "applied", "duration": 12, "batch": 3 }]
+}
+```
+
+`partial` lists what already succeeded before the failure, so a deploy pipeline
+can tell how far the run got. The exit code identifies the failure — see
+[Exit codes](/reference/cli#exit-codes).
 
 ## Reference
 

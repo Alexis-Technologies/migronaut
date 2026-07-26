@@ -12,6 +12,11 @@ Available on every command, highest precedence:
 | `--db <name>` | Database name |
 | `--dir <path>` | Migrations directory |
 | `--config <path>` | Path to a config file (overrides auto-discovery) |
+| `--env-file <path>` | `.env` file to load (default: `./.env`) |
+| `--no-env` | Do not load a `.env` file at all |
+| `--verbose` | Show debug output, including the underlying cause of an error |
+| `--quiet` | Suppress everything but errors |
+| `--no-color` | Disable colored output |
 | `--json` | Machine-readable JSON output (on data commands) |
 
 ## Running migrations
@@ -70,7 +75,23 @@ Available on every command, highest precedence:
 
 ## Exit codes
 
+The code identifies *why* a run failed, so CI can branch on it. Success is
+always `0`, and anything unmapped is `1` — a script testing `!= 0` keeps
+working unchanged.
+
 | Code | Meaning |
 |---|---|
 | `0` | Success (or nothing to do) |
-| `1` | An error occurred, or `--check` found pending migrations |
+| `1` | An unclassified error, or `--check` found pending migrations |
+| `3` | `LOCK_ALREADY_HELD` — another run holds the lock |
+| `4` | `CHECKSUM_MISMATCH` — an applied file was edited (with `--strict`) |
+| `5` | `CONNECTION_FAILED` — could not reach MongoDB |
+| `6` | `CONFIG_INVALID` — bad configuration or flags |
+| `7` | `MIGRATION_EXECUTION_FAILED` — a migration threw |
+| `8` | `MIGRATION_FILE_NOT_FOUND` |
+| `9` | `NOT_APPLIED` — nothing to revert under that name |
+| `10` | `LOCK_LOST` — the lock was lost mid-run |
+| `11` | `RUN_ABORTED` — stopped by SIGINT/SIGTERM |
+| `12` | `HOOK_FAILED` — a lifecycle hook threw |
+| `13` | `MIGRATION_IRREVERSIBLE` — an imported migrate-mongo record |
+| `130` / `143` | Killed by a second SIGINT / SIGTERM |

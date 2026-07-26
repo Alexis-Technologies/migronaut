@@ -66,8 +66,10 @@ export interface MigrationRecord {
   duration: number;
   /** SHA-256 hash of the file at time of execution */
   checksum: string;
-  /** value of process.env.NODE_ENV at time of execution */
+  /** Resolved environment at time of execution (config → NODE_ENV → 'production') */
   environment: string;
+  /** Correlation id of the run that wrote this record; matches the lock's owner token */
+  runId?: string;
   /** os.userInfo().username at time of execution */
   executedBy: string;
   /** Optional description from migration file */
@@ -159,6 +161,13 @@ export interface MigronautConfig {
   /** Path to a custom migration template file */
   templatePath?: string;
   /**
+   * `.env` file loaded before the config is resolved (it is what supplies the
+   * `MIGRONAUT_*` variables). Relative to the working directory. Default:
+   * `'.env'`; set `false` to load nothing, so a stray `.env` cannot silently
+   * outrank a committed config.
+   */
+  envFile?: string | false;
+  /**
    * Value stamped onto the `environment` field of changelog records. Falls back
    * to `process.env.NODE_ENV`, then to `'production'` — the safe assumption when
    * nothing says otherwise.
@@ -201,12 +210,25 @@ export type MigronautConfigInput =
  * `component` field when present).
  */
 export interface MigronautLogger {
-  debug: (msg: string) => void;
-  info: (msg: string) => void;
-  warn: (msg: string) => void;
-  error: (msg: string) => void;
+  debug: LogMethod;
+  info: LogMethod;
+  warn: LogMethod;
+  error: LogMethod;
+  /**
+   * Present on pino-style loggers. When it is, migronaut binds a `component`
+   * field once *and* passes structured fields as the first argument, matching
+   * pino's own `(obj, msg)` signature.
+   */
   child?: (bindings: Record<string, unknown>) => MigronautLogger;
 }
+
+/**
+ * A log sink. The optional second argument carries structured fields —
+ * `{ runId, migration, direction, batch, durationMs }` — so a machine-readable
+ * logger does not have to parse the human string. A plain `(msg) => …` logger
+ * remains valid: the extra argument is simply ignored.
+ */
+export type LogMethod = (msg: string, fields?: Record<string, unknown>) => void;
 
 // ─── Progress Reporter ─────────────────────────────────────────────────────────
 

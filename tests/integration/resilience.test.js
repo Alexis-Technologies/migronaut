@@ -286,6 +286,61 @@ describe('hook guarantees (integration)', () => {
   });
 });
 
+describe('run correlation (integration)', () => {
+  it('should stamp one runId on every record and on the lock that held it', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+
+    // Sample the lock's owner while the run is in flight; afterwards the lock
+    // is gone, so this is the only chance to compare it with the records.
+    let lockOwner;
+    const kit = makeMigrator(
+      mongo.uri,
+      DB,
+      project.dir,
+      {},
+      {
+        progress: {
+          onStart: () => {
+            if (lockOwner === undefined) {
+              lockOwner = mongo.db
+                .collection(LOCK_COLLECTION)
+                .findOne({ _id: LOCK_ID })
+                .then((doc) => doc?.owner);
+            }
+          },
+          onStop: () => undefined,
+        },
+      },
+    );
+    await kit.up();
+    const owner = await lockOwner;
+    await kit.disconnect();
+
+    const records = await mongo.db.collection('_migronaut_migrations').find().toArray();
+    const runIds = new Set(records.map((r) => r.runId));
+    assert.strictEqual(runIds.size, 1, 'all records of one run share a runId');
+    // The same token identifies the lock, so a leftover lock can be traced to
+    // the exact run (and the migrations) that held it.
+    assert.strictEqual([...runIds][0], owner);
+  });
+
+  it('should use a different runId for each run', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const first = migrator();
+    await first.up();
+    await first.disconnect();
+
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    const second = migrator();
+    await second.up();
+    await second.disconnect();
+
+    const records = await mongo.db.collection('_migronaut_migrations').find().toArray();
+    assert.strictEqual(new Set(records.map((r) => r.runId)).size, 2);
+  });
+});
+
 describe('redo atomicity (integration)', () => {
   it('should hold a single lock across both directions', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));

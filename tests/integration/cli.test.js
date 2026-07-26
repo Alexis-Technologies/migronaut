@@ -67,10 +67,96 @@ describe('migronaut CLI (integration)', () => {
     assert.ok(result.stdout.includes('Applied'));
   });
 
-  it('should exit 1 when a migration fails', async () => {
+  it('should exit with the migration-failure code when a migration fails', async () => {
     project.write('0001-bad.ts', failingMigration());
     const result = await runCli(baseArgs(['up']));
-    assert.strictEqual(result.code, 1);
+    // 7 = MIGRATION_EXECUTION_FAILED — CI can tell this apart from a config or
+    // connection problem instead of seeing an undifferentiated 1.
+    assert.strictEqual(result.code, 7);
+  });
+
+  it('should map error codes to distinct exit codes', async () => {
+    // CONFIG_INVALID: --steps and --batch are mutually exclusive.
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await runCli(baseArgs(['up']));
+    const conflict = await runCli(baseArgs(['down', '--steps', '1', '--batch', '1']));
+    assert.strictEqual(conflict.code, 6);
+
+    // CONNECTION_FAILED against a port nothing is listening on.
+    const unreachable = await runCli([
+      '--uri',
+      'mongodb://127.0.0.1:1/x?serverSelectionTimeoutMS=200',
+      '--db',
+      'x',
+      '--dir',
+      project.dir,
+      'status',
+    ]);
+    assert.strictEqual(unreachable.code, 5);
+  });
+
+  it('should report partial results and error context in --json on failure', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-bad.ts', failingMigration());
+    const result = await runCli(baseArgs(['up', '--json']));
+    assert.strictEqual(result.code, 7);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.error.code, 'MIGRATION_EXECUTION_FAILED');
+    // The migration that did land is reported, so a pipeline knows where it got to.
+    assert.deepStrictEqual(
+      parsed.partial.map((r) => [r.file, r.status]),
+      [
+        ['0001-a.ts', 'applied'],
+        ['0002-bad.ts', 'error'],
+      ],
+    );
+    // And the cause is no longer swallowed.
+    assert.match(parsed.error.context.cause, /intentional failure/);
+  });
+
+  it('should print the underlying cause only with --verbose', async () => {
+    project.write('0001-bad.ts', failingMigration());
+    const plain = await runCli(baseArgs(['up']));
+    assert.ok(!plain.stdout.includes('intentional failure'));
+
+    const verbose = await runCli(baseArgs(['up', '--verbose']));
+    assert.match(`${verbose.stdout}${verbose.stderr}`, /intentional failure/);
+  });
+
+  it('should suppress progress output with --quiet but still report errors', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const ok = await runCli(baseArgs(['up', '--quiet']));
+    assert.strictEqual(ok.code, 0);
+    assert.strictEqual(ok.stdout.trim(), '');
+
+    project.write('0002-bad.ts', failingMigration());
+    const bad = await runCli(baseArgs(['up', '--quiet']));
+    assert.strictEqual(bad.code, 7);
+    assert.match(bad.stderr, /MIGRATION_EXECUTION_FAILED/);
+  });
+
+  it('should emit no ANSI escapes with --no-color', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await runCli(baseArgs(['up']));
+    const result = await runCli(baseArgs(['status', '--no-color']));
+    assert.strictEqual(result.code, 0);
+    // eslint-disable-next-line no-control-regex -- asserting the absence of ANSI escapes
+    assert.ok(!/\[/.test(result.stdout), 'expected no ANSI escape sequences');
+  });
+
+  it('should ignore a .env file when --no-env is passed', async () => {
+    // The .env points somewhere unreachable; --no-env must keep the flags in charge.
+    writeFileSync(
+      path.join(project.dir, '.env'),
+      `MIGRONAUT_URI=mongodb://127.0.0.1:1/nope?serverSelectionTimeoutMS=200\nMIGRONAUT_DB=${DB}\n`,
+    );
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const withEnv = await runCli(['--dir', project.dir, 'status'], {}, project.dir);
+    // 5 = CONNECTION_FAILED: the unreachable URI from .env was used.
+    assert.strictEqual(withEnv.code, 5, 'the .env should have taken effect');
+
+    const noEnv = await runCli(baseArgs(['status', '--no-env']), {}, project.dir);
+    assert.strictEqual(noEnv.code, 0);
   });
 
   it('should re-run an applied migration with up <file> --force after a yes confirmation', async () => {
@@ -146,11 +232,11 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
   });
 
-  it('should exit 1 when down combines --steps with --batch', async () => {
+  it('should exit with the config-invalid code when down combines --steps with --batch', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await runCli(baseArgs(['up']));
     const result = await runCli(baseArgs(['down', '--steps', '1', '--batch', '1']));
-    assert.strictEqual(result.code, 1);
+    assert.strictEqual(result.code, 6);
     assert.ok(result.stderr.includes('CONFIG_INVALID'));
   });
 
@@ -362,10 +448,10 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(parsed[0].status, 'applied');
   });
 
-  it('should emit a JSON error object and exit 1 on failure with --json', async () => {
+  it('should emit a JSON error object and a typed exit code on failure with --json', async () => {
     project.write('0001-x.ts', failingMigration());
     const result = await runCli(baseArgs(['up', '--json']));
-    assert.strictEqual(result.code, 1);
+    assert.strictEqual(result.code, 7);
     const parsed = JSON.parse(result.stdout);
     assert.strictEqual(parsed.error.code, 'MIGRATION_EXECUTION_FAILED');
   });

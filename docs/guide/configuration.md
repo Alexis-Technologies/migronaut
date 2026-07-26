@@ -91,9 +91,22 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `createExtension` | `'ts' \| 'js'` | `'js'` | Default file type for `migronaut create` |
 | `sequential` | `boolean` | `false` | Use `0001-` numbering instead of timestamps |
 | `templatePath` | `string` | — | Path to a custom migration template |
+| `environment` | `string` | `NODE_ENV` → `'production'` | Value stamped on the `environment` field of changelog records |
+| `onLockLost` | `'abort' \| 'warn'` | `'abort'` | What to do if the lock is lost mid-run |
+| `envFile` | `string \| false` | `'.env'` | `.env` file to load, or `false` to load none |
 | `mongoose` | `Mongoose` | — | Mongoose instance, if your migrations use it |
 | `hooks` | `MigrationHooks` | — | [Lifecycle hooks](/guide/hooks) |
 | `logger` | `MigronautLogger \| null` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` silences all output |
+
+Log methods receive an optional second argument with structured fields —
+`{ runId, migration, direction, batch, durationMs }` — so a machine-readable
+logger does not have to parse the human string. A pino-style logger (one with
+`child()`) gets them in pino's own `(fields, msg)` order instead. A plain
+one-argument logger keeps working unchanged.
+
+`runId` is a per-run correlation id: it is also the lock's owner token and is
+stored on every changelog record that run writes, so a leftover lock can be
+traced to the exact migrations it was holding.
 
 ## Environment variables
 
@@ -111,8 +124,13 @@ Every core option has an `MIGRONAUT_*` variable. These **override the config fil
 | `MIGRONAUT_USE_TRANSACTION` | `useTransaction` |
 | `MIGRONAUT_SEQUENTIAL` | `sequential` |
 | `MIGRONAUT_CREATE_EXTENSION` | `createExtension` |
+| `MIGRONAUT_ENVIRONMENT` | `environment` |
+| `MIGRONAUT_ENV_FILE` | `envFile` |
 
-`.env` files are loaded automatically before env vars are read — natively via `util.parseEnv` on
+`.env` is loaded from the working directory before env vars are read. Point
+elsewhere with `--env-file <path>` (or `MIGRONAUT_ENV_FILE`), or skip it
+entirely with `--no-env` / `envFile: false` — worth doing in CI, so a stray
+`.env` cannot silently outrank a committed config. Loading works — natively via `util.parseEnv` on
 Node ≥ 20.12, with a built-in fallback parser on older Node (migronaut has zero runtime
 dependencies). Real environment variables always win over `.env` values. Supported syntax: one
 `KEY=VALUE` per line, optional `export ` prefix, matching quotes, full-line and inline `#`

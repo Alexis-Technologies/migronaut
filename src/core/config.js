@@ -96,6 +96,12 @@ const CONFIG_KEYS = [
     message: "must be 'abort' or 'warn'",
     optional: true,
   },
+  {
+    path: 'envFile',
+    check: (value) => value === false || isNonEmptyString(value),
+    message: 'must be a non-empty string or false',
+    optional: true,
+  },
 ];
 
 /**
@@ -238,10 +244,11 @@ async function loadConfigFile(filepath) {
     try {
       return await exported();
     } catch (error) {
-      throw new ConfigInvalidError('Config factory function failed to resolve', {
-        path: filepath,
-        cause: error instanceof Error ? error.message : String(error),
-      });
+      throw new ConfigInvalidError(
+        'Config factory function failed to resolve',
+        { path: filepath, cause: error instanceof Error ? error.message : String(error) },
+        { cause: error },
+      );
     }
   }
   return exported;
@@ -256,7 +263,11 @@ async function loadConfigFile(filepath) {
 async function loadConfig(options = {}) {
   const cwd = options.cwd ?? process.cwd();
 
-  await applyEnvFile(path.join(cwd, '.env'));
+  // Resolved before the merge, because loading the .env file is what supplies
+  // the MIGRONAUT_* variables the merge then reads. `false` opts out entirely —
+  // a stray .env silently outranking a committed config is a nasty surprise.
+  const envFile = options.flags?.envFile ?? process.env.MIGRONAUT_ENV_FILE ?? '.env';
+  if (envFile !== false) await applyEnvFile(path.resolve(cwd, envFile));
 
   const merged = { ...DEFAULT_CONFIG };
 

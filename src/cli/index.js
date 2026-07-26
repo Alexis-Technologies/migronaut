@@ -21,6 +21,11 @@ function buildProgram() {
     .option('--db <name>', 'Database name (overrides MIGRONAUT_DB)')
     .option('--dir <path>', 'Migrations directory (overrides MIGRONAUT_MIGRATIONS_DIR)')
     .option('--config <path>', 'Path to a config file (overrides auto-discovery)')
+    .option('--env-file <path>', 'Path to the .env file to load (default: ./.env)')
+    .option('--no-env', 'Do not load a .env file at all')
+    .option('--verbose', 'Show debug output, including error causes')
+    .option('--quiet', 'Suppress everything but errors')
+    .option('--no-color', 'Disable colored output')
     // Read straight from package.json at runtime — no build-time injection needed.
     .version(require('../../package.json').version);
 
@@ -40,6 +45,9 @@ function buildProgram() {
 
 /** Parse argv and execute the matching command */
 async function run(argv) {
+  // Checked before parsing: color is decided the first time anything renders,
+  // which can precede the command action that would otherwise read the flag.
+  if (argv.includes('--no-color')) process.env.NO_COLOR = '1';
   await buildProgram().parseAsync(argv);
 }
 

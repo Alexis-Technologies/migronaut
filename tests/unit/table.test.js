@@ -1,6 +1,13 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { renderImportTable, renderStatusTable, renderTable } = require('../../src/cli/table.js');
+const {
+  charWidth,
+  renderImportTable,
+  renderStatusTable,
+  renderTable,
+  truncate,
+  visibleWidth,
+} = require('../../src/cli/table.js');
 const { stripAnsi } = require('../../src/utils/colors.js');
 
 const lineWidths = (table) => table.split('\n').map((line) => stripAnsi(line).length);
@@ -96,5 +103,79 @@ describe('renderImportTable', () => {
     assert.ok(plain.includes('reused'));
     assert.ok(plain.includes('missing'));
     assert.strictEqual(new Set(lineWidths(table)).size, 1);
+  });
+});
+
+describe('character widths', () => {
+  it('should count CJK and fullwidth characters as two columns', () => {
+    assert.strictEqual(charWidth('日'.codePointAt(0)), 2);
+    assert.strictEqual(charWidth('한'.codePointAt(0)), 2);
+    assert.strictEqual(charWidth('Ａ'.codePointAt(0)), 2);
+    assert.strictEqual(charWidth('a'.codePointAt(0)), 1);
+    assert.strictEqual(charWidth('ї'.codePointAt(0)), 1);
+  });
+
+  it('should measure a mixed string in terminal columns, not codepoints', () => {
+    // 12 ASCII columns + 3 wide chars at 2 each = 18; String.length says 15.
+    assert.strictEqual('20240101-日本語.js'.length, 15);
+    assert.strictEqual(visibleWidth('20240101-日本語.js'), 18);
+  });
+
+  it('should keep a table with CJK filenames aligned', () => {
+    const table = renderStatusTable([
+      {
+        file: '20240101-ascii.js',
+        status: 'applied',
+        batch: 1,
+        appliedAt: new Date('2024-01-01T12:00:00Z'),
+        duration: 5,
+        checksumOk: true,
+      },
+      {
+        file: '20240101-日本語.js',
+        status: 'applied',
+        batch: 1,
+        appliedAt: new Date('2024-01-01T12:00:00Z'),
+        duration: 5,
+        checksumOk: true,
+      },
+    ]);
+    // Every rendered line occupies the same number of terminal columns.
+    const widths = table.split('\n').map((line) => visibleWidth(line));
+    assert.strictEqual(new Set(widths).size, 1);
+  });
+
+  it('should truncate with an ellipsis only past the limit', () => {
+    assert.strictEqual(truncate('short', 10), 'short');
+    assert.strictEqual(truncate('abcdefghij', 5), 'abcd…');
+    assert.strictEqual(visibleWidth(truncate('日本語日本語', 5)), 5);
+  });
+});
+
+describe('renderStatusTable description column', () => {
+  const row = (extra) => ({
+    file: 'a.js',
+    status: 'applied',
+    batch: 1,
+    appliedAt: new Date('2024-01-01T12:00:00Z'),
+    duration: 5,
+    checksumOk: true,
+    ...extra,
+  });
+
+  it('should omit the column when no row has a description', () => {
+    assert.ok(!stripAnsi(renderStatusTable([row({})])).includes('Description'));
+  });
+
+  it('should render descriptions when present', () => {
+    const plain = stripAnsi(renderStatusTable([row({ description: 'Add users index' })]));
+    assert.ok(plain.includes('Description'));
+    assert.ok(plain.includes('Add users index'));
+  });
+
+  it('should ellipsize a long description and stay aligned', () => {
+    const table = renderStatusTable([row({ description: 'x'.repeat(120) })]);
+    assert.ok(stripAnsi(table).includes('…'));
+    assert.strictEqual(new Set(table.split('\n').map((l) => visibleWidth(l))).size, 1);
   });
 });

@@ -58,11 +58,13 @@ async function runMigration(params) {
       }
     }
 
-    throw new MigrationExecutionFailedError(`Migration ${direction} failed: ${name}`, {
-      name,
-      direction,
-      cause: err.message,
-    });
+    throw new MigrationExecutionFailedError(
+      `Migration ${direction} failed: ${name}`,
+      // The message is duplicated into context because that is what survives
+      // JSON serialization; `cause` keeps the real Error (and its stack).
+      { name, direction, cause: err.message },
+      { cause: err },
+    );
   } finally {
     if (session) {
       await session.endSession();

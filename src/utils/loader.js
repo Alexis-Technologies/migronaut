@@ -42,6 +42,7 @@ function tsLoadErrorOrNull(filepath, error) {
   return new MigrationInvalidExportError(
     `Cannot load TypeScript migration "${name}" — this Node runtime cannot import .ts files. Use Node >= 22.18, run migronaut under a TypeScript loader (e.g. tsx), or author the migration as .js.`,
     { filepath, cause: error instanceof Error ? error.message : String(error) },
+    { cause: error },
   );
 }
 

@@ -58,6 +58,18 @@ expectType<Promise<RunResult[]>>(kit.redo(undefined, { noLock: true }));
 // Resilience/audit config keys
 expectAssignable<Partial<MigronautConfig>>({ onLockLost: 'warn', environment: 'staging' });
 
+// .env control: a path, or false to load nothing
+expectAssignable<Partial<MigronautConfig>>({ envFile: '.env.ci' });
+expectAssignable<Partial<MigronautConfig>>({ envFile: false });
+
+// A logger may accept structured fields, and a plain one-arg logger still fits
+expectAssignable<MigronautLogger>({
+  debug: (msg: string, fields?: Record<string, unknown>) => void [msg, fields],
+  info: (msg: string, fields?: Record<string, unknown>) => void [msg, fields],
+  warn: (msg: string) => void msg,
+  error: (msg: string) => void msg,
+});
+
 // Hooks receive direction/index info and afterAll receives the run summary
 expectAssignable<Partial<MigronautConfig>>({
   hooks: {

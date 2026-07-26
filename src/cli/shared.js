@@ -16,7 +16,44 @@ function partialFromOpts(opts) {
   if (opts.db) partial.dbName = opts.db;
   if (opts.dir) partial.migrationsDir = opts.dir;
   if (opts.strict) partial.strict = true;
+  if (opts.env === false) partial.envFile = false;
+  else if (opts.envFile) partial.envFile = opts.envFile;
   return partial;
+}
+
+/**
+ * Exit code per error code, so CI can branch on *why* a run failed instead of
+ * only that it did. Anything unmapped exits 1, and success is still 0 — a
+ * script testing `!= 0` is unaffected.
+ */
+const EXIT_CODES = {
+  LOCK_ALREADY_HELD: 3,
+  CHECKSUM_MISMATCH: 4,
+  CONNECTION_FAILED: 5,
+  CONFIG_INVALID: 6,
+  MIGRATION_EXECUTION_FAILED: 7,
+  MIGRATION_FILE_NOT_FOUND: 8,
+  NOT_APPLIED: 9,
+  LOCK_LOST: 10,
+  RUN_ABORTED: 11,
+  HOOK_FAILED: 12,
+  MIGRATION_IRREVERSIBLE: 13,
+};
+
+/** The exit code for a failure — see {@link EXIT_CODES} */
+function exitCodeFor(error) {
+  if (!(error instanceof MigronautError)) return 1;
+  return EXIT_CODES[error.code] ?? 1;
+}
+
+/**
+ * Log level from the verbosity flags. `--quiet` keeps errors — the point is to
+ * drop the running commentary, not to hide failures.
+ */
+function resolveLevel(opts) {
+  if (opts.verbose) return 'debug';
+  if (opts.quiet) return 'error';
+  return 'info';
 }
 
 /** Exit code convention for a process killed by a signal: 128 + signal number */
@@ -62,14 +99,17 @@ function attachSignalHandlers(migrator, spinner, logger) {
  */
 async function withMigrator(opts, fn, options = {}) {
   const json = options.json ?? false;
+  const verbose = opts.verbose ?? false;
+  const level = resolveLevel(opts);
   // In JSON mode the spinner is suppressed and all human output goes to stderr,
   // so stdout carries exactly one JSON document.
-  const spinner = options.spinner && !json ? createSpinner() : undefined;
+  const spinner = options.spinner && !json && level !== 'silent' ? createSpinner() : undefined;
 
   const partial = partialFromOpts(opts);
-  if (json) {
-    // Route the migrator's own progress/info lines to stderr.
-    partial.logger = createLogger(process.stderr);
+  if (json || level !== 'info') {
+    // Route the migrator's own progress/info lines to stderr in JSON mode, and
+    // apply --verbose/--quiet to them in every mode.
+    partial.logger = createLogger(json ? process.stderr : process.stdout, level);
   }
 
   const migratorOptions = {
@@ -87,7 +127,8 @@ async function withMigrator(opts, fn, options = {}) {
   }
   const migrator = new MigratorKit(partial, migratorOptions);
   // Human-facing logger for withMigrator's own messages; stderr in JSON mode.
-  const logger = createLogger(json ? process.stderr : process.stdout);
+  // Errors survive --quiet: silencing a failure is never what an operator meant.
+  const logger = createLogger(json ? process.stderr : process.stdout, level);
   const detachSignals = attachSignalHandlers(migrator, spinner, logger);
   try {
     if (spinner) {
@@ -106,15 +147,32 @@ async function withMigrator(opts, fn, options = {}) {
     spinner?.stop();
     const message = error instanceof Error ? error.message : String(error);
     if (json) {
+      // `context` carries the detail that used to be dropped entirely —
+      // validation issues, the driver's cause — and `partial` the migrations
+      // that did land before the failure, which is what a deploy pipeline needs
+      // to decide how to recover.
+      const context = error instanceof MigronautError ? error.context : undefined;
+      const { results, ...rest } = context ?? {};
       emitJson({
-        error: { ...(error instanceof MigronautError ? { code: error.code } : {}), message },
+        error: {
+          ...(error instanceof MigronautError ? { code: error.code } : {}),
+          message,
+          ...(Object.keys(rest).length > 0 ? { context: rest } : {}),
+        },
+        ...(Array.isArray(results) ? { partial: results } : {}),
       });
     } else if (error instanceof MigronautError) {
       logger.error(`✖ ${error.code}: ${error.message}`);
+      // The cause is the actionable half of a connection or migration failure;
+      // without --verbose it stays hidden so the common case reads cleanly.
+      if (verbose && error.cause instanceof Error) {
+        logger.debug(error.cause.stack ?? error.cause.message);
+      }
     } else {
       logger.error(`✖ ${message}`);
+      if (verbose && error instanceof Error && error.stack) logger.debug(error.stack);
     }
-    process.exitCode = 1;
+    process.exitCode = exitCodeFor(error);
   } finally {
     detachSignals();
     spinner?.stop();

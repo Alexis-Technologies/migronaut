@@ -1,3 +1,4 @@
+const { randomUUID } = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { MongoClient } = require('mongodb');
@@ -49,6 +50,8 @@ class MigratorKit {
   #abort;
   /** A stop requested before the run reached its lock — consumed when it does */
   #stopRequested;
+  /** Correlation id for the run in flight — ties logs, lock and changelog together */
+  #runId;
 
   constructor(config = {}, options = {}) {
     this.#partialConfig = config;
@@ -100,6 +103,16 @@ class MigratorKit {
     return this.#config?.environment ?? process.env.NODE_ENV ?? 'production';
   }
 
+  /**
+   * Structured fields for a log line. Passed as the logger's second argument
+   * (first, for pino-style loggers) so a machine-readable sink gets
+   * `{migration, direction, durationMs, …}` instead of having to parse the
+   * emoji-prefixed human string.
+   */
+  #fields(extra) {
+    return this.#runId ? { runId: this.#runId, ...extra } : { ...extra };
+  }
+
   /** Connect to MongoDB and ensure changelog indexes exist */
   async connect() {
     const config = await this.#ensureConfig();
@@ -120,9 +133,11 @@ class MigratorKit {
       this.#db = undefined;
       this.#changelog = undefined;
       await dangling?.close().catch(() => undefined);
-      throw new ConnectionFailedError('Failed to connect to MongoDB', {
-        cause: error instanceof Error ? error.message : String(error),
-      });
+      throw new ConnectionFailedError(
+        'Failed to connect to MongoDB',
+        { cause: error instanceof Error ? error.message : String(error) },
+        { cause: error },
+      );
     }
   }
 
@@ -147,6 +162,10 @@ class MigratorKit {
    * of releasing between them.
    */
   async #withLock(options, fn) {
+    // One id per run, reused as the lock's owner token and stamped on every
+    // changelog record and log line, so the three can be correlated after the
+    // fact ("which run left this lock?", "what did run X apply?").
+    this.#runId = randomUUID();
     // A second controller layered over the lock's own signal, so stop() and a
     // lost lock abort through the same path the run loops already watch.
     const stopper = new AbortController();
@@ -167,12 +186,14 @@ class MigratorKit {
         {
           logger: this.#logger,
           onLockLost: this.#config?.onLockLost ?? 'abort',
+          owner: this.#runId,
           ...(options.noLock ? { noLock: true } : {}),
         },
         (lockSignal) => fn(AbortSignal.any([lockSignal, stopper.signal])),
       );
     } finally {
       this.#abort = undefined;
+      this.#runId = undefined;
     }
   }
 
@@ -431,16 +452,25 @@ class MigratorKit {
               });
             }
             if (mismatch) {
-              logger.warn(`⚠ Warning  Checksum mismatch: ${name}`);
+              logger.warn(
+                `⚠ Warning  Checksum mismatch: ${name}`,
+                this.#fields({ migration: name, direction: 'up', expected: existing?.checksum }),
+              );
             }
-            logger.debug(`⏭ Skipped  ${name}`);
+            logger.debug(
+              `⏭ Skipped  ${name}`,
+              this.#fields({ migration: name, direction: 'up', reason: 'already-applied' }),
+            );
             results.push({ file: name, status: 'skipped', reason: 'Already applied' });
             // No beforeEach fired for a skipped migration, so no afterEach owes
             // one either — the hooks stay paired.
             continue;
           }
           // force: fall through and re-run, ignoring applied state and checksum
-          logger.warn(`⚠ Forcing   re-run of already-applied ${name}`);
+          logger.warn(
+            `⚠ Forcing   re-run of already-applied ${name}`,
+            this.#fields({ migration: name, direction: 'up', forced: true }),
+          );
         }
 
         await this.#runHook(config.hooks?.beforeEach, 'beforeEach', [
@@ -461,6 +491,7 @@ class MigratorKit {
           checksum,
           environment: this.#environment(),
           executedBy: safeUsername(),
+          ...(this.#runId ? { runId: this.#runId } : {}),
           ...(migration.description ? { description: migration.description } : {}),
         };
 
@@ -482,7 +513,10 @@ class MigratorKit {
           this.#progress?.onStop('success');
           appliedCount += 1;
 
-          logger.info(`✔ Applied  ${name}   [${duration}ms]`);
+          logger.info(
+            `✔ Applied  ${name}   [${duration}ms]`,
+            this.#fields({ migration: name, direction: 'up', batch, durationMs: duration }),
+          );
           results.push({ file: name, status: 'applied', duration, batch });
           await this.#runHook(config.hooks?.afterEach, 'afterEach', [
             name,
@@ -492,12 +526,24 @@ class MigratorKit {
           ]);
         } catch (error) {
           this.#progress?.onStop('error');
-          logger.error(`✖ Error    ${name}`);
+          logger.error(
+            `✖ Error    ${name}`,
+            this.#fields({
+              migration: name,
+              direction: 'up',
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
           results.push({
             file: name,
             status: 'error',
             error: error instanceof Error ? error.message : String(error),
           });
+          // Carry what already succeeded, so `--json` consumers can tell which
+          // migrations landed before the failure instead of losing the list.
+          if (error instanceof MigronautError && error.context) {
+            error.context.results = results;
+          }
           throw error;
         }
       }
@@ -552,10 +598,11 @@ class MigratorKit {
     try {
       await hook(...args);
     } catch (error) {
-      throw new HookFailedError(`The ${hookName} hook failed`, {
-        hook: hookName,
-        cause: error instanceof Error ? error.message : String(error),
-      });
+      throw new HookFailedError(
+        `The ${hookName} hook failed`,
+        { hook: hookName, cause: error instanceof Error ? error.message : String(error) },
+        { cause: error },
+      );
     }
   }
 
@@ -651,7 +698,10 @@ class MigratorKit {
           });
           this.#progress?.onStop('success');
           revertedCount += 1;
-          logger.info(`↩ Reverted ${name}   [${duration}ms]`);
+          logger.info(
+            `↩ Reverted ${name}   [${duration}ms]`,
+            this.#fields({ migration: name, direction: 'down', durationMs: duration }),
+          );
           results.push({ file: name, status: 'reverted', duration });
           await this.#runHook(config.hooks?.afterEach, 'afterEach', [
             name,
@@ -661,12 +711,22 @@ class MigratorKit {
           ]);
         } catch (error) {
           this.#progress?.onStop('error');
-          logger.error(`✖ Error    ${name}`);
+          logger.error(
+            `✖ Error    ${name}`,
+            this.#fields({
+              migration: name,
+              direction: 'down',
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
           results.push({
             file: name,
             status: 'error',
             error: error instanceof Error ? error.message : String(error),
           });
+          if (error instanceof MigronautError && error.context) {
+            error.context.results = results;
+          }
           throw error;
         }
       }

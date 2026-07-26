@@ -20,6 +20,7 @@ const validConfig = (overrides = {}) => ({
 });
 
 const MIGRONAUT_ENV_KEYS = [
+  'MIGRONAUT_ENV_FILE',
   'MIGRONAUT_URI',
   'MIGRONAUT_DB',
   'MIGRONAUT_MIGRATIONS_DIR',
@@ -420,5 +421,44 @@ describe('validateConfig', () => {
         { path: 'createExtension', message: "must be 'ts' or 'js'" },
       ]);
     }
+  });
+});
+
+describe('envFile control', () => {
+  it('should load .env from the working directory by default', async () => {
+    writeFileSync(path.join(tmp, '.env'), 'MIGRONAUT_DB=from-dotenv\n');
+    const config = await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017' } });
+    assert.strictEqual(config.dbName, 'from-dotenv');
+  });
+
+  it('should load an alternative file when envFile names one', async () => {
+    writeFileSync(path.join(tmp, '.env.ci'), 'MIGRONAUT_DB=from-ci\n');
+    const config = await loadConfig({
+      cwd: tmp,
+      flags: { uri: 'mongodb://x:27017', envFile: '.env.ci' },
+    });
+    assert.strictEqual(config.dbName, 'from-ci');
+  });
+
+  it('should skip .env entirely when envFile is false', async () => {
+    // A stray .env must not silently outrank an explicit value.
+    writeFileSync(path.join(tmp, '.env'), 'MIGRONAUT_DB=from-dotenv\n');
+    const config = await loadConfig({
+      cwd: tmp,
+      flags: { uri: 'mongodb://x:27017', dbName: 'explicit', envFile: false },
+    });
+    assert.strictEqual(config.dbName, 'explicit');
+    assert.strictEqual(process.env.MIGRONAUT_DB, undefined);
+  });
+
+  it('should honor MIGRONAUT_ENV_FILE', async () => {
+    writeFileSync(path.join(tmp, 'custom.env'), 'MIGRONAUT_DB=from-custom\n');
+    process.env.MIGRONAUT_ENV_FILE = 'custom.env';
+    const config = await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017' } });
+    assert.strictEqual(config.dbName, 'from-custom');
+  });
+
+  it('should reject an envFile that is neither a string nor false', () => {
+    assert.strictEqual(validateConfig(validConfig({ envFile: 42 })).length, 1);
   });
 });
