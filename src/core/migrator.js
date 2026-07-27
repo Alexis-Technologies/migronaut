@@ -288,14 +288,18 @@ class MigratorKit extends EventEmitter {
       throw error;
     } finally {
       // Result counts, so a metrics subscriber gets "3 applied in 812ms"
-      // without reconstructing it from per-migration events.
-      const summary = Array.isArray(result)
-        ? {
-            applied: result.filter((row) => row.status === 'applied').length,
-            reverted: result.filter((row) => row.status === 'reverted').length,
-            total: result.length,
-          }
-        : {};
+      // without reconstructing it from per-migration events. One pass fills
+      // both counters.
+      let summary = {};
+      if (Array.isArray(result)) {
+        let applied = 0;
+        let reverted = 0;
+        for (const row of result) {
+          if (row.status === 'applied') applied += 1;
+          else if (row.status === 'reverted') reverted += 1;
+        }
+        summary = { applied, reverted, total: result.length };
+      }
       this.#emit('run:end', {
         ...info,
         success: failure === undefined,
@@ -671,11 +675,12 @@ class MigratorKit extends EventEmitter {
     // cheaper covered name query suffices.
     const strictBulk = !filename && config.strict && !force;
     const appliedRecords = strictBulk ? await changelog.getApplied(db) : undefined;
-    const appliedNames = new Set(
-      appliedRecords
-        ? appliedRecords.map((record) => record.name)
-        : await changelog.getAppliedNames(db),
-    );
+    const appliedNames = new Set();
+    if (appliedRecords) {
+      for (const record of appliedRecords) appliedNames.add(record.name);
+    } else {
+      for (const name of await changelog.getAppliedNames(db)) appliedNames.add(name);
+    }
 
     let targets;
     if (filename) {
@@ -876,13 +881,16 @@ class MigratorKit extends EventEmitter {
       // Roll the database back *to* that point: everything applied after the
       // named migration goes, the named one stays. Exclusive, so `up --to X`
       // followed by `down --to X` is a round trip back to the same state.
+      // One pass both validates the target and collects what to revert.
       const applied = await changelog.getApplied(db);
-      if (!applied.some((record) => record.name === options.to)) {
-        throw new NotAppliedError('Migration is not applied', { to: options.to });
-      }
+      let targetApplied = false;
       toRevert = [];
       for (const record of applied) {
-        if (record.name > options.to) toRevert.push(record);
+        if (record.name === options.to) targetApplied = true;
+        else if (record.name > options.to) toRevert.push(record);
+      }
+      if (!targetApplied) {
+        throw new NotAppliedError('Migration is not applied', { to: options.to });
       }
     } else {
       const batch = options.batch ?? (await changelog.getLastBatch(db));

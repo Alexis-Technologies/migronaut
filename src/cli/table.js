@@ -99,15 +99,22 @@ function borderLine(widths, left, mid, right) {
  * once per cell and reused for padding — stripAnsi is not free at 5k rows.
  */
 function renderTable(head, rows) {
-  const headWidths = head.map(visibleWidth);
-  const cellWidths = rows.map((row) => row.map(visibleWidth));
-  const widths = [];
+  // Measure every cell once and settle the column widths in the same pass.
+  const headWidths = new Array(head.length);
+  const widths = new Array(head.length);
   for (let index = 0; index < head.length; index++) {
-    let width = headWidths[index];
-    for (const rowWidths of cellWidths) {
-      if (rowWidths[index] > width) width = rowWidths[index];
+    headWidths[index] = visibleWidth(head[index]);
+    widths[index] = headWidths[index];
+  }
+  const cellWidths = new Array(rows.length);
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex];
+    const measured = new Array(row.length);
+    for (let index = 0; index < row.length; index++) {
+      measured[index] = visibleWidth(row[index]);
+      if (measured[index] > widths[index]) widths[index] = measured[index];
     }
-    widths.push(width);
+    cellWidths[rowIndex] = measured;
   }
   const renderRow = (cells, measured) => {
     const padded = [];
@@ -156,7 +163,13 @@ const MAX_MIGRATION_WIDTH = 60;
  */
 function renderStatusTable(rows) {
   const colors = palette();
-  const hasDescription = rows.some((row) => row.description);
+  let hasDescription = false;
+  for (const row of rows) {
+    if (row.description) {
+      hasDescription = true;
+      break;
+    }
+  }
   const head = ['Migration', 'Status', 'Batch', 'Applied At', 'Duration', 'Checksum'];
   if (hasDescription) head.push('Description');
   const cells = [];

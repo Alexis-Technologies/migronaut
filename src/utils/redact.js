@@ -23,7 +23,11 @@ function redactUris(text) {
  */
 function redactDeep(value) {
   if (typeof value === 'string') return redactUris(value);
-  if (Array.isArray(value)) return value.map(redactDeep);
+  if (Array.isArray(value)) {
+    const copy = new Array(value.length);
+    for (let index = 0; index < value.length; index++) copy[index] = redactDeep(value[index]);
+    return copy;
+  }
   if (value !== null && typeof value === 'object' && value.constructor === Object) {
     const copy = {};
     for (const key of Object.keys(value)) copy[key] = redactDeep(value[key]);

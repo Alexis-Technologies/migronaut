@@ -60,10 +60,14 @@ async function runAudit(deps) {
 
   // 4. Indexes. Missing ones do not break correctness, only performance.
   try {
-    const present = new Set(
-      (await db.collection(config.migrationsCollection).indexes()).map((index) => index.name),
-    );
-    const missing = EXPECTED_INDEXES.filter((name) => !present.has(name));
+    const present = new Set();
+    for (const index of await db.collection(config.migrationsCollection).indexes()) {
+      present.add(index.name);
+    }
+    const missing = [];
+    for (const name of EXPECTED_INDEXES) {
+      if (!present.has(name)) missing.push(name);
+    }
     if (missing.length === 0) record('indexes', 'pass', 'All changelog indexes present');
     else record('indexes', 'warn', `Missing: ${missing.join(', ')}`);
   } catch (error) {
@@ -92,8 +96,13 @@ async function runAudit(deps) {
   // 6. Checksum drift and missing files, from the same rows `status` renders.
   try {
     const rows = await deps.status();
-    const drifted = rows.filter((row) => row.checksumOk === false).map((row) => row.file);
-    const pending = rows.filter((row) => row.status === 'pending').length;
+    // One pass over the rows collects both signals.
+    const drifted = [];
+    let pending = 0;
+    for (const row of rows) {
+      if (row.checksumOk === false) drifted.push(row.file);
+      if (row.status === 'pending') pending += 1;
+    }
     if (drifted.length > 0) {
       record('checksums', 'fail', `Edited after being applied: ${drifted.join(', ')}`);
     } else {
@@ -108,7 +117,7 @@ async function runAudit(deps) {
   // Feature detection instead of version parsing: it also catches a run
   // under `--no-experimental-strip-types` on an otherwise capable Node.
   const nodeVersion = process.versions.node;
-  const wantsTs = (config.fileExtensions ?? []).some((ext) => ext === '.ts');
+  const wantsTs = (config.fileExtensions ?? []).includes('.ts');
   const stripsTypes = Boolean(process.features.typescript);
   if (wantsTs && !stripsTypes) {
     record(
@@ -123,10 +132,14 @@ async function runAudit(deps) {
   return auditReport(checks);
 }
 
-/** Roll individual checks up into the report shape */
+/** Roll individual checks up into the report shape (one pass, both counters) */
 function auditReport(checks) {
-  const failed = checks.filter((check) => check.status === 'fail').length;
-  const warnings = checks.filter((check) => check.status === 'warn').length;
+  let failed = 0;
+  let warnings = 0;
+  for (const check of checks) {
+    if (check.status === 'fail') failed += 1;
+    else if (check.status === 'warn') warnings += 1;
+  }
   return { ok: failed === 0, failed, warnings, checks };
 }
 

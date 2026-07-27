@@ -56,7 +56,13 @@ async function nextSequenceIndex(dir, extensions) {
   }
   let max = 0;
   for (const file of files) {
-    const matchesExtension = extensions.some((ext) => file.endsWith(ext));
+    let matchesExtension = false;
+    for (const ext of extensions) {
+      if (file.endsWith(ext)) {
+        matchesExtension = true;
+        break;
+      }
+    }
     if (!matchesExtension) continue;
     const prefix = /^(\d+)-/.exec(file);
     if (prefix) {

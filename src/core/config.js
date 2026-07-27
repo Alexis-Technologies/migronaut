@@ -125,13 +125,8 @@ const CONFIG_KEYS = [
  * (`migrationsDirectory`, `useTransactions`) at debug level — unknown keys
  * stay allowed, matching the documented non-strict contract.
  */
-const KNOWN_CONFIG_KEYS = new Set([
-  ...CONFIG_KEYS.map((spec) => spec.path),
-  'logger',
-  'hooks',
-  'mongoose',
-  'client',
-]);
+const KNOWN_CONFIG_KEYS = new Set(['logger', 'hooks', 'mongoose', 'client']);
+for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
 
 /**
  * Validate the merged config, returning a list of `{ path, message }` issues
@@ -356,8 +351,12 @@ async function loadConfig(options = {}) {
 
   // A typo'd key (`migrationsDirectory`, `useTransactions`) validates fine and
   // then silently does nothing; a debug mention is the cheapest way to notice.
-  const unknown = Object.keys(config).filter((key) => !KNOWN_CONFIG_KEYS.has(key));
-  if (unknown.length > 0) {
+  // The array is only allocated when a stray key actually exists.
+  let unknown;
+  for (const key in config) {
+    if (!KNOWN_CONFIG_KEYS.has(key)) (unknown ??= []).push(key);
+  }
+  if (unknown) {
     resolveLogger(config.logger).debug(
       `Unrecognized config key(s), ignored: ${unknown.join(', ')}`,
     );

@@ -42,6 +42,8 @@ class Command {
   #actionFn = null;
   #parent = null;
   #values = {};
+  /** Lazily-built `--long`/`-s` → option lookup; reset whenever options change */
+  #optionIndex = null;
 
   name(value) {
     this.#name = value;
@@ -73,6 +75,7 @@ class Command {
       negated,
       takesValue: Boolean(match[3]),
     });
+    this.#optionIndex = null;
     return this;
   }
 
@@ -220,20 +223,24 @@ class Command {
     }
   }
 
+  /** The `--long`/`-s` → option map for this command, built once per option set */
+  #lookupIndex() {
+    if (this.#optionIndex === null) {
+      const index = new Map();
+      for (const option of this.#options) {
+        index.set(option.long, option);
+        if (option.short !== null) index.set(`-${option.short}`, option);
+      }
+      this.#optionIndex = index;
+    }
+    return this.#optionIndex;
+  }
+
   /** Resolve an option token against the active command first, then the root */
   #findOption(command, token) {
     const lookup = (owner) => {
       if (owner === null) return null;
-      let option = null;
-      for (const candidate of owner.#options) {
-        const matches = token.startsWith('--')
-          ? candidate.long === token
-          : candidate.short === token.slice(1);
-        if (matches) {
-          option = candidate;
-          break;
-        }
-      }
+      const option = owner.#lookupIndex().get(token);
       return option ? { owner, option } : null;
     };
     return lookup(command) ?? lookup(this);
