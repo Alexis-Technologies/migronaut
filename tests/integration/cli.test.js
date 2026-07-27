@@ -33,6 +33,10 @@ function runCli(args, env = {}, cwd = repoRoot, input) {
   });
 }
 
+/** True when `text` contains any ANSI escape sequence */
+const ESC = String.fromCharCode(27);
+const hasAnsi = (text) => text.includes(`${ESC}[`);
+
 let mongo;
 const DB = 'migronaut_cli_test';
 
@@ -135,13 +139,21 @@ describe('migronaut CLI (integration)', () => {
     assert.match(bad.stderr, /MIGRATION_EXECUTION_FAILED/);
   });
 
-  it('should emit no ANSI escapes with --no-color', async () => {
+  it('should emit no ANSI escapes with --no-color, even under FORCE_COLOR', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await runCli(baseArgs(['up']));
-    const result = await runCli(baseArgs(['status', '--no-color']));
+
+    // FORCE_COLOR is set explicitly rather than inherited: whether this test
+    // exercises the flag-beats-environment precedence must not depend on
+    // whichever colour variables the developer's shell happens to export.
+    const forced = { FORCE_COLOR: '1' };
+
+    const colored = await runCli(baseArgs(['status']), forced);
+    assert.ok(hasAnsi(colored.stdout), 'FORCE_COLOR should colorize without --no-color');
+
+    const result = await runCli(baseArgs(['status', '--no-color']), forced);
     assert.strictEqual(result.code, 0);
-    // eslint-disable-next-line no-control-regex -- asserting the absence of ANSI escapes
-    assert.ok(!/\[/.test(result.stdout), 'expected no ANSI escape sequences');
+    assert.ok(!hasAnsi(result.stdout), 'expected no ANSI escape sequences');
   });
 
   it('should ignore a .env file when --no-env is passed', async () => {

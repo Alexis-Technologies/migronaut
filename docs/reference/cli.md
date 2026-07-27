@@ -16,8 +16,15 @@ Available on every command, highest precedence:
 | `--no-env` | Do not load a `.env` file at all |
 | `--verbose` | Show debug output, including the underlying cause of an error |
 | `--quiet` | Suppress everything but errors |
-| `--no-color` | Disable colored output |
+| `--no-color` | Disable colored output — wins over `FORCE_COLOR` and `NO_COLOR` |
 | `--json` | Machine-readable JSON output (on data commands) |
+
+::: tip Color detection
+Without the flag, color is decided by `FORCE_COLOR` (any value but `0` forces it on) > `NO_COLOR` >
+`TERM=dumb` > whether the stream is an interactive TTY. `--no-color` is an explicit instruction for
+this invocation, so it overrides all four — including a `FORCE_COLOR` exported by your shell or CI
+runner.
+:::
 
 ## Running migrations
 

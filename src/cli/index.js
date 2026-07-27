@@ -51,7 +51,15 @@ function buildProgram() {
 async function run(argv) {
   // Checked before parsing: color is decided the first time anything renders,
   // which can precede the command action that would otherwise read the flag.
-  if (argv.includes('--no-color')) process.env.NO_COLOR = '1';
+  if (argv.includes('--no-color')) {
+    // FORCE_COLOR outranks NO_COLOR among *environment* signals, which is the
+    // right precedence between two ambient settings — but an explicit flag on
+    // this invocation outranks both. Without clearing it, `--no-color` is a
+    // silent no-op wherever FORCE_COLOR happens to be exported (CI runners and
+    // many local shells set it).
+    delete process.env.FORCE_COLOR;
+    process.env.NO_COLOR = '1';
+  }
   await buildProgram().parseAsync(argv);
 }
 
