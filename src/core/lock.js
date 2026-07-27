@@ -5,6 +5,7 @@ const {
   LockLostError,
   LockReleaseFailedError,
 } = require('../errors/index.js');
+const { errorText } = require('../utils/error.js');
 const { safeUsername } = require('../utils/user.js');
 
 /** Fixed `_id` of the singleton lock document */
@@ -55,32 +56,60 @@ class MigrationLock {
 
   /**
    * Acquire the lock, reclaiming it if the existing one is stale.
+   *
+   * Staleness is judged and `lockedAt` stamped in **server time** (`$$NOW` via
+   * an aggregation-pipeline update): comparing one host's clock against a
+   * timestamp another host wrote means a pod running 90s fast steals every
+   * healthy lock, and one running slow never reclaims a dead one.
+   *
    * @throws {LockAlreadyHeldError} when another process holds a fresh lock
    */
   async acquire(token) {
     const collection = this.#db.collection(this.#collectionName);
-    const staleThreshold = new Date(Date.now() - this.#ttlSeconds * 1000);
     // The caller may supply the run id so the lock document, the changelog
     // records and the log lines of one run all carry the same token.
     const owner = token ?? randomUUID();
-    const lockFields = {
-      lockedAt: new Date(),
-      pid: process.pid,
-      host: os.hostname(),
-      executedBy: safeUsername(),
-      owner,
+    // The replacement document for the taken branch. $literal guards the
+    // strings: a pipeline expression would otherwise interpret a leading `$`
+    // in a value as a field path.
+    const lockDoc = {
+      _id: LOCK_ID,
+      lockedAt: '$$NOW',
+      pid: { $literal: process.pid },
+      host: { $literal: os.hostname() },
+      executedBy: { $literal: safeUsername() },
+      owner: { $literal: owner },
     };
 
     try {
-      // Matches when no fresh lock exists; upsert inserts (no doc) or updates (stale doc).
-      // A fresh lock fails the filter, so the upsert collides on _id → duplicate-key error.
+      // Upsert on plain `_id` — upserts reject `$expr` filters (server error
+      // 224), so the staleness decision lives in the pipeline instead, still
+      // in server time: take the lock when no `lockedAt` exists (fresh insert)
+      // or the holder is stale; otherwise keep the current document untouched.
+      // The read-back below tells those outcomes apart.
       await collection.updateOne(
-        { _id: LOCK_ID, lockedAt: { $lt: staleThreshold } },
-        { $set: lockFields },
+        { _id: LOCK_ID },
+        [
+          {
+            $replaceWith: {
+              $cond: [
+                {
+                  $lt: [
+                    { $ifNull: ['$lockedAt', new Date(0)] },
+                    { $subtract: ['$$NOW', this.ttlMs] },
+                  ],
+                },
+                lockDoc,
+                '$$ROOT',
+              ],
+            },
+          },
+        ],
         { upsert: true },
       );
     } catch (error) {
       if (isDuplicateKeyError(error)) {
+        // Two processes raced the very first insert; the loser lands here.
         const holder = await collection.findOne({ _id: LOCK_ID });
         throw new LockAlreadyHeldError('Migration lock is already held', {
           holder: toLockInfo(holder) ?? undefined,
@@ -89,10 +118,10 @@ class MigrationLock {
       throw error;
     }
 
-    // Confirm we are the holder. If two processes raced to reclaim the same
-    // stale lock, both updates succeed but only the last writer's `owner` wins;
-    // the loser reads a different token here and backs off instead of running
-    // concurrently.
+    // Confirm we are the holder. A fresh lock left the document untouched, and
+    // if two processes raced to reclaim the same stale lock only the last
+    // writer's `owner` wins; either way the loser reads a different token here
+    // and backs off instead of running concurrently.
     const current = await collection.findOne({ _id: LOCK_ID });
     if (!current || current.owner !== owner) {
       throw new LockAlreadyHeldError('Migration lock is already held', {
@@ -105,7 +134,8 @@ class MigrationLock {
   /**
    * Refresh `lockedAt` so a long-running migration's lock never goes stale and
    * gets reclaimed mid-run. Scoped to our `owner` token, so it is a no-op if the
-   * lock was already lost. Returns true while we still hold the lock.
+   * lock was already lost. Server time, for the same reason as acquire().
+   * Returns true while we still hold the lock.
    */
   async renew() {
     if (!this.#owner) {
@@ -113,7 +143,7 @@ class MigrationLock {
     }
     const result = await this.#db
       .collection(this.#collectionName)
-      .updateOne({ _id: LOCK_ID, owner: this.#owner }, { $set: { lockedAt: new Date() } });
+      .updateOne({ _id: LOCK_ID, owner: this.#owner }, [{ $set: { lockedAt: '$$NOW' } }]);
     return result.matchedCount === 1;
   }
 
@@ -148,7 +178,7 @@ class MigrationLock {
     } catch (error) {
       throw new LockReleaseFailedError(
         'Failed to release migration lock',
-        { error: error instanceof Error ? error.message : String(error) },
+        { error: errorText(error) },
         { cause: error },
       );
     }
@@ -177,8 +207,17 @@ async function runWithLock(lock, options, fn) {
   const controller = new AbortController();
 
   if (options.noLock) {
-    options.logger.warn('⚠ Running without a lock (--no-lock) — concurrent runs are unsafe');
-    return fn(controller.signal);
+    options.logger.warn('⚠ Running without a lock (--no-lock) — concurrent runs are unsafe', {
+      noLock: true,
+    });
+    // Events stay balanced for subscribers even when acquisition is skipped;
+    // `skipped: true` tells them apart from a real lock.
+    options.onLockAcquired?.({ skipped: true });
+    try {
+      return await fn(controller.signal);
+    } finally {
+      options.onLockReleased?.({ skipped: true });
+    }
   }
 
   await lock.acquire(options.owner);
@@ -186,7 +225,12 @@ async function runWithLock(lock, options, fn) {
 
   const abortOnLoss = (options.onLockLost ?? 'abort') === 'abort';
   const loseLock = (reason) => {
-    options.logger.warn(`⚠ Lost the migration lock mid-run (${reason})`);
+    // The most alert-worthy line this module emits — structured fields so a
+    // JSON sink can trigger on it without parsing the human string.
+    options.logger.warn(`⚠ Lost the migration lock mid-run (${reason})`, {
+      event: 'lock:lost',
+      reason,
+    });
     options.onLockLostEvent?.(reason);
     if (abortOnLoss && !controller.signal.aborted) {
       controller.abort(
@@ -201,6 +245,27 @@ async function runWithLock(lock, options, fn) {
   const intervalMs = Math.max(1, Math.floor(lock.ttlMs / 2));
   let consecutiveFailures = 0;
   let stopped = false;
+
+  // Hard deadline, independent of the failure counter: failures may be
+  // tolerated only while the lock cannot be reclaimed yet. Counting 3 misses
+  // at ttl/2 spacing tolerates 1.5×TTL — but the lock goes stale-reclaimable
+  // at 1×TTL, leaving a window where this run keeps migrating while a peer
+  // acquires. The deadline aborts strictly before that window opens; each
+  // successful renewal re-arms it.
+  const deadlineMarginMs = Math.min(Math.floor(intervalMs / 2), 5000);
+  let deadline;
+  const armDeadline = () => {
+    clearTimeout(deadline);
+    deadline = setTimeout(
+      () => {
+        if (!stopped) loseLock('no successful renewal within the TTL');
+      },
+      Math.max(1, lock.ttlMs - deadlineMarginMs),
+    );
+    deadline.unref?.();
+  };
+  armDeadline();
+
   // Tracked so the caller never returns with a renewal still in flight: a
   // stray query landing after disconnect() fails against a closed client.
   let inFlight;
@@ -211,16 +276,27 @@ async function runWithLock(lock, options, fn) {
         consecutiveFailures = 0;
         // A renewal that finds no matching document means someone else owns the
         // lock now — unrecoverable, so it aborts on the first occurrence.
-        if (!held && !stopped) loseLock('another run reclaimed it');
+        if (!held && !stopped) {
+          loseLock('another run reclaimed it');
+          return;
+        }
+        armDeadline();
       })
       .catch((error) => {
         if (stopped) return;
         // A failing renewal may just be a blip, so tolerate a few in a row
-        // before concluding the lock is gone.
+        // before concluding the lock is gone (the deadline above still caps
+        // the tolerance at the TTL).
         consecutiveFailures += 1;
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errorText(error);
         options.logger.warn(
           `⚠ Lock renewal failed (${consecutiveFailures}/${MAX_RENEW_FAILURES}): ${message}`,
+          {
+            event: 'lock:renew-failed',
+            consecutiveFailures,
+            maxRenewFailures: MAX_RENEW_FAILURES,
+            error: message,
+          },
         );
         if (consecutiveFailures >= MAX_RENEW_FAILURES) loseLock('renewal kept failing');
       });
@@ -238,6 +314,7 @@ async function runWithLock(lock, options, fn) {
   } finally {
     stopped = true;
     clearInterval(heartbeat);
+    clearTimeout(deadline);
     // Let any renewal already in flight settle, so no stray query outlives this
     // call and lands after the caller has closed the client.
     await inFlight;
@@ -251,8 +328,11 @@ async function runWithLock(lock, options, fn) {
     // report "Failed to release migration lock" instead of the actual migration
     // error. When the run succeeded, the release failure is the only news.
     if (!failed) throw releaseError;
-    const message = releaseError instanceof Error ? releaseError.message : String(releaseError);
-    options.logger.warn(`⚠ Failed to release the migration lock: ${message}`);
+    const message = errorText(releaseError);
+    options.logger.warn(`⚠ Failed to release the migration lock: ${message}`, {
+      event: 'lock:release-failed',
+      error: message,
+    });
   }
 
   if (failed) throw runError;

@@ -2,9 +2,13 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { MigrationFileNotFoundError, MigrationInvalidExportError } = require('../errors/index.js');
+const { errorText } = require('./error.js');
 
 /** TypeScript source extensions that require a TS-capable runtime to import */
 const TS_EXTENSIONS = new Set(['.ts', '.mts', '.cts']);
+
+/** Distinguishes reload URLs; see the reload comment in loadMigrationFile */
+let reloadCounter = 0;
 
 /** Narrow an unknown value to a function */
 function isFunction(value) {
@@ -23,25 +27,43 @@ function isUnknownExtensionError(error) {
   );
 }
 
+/** True when type stripping refused non-erasable syntax (enum, namespace, …) */
+function isUnsupportedTsSyntaxError(error) {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  return error.code === 'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX';
+}
+
 /**
  * Translate a dynamic-import failure into a clear MigrationInvalidExportError
- * when the cause is a `.ts`/`.mts`/`.cts` file that the current Node runtime cannot
- * load, or return null to let the original error propagate.
+ * when the cause is a `.ts`/`.mts`/`.cts` file the current runtime refused, or
+ * return null to let the original error propagate.
  *
- * The shipped CLI runs as plain Node, where importing TypeScript only works on a
- * runtime with type stripping (Node >= 22.18) or under a loader such as `tsx`. On
- * older runtimes `import('foo.ts')` throws a cryptic `ERR_UNKNOWN_FILE_EXTENSION`;
- * this surfaces an actionable message instead.
+ * The shipped CLI runs as plain Node, whose type stripping (always present on
+ * the supported Node >= 22.18 range) handles erasable TypeScript only. Two
+ * failure shapes get an actionable message instead of the raw Node error:
+ * stripping disabled entirely (`ERR_UNKNOWN_FILE_EXTENSION`, e.g. under
+ * `--no-experimental-strip-types`), and non-erasable syntax such as `enum` or
+ * `namespace` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`).
  */
 function tsLoadErrorOrNull(filepath, error) {
   const ext = path.extname(filepath).toLowerCase();
-  if (!TS_EXTENSIONS.has(ext) || !isUnknownExtensionError(error)) {
+  if (!TS_EXTENSIONS.has(ext)) {
     return null;
   }
   const name = path.basename(filepath);
+  let message;
+  if (isUnknownExtensionError(error)) {
+    message = `Cannot load TypeScript migration "${name}" — type stripping is disabled in this Node process. Re-enable it, run migronaut under a TypeScript loader (e.g. tsx), or author the migration as .js.`;
+  } else if (isUnsupportedTsSyntaxError(error)) {
+    message = `Cannot load TypeScript migration "${name}" — it uses syntax Node's type stripping cannot erase (e.g. enum, namespace). Rewrite with erasable-only syntax, or run migronaut under a TypeScript loader (e.g. tsx).`;
+  } else {
+    return null;
+  }
   return new MigrationInvalidExportError(
-    `Cannot load TypeScript migration "${name}" — this Node runtime cannot import .ts files. Use Node >= 22.18, run migronaut under a TypeScript loader (e.g. tsx), or author the migration as .js.`,
-    { filepath, cause: error instanceof Error ? error.message : String(error) },
+    message,
+    { filepath, cause: errorText(error) },
     { cause: error },
   );
 }
@@ -67,8 +89,10 @@ async function loadMigrationFile(filepath, options = {}) {
   // long-lived process (a test runner, a dev server re-running migrations)
   // would keep executing the version it first imported; a unique query string
   // forces a fresh evaluation. Off by default — it leaks a module per load.
+  // A monotonic counter, not Date.now(): two reloads in one millisecond must
+  // still get distinct URLs.
   const url = pathToFileURL(filepath).href;
-  const href = options.reload ? `${url}?migronaut=${Date.now()}` : url;
+  const href = options.reload ? `${url}?migronaut=${++reloadCounter}` : url;
 
   let imported;
   try {

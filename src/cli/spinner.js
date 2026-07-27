@@ -35,7 +35,22 @@ function createSpinner(stream = process.stderr) {
     stream.write(CLEAR_LINE);
   };
 
-  return { start, stop };
+  /**
+   * Run `fn` (which writes to the terminal) without splicing its output into
+   * the middle of a spinner frame: clear the line, let it write, re-render.
+   * A plain pass-through while the spinner is idle.
+   */
+  const interrupt = (fn) => {
+    if (timer === null) {
+      fn();
+      return;
+    }
+    stream.write(CLEAR_LINE);
+    fn();
+    render();
+  };
+
+  return { start, stop, interrupt };
 }
 
 module.exports = { createSpinner };

@@ -71,7 +71,7 @@ like `tsx`) — not on anything migronaut itself compiles.
 
 | Was | Now |
 |---|---|
-| `dotenv` | [src/utils/env.js](src/utils/env.js) — native `util.parseEnv` (Node ≥ 20.12) or built-in fallback, `override: false` semantics |
+| `dotenv` | [src/utils/env.js](src/utils/env.js) — native `util.parseEnv` (always present on engines ≥ 22.18), `override: false` semantics |
 | `chalk` | [src/utils/colors.js](src/utils/colors.js) — `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > `isTTY` detection, `stripAnsi` |
 | `ora` | [src/cli/spinner.js](src/cli/spinner.js) — `start(text)`/`stop()`, complete no-op off-TTY |
 | `commander` | [src/cli/args.js](src/cli/args.js) — commander-compatible subset (subcommands, `--no-x`, short aliases, camelCase, help/version); no combined short flags (`-fy`) |

@@ -5,6 +5,7 @@ const {
   renderImportTable,
   renderStatusTable,
   renderTable,
+  sanitize,
   truncate,
   visibleWidth,
 } = require('../../src/cli/table.js');
@@ -177,5 +178,47 @@ describe('renderStatusTable description column', () => {
     const table = renderStatusTable([row({ description: 'x'.repeat(120) })]);
     assert.ok(stripAnsi(table).includes('…'));
     assert.strictEqual(new Set(table.split('\n').map((l) => visibleWidth(l))).size, 1);
+  });
+
+  it('should cap the Migration column for an absurdly long filename', () => {
+    const table = renderStatusTable([row({ file: `${'m'.repeat(200)}.js` })]);
+    assert.ok(stripAnsi(table).includes('…'));
+    // The 200-char filename is capped at MAX_MIGRATION_WIDTH, so the full
+    // table stays far narrower than the raw name would have forced it.
+    assert.ok(visibleWidth(table.split('\n')[0]) < 150);
+  });
+});
+
+describe('control-character sanitization', () => {
+  it('should strip terminal escapes from a cell value', () => {
+    assert.strictEqual(sanitize('safe\x1b[2Jname'), 'safe[2Jname');
+    assert.strictEqual(sanitize('a\x00b\x07c'), 'abc');
+  });
+
+  it('should neutralize ANSI injected via a changelog description', () => {
+    // A description is DB-sourced: an injected escape must not survive into
+    // the rendered table, where it would restyle everything after the cell.
+    const table = renderStatusTable([
+      {
+        file: 'a.js',
+        status: 'applied',
+        batch: 1,
+        appliedAt: new Date('2024-01-01T12:00:00Z'),
+        duration: 5,
+        checksumOk: true,
+        description: 'evil \x1b[32mgreen\x1b[0m \x1b]0;title\x07 text',
+      },
+    ]);
+    // The only ESC bytes left are migronaut's own colors, which stripAnsi
+    // removes cleanly — nothing untrusted remains.
+    assert.ok(!stripAnsi(table).includes('\x1b'));
+    assert.ok(stripAnsi(table).includes('green'));
+  });
+
+  it('should truncate without cutting an escape sequence in half', () => {
+    const cut = truncate('\x1b[32mgreenish text\x1b[39m', 8);
+    // Truncation happens on the stripped text, so no dangling color state.
+    assert.ok(!cut.includes('\x1b'));
+    assert.ok(visibleWidth(cut) <= 8);
   });
 });

@@ -131,6 +131,18 @@ class MigrationTimeoutError extends MigronautError {
   }
 }
 
+/**
+ * Thrown when `useTransaction` is on but the deployment cannot run
+ * transactions (a standalone server — they need a replica set or mongos).
+ * A dedicated code, because the driver's own error blames the migration.
+ */
+class TransactionsUnsupportedError extends MigronautError {
+  constructor(message, context, options) {
+    super('TRANSACTIONS_UNSUPPORTED', message, context, options);
+    this.name = 'TransactionsUnsupportedError';
+  }
+}
+
 /** Thrown when the merged configuration fails validation */
 class ConfigInvalidError extends MigronautError {
   constructor(message, context, options) {
@@ -193,6 +205,7 @@ module.exports = {
   MigrationInvalidExportError,
   MigrationExecutionFailedError,
   MigrationTimeoutError,
+  TransactionsUnsupportedError,
   ConfigInvalidError,
   ConfigFileExistsError,
   ConnectionFailedError,

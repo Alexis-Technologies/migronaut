@@ -9,8 +9,15 @@ const { failingMigration, insertMigration, makeProject } = require('../helpers/p
 const repoRoot = path.join(__dirname, '..', '..');
 const binPath = path.join(repoRoot, 'bin', 'migronaut.js');
 
-/** Run the CLI as a plain Node child process and capture its result */
-function runCli(args, env = {}, cwd = repoRoot, input) {
+/**
+ * Run the CLI as a plain Node child process and capture its result.
+ *
+ * `cwd` defaults to the isolated project dir, NOT the repo root: the repo has
+ * its own migronaut.config.ts, and config discovery picking it up would couple
+ * ~30 of these tests to that file's contents. Tests that want the repo config
+ * pass `repoRoot` explicitly — that coupling is then the point of the test.
+ */
+function runCli(args, env = {}, cwd = project?.dir ?? repoRoot, input) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binPath, ...args], {
       cwd,
@@ -239,10 +246,11 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
   });
 
-  it('should reject a standalone up --force with no file and exit 1', async () => {
+  it('should reject a standalone up --force with no file as CONFIG_INVALID', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     const result = await runCli(baseArgs(['up', '--force']), {}, repoRoot, '');
-    assert.strictEqual(result.code, 1);
+    // Preflight failures use the same typed envelope as everything else.
+    assert.strictEqual(result.code, 6);
     assert.ok(result.stderr.includes('--force requires a specific migration file'));
     // nothing applied
     assert.strictEqual(await mongo.db.collection('_migronaut_migrations').countDocuments(), 0);
@@ -254,10 +262,23 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
 
     const result = await runCli(baseArgs(['up', '0001-a.ts', '--force', '--json']));
-    assert.strictEqual(result.code, 1);
+    assert.strictEqual(result.code, 6);
     const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.error.code, 'CONFIG_INVALID');
     assert.ok(parsed.error.message.includes('--yes'));
     // Migration was NOT re-run.
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
+  });
+
+  it('should fail with CONFIG_INVALID when --force confirmation meets a closed stdin', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await runCli(baseArgs(['up']));
+
+    // No input at all (stdin at EOF): the prompt can never be answered. The
+    // old behavior hung forever, then exited 0 having done nothing.
+    const result = await runCli(baseArgs(['up', '0001-a.ts', '--force']));
+    assert.strictEqual(result.code, 6);
+    assert.ok(result.stderr.includes('--yes'));
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
   });
 
@@ -424,9 +445,10 @@ describe('migronaut CLI (integration)', () => {
     assert.ok(contents.includes("import type { MigronautConfig } from '@alexify/migronaut'"));
   });
 
-  it('should reject init --json --secret-provider and exit 1', async () => {
+  it('should reject init --json --secret-provider as CONFIG_INVALID', async () => {
     const result = await runCli(['init', '--json', '--secret-provider'], {}, project.dir);
-    assert.strictEqual(result.code, 1);
+    // Preflight failures use the same typed envelope as everything else.
+    assert.strictEqual(result.code, 6);
     assert.ok(result.stderr.includes('secret-provider'));
     assert.strictEqual(existsSync(path.join(project.dir, 'migronaut.config.json')), false);
   });
@@ -565,6 +587,57 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(await mongo.db.collection('_migronaut_locks').countDocuments(), 0);
   });
 
+  it('should keep the lock when the unlock confirmation is declined', async () => {
+    await mongo.db.collection('_migronaut_locks').insertOne({
+      _id: 'migronaut_lock',
+      lockedAt: new Date(),
+      pid: 4242,
+      host: 'crashed-host',
+      executedBy: 'ghost',
+      owner: 'stale-token',
+    });
+    const result = await runCli(baseArgs(['unlock']), {}, undefined, 'n\n');
+    assert.strictEqual(result.code, 0);
+    assert.ok(result.stdout.includes('Aborted'));
+    assert.strictEqual(await mongo.db.collection('_migronaut_locks').countDocuments(), 1);
+  });
+
+  it('should release after a yes confirmation and print the holder first', async () => {
+    await mongo.db.collection('_migronaut_locks').insertOne({
+      _id: 'migronaut_lock',
+      lockedAt: new Date(),
+      pid: 4242,
+      host: 'crashed-host',
+      executedBy: 'ghost',
+      owner: 'stale-token',
+    });
+    const result = await runCli(baseArgs(['unlock']), {}, undefined, 'y\n');
+    assert.strictEqual(result.code, 0);
+    assert.ok(result.stderr.includes('crashed-host'));
+    assert.ok(result.stdout.includes('Lock released'));
+    assert.strictEqual(await mongo.db.collection('_migronaut_locks').countDocuments(), 0);
+  });
+
+  // ── migronaut lock (inspect) ──────────────────────────────────────────────────
+  it('should show the holder in human mode and report no lock when free', async () => {
+    const free = await runCli(baseArgs(['lock']));
+    assert.strictEqual(free.code, 0);
+    assert.ok(free.stdout.includes('No migration lock'));
+
+    await mongo.db.collection('_migronaut_locks').insertOne({
+      _id: 'migronaut_lock',
+      lockedAt: new Date('2026-01-01T00:00:00Z'),
+      pid: 4242,
+      host: 'ci-runner',
+      executedBy: 'deploy',
+      owner: 'token',
+    });
+    const held = await runCli(baseArgs(['lock']));
+    assert.strictEqual(held.code, 0);
+    assert.ok(held.stdout.includes('pid 4242'));
+    assert.ok(held.stdout.includes('ci-runner'));
+  });
+
   it('should let --ts override a js createExtension from config', async () => {
     writeFileSync(
       path.join(project.dir, 'migronaut.config.json'),
@@ -580,5 +653,228 @@ describe('migronaut CLI (integration)', () => {
       readdirSync(project.dir).filter((f) => f.endsWith('forced-ts.ts')).length,
       1,
     );
+  });
+});
+
+describe('migronaut CLI — list/redo/import command wiring (integration)', () => {
+  it('should list all, only pending, and only applied', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    await runCli(baseArgs(['up', '0001-a.ts']));
+
+    const all = await runCli(baseArgs(['list', '--json']));
+    assert.strictEqual(all.code, 0);
+    assert.strictEqual(JSON.parse(all.stdout).length, 2);
+
+    const pending = await runCli(baseArgs(['list', '--pending', '--json']));
+    assert.deepStrictEqual(
+      JSON.parse(pending.stdout).map((row) => row.file),
+      ['0002-b.ts'],
+    );
+
+    const applied = await runCli(baseArgs(['list', '--applied', '--json']));
+    assert.deepStrictEqual(
+      JSON.parse(applied.stdout).map((row) => row.file),
+      ['0001-a.ts'],
+    );
+
+    // Human mode renders a table with both files.
+    const human = await runCli(baseArgs(['list']));
+    assert.ok(human.stdout.includes('0001-a.ts'));
+    assert.ok(human.stdout.includes('0002-b.ts'));
+  });
+
+  it('should print "No migrations found" for list on an empty project', async () => {
+    const result = await runCli(baseArgs(['list']));
+    assert.strictEqual(result.code, 0);
+    assert.ok(result.stdout.includes('No migrations found'));
+  });
+
+  it('should redo the last applied migration via the CLI', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await runCli(baseArgs(['up']));
+
+    const result = await runCli(baseArgs(['redo', '--json']));
+    assert.strictEqual(result.code, 0);
+    const parsed = JSON.parse(result.stdout);
+    assert.deepStrictEqual(
+      parsed.map((row) => row.status),
+      ['reverted', 'applied'],
+    );
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
+  });
+
+  it('should preview an import with import --dry-run --json without writing', async () => {
+    await mongo.db.collection('changelog').insertOne({
+      fileName: '0001-legacy.js',
+      appliedAt: new Date('2024-01-01T00:00:00Z'),
+    });
+
+    const result = await runCli(baseArgs(['import', '--dry-run', '--json']));
+    assert.strictEqual(result.code, 0);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.dryRun, true);
+    assert.strictEqual(parsed.imported, 0);
+    assert.deepStrictEqual(
+      parsed.rows.map((row) => row.file),
+      ['0001-legacy.js'],
+    );
+    assert.strictEqual(await mongo.db.collection('_migronaut_migrations').countDocuments(), 0);
+  });
+
+  it('should import through the CLI and then skip the adopted history on up', async () => {
+    await mongo.db.collection('changelog').insertOne({
+      fileName: '0001-legacy.js',
+      appliedAt: new Date('2024-01-01T00:00:00Z'),
+    });
+
+    const result = await runCli(baseArgs(['import', '--json']));
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(JSON.parse(result.stdout).imported, 1);
+    assert.strictEqual(await mongo.db.collection('_migronaut_migrations').countDocuments(), 1);
+  });
+
+  it('should pass --from/--to/--trust-hash/--force through the import command', async () => {
+    await mongo.db.collection('legacy_changelog').insertOne({
+      fileName: '0001-legacy.js',
+      appliedAt: new Date('2024-01-01T00:00:00Z'),
+      fileHash: 'f'.repeat(64),
+    });
+    // Non-empty target plus --force exercises the overwrite path end to end.
+    await mongo.db
+      .collection('custom_target')
+      .insertOne({ name: '0000-existing.js', batch: 1, status: 'applied' });
+
+    const result = await runCli(
+      baseArgs([
+        'import',
+        '--from',
+        'legacy_changelog',
+        '--to',
+        'custom_target',
+        '--trust-hash',
+        '--force',
+        '--json',
+      ]),
+    );
+    assert.strictEqual(result.code, 0);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.source, 'legacy_changelog');
+    assert.strictEqual(parsed.target, 'custom_target');
+    assert.strictEqual(parsed.imported, 1);
+    assert.strictEqual(parsed.rows[0].checksumSource, 'reused');
+  });
+
+  it('should preview dry-run down --batch and dry-run up --to through the CLI', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    project.write('0003-c.ts', insertMigration('things', 'c'));
+    await runCli(baseArgs(['up', '0001-a.ts']));
+
+    const to = await runCli(baseArgs(['dry-run', 'up', '--to', '0002-b.ts', '--json']));
+    assert.strictEqual(to.code, 0);
+    assert.deepStrictEqual(
+      JSON.parse(to.stdout).map((row) => row.file),
+      ['0002-b.ts'],
+    );
+
+    const batch = await runCli(baseArgs(['dry-run', 'down', '--batch', '1', '--json']));
+    assert.strictEqual(batch.code, 0);
+    assert.deepStrictEqual(
+      JSON.parse(batch.stdout).map((row) => row.file),
+      ['0001-a.ts'],
+    );
+    // A preview writes nothing.
+    assert.strictEqual(await mongo.db.collection('_migronaut_migrations').countDocuments(), 1);
+  });
+
+  it('should render redo results in human mode', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await runCli(baseArgs(['up']));
+
+    const result = await runCli(baseArgs(['redo']));
+    assert.strictEqual(result.code, 0);
+    assert.ok(result.stdout.includes('Reverted'));
+    assert.ok(result.stdout.includes('Applied'));
+  });
+});
+
+describe('migronaut CLI — quiet mode and output safety (integration)', () => {
+  it('should silence tables and info lines under --quiet but keep errors', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await runCli(baseArgs(['up']));
+
+    const status = await runCli(baseArgs(['status', '--quiet']));
+    assert.strictEqual(status.code, 0);
+    assert.strictEqual(status.stdout, '');
+
+    const list = await runCli(baseArgs(['list', '--quiet']));
+    assert.strictEqual(list.stdout, '');
+
+    // Errors must survive --quiet.
+    const failing = await runCli(baseArgs(['down', '0009-missing.ts', '--quiet']));
+    assert.strictEqual(failing.code, 9);
+    assert.ok(failing.stderr.includes('NOT_APPLIED'));
+  });
+
+  it('should never print connection credentials in any output channel', async () => {
+    const secret = 'sup3rSecretPass';
+    const json = await runCli([
+      '--uri',
+      `mongodb://ci-user:${secret}@`,
+      '--db',
+      'x',
+      '--dir',
+      project.dir,
+      'status',
+      '--json',
+    ]);
+    assert.strictEqual(json.code, 5);
+    assert.ok(!json.stdout.includes(secret));
+    assert.ok(!json.stderr.includes(secret));
+    // The username may remain; the password must be masked.
+    assert.ok(json.stdout.includes('****'));
+
+    const verbose = await runCli([
+      '--uri',
+      `mongodb://ci-user:${secret}@`,
+      '--db',
+      'x',
+      '--dir',
+      project.dir,
+      'status',
+      '--verbose',
+    ]);
+    assert.ok(!verbose.stdout.includes(secret));
+    assert.ok(!verbose.stderr.includes(secret));
+  });
+
+  it('should exit cleanly when stdout closes early (EPIPE)', async () => {
+    for (let i = 1; i <= 60; i++) {
+      project.write(`00${String(i).padStart(2, '0')}-m${i}.ts`, insertMigration('things', `m${i}`));
+    }
+    await runCli(baseArgs(['up']));
+
+    // Pipe a large --json document into `head -1`: head exits after one line,
+    // the pipe closes, and the CLI must treat the resulting EPIPE as success
+    // instead of crashing with a raw Node stack.
+    const script =
+      `node ${JSON.stringify(binPath)} --uri ${JSON.stringify(mongo.uri)} ` +
+      `--db ${JSON.stringify(DB)} --dir ${JSON.stringify(project.dir)} status --json | head -1`;
+    const result = await new Promise((resolve, reject) => {
+      const child = spawn('sh', ['-c', script], { env: { ...process.env } });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk);
+      });
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    });
+    assert.ok(!result.stderr.includes('EPIPE'));
+    assert.ok(!result.stderr.includes('Unhandled'));
   });
 });

@@ -1,4 +1,23 @@
-const { MigrationExecutionFailedError, MigrationTimeoutError } = require('../errors/index.js');
+const {
+  MigrationExecutionFailedError,
+  MigrationTimeoutError,
+  TransactionsUnsupportedError,
+} = require('../errors/index.js');
+const { errorText } = require('../utils/error.js');
+
+/**
+ * True when the driver refused to start a transaction because the deployment
+ * cannot run one (standalone server; code 20 = IllegalOperation). Matched on
+ * the message too, since older servers phrase it without the code.
+ */
+function isTransactionsUnsupported(error) {
+  if (typeof error !== 'object' || error === null) return false;
+  return (
+    error.code === 20 ||
+    (typeof error.message === 'string' &&
+      error.message.includes('Transaction numbers are only allowed'))
+  );
+}
 
 /**
  * Race a migration against its timeout.
@@ -92,12 +111,22 @@ async function runMigration(params) {
       try {
         await hooks.onError(name, err, runtimeContext);
       } catch (hookError) {
-        const message = hookError instanceof Error ? hookError.message : String(hookError);
+        const message = errorText(hookError);
         logger?.warn(`⚠ onError hook failed for ${name}: ${message}`);
       }
     }
 
     if (err instanceof MigrationTimeoutError) throw err;
+    // A standalone deployment refusing the transaction is a topology problem,
+    // not a bug in the migration — say so instead of blaming the file.
+    if (useTransaction && isTransactionsUnsupported(err)) {
+      throw new TransactionsUnsupportedError(
+        `Cannot run ${name} in a transaction — this deployment is standalone. ` +
+          'Set useTransaction: false, or run against a replica set / mongos.',
+        { name, direction, cause: err.message },
+        { cause: err },
+      );
+    }
     throw new MigrationExecutionFailedError(
       `Migration ${direction} failed: ${name}`,
       // The message is duplicated into context because that is what survives

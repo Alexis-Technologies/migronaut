@@ -18,13 +18,14 @@ describe('Changelog (mocked DB)', () => {
   it('ensureIndexes should create the indexes the read paths use', async () => {
     const { db, collection } = makeDb();
     await new Changelog('_migronaut_migrations').ensureIndexes(db);
-    // One round trip for all three, not one call each.
+    // One round trip for all of them, not one call each.
     assert.strictEqual(collection.createIndexes.mock.callCount(), 1);
     const [specs] = collection.createIndexes.mock.calls[0].arguments;
     assert.deepStrictEqual(specs, [
       { key: { name: 1 }, name: 'name_unique', unique: true },
       { key: { status: 1, batch: -1 }, name: 'status_batch' },
       { key: { batch: 1 }, name: 'batch' },
+      { key: { status: 1, name: 1 }, name: 'status_name' },
     ]);
   });
 

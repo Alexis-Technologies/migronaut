@@ -3,6 +3,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { ConfigInvalidError } = require('../errors/index.js');
 const { applyEnvFile } = require('../utils/env.js');
+const { errorText } = require('../utils/error.js');
 const { resolveLogger } = require('../utils/logger.js');
 
 /** Default values applied when no flag, env var, or config-file value is present */
@@ -117,6 +118,20 @@ const CONFIG_KEYS = [
   },
   { path: 'reloadMigrations', check: isBoolean, message: 'must be a boolean', optional: true },
 ];
+
+/**
+ * Every key the merged config legitimately carries: the validated ones plus
+ * the deliberately-unchecked live instances. Used only to *mention* typos
+ * (`migrationsDirectory`, `useTransactions`) at debug level — unknown keys
+ * stay allowed, matching the documented non-strict contract.
+ */
+const KNOWN_CONFIG_KEYS = new Set([
+  ...CONFIG_KEYS.map((spec) => spec.path),
+  'logger',
+  'hooks',
+  'mongoose',
+  'client',
+]);
 
 /**
  * Validate the merged config, returning a list of `{ path, message }` issues
@@ -270,7 +285,7 @@ async function loadConfigFile(filepath, lenient = false) {
       }
       throw new ConfigInvalidError(
         'Config factory function failed to resolve',
-        { path: filepath, cause: error instanceof Error ? error.message : String(error) },
+        { path: filepath, cause: errorText(error) },
         { cause: error },
       );
     }
@@ -338,6 +353,15 @@ async function loadConfig(options = {}) {
   }
 
   const config = merged;
+
+  // A typo'd key (`migrationsDirectory`, `useTransactions`) validates fine and
+  // then silently does nothing; a debug mention is the cheapest way to notice.
+  const unknown = Object.keys(config).filter((key) => !KNOWN_CONFIG_KEYS.has(key));
+  if (unknown.length > 0) {
+    resolveLogger(config.logger).debug(
+      `Unrecognized config key(s), ignored: ${unknown.join(', ')}`,
+    );
+  }
 
   if (config.logger && configFilePath) {
     // resolveLogger, not a direct call — config.logger may be a pino instance.

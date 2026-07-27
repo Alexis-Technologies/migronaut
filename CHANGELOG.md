@@ -4,18 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## v1.0.0
 
-Initial release.
+Initial release. Requires **Node.js ≥ 22.18**.
 
 ### Core
 
-- `MigratorKit` orchestration: `up`, `down`, `redo`, `dryRun`, `status`, `list`, `create`, `init`
-- `migronaut` CLI with `init`, `up`, `down`, `redo`, `status`, `list`, `dry-run`, `create`, `import`,
-  and `unlock` commands
+- `MigratorKit` orchestration: `up`, `down`, `redo`, `dryRun`, `status`, `list`, `audit`,
+  `create`, `init`, `import`, `lockInfo`, `forceUnlock`
+- `migronaut` CLI with `init`, `up`, `down`, `redo`, `status`, `list`, `dry-run`, `audit`,
+  `create`, `import`, `lock`, and `unlock` commands
 - Config loader with priority: CLI flags → `MIGRONAUT_*` env vars → config file → defaults,
   checked by a built-in zero-dependency validator (`ConfigInvalidError` with per-issue
   `{ path, message }`)
 - Function / async config files — `export default` a (sync or async) factory returning the config,
   for loading the connection from a secret manager at runtime with no bundled cloud SDKs
+- **Client injection** (`config.client`) — reuse an already-connected `MongoClient` (its pool,
+  auth, TLS); ownership stays with the caller and `disconnect()` never closes it
+- **Lifecycle events** — `MigratorKit` is an EventEmitter: `run:start`/`run:end` (with duration
+  and result counts), `migration:start`/`success`/`skipped`/`error`,
+  `lock:acquired`/`released`/`lost` — feed metrics or alerting without parsing log lines
 - First-class `.ts` and `.js` (ESM + CJS) migration loading
 - MongoDB-native concurrency lock with TTL-based stale reclaim and heartbeat renewal for long
   migrations
@@ -30,8 +36,14 @@ Initial release.
   `down` can peel migrations off one at a time
 - **`migronaut down --steps <n>`** — revert the last N applied migrations, newest first, regardless
   of batch
-- **`migronaut dry-run down --steps <n>`** — preview the same last-N rollback without touching the
-  database
+- **`migronaut up --to <file>` / `migronaut down --to <file>`** — migrate to a named point in the
+  sequence: `up --to` applies pending files up to and including it, `down --to` reverts everything
+  applied after it (exclusive), so the pair is a round trip
+- **`migronaut dry-run`** previews the same selections — `--steps`, `--batch`, and `--to` — without
+  touching the database
+- **`migronaut audit`** — read-only health check (config, connectivity, transaction support,
+  indexes, lock state, checksum drift, runtime) with pass/warn/fail per check
+- **`migronaut lock`** — inspect the current migration lock holder without modifying it
 - **`--json` machine-readable output** on every data command (`up`, `down`, `redo`, `status`,
   `list`, `dry-run`, `import`, `create`, `unlock`) — a single JSON document on stdout; human logs
   and the spinner go to stderr, so stdout stays pipe-safe
@@ -45,9 +57,8 @@ Initial release.
 
 - **No runtime dependencies at all** — `package.json` has no `dependencies` key; only `mongodb`
   (required) and `mongoose` (optional) as peers
-- `.env` loading via native `util.parseEnv` on Node ≥ 20.12 with a built-in fallback parser on
-  older Node (quotes, `export ` prefix, full-line and inline `#` comments; no multiline values,
-  `\n` expansion, or `${VAR}` interpolation) — real env vars always win over `.env`
+- `.env` loading via native `util.parseEnv` (quotes, `export ` prefix, comments, multiline
+  values) — real env vars always win over `.env`
 - Hand-rolled ANSI colors (detection: `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > TTY), a TTY-only
   spinner (complete no-op when piped), box-drawing tables with ANSI-aware column widths, and a
   commander-compatible argument parser (combined short flags like `-fy` are not supported)
@@ -70,9 +81,16 @@ Initial release.
   migrations directory, so a crafted name can't load or read a file outside it
   (`MigrationInvalidNameError`)
 - **Lock safety for long migrations** — heartbeat renewal at half the TTL, owner-scoped
-  acquire/release/renew so a run never loses or steals a lock it doesn't hold
-- **Clear `.ts` runtime error** — an actionable error when a Node runtime can't import a `.ts`
-  migration, instead of a cryptic `ERR_UNKNOWN_FILE_EXTENSION`
+  acquire/release/renew, server-time (`$$NOW`) staleness judgments immune to host clock skew, and
+  a hard renewal deadline that stops the run strictly before a peer could reclaim the lock
+- **Credential redaction** — connection-string passwords are masked (`user:****@`) in every error
+  message, `--json` payload, and `--verbose` stack the CLI emits
+- **Terminal-injection safety** — control characters in DB-sourced values (descriptions,
+  filenames) are stripped before table rendering
+- **Clear `.ts` runtime errors** — actionable messages when type stripping is disabled or a
+  migration uses non-erasable TypeScript syntax (`enum`, `namespace`)
+- **`TransactionsUnsupportedError`** — `useTransaction` on a standalone server names the topology
+  as the problem instead of blaming the migration
 - `prepublishOnly` runs `lint` + `format:check` + coverage-gated tests + `tsd` type tests, so a
   broken release can't be published
 
@@ -80,5 +98,5 @@ Initial release.
 
 - Full documentation site at <https://migronaut.vercel.app/> — guides, a full command reference, a
   programmatic API overview, an FAQ, and a migrate-mongo migration guide
-- `.ts` migrations run natively on **Node ≥ 22.18** (built-in type stripping) or under a
-  TypeScript loader such as `tsx`; `.js` migrations run on Node 18+ with no setup
+- Requires **Node.js ≥ 22.18** — `.ts` migrations run natively (built-in type stripping) with no
+  loader or build step; `.js` migrations likewise

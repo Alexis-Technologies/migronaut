@@ -14,11 +14,9 @@ const { insertMigration, makeProject } = require('../helpers/project.js');
 const repoRoot = path.join(__dirname, '..', '..');
 const bin = path.join(repoRoot, 'bin', 'migronaut.js');
 
-// Node enabled TypeScript type-stripping by default in v22.18 (unflagged in
-// v23.6). Below that, plain `node` cannot import `.ts` and migronaut surfaces a clear
-// error instead of a cryptic ERR_UNKNOWN_FILE_EXTENSION.
-const [major, minor] = process.versions.node.split('.').map(Number);
-const nodeStripsTypes = (major ?? 0) > 22 || ((major ?? 0) === 22 && (minor ?? 0) >= 18);
+// The supported Node range (engines >= 22.18) always strips types; feature
+// detection guards the rare case of a run under --no-experimental-strip-types.
+const nodeStripsTypes = Boolean(process.features.typescript);
 
 /** Run the CLI under the current (plain) Node */
 function runBin(args, cwd) {
@@ -80,19 +78,10 @@ describe('shipped CLI under plain node (no build, no loader)', () => {
     assert.strictEqual(await mongo.db.collection('rt_js').countDocuments(), 1);
   });
 
-  it(`should ${nodeStripsTypes ? 'apply' : 'cleanly reject'} a .ts migration on this Node`, async () => {
+  it('should apply a .ts migration', { skip: !nodeStripsTypes }, async () => {
     project.write('0002-ts.ts', tsMigration);
     const result = await runBin(args(['up', '0002-ts.ts']), project.dir);
-
-    if (nodeStripsTypes) {
-      assert.strictEqual(result.code, 0);
-      assert.strictEqual(await mongo.db.collection('rt_ts').countDocuments(), 1);
-    } else {
-      // No type-stripping: must fail loudly with our actionable message, not a
-      // raw Node ERR_UNKNOWN_FILE_EXTENSION, and must not have touched the DB.
-      assert.strictEqual(result.code, 1);
-      assert.ok(`${result.stdout}${result.stderr}`.includes('TypeScript'));
-      assert.strictEqual(await mongo.db.collection('rt_ts').countDocuments(), 0);
-    }
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(await mongo.db.collection('rt_ts').countDocuments(), 1);
   });
 });

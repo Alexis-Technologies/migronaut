@@ -19,25 +19,55 @@ class Changelog {
   /**
    * Create the indexes the read paths actually use. Safe to call repeatedly.
    *
-   * Beyond the unique `name` index: `{status, batch}` serves the applied-set
-   * and highest-batch lookups (the latter would otherwise be a blocking
-   * in-memory sort, capped at 32 MB), and `{batch}` serves rollback by batch.
+   * Beyond the unique `name` index: `{status, batch}` serves the highest-batch
+   * lookups (which would otherwise be a blocking in-memory sort, capped at
+   * 32 MB), `{batch}` serves rollback by batch, and `{status, name}` makes the
+   * hottest query of all — the applied set, sorted by name, read on every
+   * `up`/`status`/health check — a covered, sort-free index scan.
    */
   async ensureIndexes(db) {
     await this.#coll(db).createIndexes([
       { key: { name: 1 }, name: 'name_unique', unique: true },
       { key: { status: 1, batch: -1 }, name: 'status_batch' },
       { key: { batch: 1 }, name: 'batch' },
+      { key: { status: 1, name: 1 }, name: 'status_name' },
     ]);
   }
 
   /**
    * Read every raw document from a foreign collection (e.g. a migrate-mongo
    * `changelog`). Returns untyped docs since the source schema differs from
-   * ours — the caller is responsible for validating and mapping them.
+   * ours — the caller is responsible for validating and mapping them. Projected
+   * down to the fields the import mapping consumes, so adopting a large
+   * changelog does not pull every legacy payload into memory.
    */
   async getForeignDocs(db, collectionName) {
-    return db.collection(collectionName).find().toArray();
+    return db
+      .collection(collectionName)
+      .find()
+      .project({ fileName: 1, fileHash: 1, appliedAt: 1, migrationBlock: 1, _id: 0 })
+      .toArray();
+  }
+
+  /**
+   * Every record's `{name, batch}` only — what `import` needs to number new
+   * batches and detect a non-empty target without loading full documents.
+   */
+  async getNamesAndBatches(db) {
+    return this.#coll(db).find().project({ name: 1, batch: 1, _id: 0 }).toArray();
+  }
+
+  /**
+   * The most recently applied record (by `appliedAt`, name-desc tiebreak), or
+   * null. A server-side top-1 sort+limit — never the whole history in memory.
+   */
+  async getNewestApplied(db) {
+    const docs = await this.#coll(db)
+      .find({ status: 'applied' })
+      .sort({ appliedAt: -1, name: -1 })
+      .limit(1)
+      .toArray();
+    return docs[0] ?? null;
   }
 
   /** Return every changelog record, sorted by name ascending */

@@ -1,33 +1,31 @@
-const { emitJson, withMigrator } = require('../shared.js');
+const { defineCommand } = require('../shared.js');
 
 /** Register the `create` command */
 function registerCreate(program) {
-  program
-    .command('create')
-    .description('Create a new migration file')
-    .argument('<name>', 'Migration name (will be slugified)')
-    .option('--js', 'Force a .js file (overrides config createExtension)')
-    .option('--ts', 'Force a .ts file (overrides config createExtension)')
-    .option('--template <path>', 'Use a custom template file')
-    .option('--json', 'Output machine-readable JSON ({ path })')
-    .action(async (name, _opts, command) => {
-      const opts = command.optsWithGlobals();
+  defineCommand(program, {
+    name: 'create',
+    description: 'Create a new migration file',
+    args: [['<name>', 'Migration name (will be slugified)']],
+    options: [
+      ['--js', 'Force a .js file (overrides config createExtension)'],
+      ['--ts', 'Force a .ts file (overrides config createExtension)'],
+      ['--template <path>', 'Use a custom template file'],
+      ['--json', 'Output machine-readable JSON ({ path })'],
+    ],
+    // Writing a file needs no database — no spinner, no pre-connect.
+    spinner: false,
+    run: async (migrator, opts, [name]) => {
       // Tri-state: explicit flag wins; otherwise leave undefined so config decides.
       const js = opts.ts ? false : opts.js ? true : undefined;
-      await withMigrator(
-        opts,
-        async (migrator) => {
-          const path = await migrator.create(name, {
-            ...(js !== undefined ? { js } : {}),
-            ...(opts.template ? { template: opts.template } : {}),
-          });
-          if (opts.json) {
-            emitJson({ path });
-          }
-        },
-        { ...(opts.json ? { json: true } : {}) },
-      );
-    });
+      const path = await migrator.create(name, {
+        ...(js !== undefined ? { js } : {}),
+        ...(opts.template ? { template: opts.template } : {}),
+      });
+      return { path };
+    },
+    // Human mode: core already logs "✔ Created …" — nothing extra to render.
+    render: () => undefined,
+  });
 }
 
 module.exports = { registerCreate };

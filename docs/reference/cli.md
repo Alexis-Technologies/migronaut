@@ -56,6 +56,9 @@ runner.
 | [`migronaut dry-run up`](/commands/dry-run) | Preview what would apply |
 | `migronaut dry-run down` | Preview what would revert |
 | `migronaut dry-run down --steps <n>` | Preview reverting the last N |
+| `migronaut dry-run down --batch <n>` | Preview reverting a specific batch |
+| `migronaut dry-run up --to <file>` | Preview a staged rollout up to that file |
+| `migronaut dry-run down --to <file>` | Preview reverting everything applied after that file |
 
 ## Authoring
 
@@ -108,4 +111,5 @@ working unchanged.
 | `12` | `HOOK_FAILED` — a lifecycle hook threw |
 | `13` | `MIGRATION_IRREVERSIBLE` — an imported migrate-mongo record |
 | `14` | `MIGRATION_TIMEOUT` — a migration exceeded `timeoutMs` |
+| `15` | `TRANSACTIONS_UNSUPPORTED` — transactions need a replica set / mongos |
 | `130` / `143` | Killed by a second SIGINT / SIGTERM |

@@ -1,6 +1,5 @@
 const { setTimeout: delay } = require('node:timers/promises');
 const { LockAlreadyHeldError } = require('../errors/index.js');
-const { resolveLogger } = require('../utils/logger.js');
 const { MigratorKit } = require('./migrator.js');
 
 /**
@@ -55,11 +54,14 @@ async function runMigrations(config = {}, options = {}) {
   } = options;
 
   const kit = new MigratorKit(config, kitOptions);
-  const logger = resolveLogger(config.logger);
   let waited = false;
 
   try {
     await kit.connect();
+    // Resolved AFTER connect, from the kit's own merged config: a `logger:
+    // null` in the config file must silence this module's lines too, not only
+    // the kit's own.
+    const logger = kit.logger;
     // The clock starts at the first contention, not before the first attempt —
     // otherwise a slow initial attempt eats the whole waiting budget.
     let deadline;

@@ -4,6 +4,15 @@ const { LOCK_ID, MigrationLock, runWithLock, toLockInfo } = require('../../src/c
 const { LockAlreadyHeldError, LockReleaseFailedError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 
+// The owner token an acquire() or renew() update would store, or undefined.
+// acquire() sends a $replaceWith/$cond pipeline (server-time `$$NOW` stamping)
+// whose taken-branch document carries the `$literal`-wrapped owner.
+function ownerFromUpdate(update) {
+  const stage = Array.isArray(update) ? update[0] : update;
+  const raw = stage?.$replaceWith?.$cond?.[1]?.owner ?? stage?.$set?.owner;
+  return raw && typeof raw === 'object' ? raw.$literal : raw;
+}
+
 function makeDb() {
   // acquire() upserts with a random `owner` token, then reads it back to confirm
   // ownership. The mock captures the token from the update and echoes it from
@@ -11,7 +20,7 @@ function makeDb() {
   let storedOwner;
   const collection = {
     updateOne: mock.fn((_filter, update) => {
-      const owner = update?.$set?.owner;
+      const owner = ownerFromUpdate(update);
       if (owner) {
         storedOwner = owner;
       }
@@ -234,5 +243,61 @@ describe('runWithLock', () => {
     assert.strictEqual(collection.updateOne.mock.callCount(), 0);
     assert.strictEqual(collection.deleteOne.mock.callCount(), 0);
     assert.strictEqual(warn.mock.callCount(), 1);
+  });
+
+  it('should emit balanced acquired/released events with skipped when noLock is true', async () => {
+    const { db } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    const events = [];
+    await runWithLock(
+      lock,
+      {
+        noLock: true,
+        logger: silentLogger,
+        onLockAcquired: (extra) => events.push(['acquired', extra]),
+        onLockReleased: (extra) => events.push(['released', extra]),
+      },
+      async () => 'ok',
+    );
+    assert.deepStrictEqual(events, [
+      ['acquired', { skipped: true }],
+      ['released', { skipped: true }],
+    ]);
+  });
+
+  it('should abort via the TTL deadline before the failure counter is exhausted', async () => {
+    const { db, collection } = makeDb();
+    // 200ms TTL → renew every 100ms, hard deadline at 150ms. Every renewal
+    // fails, so the failure counter alone would only abort at 300ms — past the
+    // point where a peer could reclaim the stale lock. The deadline must win.
+    const lock = new MigrationLock(db, '_migronaut_locks', 0.2);
+    let owner;
+    collection.updateOne.mock.mockImplementation((_filter, update) => {
+      // acquire() carries the owner token; renew() only re-stamps lockedAt.
+      const raw = ownerFromUpdate(update);
+      if (raw) {
+        owner = raw;
+        return Promise.resolve({ matchedCount: 1 });
+      }
+      return Promise.reject(new Error('network blip'));
+    });
+    collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, owner }));
+    const started = Date.now();
+    await assert.rejects(
+      runWithLock(
+        lock,
+        { logger: silentLogger },
+        (signal) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+      ),
+      (error) => {
+        assert.strictEqual(error.code, 'LOCK_LOST');
+        return true;
+      },
+    );
+    // Aborted around the deadline (~150ms), well before 3 × 100ms of failures.
+    assert.ok(Date.now() - started < 280);
   });
 });

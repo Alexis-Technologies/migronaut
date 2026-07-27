@@ -7,10 +7,10 @@
 > exists, how data flows through it, and every non-obvious nuance you need to make a safe change.
 >
 
-**Snapshot at time of writing:** v1.0.0 · Node ≥ 18 (published) / Node ≥ 20 (to develop & test) ·
-runtime deps: **none** — `package.json` has no `dependencies` key; `.env` loading, ANSI colors,
-the spinner, the arg parser, the table renderer and config validation are all hand-rolled in
-`src/` · peer deps: `mongodb`, optional `mongoose`.
+**Snapshot at time of writing:** v1.0.0 · Node ≥ 22.18 (engines; native TS type stripping is
+always available) · runtime deps: **none** — `package.json` has no `dependencies` key; `.env`
+loading, ANSI colors, the spinner, the arg parser, the table renderer and config validation are
+all hand-rolled in `src/` · peer deps: `mongodb`, optional `mongoose`.
 
 ---
 
@@ -78,13 +78,17 @@ src/
 │   ├── changelog.js         # Read/write the _migronaut_migrations collection
 │   ├── runner.js            # Execute ONE migration up()/down() (+ transactions)
 │   ├── context.js           # Build the MigrationContext passed to each migration
+│   ├── audit.js             # runAudit() — the read-only health-check flow
 │   ├── import.js            # PURE migrate-mongo → MigrationRecord mapping
+│   ├── import-runner.js     # runImport() — the impure import flow (read/map/write)
 │   └── run.js               # Programmatic helpers: runMigrations(), pendingMigrations()
 ├── utils/
 │   ├── logger.js            # Pino-compatible logger (default console, silent, pino adapter)
 │   ├── colors.js            # ANSI palette + FORCE_COLOR/NO_COLOR/TTY detection + stripAnsi
-│   ├── env.js               # .env loader — native util.parseEnv or built-in fallback parser
+│   ├── env.js               # .env loader — native util.parseEnv, override:false semantics
 │   ├── checksum.js          # SHA-256 file hashing
+│   ├── redact.js            # Mask user:password@ in strings leaving the process
+│   ├── error.js             # errorText() — stringify caught errors, redaction built in
 │   ├── loader.js            # Dynamic-import a migration file (.ts/.js, ESM/CJS)
 │   ├── template.js          # Generate migration files & config files
 │   └── date.js              # Dependency-free timestamp formatting
@@ -252,17 +256,21 @@ Each entry: **responsibility · key exports · nuances you must know.**
 
 ### `src/core/runner.js` — single-migration execution
 - **Responsibility:** run exactly one `up()` or `down()`, optionally inside a transaction, time it,
-  fire `onError`, and translate any throw into `MigrationExecutionFailedError`.
+  fire `onError`, and translate any throw into `MigrationExecutionFailedError` (or
+  `TransactionsUnsupportedError` when a standalone deployment refused the transaction).
 - **Key export:** `runMigration(params)`.
 - **Nuances:** when `useTransaction`, it starts a session, injects it into a *copy* of the context
-  (`{...context, session}`), commits on success, **aborts on failure (swallowing the abort error so
-  it can't mask the original)**, and always `endSession()` in `finally`. `onError` runs *before* the
-  wrapped error is thrown. Errors are never swallowed.
+  (`{...context, session}`), and delegates commit/abort to the driver's `session.withTransaction()`,
+  which also retries `TransientTransactionError`/`UnknownTransactionCommitResult` per the documented
+  commit protocol — **so the migration body may run more than once; bodies must be idempotent**.
+  `endSession()` always runs in `finally`. `onError` runs *before* the wrapped error is thrown.
+  Errors are never swallowed.
 
 ### `src/core/context.js` — the migration's world
-- **Responsibility:** build the `MigrationContext` (`{ client, db, mongoose? }`) handed to migrations.
-- **Nuance:** `mongoose` is only attached when present. The `session` is added later by the runner,
-  not here.
+- **Responsibility:** build the `MigrationContext` (`{ client, db, mongoose?, signal? }`) handed to
+  migrations.
+- **Nuance:** `mongoose` is only attached when present; `signal` (abort on stop/lock loss) is
+  attached here by the run loops. The `session` is added later by the runner, not here.
 
 ### `src/core/import.js` — migrate-mongo adoption (pure)
 - **Responsibility:** **pure** transform from raw migrate-mongo changelog docs to `MigrationRecord`s.
@@ -272,14 +280,30 @@ Each entry: **responsibility · key exports · nuances you must know.**
   order, offset past the target's existing batches; `origin:'migrate-mongo'` marks it forward-only.
 
 ### `src/core/migrator.js` — the orchestrator (the heart)
-- **Responsibility:** every command's flow. `up`/`down`/`redo`/`dryRun`/`status`/`list`/`create`/
-  `init`/`import`/`lockInfo`/`forceUnlock`, plus connection lifecycle.
+- **Responsibility:** every command's flow. `up`/`down`/`redo`/`dryRun`/`status`/`list`/`audit`/
+  `create`/`init`/`import`/`lockInfo`/`forceUnlock`, plus connection lifecycle. The bodies of
+  `audit` and `import` live in [audit.js](src/core/audit.js) and
+  [import-runner.js](src/core/import-runner.js); the migrator only injects its capabilities.
 - **Shape:** public method validates + connects + wraps the *private* `runX` worker in `runWithLock`.
-  The `runX` worker is where the actual sequencing lives. This split keeps lock handling in one place.
+  The `runX` worker is where the actual sequencing lives. This split keeps lock handling in one
+  place. `up` and `down` share the same execution skeleton (`#runSequence` for
+  beforeAll/loop/afterAll, `#executeMigration` for one migration end to end), so a fix to one
+  direction cannot silently miss the other.
 - **Nuances:** `#filepath(name)` centralizes **path-traversal defense** — every user-supplied name
-  flows through it ([migrator.js:155](src/core/migrator.js#L155)). Batch numbers come from
-  `nextBatch()` (monotonic max+1). `down --steps` and its dry-run share `selectLastApplied` +
-  `assertStepsValid`. `assertReversible` preflights migrate-mongo records before any write.
+  flows through it. Batch numbers come from `nextBatch()` (monotonic max+1). `down --steps` and its
+  dry-run share `selectLastApplied` + `assertStepsValid`. `assertReversible` preflights
+  migrate-mongo records before any write.
+
+### `src/core/audit.js` — read-only health check
+- **Responsibility:** the `migronaut audit` checks (config, connectivity, transactions, indexes,
+  lock, checksum drift, runtime), each independent, rolled up into `{ok, failed, warnings, checks}`.
+- **Key export:** `runAudit(deps)` — pure orchestration over capabilities the kit injects.
+
+### `src/core/import-runner.js` — migrate-mongo adoption (impure half)
+- **Responsibility:** the `migronaut import` flow — read the foreign collection (projected), map via
+  the pure [import.js](src/core/import.js), and write with bounded concurrency, checking the abort
+  signal between writes.
+- **Key export:** `runImport(deps, options, signal)`.
 
 ### `src/core/run.js` — programmatic entry points
 - **Responsibility:** the "blessed" lifecycle-safe helpers for app startup / serverless / tests.
@@ -299,10 +323,12 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **colors.js** — ANSI palette (green/yellow/red/cyan/dim), `supportsColor` (precedence:
   `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > `stream.isTTY` — binary, no chalk-style level
   detection), `stripAnsi`. When disabled every color function is the identity.
-- **env.js** — `.env` loading: `parseEnvContent` (built-in single-line parser: quotes, `export `
-  prefix, full-line + inline `#` comments) and `applyEnvFile` (uses native `util.parseEnv` when the
-  running Node has it; never overrides keys already in `process.env`).
-- **checksum.js** — `computeChecksum` (SHA-256 hex of file contents), `verifyChecksum`.
+- **env.js** — `.env` loading: `applyEnvFile` parses via native `util.parseEnv` (always present on
+  the supported Node range) and never overrides keys already in `process.env`.
+- **checksum.js** — `computeChecksum` (SHA-256 hex of file contents, BOM/CRLF-normalized).
+- **redact.js / error.js** — `redactUris`/`redactDeep` mask `user:password@` in any string leaving
+  the process; `errorText(error)` is the single chokepoint for stringifying caught errors, with
+  redaction built in. Use it instead of `error.message` everywhere.
 - **loader.js** — `loadMigrationFile(filepath)`: dynamic `import()`, `mod.default ?? mod` for CJS,
   validates `up`/`down` are functions. Translates the `.ts`-can't-load failure into a clear error —
   see the [loader deep dive](#64-the-loader-and-the-ts-runtime-caveat).
@@ -514,7 +540,7 @@ The high-impact ones for code changes:
   (`insertMigration`, `failingMigration`).
 - **Rules:** every feature ships with tests in the same PR. Silence the logger (`logger:null`). No
   `.only`/`.skip` committed. Test file names mirror source names. Coverage gate: **90% lines / 90%
-  funcs / 85% branches**, enforced via `c8` (`pnpm run test:coverage`).
+  funcs / 90% branches**, enforced via `c8` (`pnpm run test:coverage`).
 - **Gotcha:** Node caches dynamic `import()` by path. A test that rewrites the *same* migration
   filename mid-run will re-load the *cached* module. Use a new filename, or assert via a read-only
   path (`pendingMigrations`), when you need "changed file" behavior.
@@ -530,7 +556,7 @@ Useful commands:
 ```bash
 pnpm test                                  # unit + integration (~265 tests)
 node --test tests/integration/up.test.js   # one file
-pnpm run test:coverage                     # full suite under c8, gated at 90/90/85
+pnpm run test:coverage                     # full suite under c8, gated at 90/90/90
 pnpm run test:types                        # tsd — index.d.ts vs tests/types/*.test-d.ts
 ```
 

@@ -53,9 +53,9 @@ jobs:
       # other compiler pass over it.
       - run: pnpm run check:dts
 
-  # The engines floor (>=18) and Windows path handling both need real coverage;
-  # the unit suite is what runs everywhere, since mongodb-memory-server's
-  # replica-set startup is unreliable on Node 18 and slow on Windows.
+  # The engines floor (>=22.18) and Windows path handling both need real
+  # coverage; the unit suite is what runs everywhere, since
+  # mongodb-memory-server's replica-set startup is slow on Windows.
   unit:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -63,7 +63,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node-version: [18, 20, 22, 24]
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -80,7 +80,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20, 22, 24]
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -119,3 +119,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # A broken docs build should fail the PR, not the deploy that follows it.
       - run: pnpm run docs:build
+
+  # Single aggregate check for branch protection: require only "ci-success"
+  # instead of naming every matrix leg (which silently un-requires new legs).
+  ci-success:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint, types, unit, test, docs]
+    if: always()
+    steps:
+      - name: Fail when any needed job failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - run: echo "All CI jobs passed"

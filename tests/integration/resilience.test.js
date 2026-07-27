@@ -177,6 +177,56 @@ describe('MigratorKit.stop (integration)', () => {
     assert.strictEqual(await mongo.db.collection(LOCK_COLLECTION).countDocuments(), 0);
   });
 
+  it('should stop a rollback between migrations, mirroring the up() contract', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    const seed = migrator();
+    await seed.up();
+    await seed.disconnect();
+
+    // Stop as the first revert starts: the down() loop must honor the abort
+    // signal exactly the way up() does.
+    const progress = {
+      onStart: (name, direction) => {
+        if (direction === 'down' && name === '0002-b.ts') kit.stop('test stop');
+      },
+      onStop: () => undefined,
+    };
+    const kit = makeMigrator(mongo.uri, DB, project.dir, {}, { progress });
+
+    await assert.rejects(kit.down(undefined, {}), (error) => {
+      assert.ok(error instanceof RunAbortedError);
+      // The revert in flight completed; the rest stayed applied.
+      assert.strictEqual(error.context.results.length, 1);
+      assert.strictEqual(error.context.results[0].file, '0002-b.ts');
+      assert.strictEqual(error.context.results[0].status, 'reverted');
+      return true;
+    });
+    await kit.disconnect();
+    assert.strictEqual(await mongo.db.collection(LOCK_COLLECTION).countDocuments(), 0);
+  });
+
+  it('should expose the abort signal to a down() migration context', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const seed = migrator();
+    await seed.up();
+    await seed.disconnect();
+
+    let sawSignal;
+    const kit = migrator({
+      hooks: {
+        beforeEach: async (_name, ctx) => {
+          sawSignal = ctx.signal instanceof AbortSignal;
+        },
+      },
+    });
+    await kit.down(undefined, {});
+    await kit.disconnect();
+    // index.d.ts promises ctx.signal whenever the run can be stopping — the
+    // rollback path included; it used to be silently absent there.
+    assert.strictEqual(sawSignal, true);
+  });
+
   it('should be a no-op when nothing is running', async () => {
     const kit = migrator();
     assert.doesNotThrow(() => kit.stop());

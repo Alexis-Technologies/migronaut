@@ -3,73 +3,7 @@ const { tmpdir } = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { afterEach, beforeEach, describe, it } = require('node:test');
-const { applyEnvFile, parseEnvContent } = require('../../src/utils/env.js');
-
-describe('parseEnvContent', () => {
-  it('should parse plain KEY=VALUE lines and trim whitespace', () => {
-    const parsed = parseEnvContent('FOO=bar\n  BAZ =  qux  \n');
-    assert.strictEqual(parsed.FOO, 'bar');
-    assert.strictEqual(parsed.BAZ, 'qux');
-  });
-
-  it('should skip blank lines and comment lines', () => {
-    const parsed = parseEnvContent('\n# comment\n   \nFOO=bar\n#ANOTHER=nope\n');
-    assert.deepStrictEqual({ ...parsed }, { FOO: 'bar' });
-  });
-
-  it('should strip an export prefix', () => {
-    const parsed = parseEnvContent('export FOO=bar\n');
-    assert.strictEqual(parsed.FOO, 'bar');
-  });
-
-  it('should split at the first = only', () => {
-    const parsed = parseEnvContent('URI=mongodb://user:pass@host/?a=1&b=2\n');
-    assert.strictEqual(parsed.URI, 'mongodb://user:pass@host/?a=1&b=2');
-  });
-
-  it('should strip matching single, double, and back quotes', () => {
-    const parsed = parseEnvContent('A="double"\nB=\'single\'\nC=`back`\n');
-    assert.strictEqual(parsed.A, 'double');
-    assert.strictEqual(parsed.B, 'single');
-    assert.strictEqual(parsed.C, 'back');
-  });
-
-  it('should keep a # inside a quoted value', () => {
-    const parsed = parseEnvContent('PASS="a#b"\n');
-    assert.strictEqual(parsed.PASS, 'a#b');
-  });
-
-  it('should strip an inline comment after an unquoted value', () => {
-    const parsed = parseEnvContent('PORT=3000 # production port\n');
-    assert.strictEqual(parsed.PORT, '3000');
-  });
-
-  it('should treat a whole-value comment as an empty value', () => {
-    const parsed = parseEnvContent('EMPTY=# nothing here\n');
-    assert.strictEqual(parsed.EMPTY, '');
-  });
-
-  it('should keep a # not preceded by whitespace as part of the value', () => {
-    const parsed = parseEnvContent('COLOR=abc#def\n');
-    assert.strictEqual(parsed.COLOR, 'abc#def');
-  });
-
-  it('should skip lines without = and keys with invalid characters', () => {
-    const parsed = parseEnvContent('JUSTAWORD\nMY KEY=1\n=novalue\nOK=1\n');
-    assert.deepStrictEqual({ ...parsed }, { OK: '1' });
-  });
-
-  it('should handle CRLF line endings', () => {
-    const parsed = parseEnvContent('FOO=bar\r\nBAZ=qux\r\n');
-    assert.strictEqual(parsed.FOO, 'bar');
-    assert.strictEqual(parsed.BAZ, 'qux');
-  });
-
-  it('should keep a mismatched quote literal', () => {
-    const parsed = parseEnvContent('A="unterminated\n');
-    assert.strictEqual(parsed.A, '"unterminated');
-  });
-});
+const { applyEnvFile } = require('../../src/utils/env.js');
 
 describe('applyEnvFile', () => {
   let tmp;
@@ -89,6 +23,25 @@ describe('applyEnvFile', () => {
     await applyEnvFile(file, env);
     assert.strictEqual(env.FOO, 'bar');
     assert.strictEqual(env.BAZ, 'qux');
+  });
+
+  it('should parse comments, export prefixes, and quoted values', async () => {
+    const file = path.join(tmp, '.env');
+    writeFileSync(file, '# comment\nexport FOO=bar\nPASS="a#b"\nURI=mongodb://u:p@host/?a=1\n');
+    const env = {};
+    await applyEnvFile(file, env);
+    assert.strictEqual(env.FOO, 'bar');
+    assert.strictEqual(env.PASS, 'a#b');
+    assert.strictEqual(env.URI, 'mongodb://u:p@host/?a=1');
+  });
+
+  it('should support double-quoted multiline values', async () => {
+    const file = path.join(tmp, '.env');
+    writeFileSync(file, 'MULTI="line1\nline2"\nAFTER=ok\n');
+    const env = {};
+    await applyEnvFile(file, env);
+    assert.strictEqual(env.MULTI, 'line1\nline2');
+    assert.strictEqual(env.AFTER, 'ok');
   });
 
   it('should never override keys that are already set', async () => {

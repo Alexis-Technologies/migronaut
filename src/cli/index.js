@@ -51,7 +51,14 @@ function buildProgram() {
 async function run(argv) {
   // Checked before parsing: color is decided the first time anything renders,
   // which can precede the command action that would otherwise read the flag.
-  if (argv.includes('--no-color')) {
+  // Tokens after a `--` terminator are positionals, never flags.
+  const boundary = argv.indexOf('--');
+  const flagTokens = boundary === -1 ? argv : argv.slice(0, boundary);
+  const noColor = flagTokens.includes('--no-color');
+  const saved = noColor
+    ? { FORCE_COLOR: process.env.FORCE_COLOR, NO_COLOR: process.env.NO_COLOR }
+    : undefined;
+  if (noColor) {
     // FORCE_COLOR outranks NO_COLOR among *environment* signals, which is the
     // right precedence between two ambient settings — but an explicit flag on
     // this invocation outranks both. Without clearing it, `--no-color` is a
@@ -60,7 +67,18 @@ async function run(argv) {
     delete process.env.FORCE_COLOR;
     process.env.NO_COLOR = '1';
   }
-  await buildProgram().parseAsync(argv);
+  try {
+    await buildProgram().parseAsync(argv);
+  } finally {
+    // A programmatic embedder calling run() twice must not inherit this
+    // invocation's flag as ambient state.
+    if (saved) {
+      if (saved.FORCE_COLOR === undefined) delete process.env.FORCE_COLOR;
+      else process.env.FORCE_COLOR = saved.FORCE_COLOR;
+      if (saved.NO_COLOR === undefined) delete process.env.NO_COLOR;
+      else process.env.NO_COLOR = saved.NO_COLOR;
+    }
+  }
 }
 
 module.exports = { buildProgram, run };

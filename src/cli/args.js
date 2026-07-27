@@ -116,9 +116,20 @@ class Command {
     let command = null;
     const positionals = [];
     let helpTarget = null;
+    // After a bare `--`, everything is a positional — the standard
+    // end-of-options terminator.
+    let optionsEnded = false;
 
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i];
+      if (optionsEnded) {
+        positionals.push(token);
+        continue;
+      }
+      if (token === '--') {
+        optionsEnded = true;
+        continue;
+      }
       if (token === '-h' || token === '--help') {
         helpTarget = command ?? this;
         continue;
@@ -190,6 +201,12 @@ class Command {
       }
       args.push(value);
     }
+    // Extra positionals are almost always a mistake (`up a.js b.js` would
+    // silently run only a.js); commander errors here, and so do we.
+    if (positionals.length > command.#arguments.length) {
+      const extra = positionals.slice(command.#arguments.length);
+      return this.#fail(`too many arguments — unexpected: ${extra.join(', ')}`);
+    }
 
     if (command.#actionFn) {
       await command.#actionFn(...args, command.#values, command);
@@ -259,6 +276,16 @@ class Command {
     }
     optionRows.push(['-h, --help', 'display help for command']);
     lines.push(...renderSection('Options', optionRows));
+
+    // Subcommand help also lists the root's flags: they are accepted after the
+    // command name, so hiding them here would misdocument the real surface.
+    if (!isRoot) {
+      const globalRows = [];
+      for (const option of this.#options) {
+        globalRows.push([option.flags, option.description]);
+      }
+      lines.push(...renderSection('Global Options', globalRows));
+    }
 
     if (isRoot) {
       const commandRows = [];

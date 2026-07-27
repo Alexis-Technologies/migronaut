@@ -98,4 +98,4 @@ function resolveLogger(logger) {
   return adapter;
 }
 
-module.exports = { LEVELS, silentLogger, createLogger, resolveLogger };
+module.exports = { silentLogger, createLogger, resolveLogger };

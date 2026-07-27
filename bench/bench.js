@@ -13,6 +13,7 @@ const { computeChecksum } = require('../src/utils/checksum.js');
 const { loadMigrationFile } = require('../src/utils/loader.js');
 const { Changelog } = require('../src/core/changelog.js');
 const { MigrationLock } = require('../src/core/lock.js');
+const { MigratorKit } = require('../src/core/migrator.js');
 const {
   startBenchMongo,
   makeFixtureDir,
@@ -50,6 +51,7 @@ const CHANGELOG_COLLECTION = '_migronaut_bench_migrations';
 const LOCK_COLLECTION = '_migronaut_bench_locks';
 const CHANGELOG_SEED_COUNT = 1_000;
 const REVERT_POOL_SIZE = 20_000;
+const E2E_MIGRATION_COUNT = 100;
 
 async function main() {
   console.log(`Node ${process.version} | ${new Date().toISOString()}\n`);
@@ -164,6 +166,66 @@ async function main() {
         );
       } finally {
         await lock.release();
+      }
+
+      // ---------- end-to-end MigratorKit (the user-facing hot paths) ----------
+      const migrationsDir = makeFixtureDir();
+      try {
+        for (let i = 0; i < E2E_MIGRATION_COUNT; i++) {
+          writeChecksumFixture(migrationsDir, `2026${String(i).padStart(6, '0')}-bench.js`, 512);
+        }
+        const kitConfig = {
+          uri: mongo.uri,
+          dbName: 'migronaut_bench_e2e',
+          migrationsDir: migrationsDir.dir,
+          migrationsCollection: '_migronaut_e2e_migrations',
+          lockCollection: '_migronaut_e2e_locks',
+          logger: null,
+        };
+        const e2eDb = mongo.client.db('migronaut_bench_e2e');
+
+        // A full up() is only meaningful once per changelog, so this measures
+        // wall-clock per run (dropping the changelog between runs) instead of
+        // ops/sec.
+        const runs = 3;
+        let totalMs = 0;
+        for (let i = 0; i < runs; i++) {
+          await e2eDb
+            .collection('_migronaut_e2e_migrations')
+            .drop()
+            .catch(() => undefined);
+          const kit = new MigratorKit(kitConfig);
+          const start = performance.now();
+          await kit.up();
+          totalMs += performance.now() - start;
+          await kit.disconnect();
+        }
+        const perRun = Math.round(totalMs / runs);
+        console.log(
+          `${`MigratorKit.up() — ${E2E_MIGRATION_COUNT} pending files, end-to-end`.padEnd(58)} ${`${perRun.toLocaleString('en-US')} ms/run`.padStart(
+            16,
+          )}`,
+        );
+        results.push({
+          name: `MigratorKit.up() — ${E2E_MIGRATION_COUNT} pending files`,
+          msPerRun: perRun,
+        });
+
+        const statusKit = new MigratorKit(kitConfig);
+        await statusKit.connect();
+        try {
+          results.push(
+            await bench(
+              `MigratorKit.status() — ${E2E_MIGRATION_COUNT} applied records`,
+              () => statusKit.status(),
+              { warmup: 5, measureMs: DB_MEASURE_MS },
+            ),
+          );
+        } finally {
+          await statusKit.disconnect();
+        }
+      } finally {
+        migrationsDir.cleanup();
       }
     } finally {
       await mongo.stop();

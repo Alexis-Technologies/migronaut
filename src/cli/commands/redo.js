@@ -1,26 +1,20 @@
-const { emitJson, withMigrator } = require('../shared.js');
+const { defineCommand } = require('../shared.js');
 
 /** Register the `redo` command */
 function registerRedo(program) {
-  program
-    .command('redo')
-    .description('Rollback then re-apply the last applied migration, or a specific file')
-    .argument('[file]', 'Specific migration file to redo')
-    .option('--no-lock', 'Skip the concurrency lock (dev only)')
-    .option('--json', 'Output machine-readable JSON of the run results')
-    .action(async (file, _opts, command) => {
-      const opts = command.optsWithGlobals();
-      await withMigrator(
-        opts,
-        async (migrator) => {
-          const results = await migrator.redo(file, { noLock: opts.lock === false });
-          if (opts.json) {
-            emitJson(results);
-          }
-        },
-        { spinner: true, ...(opts.json ? { json: true } : {}) },
-      );
-    });
+  defineCommand(program, {
+    name: 'redo',
+    description: 'Rollback then re-apply the last applied migration, or a specific file',
+    args: [['[file]', 'Specific migration file to redo']],
+    options: [
+      ['--no-lock', 'Skip the concurrency lock (dev only)'],
+      ['--json', 'Output machine-readable JSON of the run results'],
+    ],
+    mutating: true,
+    run: (migrator, opts, [file]) => migrator.redo(file, { noLock: opts.lock === false }),
+    // Human mode: core logs the ↩/✔ lines itself — nothing extra to render.
+    render: () => undefined,
+  });
 }
 
 module.exports = { registerRedo };

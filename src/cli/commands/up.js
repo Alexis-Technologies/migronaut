@@ -1,67 +1,55 @@
-const { createLogger } = require('../../utils/logger.js');
-const { confirm, emitJson, withMigrator } = require('../shared.js');
+const { ConfigInvalidError } = require('../../errors/index.js');
+const { confirm, defineCommand } = require('../shared.js');
 
 /** Register the `up` command */
 function registerUp(program) {
-  program
-    .command('up')
-    .description('Run all pending migrations, or a single named file')
-    .argument('[file]', 'Specific migration file to run')
-    .option('--no-lock', 'Skip the concurrency lock (dev only)')
-    .option('--to <file>', 'Apply pending migrations up to and including this file')
-    .option('--strict', 'Abort on checksum mismatch')
-    .option('-f, --force', 'Re-run an already-applied migration (requires a file)')
-    .option('-y, --yes', 'Confirm --force non-interactively (required with --json)')
-    .option('--step', 'Apply each migration as its own batch (revert individually later)')
-    .option('--json', 'Output machine-readable JSON of the run results')
-    .action(async (file, _opts, command) => {
-      const opts = command.optsWithGlobals();
-
-      // Pre-flight validation errors honour --json so scripted callers get structured output.
-      const failPreflight = (message) => {
-        if (opts.json) {
-          emitJson({ error: { message } });
-        } else {
-          createLogger().error(`✖ ${message}`);
-        }
-        process.exitCode = 1;
-      };
-
+  defineCommand(program, {
+    name: 'up',
+    description: 'Run all pending migrations, or a single named file',
+    args: [['[file]', 'Specific migration file to run']],
+    options: [
+      ['--no-lock', 'Skip the concurrency lock (dev only)'],
+      ['--to <file>', 'Apply pending migrations up to and including this file'],
+      ['--strict', 'Abort on checksum mismatch'],
+      ['-f, --force', 'Re-run an already-applied migration (requires a file)'],
+      ['-y, --yes', 'Confirm --force non-interactively (required with --json)'],
+      ['--step', 'Apply each migration as its own batch (revert individually later)'],
+      ['--json', 'Output machine-readable JSON of the run results'],
+    ],
+    mutating: true,
+    // Runs before any connection: validation and the confirmation prompt must
+    // not cost a round trip, and their errors use the same typed envelope as
+    // everything else (CONFIG_INVALID, exit 6).
+    preflight: async (opts, [file], { logger }) => {
       if (opts.force && !file) {
-        failPreflight('--force requires a specific migration file');
-        return;
+        throw new ConfigInvalidError('--force requires a specific migration file');
       }
-
       if (opts.force && file && !opts.yes) {
-        // --json is non-interactive: refuse rather than silently re-running or hanging
-        // on a prompt that can't be answered. --yes is the explicit opt-in.
+        // --json is non-interactive: refuse rather than silently re-running or
+        // hanging on a prompt that can't be answered. --yes is the explicit opt-in.
         if (opts.json) {
-          failPreflight('--force needs confirmation — pass --yes to confirm in --json mode');
-          return;
+          throw new ConfigInvalidError(
+            '--force needs confirmation — pass --yes to confirm in --json mode',
+          );
         }
         const proceed = await confirm(`are you sure you want to re-run "${file}"? [y/N] `);
         if (!proceed) {
-          createLogger().info('Aborted');
-          return;
+          logger.info('Aborted');
+          return false;
         }
       }
-
-      await withMigrator(
-        opts,
-        async (migrator) => {
-          const results = await migrator.up(file, {
-            noLock: opts.lock === false,
-            ...(opts.force ? { force: true } : {}),
-            ...(opts.step ? { step: true } : {}),
-            ...(opts.to ? { to: opts.to } : {}),
-          });
-          if (opts.json) {
-            emitJson(results);
-          }
-        },
-        { spinner: true, ...(opts.json ? { json: true } : {}) },
-      );
-    });
+      return undefined;
+    },
+    run: (migrator, opts, [file]) =>
+      migrator.up(file, {
+        noLock: opts.lock === false,
+        ...(opts.force ? { force: true } : {}),
+        ...(opts.step ? { step: true } : {}),
+        ...(opts.to ? { to: opts.to } : {}),
+      }),
+    // Human mode: core logs every ✔ Applied line — nothing extra to render.
+    render: () => undefined,
+  });
 }
 
 module.exports = { registerUp };

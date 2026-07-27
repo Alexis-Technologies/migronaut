@@ -17,6 +17,8 @@ async function startBenchMongo(dbName = 'migronaut_bench') {
   await client.connect();
   return {
     db: client.db(dbName),
+    client,
+    uri: replSet.getUri(),
     stop: async () => {
       await client.close();
       await replSet.stop();

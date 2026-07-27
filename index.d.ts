@@ -312,6 +312,12 @@ export interface StatusRow {
   /** null = never applied, true = match, false = mismatch */
   checksumOk: boolean | null;
   description?: string;
+  /**
+   * Present (true) when the changelog record's name is not a plain filename —
+   * a legacy or tampered record. The row is reported as-is instead of failing
+   * the whole status/audit call.
+   */
+  invalid?: true;
 }
 
 // ─── Import (migrate-mongo adoption) ────────────────────────────────────────────
@@ -386,6 +392,7 @@ export type MigronautErrorCode =
   | 'MIGRATION_INVALID_EXPORT'
   | 'MIGRATION_EXECUTION_FAILED'
   | 'MIGRATION_TIMEOUT'
+  | 'TRANSACTIONS_UNSUPPORTED'
   | 'CONFIG_INVALID'
   | 'CONFIG_FILE_EXISTS'
   | 'CONNECTION_FAILED'
@@ -457,16 +464,35 @@ export interface MigrationEvent extends MigronautEventBase {
   batch?: number;
   durationMs?: number;
   error?: unknown;
+  /** Why the migration was skipped (on `migration:skipped` only) */
+  reason?: string;
+}
+
+export interface RunStartEvent extends MigronautEventBase {
+  /** Which command started the run: 'up' | 'down' | 'redo' | 'import' */
+  command?: string;
+  direction?: 'up' | 'down';
 }
 
 export interface RunEndEvent extends MigronautEventBase {
   success: boolean;
+  /** Same identification as {@link RunStartEvent} */
+  command?: string;
+  direction?: 'up' | 'down';
+  /** Wall-clock duration of the whole run, lock wait included */
+  durationMs?: number;
+  /** Result counts — present when the run produced a result list */
+  applied?: number;
+  reverted?: number;
+  total?: number;
   error?: unknown;
 }
 
 export interface LockEvent extends MigronautEventBase {
   owner?: string;
   reason?: string;
+  /** True when acquisition was skipped via `noLock` — no real lock existed */
+  skipped?: boolean;
 }
 
 /**
@@ -475,10 +501,11 @@ export interface LockEvent extends MigronautEventBase {
  * never fails the run.
  */
 export interface MigronautEvents {
-  'run:start': (event: MigronautEventBase) => void;
+  'run:start': (event: RunStartEvent) => void;
   'run:end': (event: RunEndEvent) => void;
   'migration:start': (event: MigrationEvent) => void;
   'migration:success': (event: MigrationEvent) => void;
+  'migration:skipped': (event: MigrationEvent) => void;
   'migration:error': (event: MigrationEvent) => void;
   'lock:acquired': (event: LockEvent) => void;
   'lock:released': (event: LockEvent) => void;
@@ -570,6 +597,11 @@ export class MigratorKit extends EventEmitter {
 
   /** Connect to MongoDB and ensure changelog indexes exist */
   connect(): Promise<void>;
+  /**
+   * The resolved logger — silent when config sets `logger: null`. Meaningful
+   * after `connect()` (before it, a config file's logger is not loaded yet).
+   */
+  readonly logger: MigronautLogger;
   /** Disconnect from MongoDB */
   disconnect(): Promise<void>;
   /**
@@ -607,7 +639,7 @@ export class MigratorKit extends EventEmitter {
   dryRun(
     direction: 'up' | 'down',
     filename?: string,
-    options?: { steps?: number; batch?: number },
+    options?: { steps?: number; batch?: number; to?: string },
   ): Promise<StatusRow[]>;
   /** Full migration status for all known files and records */
   status(): Promise<StatusRow[]>;
@@ -617,8 +649,8 @@ export class MigratorKit extends EventEmitter {
    * problems; fixes none of them.
    */
   audit(): Promise<AuditReport>;
-  /** Filtered list of migrations */
-  list(filter: 'all' | 'pending' | 'applied'): Promise<StatusRow[]>;
+  /** Filtered list of migrations. Default: 'all' */
+  list(filter?: 'all' | 'pending' | 'applied'): Promise<StatusRow[]>;
   /** Create a new migration file and return its absolute path */
   create(name: string, options?: CreateOptions): Promise<string>;
   /** Create a migronaut config file in the working directory and return its path */
@@ -646,7 +678,11 @@ export interface RunMigrationsOptions extends MigratorKitOptions {
    * - `'wait'`: poll until the lock frees, then run.
    */
   onLockHeld?: OnLockHeld;
-  /** Max time (ms) to wait when `onLockHeld: 'wait'`. Default: 30000 */
+  /**
+   * Max time (ms) to wait when `onLockHeld: 'wait'`. Default: 90000 — sized to
+   * outlast a peer's typical run plus one lock TTL, so parallel deploys don't
+   * give up while a healthy peer is still migrating.
+   */
   lockWaitTimeoutMs?: number;
   /** Poll interval (ms) while waiting for the lock. Default: 500 */
   lockPollIntervalMs?: number;
@@ -684,31 +720,41 @@ export function pendingMigrations(
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
+/** Construction options shared by every migronaut error — `cause` keeps the wrapped Error */
+export interface MigronautErrorOptions {
+  cause?: unknown;
+}
+
 /** Base error for all migronaut failures. Carries a typed code and context */
 export class MigronautError extends Error {
   readonly code: MigronautErrorCode;
   readonly context?: Record<string, unknown>;
-  constructor(code: MigronautErrorCode, message: string, context?: Record<string, unknown>);
+  constructor(
+    code: MigronautErrorCode,
+    message: string,
+    context?: Record<string, unknown>,
+    options?: MigronautErrorOptions,
+  );
 }
 
 /** Thrown when a lock is already held by another process within its TTL */
 export class LockAlreadyHeldError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when releasing a lock fails */
 export class LockReleaseFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a file's checksum differs from the one recorded at apply time */
 export class ChecksumMismatchError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a referenced migration file does not exist on disk */
 export class MigrationFileNotFoundError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /**
@@ -717,32 +763,32 @@ export class MigrationFileNotFoundError extends MigronautError {
  * directory (path traversal) when joined into a filesystem path.
  */
 export class MigrationInvalidNameError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a migration file does not export valid up()/down() functions */
 export class MigrationInvalidExportError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a migration's up() or down() throws during execution */
 export class MigrationExecutionFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when the merged configuration fails validation */
 export class ConfigInvalidError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when creating a config file that already exists without `--force` */
 export class ConfigFileExistsError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when connecting to MongoDB fails */
 export class ConnectionFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /**
@@ -751,7 +797,7 @@ export class ConnectionFailedError extends MigronautError {
  * `onLockLost: 'warn'` to downgrade this to a warning.
  */
 export class LockLostError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /**
@@ -759,7 +805,7 @@ export class LockLostError extends MigronautError {
  * or a SIGINT/SIGTERM. `context.results` lists what was applied first.
  */
 export class RunAbortedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /**
@@ -767,30 +813,38 @@ export class RunAbortedError extends MigronautError {
  * own work keeps running, but the run stops rather than hanging.
  */
 export class MigrationTimeoutError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown when `useTransaction` is on but the deployment cannot run
+ * transactions (a standalone server — they need a replica set or mongos).
+ */
+export class TransactionsUnsupportedError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a user-supplied lifecycle hook throws */
 export class HookFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when `create` would overwrite an existing migration file */
 export class MigrationFileExistsError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when attempting to revert a migration that was never applied */
 export class NotAppliedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when `migronaut import` targets a non-empty changelog without `--force` */
 export class ImportTargetNotEmptyError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
 /** Thrown when attempting to roll back a migrate-mongo-imported (forward-only) migration */
 export class IrreversibleMigrationError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>);
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }

@@ -11,7 +11,7 @@ _A modern, drop-in replacement for `migrate-mongo` etc._
 [![npm version](https://img.shields.io/npm/v/%40alexify%2Fmigronaut?style=flat-square&color=1E9E57&logo=npm&logoColor=white)](https://www.npmjs.com/package/@alexify/migronaut)
 [![CI](https://img.shields.io/github/actions/workflow/status/Alexis-Technologies/migronaut/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/Alexis-Technologies/migronaut/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-online-1E9E57?style=flat-square&logo=readthedocs&logoColor=white)](https://migronaut.vercel.app/)
-[![Node](https://img.shields.io/badge/Node-%E2%89%A518-1E9E57?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A522.18-1E9E57?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![Known Vulnerabilities](https://snyk.io/test/npm/@alexify/migronaut/badge.svg)](https://snyk.io/test/npm/@alexify/migronaut)
 [![License: MIT](https://img.shields.io/badge/License-MIT-1E9E57?style=flat-square)](https://opensource.org/licenses/MIT)
 
@@ -133,23 +133,27 @@ Full docs, guides, and the API reference live at
 
 ## Commands
 
-Every command accepts the global flags `--uri`, `--db`, `--dir`, and `--config`.
+Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--env-file`,
+`--no-env`, `--verbose`, `--quiet`, and `--no-color`.
 
 | Command | What it does |
 |---|---|
 | `migronaut init` | Create a documented `migronaut.config.*` in the current directory |
 | `migronaut import` | Adopt an existing `migrate-mongo` changelog (one-time, forward-only) |
 | `migronaut create <name>` | Generate a timestamped migration file |
-| `migronaut up [file]` | Run all pending migrations, or one named file |
-| `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, or one file |
+| `migronaut up [file]` | Run all pending migrations, one named file, or up to `--to <file>` |
+| `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, one file, or to `--to <file>` |
 | `migronaut redo [file]` | Roll back then re-apply (the last migration, or one file) |
 | `migronaut status` | Print the full migration status table (`--check` to fail CI on pending) |
 | `migronaut list` | List migrations, filtered by status |
 | `migronaut dry-run <up\|down> [file]` | Preview a run without touching the database |
+| `migronaut audit` | Read-only health check: config, connection, transactions, indexes, lock, drift |
+| `migronaut lock` | Show who currently holds the migration lock |
 | `migronaut unlock` | Force-release a stuck lock left behind by a crashed run |
 
 Most data commands (`up`, `down`, `redo`, `status`, `list`, `dry-run`, `import`, `create`,
-`unlock`) accept **`--json`** for machine-readable output — see [CI & automation](#ci--automation).
+`audit`, `lock`, `unlock`) accept **`--json`** for machine-readable output — see
+[CI & automation](#ci--automation).
 
 <details>
 <summary><b>Options for every command</b></summary>
@@ -184,6 +188,7 @@ migronaut create <name> --json     # machine-readable output ({ "path": "..." })
 # up — apply migrations
 migronaut up                       # all pending (one shared batch for the run)
 migronaut up <file>                # one specific file
+migronaut up --to <file>           # pending files up to and including <file>, then stop
 migronaut up --step                # apply each file as its own batch (revert individually later)
 migronaut up <file> --force        # re-run an ALREADY-applied file (asks for confirmation)
 migronaut up <file> --force --yes  # confirm a re-run non-interactively (required with --json)
@@ -196,6 +201,7 @@ migronaut down                     # the last batch (may be several files)
 migronaut down <file>              # one specific file
 migronaut down --batch <n>         # a specific batch number
 migronaut down --steps <n>         # the last N migrations, newest first, ignoring batches
+migronaut down --to <file>         # everything applied after <file>; <file> itself stays applied
 migronaut down --no-lock           # skip the concurrency lock (local dev only)
 migronaut down --json              # machine-readable output (array of run results)
 
@@ -219,7 +225,17 @@ migronaut list --json              # machine-readable output (array of status ro
 migronaut dry-run up [file]
 migronaut dry-run down [file]
 migronaut dry-run down --steps <n> # preview a step rollback (the last N migrations)
+migronaut dry-run down --batch <n> # preview reverting a specific batch
+migronaut dry-run up --to <file>   # preview a staged rollout up to <file>
 migronaut dry-run up --json        # machine-readable output (array of status rows)
+
+# audit — read-only health check
+migronaut audit                    # pass/warn/fail per check; exit 1 on any fail
+migronaut audit --json             # machine-readable report
+
+# lock — inspect the current lock
+migronaut lock                     # shows the holder (pid / host / user / since), or "no lock"
+migronaut lock --json              # machine-readable output
 
 # unlock — clear a stuck lock after a crash
 migronaut unlock                   # shows the holder, prompts y/N
@@ -229,12 +245,13 @@ migronaut unlock --json            # machine-readable output ({ "released": ...,
 
 **Global flags** (available on all commands): `--uri <uri>` (override `MIGRONAUT_URI`),
 `--db <name>` (override `MIGRONAUT_DB`), `--dir <path>` (override `MIGRONAUT_MIGRATIONS_DIR`),
-`--config <path>` (explicit config file, overrides auto-discovery).
+`--config <path>` (explicit config file, overrides auto-discovery), `--env-file <path>` /
+`--no-env` (control `.env` loading), `--verbose` / `--quiet` (log level), `--no-color`.
 
 **`--json`** is accepted by every data command above (`up`, `down`, `redo`, `status`, `list`,
-`dry-run`, `import`, `create`, `unlock`) and prints one JSON document to stdout — see
-[CI & automation](#ci--automation). On `migronaut init` only, `--json` instead selects the config
-**file format** (`migronaut.config.json`).
+`dry-run`, `import`, `create`, `audit`, `lock`, `unlock`) and prints one JSON document to stdout —
+see [CI & automation](#ci--automation). On `migronaut init` only, `--json` instead selects the
+config **file format** (`migronaut.config.json`).
 
 </details>
 
@@ -492,7 +509,7 @@ block until the migrating peer finishes, then confirm there's nothing left to ap
 ```ts
 await runMigrations(
   { uri: process.env.MONGO_URI!, dbName: 'my_app' },
-  { onLockHeld: 'wait', lockWaitTimeoutMs: 30_000 }, // default 'throw'
+  { onLockHeld: 'wait', lockWaitTimeoutMs: 90_000 }, // default 'throw', waits up to 90s
 );
 ```
 
