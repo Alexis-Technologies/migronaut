@@ -50,6 +50,10 @@ I'll let the table do the talking. This is `migrate-mongo` versus `migronaut`:
 | History preserved on rollback | ❌ *(entry removed)* | ✅ *(never deleted)* |
 | Adopt an existing `migrate-mongo` changelog | — | ✅ `migronaut import` |
 
+<sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026. It has since added transaction access
+via a `client` argument; `migronaut` exposes the same plus a declarative per-file `useTransaction`
+flag.</sub>
+
 That last row is the one I care about most. Because a better tool is useless if switching to it is painful.
 
 ## The part I was dreading: switching

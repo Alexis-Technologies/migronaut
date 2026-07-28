@@ -15,6 +15,13 @@ Initial release. Requires **Node.js ≥ 22.18**.
 - Config loader with priority: CLI flags → `MIGRONAUT_*` env vars → config file → defaults,
   checked by a built-in zero-dependency validator (`ConfigInvalidError` with per-issue
   `{ path, message }`)
+- **Every scalar option is settable from the environment** — a table-driven `MIGRONAUT_*` layer
+  pinned against the config-key spec by a test, so a config file is genuinely optional rather than
+  merely discouraged. Values fail closed: `MIGRONAUT_STRICT=on`, `MIGRONAUT_LOCK_TTL=abc` and
+  `MIGRONAUT_CREATE_EXTENSION=tsx` are rejected with an error naming the variable, never coerced
+- `MIGRONAUT_NO_COLOR` / `MIGRONAUT_FORCE_COLOR` pin migronaut's own color output above the
+  ecosystem-wide `NO_COLOR`/`FORCE_COLOR`, which stay honored underneath; `MIGRONAUT_USER`
+  overrides the OS user recorded in `executedBy`, for CI where that user is a meaningless `runner`
 - Function / async config files — `export default` a (sync or async) factory returning the config,
   for loading the connection from a secret manager at runtime with no bundled cloud SDKs
 - **Client injection** (`config.client`) — reuse an already-connected `MongoClient` (its pool,
@@ -65,7 +72,8 @@ Initial release. Requires **Node.js ≥ 22.18**.
   (required) and `mongoose` (optional) as peers
 - `.env` loading via native `util.parseEnv` (quotes, `export ` prefix, comments, multiline
   values) — real env vars always win over `.env`
-- Hand-rolled ANSI colors (detection: `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > TTY), a TTY-only
+- Hand-rolled ANSI colors (detection: `MIGRONAUT_FORCE_COLOR` > `MIGRONAUT_NO_COLOR` >
+  `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > TTY), a TTY-only
   spinner (complete no-op when piped), box-drawing tables with ANSI-aware column widths, and a
   commander-compatible argument parser (combined short flags like `-fy` are not supported)
 - `MigronautLogger` is pino-compatible (`{ debug, info, warn, error, child? }`) — pass a pino

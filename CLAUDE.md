@@ -28,7 +28,10 @@ which coordinates small single-responsibility modules: `config`, `lock`, `change
 Three ideas explain almost everything:
 
 1. **Config is resolved once** with priority CLI flags > `MIGRONAUT_*` env vars > config file >
-   defaults ([src/core/config.js](src/core/config.js)).
+   defaults ([src/core/config.js](src/core/config.js)). The env layer is the table-driven
+   `ENV_KEYS` — every *scalar* config key has an entry, a unit test pins it against `CONFIG_KEYS`,
+   and every parse fails closed with the variable named. `MIGRONAUT_ENV_FILE` is the one exception,
+   read before the table because it selects which `.env` to load.
 2. **The changelog (`_migronaut_migrations` collection) is append-mostly.** Applying upserts a
    record; reverting updates it to `status:'reverted'` — it never deletes.
 3. **A MongoDB-native lock (`_migronaut_locks`) makes concurrent runs safe**, with a heartbeat
@@ -72,7 +75,7 @@ like `tsx`) — not on anything migronaut itself compiles.
 | Was | Now |
 |---|---|
 | `dotenv` | [src/utils/env.js](src/utils/env.js) — native `util.parseEnv` (always present on engines ≥ 22.18), `override: false` semantics |
-| `chalk` | [src/utils/colors.js](src/utils/colors.js) — `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > `isTTY` detection, `stripAnsi` |
+| `chalk` | [src/utils/colors.js](src/utils/colors.js) — `MIGRONAUT_FORCE_COLOR` > `MIGRONAUT_NO_COLOR` > `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > `isTTY` detection, `stripAnsi` |
 | `ora` | [src/cli/spinner.js](src/cli/spinner.js) — `start(text)`/`stop()`, complete no-op off-TTY |
 | `commander` | [src/cli/args.js](src/cli/args.js) — commander-compatible subset (subcommands, `--no-x`, short aliases, camelCase, help/version); no combined short flags (`-fy`) |
 | `cli-table3` | [src/cli/table.js](src/cli/table.js) — box-drawing renderer, ANSI-aware widths (no wcwidth/CJK) |

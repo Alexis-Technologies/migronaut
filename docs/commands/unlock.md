@@ -37,7 +37,7 @@ Release this lock? [y/N]
 
 | Option | Description |
 |---|---|
-| `--yes` | Skip the confirmation prompt and release immediately. |
+| `-y, --yes` | Skip the confirmation prompt and release immediately. |
 | `--json` | Emit `{ released, holder }` as JSON. |
 
 Plus the [global flags](/guide/configuration#global-cli-flags).

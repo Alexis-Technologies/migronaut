@@ -125,10 +125,9 @@ clientOptions: { serverSelectionTimeoutMS: 5000 }
 
 ## Environment variables
 
-Every core *scalar* option has an `MIGRONAUT_*` variable. These **override the
-config file**. The rest (`fileExtensions`, `templatePath`, `timeoutMs`,
-`ensureIndexes`, `onLockLost`, `reloadMigrations`, `clientOptions` and the live
-instances) are config-file-only:
+Every *scalar* option has an `MIGRONAUT_*` variable — which is what makes "a
+config file is never required" literally true, not just a slogan. These
+**override the config file**:
 
 | Env var | Maps to |
 |---|---|
@@ -143,7 +142,49 @@ instances) are config-file-only:
 | `MIGRONAUT_SEQUENTIAL` | `sequential` |
 | `MIGRONAUT_CREATE_EXTENSION` | `createExtension` |
 | `MIGRONAUT_ENVIRONMENT` | `environment` |
+| `MIGRONAUT_TEMPLATE_PATH` | `templatePath` |
+| `MIGRONAUT_TIMEOUT_MS` | `timeoutMs` |
+| `MIGRONAUT_ON_LOCK_LOST` | `onLockLost` |
+| `MIGRONAUT_ENSURE_INDEXES` | `ensureIndexes` |
+| `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` |
 | `MIGRONAUT_ENV_FILE` | `envFile` |
+
+The remaining options — `fileExtensions`, `clientOptions`, and the live
+instances `client`, `mongoose`, `hooks`, `logger` — are config-file/API only.
+They hold arrays, objects or live handles, which a single environment string
+cannot express.
+
+::: warning Values are rejected, never coerced
+A value that doesn't parse fails the run with a `CONFIG_INVALID` error naming
+the variable. `MIGRONAUT_STRICT=on` does **not** quietly mean `false`, and
+`MIGRONAUT_LOCK_TTL=abc` does not quietly mean "no TTL" — a typo in a safety
+setting must never be the reason a safety setting is off.
+
+Booleans accept `true`/`1`/`yes` and `false`/`0`/`no`, case-insensitive and
+trimmed. Numbers must be positive integers.
+:::
+
+### Variables that shape the CLI, not the config
+
+| Env var | Effect |
+|---|---|
+| `MIGRONAUT_NO_COLOR` | Disable ANSI color for migronaut only |
+| `MIGRONAUT_FORCE_COLOR` | Force color on even when piped; `0` forces it off |
+| `MIGRONAUT_USER` | Who to record in a changelog record's `executedBy`, overriding the OS user |
+
+Color precedence, most specific first: `MIGRONAUT_FORCE_COLOR` >
+`MIGRONAUT_NO_COLOR` > `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > whether the
+stream is a TTY. The `--no-color` flag beats all of them. The prefixed pair is
+there so you can pin migronaut's own output without disturbing every other tool
+in the same shell; the unprefixed pair is still honored underneath, because
+[no-color.org](https://no-color.org) is an ecosystem-wide convention. There is
+no `MIGRONAUT_TERM` — `TERM` describes what your terminal can render, not what
+migronaut should do.
+
+`MIGRONAUT_USER` matters in CI, where the OS user is a meaningless `runner` or
+`root` and the identity worth stamping on the changelog is the deploy actor.
+
+### `.env` files
 
 `.env` is loaded from the working directory before env vars are read. Point
 elsewhere with `--env-file <path>` (or `MIGRONAUT_ENV_FILE`), or skip it
@@ -153,7 +194,7 @@ entirely with `--no-env` / `envFile: false` — worth doing in CI, so a stray
 Real environment variables always win over `.env` values. Files above 1 MB (or anything that is
 not a regular file) are rejected with `CONFIG_INVALID`. Supported syntax: one
 `KEY=VALUE` per line, optional `export ` prefix, matching quotes, full-line and inline `#`
-comments; multiline values, `\n` expansion and `${VAR}` interpolation are not supported.
+comments, and multiline values inside double quotes; `${VAR}` interpolation is not supported.
 
 ```bash
 # .env

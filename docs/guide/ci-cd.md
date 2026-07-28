@@ -104,6 +104,7 @@ See [Configuration → async/factory config](/guide/configuration#async-factory-
 
 ## Tips
 
-- Pin a Node version in CI that can run your migrations (≥ 18; ≥ 22.18 if you run `.ts` without `tsx`).
+- Pin a Node version in CI (≥ 22.18 — the package's `engines` floor). `.ts` migrations then run with
+  no loader; on that same floor `tsx` is only needed for syntax type stripping can't erase.
 - Run `migronaut dry-run up` in a pre-deploy check to log exactly what *would* run.
 - If a job is killed mid-run and leaves a lock, `migronaut unlock --yes` clears it in the next job.

@@ -13,6 +13,8 @@ your database half-migrated when something fails.
 
 ## Reasons to choose it
 
+- **Zero dependencies** — no runtime dependencies at all; only the `mongodb` driver as a peer.
+  Instant installs, nothing extra in your lockfile, no supply-chain surface.
 - **Run a single migration** — `migronaut up <file>`, not just "all pending".
 - **Roll back anything** — a batch (`--batch 3`), the last N (`--steps 2`), one file, or `redo`.
 - **Preview before you run** — `migronaut dry-run up` prints the exact plan without touching the database.
@@ -28,14 +30,20 @@ your database half-migrated when something fails.
 
 | Capability                                      | `migrate-mongo` | `migronaut` |
 | ----------------------------------------------- | :-------------: | :-----------------: |
+| `up` / `down` / `create` / `status`             |        ✅        |          ✅          |
 | Run a single migration file                     |        ❌        |          ✅          |
 | Roll back a specific batch (not just the last)  |        ❌        |          ✅          |
 | Dry-run preview                                 |        ❌        |          ✅          |
 | `redo` (down + up)                              |        ❌        |          ✅          |
-| Checksum / tamper detection                     |        ❌        |          ✅          |
+| SHA-256 checksum / tamper detection             |        ❌        |          ✅          |
 | Lifecycle hooks                                 |        ❌        |          ✅          |
 | First-class TypeScript (built-in)               |        ❌        |          ✅          |
-| History kept on rollback (never deleted)        |        ❌        |          ✅          |
+| History preserved on rollback (never deleted)   |        ❌        |          ✅          |
+| Adopt an existing `migrate-mongo` changelog     |        —        | ✅ `migronaut import` |
+
+<sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026. It has since added transaction access
+via a `client` argument; `migronaut` exposes the same plus a declarative per-file `useTransaction`
+flag.</sub>
 
 ::: tip Already on migrate-mongo?
 Switch in one command — `migronaut import` adopts your existing `changelog` as-is, with no re-running and
@@ -44,5 +52,6 @@ no data loss. See [Migrating from migrate-mongo](/guide/migrate-mongo).
 
 ## Next
 
+- [vs. mongo-migrate-kit](/guide/vs-mongo-migrate-kit) — what changed since the `mmk` fork, and why.
 - [Getting Started](/guide/getting-started) — install and run your first migration.
 - [Writing Migrations](/guide/writing-migrations) — the `up`/`down` contract.

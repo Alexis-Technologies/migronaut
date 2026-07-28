@@ -40,8 +40,8 @@ Nothing to migrate
 | `[file]` | Run only this migration file. |
 | `--to <file>` | Apply pending migrations **up to and including** this file, leaving later ones pending. |
 | `--step` | Apply each pending file as its **own** sequential batch, so they can later be rolled back one at a time. |
-| `--force` | Re-run an **already-applied** file (requires a `[file]`). Prompts for confirmation. |
-| `--yes` | Skip the confirmation prompt for `--force` (required in `--json` mode). |
+| `-f, --force` | Re-run an **already-applied** file (requires a `[file]`). Prompts for confirmation. |
+| `-y, --yes` | Skip the confirmation prompt for `--force` (required in `--json` mode). |
 | `--strict` | Override config: abort on a checksum mismatch instead of warning. |
 | `--no-lock` | Skip the concurrency lock. **Dev only** — warns loudly. |
 | `--json` | Emit the run results as a JSON array on stdout. |

@@ -212,8 +212,14 @@ Each entry: **responsibility · key exports · nuances you must know.**
   implemented as successive `mergeDefined()` calls onto a defaults base.
 - **Nuances:**
   - `applyEnvFile(cwd/.env)` runs first with `override: false` semantics — a real env var beats
-    `.env`. On Node ≥ 20.12 the native `util.parseEnv` does the parsing; older Node falls back to
-    the built-in single-line parser in [utils/env.js](src/utils/env.js).
+    `.env`. Parsing is always the native `util.parseEnv` (see [utils/env.js](src/utils/env.js));
+    there is no fallback parser, because `engines.node >= 22.18` guarantees the built-in is there.
+  - The env layer is the table-driven `ENV_KEYS` (`{env, path, parse}`) — every *scalar* config key
+    has an entry, and a unit test pins the table against `CONFIG_KEYS` so the two cannot drift.
+    `parse` fails closed (`ConfigInvalidError` naming the variable) rather than coercing: a typo in
+    `MIGRONAUT_STRICT`/`MIGRONAUT_LOCK_TTL`/`MIGRONAUT_CREATE_EXTENSION` must never silently
+    disable a safety setting. `MIGRONAUT_ENV_FILE` is the one env-settable option outside the
+    table — it selects which `.env` to load, so it has to resolve before the table runs.
   - The config file may export an **object or a (sync/async) factory function** — the factory is
     awaited. This is the secret-manager story; a throwing factory becomes `ConfigInvalidError`.
   - `requireDb: false` (used by `create`/`init`) relaxes validation so `uri`/`dbName` may be empty —
@@ -321,8 +327,12 @@ Each entry: **responsibility · key exports · nuances you must know.**
   methods fall back to `info`, and every call is try/catch-guarded so a throwing logger can never
   break a run. The stream param is how `--json` keeps stdout clean (human lines → stderr).
 - **colors.js** — ANSI palette (green/yellow/red/cyan/dim), `supportsColor` (precedence:
-  `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > `stream.isTTY` — binary, no chalk-style level
-  detection), `stripAnsi`. When disabled every color function is the identity.
+  `MIGRONAUT_FORCE_COLOR` > `MIGRONAUT_NO_COLOR` > `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` >
+  `stream.isTTY` — binary, no chalk-style level detection), `stripAnsi`. The prefixed pair lets a
+  project pin migronaut's own output without disturbing every other tool in the shell; the
+  unprefixed pair stays honored underneath because no-color.org is an ecosystem-wide convention.
+  There is deliberately no `MIGRONAUT_TERM` — `TERM` describes the terminal, not migronaut. When
+  disabled every color function is the identity.
 - **env.js** — `.env` loading: `applyEnvFile` parses via native `util.parseEnv` (always present on
   the supported Node range) and never overrides keys already in `process.env`.
 - **checksum.js** — `computeChecksum` (SHA-256 hex of file contents, BOM/CRLF-normalized).
@@ -372,12 +382,13 @@ Each entry: **responsibility · key exports · nuances you must know.**
 
 ### 6.1 Config resolution
 The whole function is [`loadConfig`](src/core/config.js). Order of operations:
-1. `applyEnvFile(cwd/.env)` — load `.env` without clobbering real env (native `util.parseEnv` on
-   Node ≥ 20.12, built-in fallback parser otherwise).
+1. `applyEnvFile(cwd/.env)` — load `.env` without clobbering real env (always native
+   `util.parseEnv`; the `engines.node >= 22.18` floor guarantees it, so there is no fallback parser).
 2. Start from `{...DEFAULT_CONFIG}`.
 3. If a config file is found (explicit `--config` path, else discover `migronaut.config.{ts,js,json}` in
    cwd), load it (awaiting a factory if exported) and `mergeDefined` onto the base.
-4. `mergeDefined(readEnvConfig())` — env beats file.
+4. `mergeDefined(readEnvConfig())` — env beats file. Driven by the `ENV_KEYS` table; every parse
+   fails closed with a `ConfigInvalidError` naming the variable rather than coercing.
 5. `mergeDefined(flags)` — flags beat env.
 6. If `requireDb:false`, default empty `uri`/`dbName` so validation passes.
 7. `validateConfig` (built-in, table-driven `CONFIG_KEYS`); on failure throw `ConfigInvalidError`

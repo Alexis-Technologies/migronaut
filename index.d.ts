@@ -79,7 +79,7 @@ export interface MigrationRecord {
   environment: string;
   /** Correlation id of the run that wrote this record; matches the lock's owner token */
   runId?: string;
-  /** os.userInfo().username at time of execution */
+  /** Who ran it: `MIGRONAUT_USER` if set, otherwise `os.userInfo().username` */
   executedBy: string;
   /** Optional description from migration file */
   description?: string;
@@ -138,6 +138,19 @@ export interface MigrationHooks {
 /** File type a created migration is written as */
 export type MigrationExtension = 'ts' | 'js';
 
+/**
+ * Every **scalar** option below is also settable from the environment as
+ * `MIGRONAUT_<SCREAMING_SNAKE>` (`migrationsDir` → `MIGRONAUT_MIGRATIONS_DIR`,
+ * with `dbName` → `MIGRONAUT_DB`, `migrationsCollection` → `MIGRONAUT_COLLECTION`
+ * and `lockTTLSeconds` → `MIGRONAUT_LOCK_TTL` as the shortened exceptions), which
+ * is what makes a config file genuinely optional. Env vars outrank the config
+ * file and are outranked by CLI flags. A value that does not parse is rejected
+ * with a {@link ConfigInvalidError} naming the variable — never coerced.
+ *
+ * `fileExtensions`, `clientOptions` and the live handles (`client`, `mongoose`,
+ * `hooks`, `logger`) are config-file/API only: a single environment string
+ * cannot express them.
+ */
 export interface MigronautConfig {
   /** MongoDB connection URI. Not required when `client` is supplied */
   uri: string;

@@ -38,7 +38,7 @@ function jitteredDelay(baseMs) {
  * const { runMigrations } = require('@alexify/migronaut');
  *
  * const { applied, upToDate } = await runMigrations(
- *   { uri: process.env.MONGO_URI, dbName: 'my_app' },
+ *   { uri: process.env.MIGRONAUT_URI, dbName: 'my_app' },
  *   { onLockHeld: 'wait' },
  * );
  * if (!upToDate) console.log(`Applied ${applied.length} migration(s)`);

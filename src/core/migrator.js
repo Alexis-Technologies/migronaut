@@ -186,6 +186,10 @@ class MigratorKit extends EventEmitter {
    * then NODE_ENV, then 'production' — the safe assumption when nothing says
    * otherwise (an unset NODE_ENV in a container is far more often production
    * than a developer's laptop).
+   *
+   * `MIGRONAUT_ENVIRONMENT` is the prefixed override: it feeds `config.environment`
+   * through the ENV_KEYS table, so it already outranks NODE_ENV by the time this
+   * runs. NODE_ENV stays honored underneath as the ecosystem convention.
    */
   #environment() {
     return this.#config?.environment ?? process.env.NODE_ENV ?? 'production';

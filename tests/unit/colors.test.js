@@ -38,6 +38,37 @@ describe('supportsColor', () => {
   it('should disable colors when TERM is dumb', () => {
     assert.strictEqual(supportsColor(tty, { TERM: 'dumb' }), false);
   });
+
+  it('should let MIGRONAUT_NO_COLOR beat a TTY', () => {
+    assert.strictEqual(supportsColor(tty, { MIGRONAUT_NO_COLOR: '1' }), false);
+  });
+
+  it('should ignore an empty MIGRONAUT_NO_COLOR', () => {
+    assert.strictEqual(supportsColor(tty, { MIGRONAUT_NO_COLOR: '' }), true);
+  });
+
+  it('should let MIGRONAUT_FORCE_COLOR beat a non-TTY', () => {
+    assert.strictEqual(supportsColor(pipe, { MIGRONAUT_FORCE_COLOR: '1' }), true);
+  });
+
+  it('should let MIGRONAUT_FORCE_COLOR=0 disable colors on a TTY', () => {
+    assert.strictEqual(supportsColor(tty, { MIGRONAUT_FORCE_COLOR: '0' }), false);
+  });
+
+  it('should let the prefixed pair outrank the unprefixed one', () => {
+    // A project pinning migronaut's own output must win over whatever the shell
+    // or CI runner exported for every tool.
+    assert.strictEqual(supportsColor(pipe, { MIGRONAUT_FORCE_COLOR: '1', NO_COLOR: '1' }), true);
+    assert.strictEqual(supportsColor(tty, { MIGRONAUT_NO_COLOR: '1', FORCE_COLOR: '1' }), false);
+    assert.strictEqual(supportsColor(tty, { MIGRONAUT_FORCE_COLOR: '0', FORCE_COLOR: '1' }), false);
+  });
+
+  it('should keep honoring the unprefixed pair when no prefixed one is set', () => {
+    // no-color.org compatibility is not traded away for the prefix.
+    const empty = { MIGRONAUT_FORCE_COLOR: '', MIGRONAUT_NO_COLOR: '' };
+    assert.strictEqual(supportsColor(tty, { ...empty, NO_COLOR: '1' }), false);
+    assert.strictEqual(supportsColor(pipe, { ...empty, FORCE_COLOR: '1' }), true);
+  });
 });
 
 describe('createColors', () => {

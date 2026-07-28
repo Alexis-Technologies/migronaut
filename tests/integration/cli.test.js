@@ -163,6 +163,28 @@ describe('migronaut CLI (integration)', () => {
     assert.ok(!hasAnsi(result.stdout), 'expected no ANSI escape sequences');
   });
 
+  it('should let the MIGRONAUT_ color vars outrank the unprefixed ones', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await runCli(baseArgs(['up']));
+
+    // The point of the prefixed pair: pin migronaut's own output without
+    // disturbing whatever the shell or CI runner exported for every other tool.
+    const forcedOn = await runCli(baseArgs(['status']), {
+      MIGRONAUT_FORCE_COLOR: '1',
+      NO_COLOR: '1',
+    });
+    assert.ok(hasAnsi(forcedOn.stdout), 'MIGRONAUT_FORCE_COLOR should beat NO_COLOR');
+
+    const forcedOff = await runCli(baseArgs(['status']), {
+      // Cleared explicitly: the child inherits process.env, and this assertion
+      // must not depend on what the developer's shell exports.
+      MIGRONAUT_FORCE_COLOR: '',
+      MIGRONAUT_NO_COLOR: '1',
+      FORCE_COLOR: '1',
+    });
+    assert.ok(!hasAnsi(forcedOff.stdout), 'MIGRONAUT_NO_COLOR should beat FORCE_COLOR');
+  });
+
   it('should ignore a .env file when --no-env is passed', async () => {
     // The .env points somewhere unreachable; --no-env must keep the flags in charge.
     writeFileSync(

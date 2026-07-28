@@ -4,7 +4,9 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const { afterEach, beforeEach, describe, it } = require('node:test');
 const {
+  CONFIG_KEYS,
   DEFAULT_CONFIG,
+  ENV_KEYS,
   isCollectionName,
   loadConfig,
   validateConfig,
@@ -19,19 +21,11 @@ const validConfig = (overrides = {}) => ({
   ...overrides,
 });
 
-const MIGRONAUT_ENV_KEYS = [
-  'MIGRONAUT_ENV_FILE',
-  'MIGRONAUT_URI',
-  'MIGRONAUT_DB',
-  'MIGRONAUT_MIGRATIONS_DIR',
-  'MIGRONAUT_COLLECTION',
-  'MIGRONAUT_LOCK_COLLECTION',
-  'MIGRONAUT_LOCK_TTL',
-  'MIGRONAUT_STRICT',
-  'MIGRONAUT_USE_TRANSACTION',
-  'MIGRONAUT_SEQUENTIAL',
-  'MIGRONAUT_CREATE_EXTENSION',
-];
+// Derived from ENV_KEYS rather than hand-listed: the previous hand-written copy
+// silently fell behind (it never learned about MIGRONAUT_ENVIRONMENT), which
+// would leak an ambient value into every case below. MIGRONAUT_ENV_FILE is
+// appended because it is read outside the table, before the .env load.
+const MIGRONAUT_ENV_KEYS = [...ENV_KEYS.map((spec) => spec.env), 'MIGRONAUT_ENV_FILE'];
 
 let tmp;
 const savedEnv = {};
@@ -53,6 +47,38 @@ afterEach(() => {
       process.env[key] = savedEnv[key];
     }
   }
+});
+
+// The docs promise a config file is never required, which is only true while
+// every scalar option is reachable from the environment. Pinning the two tables
+// against each other means adding a config key without an env var (or without a
+// deliberate exemption below) fails here rather than in a user's CI.
+describe('ENV_KEYS covers every scalar config option', () => {
+  // Not expressible as a single env string: two are structured values, and
+  // envFile selects which .env to load, so it is read before the table runs.
+  const NON_SCALAR_KEYS = ['clientOptions', 'envFile', 'fileExtensions'];
+
+  it('should map every config key except the documented exemptions', () => {
+    const envPaths = new Set(ENV_KEYS.map((spec) => spec.path));
+    const uncovered = [];
+    for (const spec of CONFIG_KEYS) {
+      if (!envPaths.has(spec.path)) uncovered.push(spec.path);
+    }
+    assert.deepStrictEqual(uncovered.sort(), NON_SCALAR_KEYS);
+  });
+
+  it('should not map an env var onto a config key that does not exist', () => {
+    const configPaths = new Set(CONFIG_KEYS.map((spec) => spec.path));
+    for (const spec of ENV_KEYS) {
+      assert.ok(configPaths.has(spec.path), `${spec.env} maps to unknown key "${spec.path}"`);
+    }
+  });
+
+  it('should name every variable with the MIGRONAUT_ prefix', () => {
+    for (const spec of ENV_KEYS) {
+      assert.ok(spec.env.startsWith('MIGRONAUT_'), `${spec.env} is missing the prefix`);
+    }
+  });
 });
 
 describe('loadConfig', () => {
@@ -225,7 +251,13 @@ describe('loadConfig', () => {
   });
 
   it('should reject unrecognized values for every boolean env var', async () => {
-    for (const key of ['MIGRONAUT_STRICT', 'MIGRONAUT_USE_TRANSACTION', 'MIGRONAUT_SEQUENTIAL']) {
+    for (const key of [
+      'MIGRONAUT_STRICT',
+      'MIGRONAUT_USE_TRANSACTION',
+      'MIGRONAUT_SEQUENTIAL',
+      'MIGRONAUT_ENSURE_INDEXES',
+      'MIGRONAUT_RELOAD_MIGRATIONS',
+    ]) {
       process.env[key] = 'maybe';
       await assert.rejects(
         loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } }),
@@ -233,6 +265,65 @@ describe('loadConfig', () => {
       );
       delete process.env[key];
     }
+  });
+
+  it('should name the variable when a numeric env var is not a positive integer', async () => {
+    // A bare Number() turned `abc` into NaN, which surfaced as a generic
+    // validateConfig issue that never mentioned the variable the user set.
+    for (const key of ['MIGRONAUT_LOCK_TTL', 'MIGRONAUT_TIMEOUT_MS']) {
+      for (const value of ['abc', '0', '-5', '1.5', '']) {
+        process.env[key] = value;
+        await assert.rejects(
+          loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } }),
+          (error) => {
+            assert.ok(error instanceof ConfigInvalidError);
+            assert.strictEqual(error.context.name, key, `${key}=${value}`);
+            return true;
+          },
+        );
+      }
+      delete process.env[key];
+    }
+  });
+
+  it('should reject an unrecognized enum env var instead of silently ignoring it', async () => {
+    // MIGRONAUT_CREATE_EXTENSION used to drop anything but ts/js on the floor,
+    // so a typo left `create` quietly emitting the wrong language.
+    for (const [key, value] of [
+      ['MIGRONAUT_CREATE_EXTENSION', 'tsx'],
+      ['MIGRONAUT_ON_LOCK_LOST', 'ignore'],
+    ]) {
+      process.env[key] = value;
+      await assert.rejects(
+        loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } }),
+        (error) => {
+          assert.ok(error instanceof ConfigInvalidError);
+          assert.strictEqual(error.context.name, key);
+          assert.strictEqual(error.context.value, value);
+          return true;
+        },
+      );
+      delete process.env[key];
+    }
+  });
+
+  it('should read every remaining scalar option from its env var', async () => {
+    process.env.MIGRONAUT_TEMPLATE_PATH = './tpl.js';
+    process.env.MIGRONAUT_TIMEOUT_MS = '5000';
+    process.env.MIGRONAUT_ON_LOCK_LOST = 'warn';
+    process.env.MIGRONAUT_ENSURE_INDEXES = 'false';
+    process.env.MIGRONAUT_RELOAD_MIGRATIONS = 'true';
+    process.env.MIGRONAUT_ENVIRONMENT = 'staging';
+    const config = await loadConfig({
+      cwd: tmp,
+      flags: { uri: 'mongodb://x:27017', dbName: 'x' },
+    });
+    assert.strictEqual(config.templatePath, './tpl.js');
+    assert.strictEqual(config.timeoutMs, 5000);
+    assert.strictEqual(config.onLockLost, 'warn');
+    assert.strictEqual(config.ensureIndexes, false);
+    assert.strictEqual(config.reloadMigrations, true);
+    assert.strictEqual(config.environment, 'staging');
   });
 
   it('should not let a JSON config poison the prototype via __proto__', async () => {

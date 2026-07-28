@@ -4,7 +4,7 @@ Let's build and run a real migration end to end — create a `users` collection 
 index, watch it apply, then roll it back. About five minutes.
 
 ::: tip Prerequisites
-A running MongoDB you can connect to (local `mongodb://localhost:27017` is fine) and Node ≥ 18.
+A running MongoDB you can connect to (local `mongodb://localhost:27017` is fine) and Node ≥ 22.18.
 If you don't have Mongo handy, Docker works: `docker run -d -p 27017:27017 mongo`.
 :::
 

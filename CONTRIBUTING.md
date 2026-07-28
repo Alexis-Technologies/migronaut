@@ -54,6 +54,24 @@ Node's built-in `node:test` — no external framework.
 Use `before`/`after`, not `beforeAll`/`afterAll` (those are Jest/Vitest names).
 Silence the logger with `logger: null`. No committed `.only` or `.skip`.
 
+Three environment variables control the test run:
+
+| Env var | Effect |
+|---|---|
+| `MIGRONAUT_TEST_MONGO_URI` | Set by `tests/helpers/global-setup.js` so every integration file shares one replica set. Export it yourself to run against an existing MongoDB instead of booting one. |
+| `MONGOMS_VERSION` | `mongodb-memory-server`'s own variable — which server version to download. CI pins `7.0.14`; an explicit value always wins. |
+| `MONGOMS_DOWNLOAD_DIR` | `mongodb-memory-server`'s binary cache directory. CI points it at a cached path. |
+
+The two `MONGOMS_*` names belong to `mongodb-memory-server`, so they keep their
+prefix. Everything migronaut itself reads is `MIGRONAUT_*` — including
+`MIGRONAUT_NO_COLOR` / `MIGRONAUT_FORCE_COLOR` and `MIGRONAUT_USER`, which sit
+above the ecosystem-standard `NO_COLOR` / `FORCE_COLOR` / `TERM` and `USER`.
+
+When you add a config option, add its variable to the `ENV_KEYS` table in
+[src/core/config.js](src/core/config.js) too — a unit test pins that table
+against `CONFIG_KEYS` and will fail if a scalar option has no way to be set from
+the environment.
+
 New behavior needs a test that fails without the change. For a bug fix, the test
 should describe the bug, not the implementation.
 

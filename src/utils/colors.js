@@ -1,9 +1,25 @@
 /**
  * Decide whether ANSI colors should be emitted to `stream`.
- * Precedence: FORCE_COLOR (any value but '0' forces on) > NO_COLOR (forces
- * off) > TERM=dumb (off) > the stream being an interactive TTY.
+ *
+ * Precedence, most specific signal first:
+ *   MIGRONAUT_FORCE_COLOR > MIGRONAUT_NO_COLOR > FORCE_COLOR > NO_COLOR >
+ *   TERM=dumb > the stream being an interactive TTY.
+ *
+ * The MIGRONAUT_* pair exists so a project can pin migronaut's own output
+ * without disturbing every other tool in the same shell; the unprefixed pair
+ * stays honored underneath, because NO_COLOR/FORCE_COLOR are ecosystem-wide
+ * conventions (no-color.org) that a CLI is expected to obey. Same value
+ * semantics in both tiers: a *FORCE_COLOR that is set and non-empty decides
+ * ('0' off, anything else on); a *NO_COLOR that is set and non-empty forces off.
+ *
+ * There is deliberately no MIGRONAUT_TERM — TERM describes what the terminal
+ * can render, not what migronaut should do, and MIGRONAUT_NO_COLOR already
+ * covers the override case.
  */
 function supportsColor(stream, env = process.env) {
+  const ownForce = env.MIGRONAUT_FORCE_COLOR;
+  if (ownForce !== undefined && ownForce !== '') return ownForce !== '0';
+  if (env.MIGRONAUT_NO_COLOR !== undefined && env.MIGRONAUT_NO_COLOR !== '') return false;
   const force = env.FORCE_COLOR;
   if (force !== undefined && force !== '') return force !== '0';
   if (env.NO_COLOR !== undefined && env.NO_COLOR !== '') return false;

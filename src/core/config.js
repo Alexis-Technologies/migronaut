@@ -190,38 +190,76 @@ function mergeDefined(target, source) {
   return target;
 }
 
+/**
+ * Parse a string into a positive integer, failing closed like `parseBoolean`.
+ * A bare `Number()` turns a typo into `NaN`, which surfaces as a generic
+ * validateConfig issue that never names the variable the user actually set.
+ */
+function parsePositiveInteger(value, name) {
+  const parsed = Number(value.trim());
+  if (!isPositiveInteger(parsed)) {
+    throw new ConfigInvalidError(`${name} must be a positive integer`, { name, value });
+  }
+  return parsed;
+}
+
+/** Parse one of a fixed set of string values, failing closed on anything else */
+function parseEnum(allowed) {
+  const values = new Set(allowed);
+  const list = allowed.map((item) => `'${item}'`).join(' or ');
+  return (value, name) => {
+    const normalized = value.trim();
+    if (!values.has(normalized)) {
+      throw new ConfigInvalidError(`${name} must be ${list}`, { name, value });
+    }
+    return normalized;
+  };
+}
+
+const parseString = (value) => value;
+
+/**
+ * Every environment variable that maps onto a config key: the variable name,
+ * the config path it feeds, and how its string is parsed. Table-driven for the
+ * same reason CONFIG_KEYS is — a hand-written `if` chain silently drifts from
+ * the key list it is supposed to mirror (MIGRONAUT_ENVIRONMENT was missing from
+ * the tests' save/restore list for exactly that reason).
+ *
+ * Every *scalar* config option has an entry here, which is what makes the
+ * documented "a config file is never required" promise literally true. Options
+ * holding non-scalars — `fileExtensions`, `clientOptions`, `client`, `mongoose`,
+ * `hooks`, `logger` — are config-file/API only; an env var cannot express them.
+ *
+ * MIGRONAUT_ENV_FILE is deliberately absent: it selects which .env file to load,
+ * so it has to be read before this table can run (see loadConfig).
+ */
+const ENV_KEYS = [
+  { env: 'MIGRONAUT_URI', path: 'uri', parse: parseString },
+  { env: 'MIGRONAUT_DB', path: 'dbName', parse: parseString },
+  { env: 'MIGRONAUT_MIGRATIONS_DIR', path: 'migrationsDir', parse: parseString },
+  { env: 'MIGRONAUT_COLLECTION', path: 'migrationsCollection', parse: parseString },
+  { env: 'MIGRONAUT_LOCK_COLLECTION', path: 'lockCollection', parse: parseString },
+  { env: 'MIGRONAUT_LOCK_TTL', path: 'lockTTLSeconds', parse: parsePositiveInteger },
+  { env: 'MIGRONAUT_STRICT', path: 'strict', parse: parseBoolean },
+  { env: 'MIGRONAUT_USE_TRANSACTION', path: 'useTransaction', parse: parseBoolean },
+  { env: 'MIGRONAUT_SEQUENTIAL', path: 'sequential', parse: parseBoolean },
+  { env: 'MIGRONAUT_CREATE_EXTENSION', path: 'createExtension', parse: parseEnum(['ts', 'js']) },
+  { env: 'MIGRONAUT_ENVIRONMENT', path: 'environment', parse: parseString },
+  { env: 'MIGRONAUT_TEMPLATE_PATH', path: 'templatePath', parse: parseString },
+  { env: 'MIGRONAUT_TIMEOUT_MS', path: 'timeoutMs', parse: parsePositiveInteger },
+  { env: 'MIGRONAUT_ON_LOCK_LOST', path: 'onLockLost', parse: parseEnum(['abort', 'warn']) },
+  { env: 'MIGRONAUT_ENSURE_INDEXES', path: 'ensureIndexes', parse: parseBoolean },
+  { env: 'MIGRONAUT_RELOAD_MIGRATIONS', path: 'reloadMigrations', parse: parseBoolean },
+];
+
 /** Build a partial config from the MIGRONAUT_* environment variables */
-function readEnvConfig() {
-  const env = process.env;
+function readEnvConfig(env = process.env) {
   const result = {};
-  if (env.MIGRONAUT_URI !== undefined) result.uri = env.MIGRONAUT_URI;
-  if (env.MIGRONAUT_DB !== undefined) result.dbName = env.MIGRONAUT_DB;
-  if (env.MIGRONAUT_MIGRATIONS_DIR !== undefined) {
-    result.migrationsDir = env.MIGRONAUT_MIGRATIONS_DIR;
+  for (const spec of ENV_KEYS) {
+    const value = env[spec.env];
+    if (value === undefined) continue;
+    result[spec.path] = spec.parse(value, spec.env);
   }
-  if (env.MIGRONAUT_COLLECTION !== undefined) {
-    result.migrationsCollection = env.MIGRONAUT_COLLECTION;
-  }
-  if (env.MIGRONAUT_LOCK_COLLECTION !== undefined) {
-    result.lockCollection = env.MIGRONAUT_LOCK_COLLECTION;
-  }
-  if (env.MIGRONAUT_LOCK_TTL !== undefined) result.lockTTLSeconds = Number(env.MIGRONAUT_LOCK_TTL);
-  if (env.MIGRONAUT_STRICT !== undefined) {
-    result.strict = parseBoolean(env.MIGRONAUT_STRICT, 'MIGRONAUT_STRICT');
-  }
-  if (env.MIGRONAUT_USE_TRANSACTION !== undefined) {
-    result.useTransaction = parseBoolean(
-      env.MIGRONAUT_USE_TRANSACTION,
-      'MIGRONAUT_USE_TRANSACTION',
-    );
-  }
-  if (env.MIGRONAUT_SEQUENTIAL !== undefined) {
-    result.sequential = parseBoolean(env.MIGRONAUT_SEQUENTIAL, 'MIGRONAUT_SEQUENTIAL');
-  }
-  if (env.MIGRONAUT_CREATE_EXTENSION === 'ts' || env.MIGRONAUT_CREATE_EXTENSION === 'js') {
-    result.createExtension = env.MIGRONAUT_CREATE_EXTENSION;
-  }
-  if (env.MIGRONAUT_ENVIRONMENT !== undefined) result.environment = env.MIGRONAUT_ENVIRONMENT;
   return result;
 }
 
@@ -334,6 +372,8 @@ async function loadConfig(options = {}) {
   // Resolved before the merge, because loading the .env file is what supplies
   // the MIGRONAUT_* variables the merge then reads. `false` opts out entirely —
   // a stray .env silently outranking a committed config is a nasty surprise.
+  // This is why MIGRONAUT_ENV_FILE is read here rather than from ENV_KEYS: it
+  // has to resolve before the table that reads everything else can run.
   const envFile = options.flags?.envFile ?? process.env.MIGRONAUT_ENV_FILE ?? '.env';
   if (envFile !== false) {
     // Checked here, before validateConfig runs, because path.resolve on a
@@ -426,4 +466,14 @@ async function loadConfig(options = {}) {
   return config;
 }
 
-module.exports = { DEFAULT_CONFIG, isCollectionName, loadConfig, validateConfig };
+// CONFIG_KEYS and ENV_KEYS are exported for the unit test that pins the two
+// tables against each other — internal to the config layer, not part of the
+// package's public surface (index.d.ts describes neither).
+module.exports = {
+  CONFIG_KEYS,
+  DEFAULT_CONFIG,
+  ENV_KEYS,
+  isCollectionName,
+  loadConfig,
+  validateConfig,
+};

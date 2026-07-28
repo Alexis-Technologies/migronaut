@@ -11,11 +11,11 @@ npm install @alexify/migronaut mongodb
 ```
 
 ```bash [pnpm]
-pnpm add migronaut mongodb
+pnpm add @alexify/migronaut mongodb
 ```
 
 ```bash [yarn]
-yarn add migronaut mongodb
+yarn add @alexify/migronaut mongodb
 ```
 
 :::
@@ -24,8 +24,8 @@ The CLI binary is `migronaut`. Run it with your package manager's runner (`npx m
 `package.json`.
 
 ::: tip Requirements
-Node.js **≥ 18**, MongoDB **≥ 5.0**. `mongoose` is an optional peer dependency — only needed if your
-migrations use Mongoose models.
+Node.js **≥ 22.18**, MongoDB **≥ 5.0**. `mongoose` is an optional peer dependency — only needed if
+your migrations use Mongoose models.
 :::
 
 ## 1. Create a config file

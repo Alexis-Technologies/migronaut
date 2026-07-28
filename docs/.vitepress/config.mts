@@ -2,7 +2,7 @@ import { defineConfig } from 'vitepress';
 
 const ogTitle = 'migronaut — MongoDB migrations for Node.js';
 const ogDescription =
-  'MongoDB migration toolkit for Node.js & TypeScript. Run a single migration, ' +
+  'Zero-dependency MongoDB migration toolkit for Node.js & TypeScript. Run a single migration, ' +
   'roll back any batch, preview with dry-run, transactions, checksums, and native locking.';
 const repo = 'https://github.com/Alexis-Technologies/migronaut';
 const base = '/';
@@ -22,6 +22,10 @@ const keywords = [
   'migrate-mongo alternative',
   'mongoose migration',
   'mongodb migration cli',
+  'zero dependency mongodb migration',
+  'mongo-migrate-kit',
+  'mongo-migrate-kit alternative',
+  'mmk',
   'migronaut',
   '@alexify/migronaut',
 ].join(', ');
@@ -95,6 +99,7 @@ export default defineConfig({
       { text: 'Commands', link: '/commands/up', activeMatch: '/commands/' },
       { text: 'Reference', link: '/reference/cli', activeMatch: '/reference/' },
       {
+        // Hand-synced with package.json "version" — part of the release checklist.
         text: 'v1.0.0',
         items: [
           { text: 'Changelog', link: `${repo}/blob/main/CHANGELOG.md` },
@@ -111,6 +116,7 @@ export default defineConfig({
           text: 'Introduction',
           items: [
             { text: 'Why migronaut?', link: '/guide/why' },
+            { text: 'vs. mongo-migrate-kit', link: '/guide/vs-mongo-migrate-kit' },
             { text: 'Core Concepts', link: '/guide/concepts' },
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'Tutorial', link: '/guide/tutorial' },

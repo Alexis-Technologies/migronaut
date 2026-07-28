@@ -18,7 +18,7 @@ function buildProgram() {
 
   program
     .name('migronaut')
-    .description('Elegant, fast, fully-typed MongoDB migrations for Node.js')
+    .description('Elegant, fast, fully-typed, zero-dependency MongoDB migrations for Node.js')
     .option('--uri <uri>', 'MongoDB connection URI (overrides MIGRONAUT_URI)')
     .option('--db <name>', 'Database name (overrides MIGRONAUT_DB)')
     .option('--dir <path>', 'Migrations directory (overrides MIGRONAUT_MIGRATIONS_DIR)')
@@ -60,16 +60,19 @@ async function run(argv) {
   const flagTokens = boundary === -1 ? argv : argv.slice(0, boundary);
   const noColor = flagTokens.includes('--no-color');
   const saved = noColor
-    ? { FORCE_COLOR: process.env.FORCE_COLOR, NO_COLOR: process.env.NO_COLOR }
+    ? {
+        MIGRONAUT_FORCE_COLOR: process.env.MIGRONAUT_FORCE_COLOR,
+        MIGRONAUT_NO_COLOR: process.env.MIGRONAUT_NO_COLOR,
+      }
     : undefined;
   if (noColor) {
-    // FORCE_COLOR outranks NO_COLOR among *environment* signals, which is the
-    // right precedence between two ambient settings — but an explicit flag on
-    // this invocation outranks both. Without clearing it, `--no-color` is a
-    // silent no-op wherever FORCE_COLOR happens to be exported (CI runners and
-    // many local shells set it).
-    delete process.env.FORCE_COLOR;
-    process.env.NO_COLOR = '1';
+    // An explicit flag on this invocation outranks every ambient signal.
+    // MIGRONAUT_NO_COLOR is the top of supportsColor()'s precedence chain once
+    // MIGRONAUT_FORCE_COLOR is cleared, so setting these two is enough to beat
+    // an exported FORCE_COLOR (CI runners and many local shells set it) without
+    // touching the shared FORCE_COLOR/NO_COLOR other tools read.
+    delete process.env.MIGRONAUT_FORCE_COLOR;
+    process.env.MIGRONAUT_NO_COLOR = '1';
   }
   try {
     await buildProgram().parseAsync(argv);
@@ -77,10 +80,10 @@ async function run(argv) {
     // A programmatic embedder calling run() twice must not inherit this
     // invocation's flag as ambient state.
     if (saved) {
-      if (saved.FORCE_COLOR === undefined) delete process.env.FORCE_COLOR;
-      else process.env.FORCE_COLOR = saved.FORCE_COLOR;
-      if (saved.NO_COLOR === undefined) delete process.env.NO_COLOR;
-      else process.env.NO_COLOR = saved.NO_COLOR;
+      for (const key of Object.keys(saved)) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
     }
   }
 }

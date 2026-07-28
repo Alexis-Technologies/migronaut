@@ -7,7 +7,7 @@ titleTemplate: Elegant MongoDB migrations for Node.js
 hero:
   name: migronaut
   text: Elegant MongoDB migrations for Node.js
-  tagline: Precise, safe migrations for MongoDB. Run a single file, roll back anything, and preview every change before it touches your database.
+  tagline: Precise, safe migrations for MongoDB, with zero runtime dependencies. Run a single file, roll back anything, and preview every change before it touches your database.
   image:
     src: /logo-mark.svg
     alt: migronaut
@@ -23,6 +23,11 @@ hero:
       link: https://github.com/Alexis-Technologies/migronaut
 
 features:
+  - icon: 📭
+    title: Zero dependencies
+    details: No runtime dependencies at all — only the mongodb driver as a peer. Nothing extra in your lockfile, and no third-party code in the process that writes to your database.
+    link: /guide/vs-mongo-migrate-kit
+    linkText: How it got there
   - icon: 🎯
     title: Run a single file
     details: migronaut up <file> and migronaut down <file> — not just "all pending" or "the last batch". Full control over exactly what runs.

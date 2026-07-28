@@ -16,14 +16,24 @@ Available on every command, highest precedence:
 | `--no-env` | Do not load a `.env` file at all |
 | `--verbose` | Show debug output, including the underlying cause of an error (disables the spinner — debug lines and an animated frame would fight for the same terminal line) |
 | `--quiet` | Suppress everything but errors |
-| `--no-color` | Disable colored output — wins over `FORCE_COLOR` and `NO_COLOR` |
+| `--no-color` | Disable colored output — wins over every color environment variable |
 | `--json` | Machine-readable JSON output (every command except `init` — see `init --format`) |
+| `-V, --version` | Print the installed version |
+| `-h, --help` | Print help for the program or a command |
 
 ::: tip Color detection
-Without the flag, color is decided by `FORCE_COLOR` (any value but `0` forces it on) > `NO_COLOR` >
-`TERM=dumb` > whether the stream is an interactive TTY. `--no-color` is an explicit instruction for
-this invocation, so it overrides all four — including a `FORCE_COLOR` exported by your shell or CI
-runner.
+Without the flag, color is decided by `MIGRONAUT_FORCE_COLOR` > `MIGRONAUT_NO_COLOR` >
+`FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > whether the stream is an interactive TTY. A
+`*FORCE_COLOR` that is set and non-empty decides (`0` forces color off, anything else forces it
+on); a `*NO_COLOR` that is set and non-empty forces it off.
+
+The `MIGRONAUT_`-prefixed pair lets you pin migronaut's output without disturbing every other tool
+in the same shell. `--no-color` is an explicit instruction for this invocation, so it overrides all
+of them — including a `FORCE_COLOR` exported by your CI runner.
+:::
+
+::: tip Short flags
+Combined short flags are not supported: write `-f -y`, not `-fy`.
 :::
 
 ## Running migrations
@@ -35,15 +45,17 @@ runner.
 | `migronaut up --to <file>` | Apply pending migrations up to and including that file |
 | `migronaut down --to <file>` | Revert everything applied after that file (it stays applied) |
 | `migronaut up --step` | Apply each file as its own batch |
-| `migronaut up <file> --force --yes` | Re-run an already-applied file |
+| `migronaut up <file> --force --yes` | Re-run an already-applied file (short: `-f -y`) |
 | `migronaut up --strict` | Abort on a checksum mismatch |
 | `migronaut up --no-lock` | Skip the lock (dev only) |
 | [`migronaut down`](/commands/down) | Roll back the last batch |
 | `migronaut down <file>` | Roll back a single migration |
 | `migronaut down --batch <n>` | Roll back a specific batch |
 | `migronaut down --steps <n>` | Roll back the last N migrations |
+| `migronaut down --no-lock` | Skip the lock (dev only) |
 | [`migronaut redo`](/commands/redo) | Down + up the last applied migration |
 | `migronaut redo <file>` | Down + up a specific migration |
+| `migronaut redo --no-lock` | Skip the lock (dev only) |
 
 ## Inspecting
 
@@ -51,7 +63,7 @@ runner.
 |---|---|
 | [`migronaut status`](/commands/status) | Full status table |
 | `migronaut status --check` | Exit 2 if any migration is pending (CI gate) |
-| `migronaut status --pending` / `--limit <n>` | Filter to pending rows / show only the last N |
+| `migronaut status --pending` / `--limit <n>` | Filter to pending rows / show only the last N (`--limit` is not combinable with `--check`) |
 | `migronaut list --pending` | Only pending migrations |
 | `migronaut list --applied` | Only applied migrations |
 | [`migronaut dry-run up`](/commands/dry-run) | Preview what would apply |
@@ -88,7 +100,7 @@ runner.
 | `migronaut audit` | Check config, connectivity, transactions, indexes, lock, checksums |
 | `migronaut audit --json` | Machine-readable report; exit 22 when a check fails |
 | [`migronaut unlock`](/commands/unlock) | Force-release a stuck lock |
-| `migronaut unlock --yes` | Release without confirmation |
+| `migronaut unlock --yes` | Release without confirmation (short: `-y`) |
 
 ## Exit codes
 
