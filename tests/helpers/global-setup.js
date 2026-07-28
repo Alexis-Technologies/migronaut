@@ -7,6 +7,10 @@ const { MongoMemoryReplSet } = require('mongodb-memory-server');
  * env var via `startTestMongo` in ./mongo.js; isolation is preserved by the
  * per-file database names and `dropDatabase()` in each beforeEach.
  *
+ * Only wired up on Node >= 24 — the flag does not exist on Node 22, which is
+ * the `engines` floor. scripts/node-test.js feature-detects it and omits it
+ * there, so this module simply never runs and each file boots its own server.
+ *
  * Files that fork real processes against their own server
  * (concurrency.test.js, runtime-ts.test.js) opt out with
  * `startTestMongo(db, { dedicated: true })`.

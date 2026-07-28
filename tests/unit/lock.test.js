@@ -3,6 +3,7 @@ const { describe, it, mock } = require('node:test');
 const { LOCK_ID, MigrationLock, runWithLock, toLockInfo } = require('../../src/core/lock.js');
 const { LockAlreadyHeldError, LockReleaseFailedError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
+const { keepEventLoopAlive } = require('../helpers/event-loop.js');
 
 // The owner token an acquire() or renew() update would store, or undefined.
 // acquire() sends a $replaceWith/$cond pipeline (server-time `$$NOW` stamping)
@@ -283,20 +284,27 @@ describe('runWithLock', () => {
     });
     collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, owner }));
     const started = Date.now();
-    await assert.rejects(
-      runWithLock(
-        lock,
-        { logger: silentLogger },
-        (signal) =>
-          new Promise((_resolve, reject) => {
-            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
-          }),
-      ),
-      (error) => {
-        assert.strictEqual(error.code, 'LOCK_LOST');
-        return true;
-      },
-    );
+    // The mocked driver does no I/O, so the unref'ed deadline timer is the only
+    // pending handle — see tests/helpers/event-loop.js.
+    const release = keepEventLoopAlive();
+    try {
+      await assert.rejects(
+        runWithLock(
+          lock,
+          { logger: silentLogger },
+          (signal) =>
+            new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+            }),
+        ),
+        (error) => {
+          assert.strictEqual(error.code, 'LOCK_LOST');
+          return true;
+        },
+      );
+    } finally {
+      release();
+    }
     // Aborted around the deadline (~150ms) — strictly before 1×TTL (200ms)
     // plus scheduling slack.
     assert.ok(Date.now() - started < 280);

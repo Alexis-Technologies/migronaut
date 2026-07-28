@@ -5,6 +5,7 @@ const {
   MigrationExecutionFailedError,
   MigrationTimeoutError,
 } = require('../../src/errors/index.js');
+const { keepEventLoopAlive } = require('../helpers/event-loop.js');
 
 function makeContext() {
   // withTransaction is the driver's retry-aware wrapper: it runs the body,
@@ -203,6 +204,9 @@ describe('runMigration', () => {
     const unhandled = [];
     const onUnhandled = (reason) => unhandled.push(reason);
     process.on('unhandledRejection', onUnhandled);
+    // `up` never settles on its own and the context is a mock, so the unref'ed
+    // timeout timer is the only pending handle — see tests/helpers/event-loop.js.
+    const release = keepEventLoopAlive();
     try {
       let rejectLater;
       const migration = {
@@ -229,6 +233,7 @@ describe('runMigration', () => {
       await new Promise((resolve) => setImmediate(resolve));
       assert.deepStrictEqual(unhandled, []);
     } finally {
+      release();
       process.off('unhandledRejection', onUnhandled);
     }
   });

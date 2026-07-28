@@ -51,6 +51,15 @@ Node's built-in `node:test` — no external framework.
   ports and starves the timing-sensitive lock tests.
 - `tests/types/` — `tsd` assertions against `index.d.ts`.
 
+The integration suite goes through [scripts/node-test.js](scripts/node-test.js)
+rather than calling `node --test` directly. It feature-detects
+`--test-global-setup`, which only exists on Node >= 24: where present, one
+replica set is shared by the whole run; on Node 22 (the `engines` floor) each
+file boots its own. Identical results, about a minute slower — so run the suite
+on **both** 22 and 24 before assuming a failure is real. A test whose awaited
+promise can only settle from an `unref()`ed timer passes on 24 and is cancelled
+on 22; see [tests/helpers/event-loop.js](tests/helpers/event-loop.js).
+
 Use `before`/`after`, not `beforeAll`/`afterAll` (those are Jest/Vitest names).
 Silence the logger with `logger: null`. No committed `.only` or `.skip`.
 
