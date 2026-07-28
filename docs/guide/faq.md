@@ -48,7 +48,7 @@ Rollbacks never delete history — the record is marked `reverted`. See [`migron
 
 Yes — TypeScript is first-class, with a fully-typed migration context and config. On **Node ≥ 22.18**
 `.ts` migrations load natively with zero setup. On older Node, run `migronaut` under a TypeScript loader
-like `tsx`, or author migrations as `.js` (which work on Node 18+). `migronaut` doesn't bundle a loader —
+like `tsx`, or author migrations as `.js` (which need no loader at all). `migronaut` doesn't bundle a loader —
 it uses your installed Node. See
 [Running TypeScript migrations](/guide/writing-migrations#running-typescript-migrations).
 
@@ -99,8 +99,10 @@ Mongoose is an optional peer dependency — you only need it if your migrations 
 
 ## Can I run migrations without a config file?
 
-Yes. Every option has an `MIGRONAUT_*` environment variable, so exporting `MIGRONAUT_URI` and `MIGRONAUT_DB` is enough
-to run — no config file required. See [Configuration](/guide/configuration).
+Yes. Every scalar option has an `MIGRONAUT_*` environment variable, so exporting `MIGRONAUT_URI` and
+`MIGRONAUT_DB` is enough to run — no config file required. Only the non-scalar options
+(`fileExtensions`, `clientOptions`, and live handles like `client`, `mongoose`, `hooks` and
+`logger`) need a config file or the programmatic API. See [Configuration](/guide/configuration).
 
 ## How does it prevent two deploys running migrations at once?
 
@@ -110,7 +112,9 @@ cleared with [`migronaut unlock`](/commands/unlock).
 
 ## What Node.js and MongoDB versions are required?
 
-Node.js **≥ 18** and MongoDB **≥ 5.0**. `mongoose` (≥ 7) is optional.
+Node.js **≥ 22.18** and MongoDB **≥ 5.0**. `mongoose` (≥ 7) is optional. The Node floor is what lets
+`.ts` migrations run with no loader and `.env` files parse with no dependency — both use built-ins
+that only exist from 22.18 on.
 
 ## Is it free and open source?
 

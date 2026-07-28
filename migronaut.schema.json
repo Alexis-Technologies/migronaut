@@ -1,0 +1,135 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://migronaut.vercel.app/migronaut.schema.json",
+  "title": "migronaut configuration",
+  "description": "Configuration for migronaut.config.json. Options that hold live instances (hooks, logger, mongoose, client) are only available in a .ts/.js config.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "URL of this schema, for editor completion and validation"
+    },
+    "uri": {
+      "type": "string",
+      "minLength": 1,
+      "description": "MongoDB connection URI"
+    },
+    "dbName": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Database name"
+    },
+    "migrationsDir": {
+      "type": "string",
+      "minLength": 1,
+      "default": "./migrations",
+      "description": "Directory holding migration files"
+    },
+    "migrationsCollection": {
+      "type": "string",
+      "minLength": 1,
+      "default": "_migronaut_migrations",
+      "pattern": "^(?!system\\.)[^$\\u0000]+$",
+      "description": "Collection storing the changelog"
+    },
+    "lockCollection": {
+      "type": "string",
+      "minLength": 1,
+      "default": "_migronaut_locks",
+      "pattern": "^(?!system\\.)[^$\\u0000]+$",
+      "description": "Collection used for the concurrency lock"
+    },
+    "lockTTLSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 60,
+      "description": "Seconds before a lock is considered stale and reclaimable"
+    },
+    "strict": {
+      "type": "boolean",
+      "default": false,
+      "description": "Abort (instead of warn) when an applied file's checksum no longer matches"
+    },
+    "useTransaction": {
+      "type": "boolean",
+      "default": false,
+      "description": "Wrap every migration in a transaction. Requires a replica set or sharded cluster"
+    },
+    "fileExtensions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "default": [
+        ".ts",
+        ".js"
+      ],
+      "description": "Extensions scanned when discovering migrations"
+    },
+    "createExtension": {
+      "enum": [
+        "ts",
+        "js"
+      ],
+      "default": "js",
+      "description": "File type `migronaut create` generates by default"
+    },
+    "sequential": {
+      "type": "boolean",
+      "default": false,
+      "description": "Use 0001-style sequential numbering instead of timestamps"
+    },
+    "templatePath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to a custom migration template file"
+    },
+    "environment": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Value stamped on changelog records. Defaults to NODE_ENV, then 'production'"
+    },
+    "onLockLost": {
+      "enum": [
+        "abort",
+        "warn"
+      ],
+      "default": "abort",
+      "description": "What to do when the lock is lost mid-run"
+    },
+    "envFile": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "const": false
+        }
+      ],
+      "default": ".env",
+      "description": "The .env file to load, or false to load none"
+    },
+    "ensureIndexes": {
+      "type": "boolean",
+      "default": true,
+      "description": "Create the changelog indexes on first connect"
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Abort the run when a single migration exceeds this many milliseconds"
+    },
+    "reloadMigrations": {
+      "type": "boolean",
+      "default": false,
+      "description": "Bypass the ESM module cache when loading migrations (long-lived processes)"
+    },
+    "clientOptions": {
+      "type": "object",
+      "description": "MongoDB driver options (MongoClientOptions): TLS, auth mechanisms, proxies, pool sizing. Passed to the driver as-is."
+    }
+  }
+}

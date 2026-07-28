@@ -1,21 +1,24 @@
 # migronaut
 
-> Production-grade MongoDB migration toolkit for Node.js and TypeScript. Run a single migration file,
-> roll back any batch or the last N, preview with dry-run, wrap migrations in transactions, verify
-> file checksums, and run safely behind a native MongoDB concurrency lock — via the `migronaut` CLI or a
-> fully-typed programmatic API. A drop-in alternative to migrate-mongo, with one-command import of an
-> existing migrate-mongo changelog.
+> Production-grade MongoDB migration toolkit for Node.js and TypeScript, with zero runtime
+> dependencies. Run a single migration file, roll back any batch or the last N, preview with dry-run,
+> wrap migrations in transactions, verify file checksums, and run safely behind a native MongoDB
+> concurrency lock — via the `migronaut` CLI or a fully-typed programmatic API. An alternative to
+> migrate-mongo, with one-command import of an existing migrate-mongo changelog. Also the maintained
+> successor to `mongo-migrate-kit` (CLI `mmk`), which it was forked from.
 
 Key facts:
-- Package (npm): `migronaut` — install with `npm install migronaut mongodb`
+- Package (npm): `@alexify/migronaut` — install with `npm install @alexify/migronaut mongodb`
 - CLI binary: `migronaut`
-- Requires Node.js >= 18 and MongoDB >= 5.0; supports TypeScript, ESM, and CommonJS
+- Requires Node.js >= 22.18 and MongoDB >= 5.0; supports TypeScript, ESM, and CommonJS
+- Zero runtime dependencies; `mongodb` is a required peer, `mongoose` an optional one
 - License: MIT
 - Repository: https://github.com/Alexis-Technologies/migronaut
 
 ## Guide
 
 - [Why migronaut?](https://migronaut.vercel.app/guide/why): Reasons to choose it and how it compares to migrate-mongo
+- [vs. mongo-migrate-kit](https://migronaut.vercel.app/guide/vs-mongo-migrate-kit): What changed since the mmk fork, and why
 - [Core Concepts](https://migronaut.vercel.app/guide/concepts): Migrations, batches, the changelog, ordering, locking, and checksums
 - [Getting Started](https://migronaut.vercel.app/guide/getting-started): Install, configure, create, and run your first migration
 - [Tutorial](https://migronaut.vercel.app/guide/tutorial): End-to-end worked example from init to rollback
@@ -37,7 +40,9 @@ Key facts:
 - [migronaut status & list](https://migronaut.vercel.app/commands/status): Inspect migration state; --check gates CI
 - [migronaut create & init](https://migronaut.vercel.app/commands/create): Scaffold migrations and generate a config
 - [migronaut dry-run](https://migronaut.vercel.app/commands/dry-run): Preview up/down without touching the database
+- [migronaut audit](https://migronaut.vercel.app/commands/audit): Read-only health check of config, connectivity, and locks
 - [migronaut import](https://migronaut.vercel.app/commands/import): Adopt a migrate-mongo changelog (forward-only)
+- [migronaut lock](https://migronaut.vercel.app/commands/lock): Inspect the current migration lock holder
 - [migronaut unlock](https://migronaut.vercel.app/commands/unlock): Force-release a stuck concurrency lock
 
 ## Reference

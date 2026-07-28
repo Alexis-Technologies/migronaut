@@ -20,17 +20,17 @@ export default {
     beforeAll: async (ctx) => {
       console.log('Starting migration batch…');
     },
-    /** Runs once after all migrations in the batch complete */
-    afterAll: async (ctx) => {
-      console.log('Batch complete.');
+    /** Runs once after the run ends — including when it failed */
+    afterAll: async (ctx, summary) => {
+      console.log(`Batch complete: ${summary.applied} applied (success: ${summary.success})`);
     },
     /** Runs before each individual migration */
-    beforeEach: async (name, ctx) => {
-      console.log(`→ ${name}`);
+    beforeEach: async (name, ctx, info) => {
+      console.log(`→ ${name} (${info.index + 1}/${info.total})`);
     },
     /** Runs after each migration completes successfully */
-    afterEach: async (name, duration, ctx) => {
-      console.log(`✓ ${name} (${duration}ms)`);
+    afterEach: async (name, duration, ctx, info) => {
+      console.log(`✓ ${name} (${duration}ms, ${info.direction})`);
     },
     /** Runs when a migration throws — before the error propagates */
     onError: async (name, error, ctx) => {
@@ -45,13 +45,19 @@ export default {
 | Hook | Signature | When it runs |
 |---|---|---|
 | `beforeAll` | `(ctx) => Promise<void>` | Once, before the first migration in the run |
-| `afterAll` | `(ctx) => Promise<void>` | Once, after the last migration succeeds |
-| `beforeEach` | `(name, ctx) => Promise<void>` | Before every individual migration |
-| `afterEach` | `(name, duration, ctx) => Promise<void>` | After each migration succeeds |
+| `afterAll` | `(ctx, summary) => Promise<void>` | Once, after the run ends — **including when it failed** |
+| `beforeEach` | `(name, ctx, info) => Promise<void>` | Before every individual migration (not for skipped ones) |
+| `afterEach` | `(name, duration, ctx, info) => Promise<void>` | After each migration succeeds |
 | `onError` | `(name, error, ctx) => Promise<void>` | When a migration throws, before it propagates |
 
 `ctx` is the same [`MigrationContext`](/guide/writing-migrations#the-migration-context) passed to
-your migrations, so hooks have full database access.
+your migrations, so hooks have full database access. `info` is
+`{ direction, index, total }`, so a hook can tell an apply from a revert and see
+its position in the run. `summary` is `{ success, applied, direction }`.
+
+A hook that throws fails the run with a
+[`HOOK_FAILED`](/reference/error-codes) error — it is never swallowed, and never
+surfaces as an untyped `Error`.
 
 ## Execution order
 
@@ -69,6 +75,42 @@ If `A.up()` throws:
 ```
 beforeAll
   beforeEach(A) → A.up() ✖ → onError(A)   ← batch stops here, B never runs
+afterAll({ success: false, applied: 0 })
 ```
 
-`afterAll` does **not** run when the batch stops on an error.
+`afterAll` **does** run when the batch stops on an error — cleanup and
+notification hooks matter most on exactly that path. Check `summary.success` to
+tell the two cases apart.
+
+## Events
+
+Hooks are configured up front and run inside the migration's flow. For metrics
+and alerting, subscribe to events instead: several listeners may attach from
+outside the config, and a listener that throws is contained rather than failing
+the run.
+
+```js
+const kit = new MigratorKit(config);
+
+kit.on('migration:success', ({ migration, durationMs, runId }) => {
+  metrics.timing('migration.duration', durationMs, { migration, runId });
+});
+kit.on('lock:lost', ({ reason }) => alert(`Migration lock lost: ${reason}`));
+
+await kit.up();
+```
+
+| Event | Payload |
+|---|---|
+| `run:start` | `{ runId }` |
+| `run:end` | `{ runId, success, error? }` |
+| `migration:start` | `{ runId, migration, direction, batch? }` |
+| `migration:success` | `{ runId, migration, direction, batch?, durationMs }` |
+| `migration:error` | `{ runId, migration, direction, error }` |
+| `lock:acquired` | `{ runId, owner }` |
+| `lock:released` | `{ runId, owner }` |
+| `lock:lost` | `{ runId, reason }` |
+
+`runId` is the same value on every event of a run, on the lock document, and on
+each changelog record that run writes — so logs, metrics and the database can be
+correlated after the fact.

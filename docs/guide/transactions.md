@@ -63,10 +63,38 @@ export default {
 
 When a transactional migration runs:
 
-1. A MongoDB session starts and `session.startTransaction()` is called.
+1. A MongoDB session starts and the migration body runs inside `session.withTransaction()`.
 2. The session is exposed as `ctx.session` to your `up`/`down`.
-3. On success → `session.commitTransaction()`, then the changelog record is written.
-4. On any thrown error → `session.abortTransaction()`, the `onError` hook fires, and the batch stops.
+3. Still **inside** that transaction, migronaut writes the changelog record for the migration.
+4. The transaction commits — your writes and the changelog record together, in one commit.
+5. On any thrown error → the transaction aborts, the `onError` hook fires, and the batch stops.
 
 This means a failed transactional migration leaves the database in its original state — no partial
 writes.
+
+### The changelog is part of the transaction
+
+Step 3 is the reason this matters beyond your own writes. The record that says *"this migration ran"*
+commits in the same transaction as the migration itself, so the two can never disagree. Without that,
+a crash in the window between committing the migration and recording it would leave the migration
+**applied but unrecorded** — and the next `migronaut up` would run it a second time.
+
+`withTransaction` also gives you the driver's documented commit protocol for free: it retries
+`TransientTransactionError` and `UnknownTransactionCommitResult` instead of surfacing a network blip
+as a failed migration.
+
+### Without `useTransaction`
+
+The non-transactional path is unchanged: the migration runs, and the changelog record is written
+immediately afterwards as a separate write. That gap is small but real — a process killed inside it
+leaves a migration applied with no record of it.
+
+Turning on `useTransaction` is what closes the gap, which is worth knowing when you choose per file:
+
+| | Migration writes | Changelog record |
+|---|---|---|
+| `useTransaction: true` | Roll back together on failure | Commits atomically with the migration |
+| `useTransaction: false` (default) | Whatever your `up()` already did stays | Written right after — a crash between the two loses it |
+
+If your MongoDB is a standalone `mongod` and transactions aren't available to you, keep migrations
+idempotent (`createIndex`, `updateMany` with a guard filter) so a re-run is harmless.

@@ -49,11 +49,16 @@ reversible. Only the *imported* legacy records are forward-only.
 | Capability                                      | `migrate-mongo` | `migronaut` |
 | ----------------------------------------------- | :-------------: | :-----------------: |
 | `up` / `down` / `create` / `status`             |        ✅        |          ✅          |
-| Dry-run preview                                 |        ❌        |          ✅          |
 | Run a single migration file                     |        ❌        |          ✅          |
 | Roll back a specific batch (not just the last)  |        ❌        |          ✅          |
+| Dry-run preview                                 |        ❌        |          ✅          |
 | `redo` (down + up)                              |        ❌        |          ✅          |
 | SHA-256 checksum / tamper detection             |        ❌        |          ✅          |
 | Lifecycle hooks                                 |        ❌        |          ✅          |
 | First-class TypeScript (built-in)               |        ❌        |          ✅          |
 | History preserved on rollback (never deleted)   |        ❌        |          ✅          |
+| Adopt an existing `migrate-mongo` changelog     |        —        | ✅ `migronaut import` |
+
+<sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026. It has since added transaction access
+via a `client` argument; `migronaut` exposes the same plus a declarative per-file `useTransaction`
+flag.</sub>

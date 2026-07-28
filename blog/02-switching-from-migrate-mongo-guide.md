@@ -12,7 +12,7 @@ You'll need:
 
 - A project already using `migrate-mongo` with some migrations applied.
 - Access to the same MongoDB database that `migrate-mongo` has been writing to.
-- Node 18 or newer.
+- Node 22.18 or newer.
 
 That's it. You don't need to uninstall `migrate-mongo` yet. We'll leave it in place until you're confident.
 

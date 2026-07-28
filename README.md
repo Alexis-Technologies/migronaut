@@ -1,18 +1,19 @@
 <div align="center">
 
-<img src="assets/logo-icon-b-alt2.png" alt="@alexify/migronaut" width="420" />
+<img src="https://raw.githubusercontent.com/Alexis-Technologies/migronaut/main/assets/logo-icon-b-alt2.png" alt="@alexify/migronaut" width="420" />
 
 # migronaut
 
-**Elegant, fast, TypeScript-first MongoDB migrations for Node.js.**
+**Elegant, fast, fully-typed, zero-dependency MongoDB migrations for Node.js.**
 
-_A modern, drop-in replacement for `migrate-mongo` etc._
+_Adopt an existing `migrate-mongo` changelog in one command — then get the controls it never had._
 
-[![npm version](https://img.shields.io/npm/v/%40alexify%2Fmigronaut?style=flat-square&color=1E9E57&logo=npm&logoColor=white)](https://www.npmjs.com/package/@alexify/migronaut)
-[![Docs](https://img.shields.io/badge/docs-online-1E9E57?style=flat-square&logo=readthedocs&logoColor=white)](https://migronaut.vercel.app/)
-[![Node](https://img.shields.io/badge/Node-%E2%89%A518-1E9E57?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org)
-[![Known Vulnerabilities](https://snyk.io/test/npm/@alexify/migronaut/badge.svg)](https://snyk.io/test/npm/@alexify/migronaut)
-[![License: MIT](https://img.shields.io/badge/License-MIT-1E9E57?style=flat-square)](https://opensource.org/licenses/MIT)
+[![npm](https://img.shields.io/npm/v/%40alexify%2Fmigronaut)](https://www.npmjs.com/package/@alexify/migronaut)
+[![CI](https://github.com/Alexis-Technologies/migronaut/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexis-Technologies/migronaut/actions/workflows/ci.yml)
+[![node](https://img.shields.io/node/v/%40alexify%2Fmigronaut)](#quick-start)
+[![dependencies](https://img.shields.io/badge/runtime_dependencies-0-brightgreen)](#reasons-to-choose-it)
+[![docs](https://img.shields.io/badge/docs-online-blue)](https://migronaut.vercel.app/)
+[![license](https://img.shields.io/npm/l/%40alexify%2Fmigronaut)](./LICENSE)
 
 
 Precise, safe migrations for MongoDB. Run a single file, roll back anything, and preview every
@@ -26,6 +27,8 @@ change before it touches your database.
 
 ## Reasons to choose it
 
+- **Zero dependencies** — no runtime dependencies at all; only the `mongodb` driver as a peer.
+  Instant installs, nothing extra in your lockfile, no supply-chain surface.
 - **Run a single migration** — `migronaut up <file>`, not just "all pending".
 - **Roll back anything** — a batch (`--batch 3`), the last N (`--steps 2`), one file, or `redo`.
 - **Preview before you run** — `migronaut dry-run up` prints the exact plan without touching the database.
@@ -36,23 +39,53 @@ change before it touches your database.
 - **Opt-in transactions** — wrap a migration so it fully commits or fully aborts.
 - **TypeScript, ESM & CommonJS** — all run with no `ts-node` plumbing.
 - **Zero config files required** — drive everything from env vars if you prefer.
+- **Pino-friendly logging** — the `logger` option is pino-compatible; pass a pino instance directly
+  and migronaut logs through it (with a `component: 'migronaut'` child binding).
 
 ### How it compares to `migrate-mongo`
 
 | Capability                                      | `migrate-mongo` | `migronaut` |
 | ----------------------------------------------- | :-------------: | :-----------------: |
+| `up` / `down` / `create` / `status`             |        ✅        |          ✅          |
 | Run a single migration file                     |        ❌        |          ✅          |
 | Roll back a specific batch (not just the last)  |        ❌        |          ✅          |
 | Dry-run preview                                 |        ❌        |          ✅          |
 | `redo` (down + up)                              |        ❌        |          ✅          |
-| Checksum / tamper detection                     |        ❌        |          ✅          |
+| SHA-256 checksum / tamper detection             |        ❌        |          ✅          |
 | Lifecycle hooks                                 |        ❌        |          ✅          |
 | First-class TypeScript (built-in)               |        ❌        |          ✅          |
-| History kept on rollback (never deleted)        |        ❌        |          ✅          |
-| Adopt an existing `migrate-mongo` changelog | — | ✅ `migronaut import` |
+| History preserved on rollback (never deleted)   |        ❌        |          ✅          |
+| Adopt an existing `migrate-mongo` changelog     |        —        | ✅ `migronaut import` |
 
 <sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026. It has since added transaction access
 via a `client` argument; `migronaut` exposes the same plus a declarative per-file `useTransaction` flag.</sub>
+
+### How it compares to `mongo-migrate-kit`
+
+`migronaut` is a fork of [`mongo-migrate-kit`](https://www.npmjs.com/package/mongo-migrate-kit)
+(CLI `mmk`) by Santosh Gupta. The fork was not a rename — everything below landed after it:
+
+| Capability                                      | `mongo-migrate-kit` | `migronaut` |
+| ----------------------------------------------- | :-------------: | :-----------------: |
+| Runtime dependencies                            |        6        |      **0**          |
+| Ships as                                        | bundled `dist/` | source, no build step |
+| `--json` on every command                       |        ❌        |          ✅          |
+| Typed exit code per error (`EXIT_CODES`)        |        ❌        |          ✅          |
+| `status --check` deploy gate                    |        ❌        |          ✅          |
+| `audit` / `lock` commands                       |        ❌        |          ✅          |
+| `up --to` / `down --to` targeting               |        ❌        |          ✅          |
+| Lifecycle events (`EventEmitter`)               |        ❌        |          ✅          |
+| Reuse an already-connected `MongoClient`        |        ❌        |          ✅          |
+| Changelog written inside the migration's transaction |   ❌        |          ✅          |
+| Credentials masked in errors, logs and `--json` |        ❌        |          ✅          |
+| Pino-compatible logger                          |        ❌        |          ✅          |
+| Node floor                                      |      ≥ 18       |      ≥ 22.18        |
+
+<sub>Compared against `mongo-migrate-kit` 1.2.2 — the version this project forked from. The Node
+floor is a trade-off, not a win: it is what buys `.ts` migrations with no loader and `.env` parsing
+with no dependency.</sub>
+
+→ **[Full comparison, and what stayed the same](https://migronaut.vercel.app/guide/vs-mongo-migrate-kit)**
 
 > [!TIP]
 > ### 🔄 Already using `migrate-mongo`? Switch in under a minute.
@@ -79,7 +112,7 @@ npm install mongodb          # required peer dependency
 ```
 
 ```bash
-# 1 · create a configuration file migronaut.config.*. (pass --ts if need ts file)
+# 1 · create a configuration file (migronaut.config.js; pass --ts for TypeScript)
 npx migronaut init
 
 # 2 · create your first migration
@@ -128,23 +161,27 @@ Full docs, guides, and the API reference live at
 
 ## Commands
 
-Every command accepts the global flags `--uri`, `--db`, `--dir`, and `--config`.
+Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--env-file`,
+`--no-env`, `--verbose`, `--quiet`, `--no-color`, and `--json` (except `init` — see `init --format`).
 
 | Command | What it does |
 |---|---|
 | `migronaut init` | Create a documented `migronaut.config.*` in the current directory |
 | `migronaut import` | Adopt an existing `migrate-mongo` changelog (one-time, forward-only) |
 | `migronaut create <name>` | Generate a timestamped migration file |
-| `migronaut up [file]` | Run all pending migrations, or one named file |
-| `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, or one file |
+| `migronaut up [file]` | Run all pending migrations, one named file, or up to `--to <file>` |
+| `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, one file, or to `--to <file>` |
 | `migronaut redo [file]` | Roll back then re-apply (the last migration, or one file) |
 | `migronaut status` | Print the full migration status table (`--check` to fail CI on pending) |
 | `migronaut list` | List migrations, filtered by status |
 | `migronaut dry-run <up\|down> [file]` | Preview a run without touching the database |
+| `migronaut audit` | Read-only health check: config, connection, transactions, indexes, lock, drift |
+| `migronaut lock` | Show who currently holds the migration lock |
 | `migronaut unlock` | Force-release a stuck lock left behind by a crashed run |
 
 Most data commands (`up`, `down`, `redo`, `status`, `list`, `dry-run`, `import`, `create`,
-`unlock`) accept **`--json`** for machine-readable output — see [CI & automation](#ci--automation).
+`audit`, `lock`, `unlock`) accept **`--json`** for machine-readable output — see
+[CI & automation](#ci--automation).
 
 <details>
 <summary><b>Options for every command</b></summary>
@@ -154,7 +191,7 @@ Most data commands (`up`, `down`, `redo`, `status`, `list`, `dry-run`, `import`,
 migronaut init                     # migronaut.config.js (default)
 migronaut init --js                # migronaut.config.js (explicit default)
 migronaut init --ts                # migronaut.config.ts
-migronaut init --json              # migronaut.config.json  (NOTE: here --json picks the file format)
+migronaut init --format json       # migronaut.config.json
 migronaut init --secret-provider   # async config that loads the URI from a secret manager (js/ts only)
 migronaut init --force             # overwrite an existing config file
 migronaut init --uri mongodb://localhost:27017 --db my_app   # prefill the generated config
@@ -179,6 +216,7 @@ migronaut create <name> --json     # machine-readable output ({ "path": "..." })
 # up — apply migrations
 migronaut up                       # all pending (one shared batch for the run)
 migronaut up <file>                # one specific file
+migronaut up --to <file>           # pending files up to and including <file>, then stop
 migronaut up --step                # apply each file as its own batch (revert individually later)
 migronaut up <file> --force        # re-run an ALREADY-applied file (asks for confirmation)
 migronaut up <file> --force --yes  # confirm a re-run non-interactively (required with --json)
@@ -191,17 +229,21 @@ migronaut down                     # the last batch (may be several files)
 migronaut down <file>              # one specific file
 migronaut down --batch <n>         # a specific batch number
 migronaut down --steps <n>         # the last N migrations, newest first, ignoring batches
+migronaut down --to <file>         # everything applied after <file>; <file> itself stays applied
 migronaut down --no-lock           # skip the concurrency lock (local dev only)
 migronaut down --json              # machine-readable output (array of run results)
 
 # redo — down then up
 migronaut redo                     # the most recently applied migration
 migronaut redo <file>              # a specific file
+migronaut redo --no-lock           # skip the lock (dev only)
 migronaut redo --json              # machine-readable output (array of run results)
 
 # status — full status table
 migronaut status                   # the full status table
-migronaut status --check           # exit 1 if any migration is pending (CI gate)
+migronaut status --check           # exit 2 if any migration is pending (CI gate)
+migronaut status --pending         # only the pending rows
+migronaut status --limit <n>       # only the last N rows (not combinable with --check)
 migronaut status --json            # machine-readable output (array of status rows)
 
 # list — filtered status
@@ -214,22 +256,35 @@ migronaut list --json              # machine-readable output (array of status ro
 migronaut dry-run up [file]
 migronaut dry-run down [file]
 migronaut dry-run down --steps <n> # preview a step rollback (the last N migrations)
+migronaut dry-run down --batch <n> # preview reverting a specific batch
+migronaut dry-run up --to <file>   # preview a staged rollout up to <file>
+migronaut dry-run down --to <file> # preview reverting everything applied after <file>
 migronaut dry-run up --json        # machine-readable output (array of status rows)
+
+# audit — read-only health check
+migronaut audit                    # pass/warn/fail per check; exit 22 on any fail
+migronaut audit --json             # machine-readable report
+
+# lock — inspect the current lock
+migronaut lock                     # shows the holder (pid / host / user / since), or "no lock"
+migronaut lock --json              # machine-readable output
 
 # unlock — clear a stuck lock after a crash
 migronaut unlock                   # shows the holder, prompts y/N
-migronaut unlock --yes             # skip the prompt
+migronaut unlock --yes             # skip the prompt (short: -y)
 migronaut unlock --json            # machine-readable output ({ "released": ..., "holder": ... })
 ```
 
 **Global flags** (available on all commands): `--uri <uri>` (override `MIGRONAUT_URI`),
 `--db <name>` (override `MIGRONAUT_DB`), `--dir <path>` (override `MIGRONAUT_MIGRATIONS_DIR`),
-`--config <path>` (explicit config file, overrides auto-discovery).
+`--config <path>` (explicit config file, overrides auto-discovery), `--env-file <path>` /
+`--no-env` (control `.env` loading), `--verbose` / `--quiet` (log level), `--no-color`,
+`-V, --version`, `-h, --help`. Combined short flags are not supported — write `-f -y`, not `-fy`.
 
-**`--json`** is accepted by every data command above (`up`, `down`, `redo`, `status`, `list`,
-`dry-run`, `import`, `create`, `unlock`) and prints one JSON document to stdout — see
-[CI & automation](#ci--automation). On `migronaut init` only, `--json` instead selects the config
-**file format** (`migronaut.config.json`).
+**`--json`** is a global flag (`migronaut --json status` and `migronaut status --json` both
+work) and prints one JSON document to stdout — see [CI & automation](#ci--automation). The one
+command without JSON output is `migronaut init`, whose deliverable is the config file itself:
+use `init --format <js|ts|json>` to pick the file format.
 
 </details>
 
@@ -413,7 +468,7 @@ otherwise it warns and skips. To intentionally re-run an edited, already-applied
 <br>
 
 **Machine-readable output.** Add `--json` to any data command (`up`, `down`, `redo`, `status`,
-`list`, `dry-run`, `import`, `create`, `unlock`) to get a single JSON document on **stdout** — all
+`list`, `dry-run`, `import`, `create`, `audit`, `lock`, `unlock`) to get a single JSON document on **stdout** — all
 human logs and the spinner are redirected to stderr, so the stream is safe to pipe into `jq` or parse
 in a script. On failure the command prints `{ "error": { "code": "...", "message": "..." } }` to
 stdout and exits `1`.
@@ -423,7 +478,7 @@ stdout and exits `1`.
 migronaut up --json | jq '.[] | select(.status == "applied") | .file'
 
 # Fail a deploy step if the database isn't fully migrated
-migronaut status --check          # exits 1 when anything is pending, 0 otherwise
+migronaut status --check          # exits 2 when anything is pending, 0 otherwise
 
 # Inspect status as data
 migronaut status --json | jq 'map(select(.status == "pending")) | length'
@@ -434,11 +489,11 @@ A typical pipeline gate:
 ```yaml
 # .github/workflows/deploy.yml (excerpt)
 - name: Fail if migrations are pending
-  run: npx migronaut status --check --uri "$MONGO_URI" --db "$MONGO_DB"
+  run: npx migronaut status --check --uri "$MIGRONAUT_URI" --db "$MIGRONAUT_DB"
 ```
 
-> Note: `migronaut init --json` is the one exception — there `--json` means "write `migronaut.config.json`",
-> not machine-readable output (kept for backwards compatibility).
+> Note: `migronaut init` is the one command without JSON output — its deliverable is the
+> config file itself. `init --format json` writes `migronaut.config.json`.
 
 </details>
 
@@ -470,7 +525,7 @@ import { runMigrations } from '@alexify/migronaut';
 
 // Call this before your server starts listening.
 const { applied, upToDate } = await runMigrations({
-  uri: process.env.MONGO_URI!,
+  uri: process.env.MIGRONAUT_URI!,
   dbName: 'my_app',
   migrationsDir: './migrations',
 });
@@ -486,8 +541,8 @@ block until the migrating peer finishes, then confirm there's nothing left to ap
 
 ```ts
 await runMigrations(
-  { uri: process.env.MONGO_URI!, dbName: 'my_app' },
-  { onLockHeld: 'wait', lockWaitTimeoutMs: 30_000 }, // default 'throw'
+  { uri: process.env.MIGRONAUT_URI!, dbName: 'my_app' },
+  { onLockHeld: 'wait', lockWaitTimeoutMs: 90_000 }, // default 'throw', waits up to 90s
 );
 ```
 
@@ -566,14 +621,39 @@ export default {
   // ── Code-only options (omit in migronaut.config.json) ─────────────────────────
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
   // mongoose: myMongooseInstance, // pass if your migrations use Mongoose models
-  // logger: null,                 // null silences all output (handy in CI/tests)
+  // logger: null,                 // null silences all output; a pino instance works directly
 };
 ```
+
+<details>
+<summary><b>Structured logging with pino</b> — the logger option is pino-compatible</summary>
+
+<br>
+
+Anything with `{ debug, info, warn, error }` methods works as `logger` — including a real pino
+instance. When the logger has a pino-style `child()`, migronaut binds `component: 'migronaut'`
+once, and a throwing logger can never break a migration run:
+
+```js
+const pino = require('pino');
+const { runMigrations } = require('@alexify/migronaut');
+
+await runMigrations({
+  uri: process.env.MIGRONAUT_URI,
+  dbName: 'my_app',
+  logger: pino({ level: 'info' }),
+});
+```
+
+</details>
 
 <details>
 <summary><b>Environment variables</b> — the zero-file way to configure everything</summary>
 
 <br>
+
+Every **scalar** config option has an environment variable, which is what makes a config file
+optional rather than merely discouraged:
 
 | Env var | Config key | Default |
 |---|---|---|
@@ -587,8 +667,37 @@ export default {
 | `MIGRONAUT_USE_TRANSACTION` | `useTransaction` | `false` |
 | `MIGRONAUT_SEQUENTIAL` | `sequential` | `false` |
 | `MIGRONAUT_CREATE_EXTENSION` | `createExtension` | `js` |
+| `MIGRONAUT_ENVIRONMENT` | `environment` | `NODE_ENV`, then `production` |
+| `MIGRONAUT_TEMPLATE_PATH` | `templatePath` | — *(built-in template)* |
+| `MIGRONAUT_TIMEOUT_MS` | `timeoutMs` | — *(no timeout)* |
+| `MIGRONAUT_ON_LOCK_LOST` | `onLockLost` | `abort` |
+| `MIGRONAUT_ENSURE_INDEXES` | `ensureIndexes` | `true` |
+| `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` | `false` |
+| `MIGRONAUT_ENV_FILE` | `envFile` | `.env` |
 
-`.env` files are loaded automatically.
+`fileExtensions`, `clientOptions`, `client`, `mongoose`, `hooks` and `logger` are config-file/API
+only — they aren't scalars, so no environment variable can express them.
+
+A value that doesn't parse is **rejected, never coerced**: `MIGRONAUT_STRICT=on` or
+`MIGRONAUT_LOCK_TTL=abc` fails with an error naming the variable, rather than quietly turning a
+safety setting off.
+
+Three more variables shape the CLI rather than the config:
+
+| Env var | Effect |
+|---|---|
+| `MIGRONAUT_NO_COLOR` | Disable ANSI color for migronaut only; outranks `NO_COLOR`/`FORCE_COLOR` |
+| `MIGRONAUT_FORCE_COLOR` | Force color on (`0` forces it off); the highest-priority color signal |
+| `MIGRONAUT_USER` | Who to record in `executedBy`; overrides the OS user (useful in CI) |
+
+The unprefixed `NO_COLOR`, `FORCE_COLOR` and `TERM=dumb` are still honored underneath the prefixed
+pair — they're ecosystem-wide conventions, and a CLI is expected to obey them.
+
+`.env` files are loaded automatically, parsed by Node's built-in `util.parseEnv`. Real environment
+variables always win over `.env` values. Supported syntax: one `KEY=VALUE` per line, optional
+`export ` prefix, matching single/double/back quotes, full-line and inline `#` comments, and
+multiline values inside double quotes. Not supported: `${VAR}` interpolation. Files over 1 MB are
+rejected, as is anything that isn't a regular file.
 
 </details>
 
@@ -623,6 +732,42 @@ positional `(db, client)`.
 
 ---
 
+## Benchmarks
+
+Measured with the zero-dependency harness in [`bench/bench.js`](./bench/bench.js) (in-process
+scenarios: 1s timed run after 2k warmup iterations; DB-bound scenarios against an in-memory
+MongoDB replica set: 500ms timed run after 100 warmup iterations). Reproduce with:
+
+```bash
+pnpm bench
+```
+
+Apple M3 Max, Node v24.14.1:
+
+| Scenario | ops/sec |
+|---|--------:|
+| `computeChecksum` — small migration file (~1 KB) | ~16,000 |
+| `computeChecksum` — large migration file (~100 KB) |  ~8,000 |
+| `loadMigrationFile` — CommonJS default export | ~60,000 |
+| `loadMigrationFile` — ESM named exports | ~60,000 |
+| `loadMigrationFile` — TypeScript (native type-stripping) | ~60,000 |
+| `Changelog.getAll` — 1,000 records |     ~20 |
+| `Changelog.getAppliedNames` — 1,000 records |     ~30 |
+| `Changelog.getLastBatch` — 1,000 records |    ~200 |
+| `Changelog.markApplied` — idempotent upsert |    ~150 |
+| `Changelog.markReverted` — update existing applied record |    ~150 |
+| `MigrationLock.acquire + release` — uncontended round trip |     ~80 |
+| `MigrationLock.renew` — heartbeat update |    ~150 |
+
+Numbers vary by hardware and Node version — treat them as relative guidance, not absolutes. The
+harness exists primarily to catch performance regressions between releases.
+
+---
+
 ## License
 
-[MIT](./LICENSE) © guptasantosh327
+[MIT](./LICENSE) © Alexis Technologies
+
+Originally forked from `mongo-migrate-kit` by Santosh Gupta; MIT, attribution
+retained in [LICENSE](./LICENSE). See
+[what changed since the fork](https://migronaut.vercel.app/guide/vs-mongo-migrate-kit).

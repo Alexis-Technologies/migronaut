@@ -39,10 +39,17 @@ Plus the [global flags](/guide/configuration#global-cli-flags).
   imported `migrate-mongo` record cannot be redone and is rejected up front.
 - Because the `down` half reverts the record and the `up` half re-applies it, the audit trail keeps
   both events.
+- Both halves run under **one** lock. No other process can slip in between the revert and the
+  re-apply, so the migration is never left in the reverted state by a competing run.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | The migration was reverted and re-applied. |
-| `1` | Either half threw, or the target isn't applied / is irreversible. |
+| `3` | Another process holds the migration lock. |
+| `7` | Either half threw. |
+| `9` | The target isn't applied. |
+| `13` | The target was imported from migrate-mongo and is forward-only. |
+
+See the [full exit-code table](/reference/cli#exit-codes) for the rest.
