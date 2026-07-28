@@ -3,7 +3,9 @@ import type { MigronautConfig } from '@alexify/migronaut';
 /**
  * migronaut configuration.
  * Precedence (highest first): CLI flags > MIGRONAUT_* env vars > this file > defaults.
- * Every field is optional; the values below are the built-in defaults.
+ * Every field is optional; the values below are the built-in defaults, except
+ * where noted (createExtension is 'js' by default — 'ts' here because this
+ * repository's own example migrations are TypeScript).
  *
  * Exported with `module.exports` rather than `export default`: this repository's
  * package.json has no `"type"` field, so an ESM-syntax config makes Node reparse
@@ -45,9 +47,9 @@ const config: Partial<MigronautConfig> = {
   // ── Lifecycle hooks (code only — not available in JSON config) ──
   // hooks: {
   //   beforeAll: async (ctx) => {},
-  //   afterAll: async (ctx) => {},
-  //   beforeEach: async (name, ctx) => {},
-  //   afterEach: async (name, duration, ctx) => {},
+  //   afterAll: async (ctx, summary) => {},        // summary: { success, applied, direction }
+  //   beforeEach: async (name, ctx, info) => {},    // info: { direction, index, total }
+  //   afterEach: async (name, duration, ctx, info) => {},
   //   onError: async (name, error, ctx) => {},
   // },
 };

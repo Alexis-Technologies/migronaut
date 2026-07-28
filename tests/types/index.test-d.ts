@@ -3,6 +3,7 @@ import { expectAssignable, expectError, expectType } from 'tsd';
 import {
   type AuditReport,
   ChecksumMismatchError,
+  EXIT_CODES,
   HookFailedError,
   type ImportResult,
   type LockInfo,
@@ -32,9 +33,15 @@ expectType<Promise<RunResult[]>>(kit.down(undefined, { steps: 1 }));
 expectType<Promise<StatusRow[]>>(kit.status());
 
 // Programmatic entry points
-expectType<Promise<{ applied: RunResult[]; upToDate: boolean; waited: boolean }>>(
-  runMigrations({ uri: 'mongodb://localhost:27017', dbName: 'test' }),
-);
+expectType<
+  Promise<{
+    applied: RunResult[];
+    upToDate: boolean;
+    waited: boolean;
+    waitedMs: number;
+    attempts: number;
+  }>
+>(runMigrations({ uri: 'mongodb://localhost:27017', dbName: 'test' }));
 expectType<Promise<StatusRow[]>>(
   pendingMigrations({ uri: 'mongodb://localhost:27017', dbName: 'test' }),
 );
@@ -121,6 +128,8 @@ kit.on('run:end', (event) => {
   expectType<RunEndEvent>(event);
   expectType<boolean>(event.success);
   expectType<number | undefined>(event.durationMs);
+  // Redacted string, never a raw Error — subscribers may ship it as-is.
+  expectType<string | undefined>(event.error);
 });
 kit.on('migration:success', (event) => {
   expectType<MigrationEvent>(event);
@@ -129,8 +138,15 @@ kit.on('migration:success', (event) => {
 kit.on('migration:skipped', (event) => {
   expectType<MigrationEvent>(event);
 });
+kit.on('migration:error', (event) => {
+  expectType<string | undefined>(event.error);
+});
 kit.once('lock:lost', (event) => {
   expectType<string | undefined>(event.reason);
+});
+kit.once('lock:acquired', (event) => {
+  expectType<number | undefined>(event.ttlMs);
+  expectType<number | undefined>(event.acquireMs);
 });
 // The event-name union is enforced — a typo'd event does not degrade to the
 // untyped EventEmitter overload.
@@ -150,9 +166,15 @@ new MigratorKit({}, { progress: { onStart: () => undefined, onStop: () => undefi
 
 // ─── runMigrations options ───────────────────────────────────────────────────
 
-expectType<Promise<{ applied: RunResult[]; upToDate: boolean; waited: boolean }>>(
-  runMigrations({}, { onLockHeld: 'wait', lockWaitTimeoutMs: 90_000, lockPollIntervalMs: 250 }),
-);
+expectType<
+  Promise<{
+    applied: RunResult[];
+    upToDate: boolean;
+    waited: boolean;
+    waitedMs: number;
+    attempts: number;
+  }>
+>(runMigrations({}, { onLockHeld: 'wait', lockWaitTimeoutMs: 90_000, lockPollIntervalMs: 250 }));
 expectError(runMigrations({}, { onLockHeld: 'retry' }));
 
 // ─── Error codes and construction options ────────────────────────────────────
@@ -167,3 +189,13 @@ new ChecksumMismatchError('mismatch', { name: 'x' }, { cause: new Error('inner')
 
 declare const row: StatusRow;
 expectType<true | undefined>(row.invalid);
+
+// ─── EXIT_CODES map and CLI logger fallback ──────────────────────────────────
+
+expectType<number>(EXIT_CODES.LOCK_ALREADY_HELD);
+expectType<number>(EXIT_CODES.PENDING_MIGRATIONS);
+expectType<number>(EXIT_CODES.AUDIT_FAILED);
+// Only real error codes (plus the two CLI conditions) are keys.
+expectError(EXIT_CODES.NOT_A_CODE);
+new MigratorKit({}, { fallbackLogger: null });
+new MigratorKit({}, { fallbackLogger: pino() });

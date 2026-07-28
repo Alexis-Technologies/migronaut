@@ -1,26 +1,15 @@
 const { createColors, stripAnsi } = require('../utils/colors.js');
 const { formatDateTime } = require('../utils/date.js');
+// Shared with the logger and spinner — cell values come from the changelog and
+// from migration files, and every sink that prints them sanitizes the same way.
+// Migronaut's own colors are applied after sanitizing, so they survive.
+const { sanitize } = require('../utils/sanitize.js');
 
 /**
  * Resolved per render rather than once at import: color depends on NO_COLOR /
  * FORCE_COLOR / TTY, and `--no-color` is applied after this module is loaded.
  */
 const palette = () => createColors(process.stdout);
-
-/**
- * Control characters stripped from data cells. Cell values come from the
- * changelog and from migration files — sources anyone with write access to the
- * database can influence — so ESC and friends must never reach the terminal,
- * where they could move the cursor or restyle everything after the table.
- * Migronaut's own colors are applied after sanitizing, so they survive.
- */
-// oxlint-disable-next-line no-control-regex -- stripping control characters is the point
-const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f\u009b]/g;
-
-/** Strip terminal control characters from an untrusted cell value */
-function sanitize(text) {
-  return String(text).replace(CONTROL_CHARS, '');
-}
 
 /**
  * Codepoint ranges the terminal renders two columns wide (East Asian Wide and
@@ -57,23 +46,29 @@ function charWidth(codepoint) {
   return 1;
 }
 
-/** Number of terminal columns a cell occupies, ignoring ANSI color codes */
-function visibleWidth(text) {
+/** Terminal columns of already-ANSI-free text — the shared codepoint walk */
+function widthOfPlain(plain) {
   let width = 0;
-  for (const char of stripAnsi(text)) {
+  for (const char of plain) {
     width += charWidth(char.codePointAt(0));
   }
   return width;
+}
+
+/** Number of terminal columns a cell occupies, ignoring ANSI color codes */
+function visibleWidth(text) {
+  return widthOfPlain(stripAnsi(text));
 }
 
 /**
  * Shorten `text` to at most `max` visible columns, ending with an ellipsis.
  * Operates on the ANSI-stripped text: slicing raw characters could cut an
  * escape sequence in half and leave the terminal restyled past the cell.
+ * One stripAnsi + one width walk per call — not one of each per check.
  */
 function truncate(text, max) {
   const plain = stripAnsi(text);
-  if (visibleWidth(plain) <= max) return text;
+  if (widthOfPlain(plain) <= max) return text;
   let out = '';
   let width = 0;
   for (const char of plain) {
@@ -95,8 +90,10 @@ function borderLine(widths, left, mid, right) {
 /**
  * Render `head` + `rows` (arrays of string cells) as a box-drawing table.
  * Column widths come from the widest cell; ANSI color codes are excluded
- * from width so colored cells never skew the alignment. Widths are measured
- * once per cell and reused for padding — stripAnsi is not free at 5k rows.
+ * from width so colored cells never skew the alignment. Within this function
+ * each cell is measured exactly once and the width reused for padding
+ * (truncate() above accounts for one more scan) — stripAnsi is not free at
+ * 5k rows.
  */
 function renderTable(head, rows) {
   // Measure every cell once and settle the column widths in the same pass.
@@ -158,6 +155,32 @@ const MAX_DESCRIPTION_WIDTH = 40;
 const MAX_MIGRATION_WIDTH = 60;
 
 /**
+ * Width budgets for the two truncatable columns, shrunk to fit the terminal.
+ *
+ * `fixedWidth` is the room the non-truncatable columns and the box-drawing
+ * frame take. Off-TTY (pipes, CI logs, tests) the static caps apply — output
+ * stays byte-stable regardless of the invoking terminal's size. On a narrow
+ * TTY the truncatable columns give way instead of every row wrapping into
+ * box-drawing noise — the common case over SSH at 80 columns.
+ */
+function truncationBudgets(hasDescription, fixedWidth) {
+  const columns = process.stdout.isTTY ? process.stdout.columns : undefined;
+  if (!columns) {
+    return { migration: MAX_MIGRATION_WIDTH, description: MAX_DESCRIPTION_WIDTH };
+  }
+  const available = Math.max(0, columns - fixedWidth);
+  if (!hasDescription) {
+    return {
+      migration: Math.max(12, Math.min(MAX_MIGRATION_WIDTH, available)),
+      description: MAX_DESCRIPTION_WIDTH,
+    };
+  }
+  const migration = Math.max(12, Math.min(MAX_MIGRATION_WIDTH, Math.ceil(available * 0.6)));
+  const description = Math.max(8, Math.min(MAX_DESCRIPTION_WIDTH, available - migration));
+  return { migration, description };
+}
+
+/**
  * Render status rows as a human-readable table string. The Description column
  * appears only when at least one row has one, so the common case stays narrow.
  */
@@ -170,12 +193,15 @@ function renderStatusTable(rows) {
       break;
     }
   }
+  // Status(7) + Batch(5) + Applied At(19) + Duration(8) + Checksum(8) plus
+  // `│ … │ ` framing: 3 columns of overhead per column and one closing bar.
+  const budgets = truncationBudgets(hasDescription, 47 + (hasDescription ? 7 : 6) * 3 + 1);
   const head = ['Migration', 'Status', 'Batch', 'Applied At', 'Duration', 'Checksum'];
   if (hasDescription) head.push('Description');
   const cells = [];
   for (const row of rows) {
     const cell = [
-      truncate(sanitize(row.file), MAX_MIGRATION_WIDTH),
+      truncate(sanitize(row.file), budgets.migration),
       statusCell(colors, row.status),
       row.batch === null ? '' : String(row.batch),
       row.appliedAt ? formatDateTime(row.appliedAt) : '',
@@ -183,11 +209,17 @@ function renderStatusTable(rows) {
       checksumCell(colors, row.checksumOk),
     ];
     if (hasDescription) {
-      cell.push(truncate(sanitize(row.description ?? ''), MAX_DESCRIPTION_WIDTH));
+      cell.push(truncate(sanitize(row.description ?? ''), budgets.description));
     }
     cells.push(cell);
   }
   return renderTable(head, cells);
+}
+
+/** Shared render for row-listing commands: the table, or a friendly empty line */
+function renderRowsOrEmpty(rows, { logger }) {
+  if (rows.length === 0) logger.info('No migrations found');
+  else logger.info(renderStatusTable(rows));
 }
 
 /** Render the checksum-source cell for an import row */
@@ -200,11 +232,13 @@ function checksumSourceCell(colors, source) {
 /** Render mapped import rows as a human-readable table string */
 function renderImportTable(rows) {
   const colors = palette();
+  // Batch(5) + Applied At(19) + Checksum(10) plus the 4-column frame.
+  const budgets = truncationBudgets(false, 34 + 4 * 3 + 1);
   const head = ['Migration', 'Batch', 'Applied At', 'Checksum'];
   const cells = [];
   for (const row of rows) {
     cells.push([
-      truncate(sanitize(row.file), MAX_MIGRATION_WIDTH),
+      truncate(sanitize(row.file), budgets.migration),
       String(row.batch),
       formatDateTime(row.appliedAt),
       checksumSourceCell(colors, row.checksumSource),
@@ -221,4 +255,5 @@ module.exports = {
   renderTable,
   renderStatusTable,
   renderImportTable,
+  renderRowsOrEmpty,
 };

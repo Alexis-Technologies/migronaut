@@ -1,3 +1,4 @@
+const { EXIT_CODES } = require('./cli/exit-codes.js');
 const { MigratorKit } = require('./core/migrator.js');
 const { pendingMigrations, runMigrations } = require('./core/run.js');
 const {
@@ -30,6 +31,9 @@ module.exports = {
   // Programmatic entry points (app startup / serverless / test setup)
   pendingMigrations,
   runMigrations,
+
+  // The CLI's exit-code map, for wrappers that mirror its semantics
+  EXIT_CODES,
 
   // Error classes
   ChecksumMismatchError,

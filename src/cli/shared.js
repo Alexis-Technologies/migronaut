@@ -22,26 +22,7 @@ function partialFromOpts(opts) {
   return partial;
 }
 
-/**
- * Exit code per error code, so CI can branch on *why* a run failed instead of
- * only that it did. Anything unmapped exits 1, and success is still 0 — a
- * script testing `!= 0` is unaffected.
- */
-const EXIT_CODES = {
-  LOCK_ALREADY_HELD: 3,
-  CHECKSUM_MISMATCH: 4,
-  CONNECTION_FAILED: 5,
-  CONFIG_INVALID: 6,
-  MIGRATION_EXECUTION_FAILED: 7,
-  MIGRATION_FILE_NOT_FOUND: 8,
-  NOT_APPLIED: 9,
-  LOCK_LOST: 10,
-  RUN_ABORTED: 11,
-  HOOK_FAILED: 12,
-  MIGRATION_IRREVERSIBLE: 13,
-  MIGRATION_TIMEOUT: 14,
-  TRANSACTIONS_UNSUPPORTED: 15,
-};
+const { EXIT_CODES } = require('./exit-codes.js');
 
 /** The exit code for a failure — see {@link EXIT_CODES} */
 function exitCodeFor(error) {
@@ -78,6 +59,10 @@ function attachSignalHandlers(migrator, spinner, logger) {
     const handler = () => {
       if (stopping) {
         spinner?.stop();
+        // process.exit(), not exitCode: the operator pressed twice — an
+        // immediate abort is exactly what they asked for, and the output
+        // truncation bin/migronaut.js avoids on the graceful path is the
+        // accepted cost here.
         process.exit(SIGNAL_EXIT_CODES[signal]);
       }
       stopping = true;
@@ -87,6 +72,30 @@ function attachSignalHandlers(migrator, spinner, logger) {
           'Press again to exit immediately.',
       );
       migrator.stop(`Received ${signal}`);
+    };
+    process.on(signal, handler);
+    handlers.push([signal, handler]);
+  }
+  return () => {
+    for (const [signal, handler] of handlers) process.off(signal, handler);
+  };
+}
+
+/**
+ * Minimal signal handling for read-only commands: clear the spinner's frame,
+ * then re-deliver the signal to Node's default handler (exit). Without this,
+ * Ctrl-C during "Connecting to MongoDB…" leaves a partial frame the shell
+ * prompt then overwrites messily. No graceful-stop promise here — a read-only
+ * command has nothing to finish.
+ */
+function attachCleanupHandlers(spinner) {
+  if (!spinner) return () => undefined;
+  const handlers = [];
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    const handler = () => {
+      spinner.stop();
+      process.off(signal, handler);
+      process.kill(process.pid, signal);
     };
     process.on(signal, handler);
     handlers.push([signal, handler]);
@@ -164,13 +173,19 @@ async function withMigrator(opts, fn, options = {}) {
   const spinner = options.spinner && !json && level === 'info' ? createSpinner() : undefined;
 
   const partial = partialFromOpts(opts);
-  // Always inject the CLI logger: core's lines get the right stream and level,
-  // and while a spinner is active they interrupt it instead of colliding.
-  const baseLogger = createLogger(json ? process.stderr : process.stdout, level);
-  partial.logger = spinner ? spinnerAwareLogger(baseLogger, spinner) : baseLogger;
+  // One level-aware logger per invocation (defineCommand hands its own in so
+  // preflight and run render identically); while a spinner is active every
+  // line interrupts it instead of colliding.
+  const baseLogger =
+    options.baseLogger ?? createLogger(json ? process.stderr : process.stdout, level);
+  const cliLogger = spinner ? spinnerAwareLogger(baseLogger, spinner) : baseLogger;
 
   const migratorOptions = {
     ...(opts.config ? { configPath: opts.config } : {}),
+    // A *fallback*, not an override: a `logger` in the user's config file
+    // (pino, or `null` for silence) wins over the CLI's console logger — the
+    // README documents that pattern, and clobbering it silently broke it.
+    fallbackLogger: cliLogger,
   };
   if (spinner) {
     const reporter = {
@@ -185,14 +200,16 @@ async function withMigrator(opts, fn, options = {}) {
   const migrator = new MigratorKit(partial, migratorOptions);
   // Human-facing logger for withMigrator's own messages and command rendering;
   // stderr in JSON mode. Errors survive --quiet: silencing a failure is never
-  // what an operator meant.
-  const logger = partial.logger;
+  // what an operator meant. Command output stays on the CLI logger even when
+  // the config supplies its own — a table or error is what the operator asked
+  // this invocation for, not a line for the app's structured sink.
+  const logger = cliLogger;
   // Graceful-stop handlers only make sense for a command that runs migrations;
-  // on a read-only command the first Ctrl-C should just exit (Node's default),
-  // not promise to "finish the current migration".
+  // a read-only command gets a minimal handler that clears the spinner (a
+  // stray frame otherwise survives Node's default exit) and re-raises.
   const detachSignals = options.mutating
     ? attachSignalHandlers(migrator, spinner, logger)
-    : () => undefined;
+    : attachCleanupHandlers(spinner);
   try {
     // Pre-connect is cosmetic (early spinner + early failure): every kit
     // method connects on its own. `connect: false` opts out — `audit` reports
@@ -265,10 +282,15 @@ function defineCommand(program, spec) {
   const command = program.command(spec.name).description(spec.description);
   for (const [arg, help] of spec.args ?? []) command.argument(arg, help);
   for (const [flags, help] of spec.options ?? []) command.option(flags, help);
+  // `lockable: true` declares the option AND computes the inversion once —
+  // the `--no-x` flag arriving as `opts.lock === false` is subtle enough that
+  // a per-command copy will eventually get it wrong.
+  if (spec.lockable) command.option('--no-lock', 'Skip the concurrency lock (dev only)');
   command.action(async (...actionArgs) => {
     const invoked = actionArgs[actionArgs.length - 1];
     const positionals = actionArgs.slice(0, -2);
     const opts = invoked.optsWithGlobals();
+    if (spec.lockable) opts.noLock = opts.lock === false;
     const json = spec.jsonOutput === false ? false : Boolean(opts.json);
     const verbose = opts.verbose ?? false;
     const logger = createLogger(json ? process.stderr : process.stdout, resolveLevel(opts));
@@ -295,6 +317,9 @@ function defineCommand(program, spec) {
       },
       {
         spinner: spec.spinner ?? true,
+        // The preflight logger is reused inside, so a warning printed before
+        // the run and one printed during it render identically.
+        baseLogger: logger,
         ...(spec.connect !== undefined ? { connect: spec.connect } : {}),
         ...(spec.mutating ? { mutating: true } : {}),
         ...(json ? { json: true } : {}),
@@ -311,5 +336,8 @@ module.exports = {
   confirm,
   defineCommand,
   reportError,
+  exitCodeFor,
+  resolveLevel,
+  attachSignalHandlers,
   EXIT_CODES,
 };

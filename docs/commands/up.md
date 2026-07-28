@@ -86,7 +86,7 @@ Use `--step` when you want to peel migrations off individually later with
 ## Re-running an applied migration
 
 By default an already-applied file is skipped. `--force` re-runs its `up()` and re-records it as a new
-batch. It requires a specific file (a bare `migronaut up --force` exits 1) and asks for `y/N` confirmation
+batch. It requires a specific file (a bare `migronaut up --force` exits 6) and asks for `y/N` confirmation
 first — pass `--yes` to confirm non-interactively:
 
 ```bash

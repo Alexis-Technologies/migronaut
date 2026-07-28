@@ -47,7 +47,7 @@ npx migronaut init --ts     # → migronaut.config.ts
 ```
 
 ```bash [JSON]
-npx migronaut init --json   # → migronaut.config.json
+npx migronaut init --format json   # → migronaut.config.json
 ```
 
 :::

@@ -45,6 +45,47 @@ describe('changelog indexes (integration)', () => {
     assert.strictEqual(byName.get('name_unique')?.unique, true);
     assert.deepStrictEqual(byName.get('status_batch')?.key, { status: 1, batch: -1 });
     assert.deepStrictEqual(byName.get('batch')?.key, { batch: 1 });
+    assert.deepStrictEqual(byName.get('status_appliedAt_name')?.key, {
+      status: 1,
+      appliedAt: -1,
+      name: -1,
+    });
+  });
+
+  it('should serve the newest-applied lookup from an index, not a blocking sort', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const kit = migrator();
+    await kit.up();
+    await kit.disconnect();
+
+    // The exact query shape of getNewestApplied (redo) and getLastAppliedN
+    // (down --steps): without the status_appliedAt_name index the server
+    // fetches every applied record and runs an in-memory SORT stage.
+    const plan = await mongo.db
+      .collection('_migronaut_migrations')
+      .find({ status: 'applied' })
+      .sort({ appliedAt: -1, name: -1 })
+      .limit(1)
+      .explain();
+    assert.ok(!JSON.stringify(plan.queryPlanner.winningPlan).includes('"SORT"'));
+  });
+
+  it('should push the down --to selection onto the status_name index', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const kit = migrator();
+    await kit.up();
+    await kit.disconnect();
+
+    // The exact query shape of getAppliedAfter: predicate and order both
+    // covered — no client-side filter over the full applied history.
+    const plan = await mongo.db
+      .collection('_migronaut_migrations')
+      .find({ status: 'applied', name: { $gt: '0001-a.ts' } })
+      .sort({ name: 1 })
+      .explain();
+    const winning = JSON.stringify(plan.queryPlanner.winningPlan);
+    assert.ok(!winning.includes('"SORT"'));
+    assert.ok(!winning.includes('COLLSCAN'));
   });
 
   it('should serve the highest-batch lookup from an index, not a collection scan', async () => {

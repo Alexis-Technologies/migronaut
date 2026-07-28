@@ -113,9 +113,22 @@ one-argument logger keeps working unchanged.
 stored on every changelog record that run writes, so a leftover lock can be
 traced to the exact migrations it was holding.
 
+::: tip Connection timeout
+The driver waits up to 30 s (its default `serverSelectionTimeoutMS`) before a
+connection failure surfaces — a long time for a boot-time `runMigrations` or a
+serverless cold start. Tighten it via `clientOptions`:
+
+```js
+clientOptions: { serverSelectionTimeoutMS: 5000 }
+```
+:::
+
 ## Environment variables
 
-Every core option has an `MIGRONAUT_*` variable. These **override the config file**:
+Every core *scalar* option has an `MIGRONAUT_*` variable. These **override the
+config file**. The rest (`fileExtensions`, `templatePath`, `timeoutMs`,
+`ensureIndexes`, `onLockLost`, `reloadMigrations`, `clientOptions` and the live
+instances) are config-file-only:
 
 | Env var | Maps to |
 |---|---|
@@ -135,9 +148,10 @@ Every core option has an `MIGRONAUT_*` variable. These **override the config fil
 `.env` is loaded from the working directory before env vars are read. Point
 elsewhere with `--env-file <path>` (or `MIGRONAUT_ENV_FILE`), or skip it
 entirely with `--no-env` / `envFile: false` — worth doing in CI, so a stray
-`.env` cannot silently outrank a committed config. Loading works — natively via `util.parseEnv` on
-Node ≥ 20.12, with a built-in fallback parser on older Node (migronaut has zero runtime
-dependencies). Real environment variables always win over `.env` values. Supported syntax: one
+`.env` cannot silently outrank a committed config. Loading uses Node's native
+`util.parseEnv` — always present on the supported Node range (≥ 22.18), no dependency needed.
+Real environment variables always win over `.env` values. Files above 1 MB (or anything that is
+not a regular file) are rejected with `CONFIG_INVALID`. Supported syntax: one
 `KEY=VALUE` per line, optional `export ` prefix, matching quotes, full-line and inline `#`
 comments; multiline values, `\n` expansion and `${VAR}` interpolation are not supported.
 

@@ -1,4 +1,5 @@
 const { createColors } = require('./colors.js');
+const { sanitizeTerminal } = require('./sanitize.js');
 
 /** Severity order, used to drop messages below the configured level */
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
@@ -34,11 +35,18 @@ function createLogger(stream = process.stdout, level = 'info') {
     process.stderr.write(`${msg}\n`);
   };
   const at = (name, write) => (LEVELS[name] >= threshold ? write : () => {});
+  // Sanitized by construction: messages routinely embed migration names and
+  // lock-holder fields — values anyone with DB write access can influence —
+  // and no individual call site should have to remember terminal-escape
+  // hygiene. SGR color codes (migronaut's own table/level styling) survive;
+  // cursor movement and screen clearing do not. User-injected loggers are
+  // exempt (their sink is not necessarily a terminal) — this is the default
+  // terminal logger only.
   return {
-    debug: at('debug', (msg) => writeOut(outColors.dim(msg))),
-    info: at('info', (msg) => writeOut(msg)),
-    warn: at('warn', (msg) => writeErr(errColors.yellow(msg))),
-    error: at('error', (msg) => writeErr(errColors.red(msg))),
+    debug: at('debug', (msg) => writeOut(outColors.dim(sanitizeTerminal(msg)))),
+    info: at('info', (msg) => writeOut(sanitizeTerminal(msg))),
+    warn: at('warn', (msg) => writeErr(errColors.yellow(sanitizeTerminal(msg)))),
+    error: at('error', (msg) => writeErr(errColors.red(sanitizeTerminal(msg)))),
   };
 }
 

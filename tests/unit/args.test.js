@@ -227,6 +227,19 @@ describe('Command error handling', () => {
     const program = new Command();
     assert.throws(() => program.option('!!bad!!'), TypeError);
   });
+
+  it('should accept a negative number as an option value', async () => {
+    // `--steps -1` must reach the command (whose validator rejects it with an
+    // actionable message), not die in the parser as "argument missing".
+    let seen;
+    await parse(
+      buildFixture((_name, { opts }) => {
+        seen = opts.steps;
+      }),
+      ['up', '--steps', '-1'],
+    );
+    assert.strictEqual(seen, '-1');
+  });
 });
 
 describe('Command help and version', () => {
@@ -262,6 +275,22 @@ describe('Command help and version', () => {
     assert.ok(help.includes('Usage: fixture up [options] [file]'));
     assert.ok(help.includes('--no-lock'));
     assert.ok(help.includes('-f, --force'));
+  });
+
+  it('should short-circuit on --help even when a later token is invalid', async () => {
+    // A user who mistyped a flag and appended --help to find out what went
+    // wrong must get the help, not another parse error.
+    const out = [];
+    mock.method(process.stdout, 'write', (chunk) => {
+      out.push(chunk);
+      return true;
+    });
+    await parse(
+      buildFixture(() => {}),
+      ['up', '--help', '--bogus'],
+    );
+    assert.ok(out.join('').includes('Usage: fixture up [options] [file]'));
+    assert.strictEqual(process.exitCode, undefined);
   });
 
   it('should print the version on --version and -V', async () => {

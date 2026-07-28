@@ -35,7 +35,7 @@ const jsonLd = {
   alternateName: 'migronaut',
   description: ogDescription,
   applicationCategory: 'DeveloperApplication',
-  operatingSystem: 'Node.js >= 18',
+  operatingSystem: 'Node.js >= 22.18',
   url: hostname,
   downloadUrl: 'https://www.npmjs.com/package/@alexify/migronaut',
   codeRepository: repo,

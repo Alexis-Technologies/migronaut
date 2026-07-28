@@ -61,8 +61,8 @@ loader is registered. `migronaut` runs under your Node and does not bundle a loa
 **Fix:** any one of:
 - **Upgrade to Node ≥ 22.18** — `.ts` then loads natively, no setup.
 - **Register a loader:** install `tsx` and run migronaut under it, e.g.
-  `node --import tsx node_modules/migronaut/dist/migronaut.cjs up`.
-- **Use `.js` instead** (`migronaut create <name> --js`) — runs on Node 18+ with zero setup.
+  `node --import tsx node_modules/@alexify/migronaut/bin/migronaut.js up`.
+- **Use `.js` instead** (`migronaut create <name> --js`) — runs with zero setup on any supported Node.
 
 See [Running TypeScript migrations](/guide/writing-migrations#running-typescript-migrations) for the
 full breakdown.

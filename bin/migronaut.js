@@ -17,6 +17,15 @@ process.on('unhandledRejection', (error) => {
   process.exitCode = 1;
 });
 
+// A synchronous throw (signal handler, timer callback) bypasses the promise
+// chain — without this, Node prints a raw stack, the one output path that
+// skips errorText's URI redaction. exit(1), not exitCode: after an uncaught
+// throw the process state is not trustworthy enough to keep draining.
+process.on('uncaughtException', (error) => {
+  process.stderr.write(`✖ ${errorText(error)}\n`);
+  process.exit(1);
+});
+
 const { run } = require('../src/cli/index.js');
 
 run(process.argv).catch((error) => {

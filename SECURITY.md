@@ -33,7 +33,10 @@ Some things are working as intended, and are not vulnerabilities:
 - **Config and migration files execute.** `migronaut.config.{ts,js}` and every
   migration file are `import()`ed and run. Running migronaut inside an untrusted
   checkout executes that checkout's code, exactly as `eslint`, `vite` or `jest`
-  would. Do not run it against a repository you have not reviewed.
+  would. Do not run it against a repository you have not reviewed. The same
+  applies to `--config <path>` and to a `.env` file in the working directory:
+  both are trusted input, same as any `node -r` — migration *names* get a
+  path-traversal guard, but the config file you point at is yours to vet.
 - **Checksums detect drift, not tampering.** The SHA-256 recorded for each
   applied migration catches a file edited after the fact. It is not a signature:
   anyone who can write to the changelog collection can also rewrite the

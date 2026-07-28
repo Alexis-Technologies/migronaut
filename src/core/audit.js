@@ -2,7 +2,13 @@ const { errorText } = require('../utils/error.js');
 const { toLockInfo } = require('./lock.js');
 
 /** Changelog indexes ensureIndexes() creates — audit warns when any is absent */
-const EXPECTED_INDEXES = ['name_unique', 'status_batch', 'batch', 'status_name'];
+const EXPECTED_INDEXES = [
+  'name_unique',
+  'status_batch',
+  'batch',
+  'status_name',
+  'status_appliedAt_name',
+];
 
 /**
  * Read-only health check of the setup: configuration, connectivity,

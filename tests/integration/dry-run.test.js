@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
-const { ConfigInvalidError } = require('../../src/errors/index.js');
+const { ConfigInvalidError, IrreversibleMigrationError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
@@ -80,6 +80,36 @@ describe('MigratorKit.dryRun (integration)', () => {
   it('should reject dry-run down --steps combined with a filename', async () => {
     setup();
     await assert.rejects(migrator.dryRun('down', '0001-a.ts', { steps: 1 }), ConfigInvalidError);
+  });
+
+  it('should refuse to preview a rollback of a migrate-mongo-imported record', async () => {
+    setup();
+    // The preview must fail exactly the way the real `down` does — it used to
+    // hand-roll its own selection and happily list forward-only records.
+    await mongo.db.collection('_migronaut_migrations').insertOne({
+      name: '20200101000000-legacy.js',
+      batch: 1,
+      status: 'applied',
+      appliedAt: new Date(),
+      origin: 'migrate-mongo',
+    });
+    await assert.rejects(migrator.dryRun('down'), IrreversibleMigrationError);
+    await assert.rejects(migrator.dryRun('down', undefined, { steps: 1 }), (error) => {
+      assert.ok(error instanceof IrreversibleMigrationError);
+      return true;
+    });
+  });
+
+  it('should preview a batch rollback in revert order, matching the real down', async () => {
+    setup();
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    await migrator.up();
+    const rows = await migrator.dryRun('down');
+    assert.deepStrictEqual(
+      rows.map((r) => r.file),
+      ['0002-b.ts', '0001-a.ts'],
+    );
   });
 
   it('should leave DB state unchanged after a dry-run', async () => {

@@ -4,7 +4,12 @@ const { LOCK_ID, MigrationLock, runWithLock } = require('../../src/core/lock.js'
 const { HookFailedError, LockLostError, RunAbortedError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { startTestMongo } = require('../helpers/mongo.js');
-const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
+const {
+  failingMigration,
+  insertMigration,
+  makeMigrator,
+  makeProject,
+} = require('../helpers/project.js');
 
 let mongo;
 const DB = 'migronaut_resilience_test';
@@ -232,6 +237,26 @@ describe('MigratorKit.stop (integration)', () => {
     assert.doesNotThrow(() => kit.stop());
     await kit.disconnect();
   });
+
+  it('should not let a stop from a finished run abort a later one', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    const kit = migrator();
+    try {
+      await kit.up('0001-a.ts');
+      // A stop that lands between runs (e.g. racing the previous run's
+      // teardown) is aimed at that run — it must not poison an unrelated
+      // up() later.
+      kit.stop('stale stop');
+      const results = await kit.up();
+      assert.deepStrictEqual(
+        results.map((r) => r.file),
+        ['0002-b.ts'],
+      );
+    } finally {
+      await kit.disconnect();
+    }
+  });
 });
 
 describe('hook guarantees (integration)', () => {
@@ -251,6 +276,47 @@ describe('hook guarantees (integration)', () => {
     await assert.rejects(kit.up());
     await kit.disconnect();
     assert.deepStrictEqual(calls, ['beforeAll', 'afterAll:false']);
+  });
+
+  it('should not let a throwing afterAll mask the migration failure', async () => {
+    project.write('0001-bad.ts', failingMigration());
+    const kit = migrator({
+      hooks: {
+        afterAll: async () => {
+          throw new Error('slack notification failed');
+        },
+      },
+    });
+    try {
+      // The caller must see the migration failure (with its partial results),
+      // not the notification hook's own trouble.
+      await assert.rejects(kit.up(), (error) => {
+        assert.strictEqual(error.code, 'MIGRATION_EXECUTION_FAILED');
+        assert.ok(Array.isArray(error.context.results));
+        return true;
+      });
+    } finally {
+      await kit.disconnect();
+    }
+  });
+
+  it('should still surface a throwing afterAll when the run itself succeeded', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const kit = migrator({
+      hooks: {
+        afterAll: async () => {
+          throw new Error('cleanup failed');
+        },
+      },
+    });
+    try {
+      await assert.rejects(kit.up(), (error) => {
+        assert.ok(error instanceof HookFailedError);
+        return true;
+      });
+    } finally {
+      await kit.disconnect();
+    }
   });
 
   it('should report success and the applied count to afterAll', async () => {

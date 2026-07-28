@@ -300,6 +300,39 @@ describe('loadConfig', () => {
     await assert.rejects(loadConfig({ cwd: tmp }), ConfigInvalidError);
   });
 
+  it('should wrap a malformed JSON config in ConfigInvalidError, not a bare SyntaxError', async () => {
+    writeFileSync(path.join(tmp, 'migronaut.config.json'), '{"uri": "mongodb://x:27017",}');
+    await assert.rejects(loadConfig({ cwd: tmp }), (error) => {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.strictEqual(typeof error.context.cause, 'string');
+      return true;
+    });
+  });
+
+  it('should wrap a config file that throws at module evaluation in ConfigInvalidError', async () => {
+    writeFileSync(
+      path.join(tmp, 'migronaut.config.js'),
+      "throw new Error('top-level explosion');\n",
+    );
+    await assert.rejects(loadConfig({ cwd: tmp }), ConfigInvalidError);
+  });
+
+  it('should degrade a module-evaluation failure to a warning when lenient', async () => {
+    writeFileSync(
+      path.join(tmp, 'migronaut.config.js'),
+      "throw new Error('top-level explosion');\n",
+    );
+    // Same contract as a throwing factory: offline commands (`create`) keep
+    // working from env/flags/defaults instead of failing on the broken file.
+    const config = await loadConfig({
+      cwd: tmp,
+      lenient: true,
+      requireDb: false,
+      flags: { logger: null },
+    });
+    assert.strictEqual(config.migrationsDir, DEFAULT_CONFIG.migrationsDir);
+  });
+
   it('should load env vars from a .env file', async () => {
     writeFileSync(
       path.join(tmp, '.env'),
@@ -460,5 +493,22 @@ describe('envFile control', () => {
 
   it('should reject an envFile that is neither a string nor false', () => {
     assert.strictEqual(validateConfig(validConfig({ envFile: 42 })).length, 1);
+  });
+
+  it('should reject a non-string envFile through loadConfig with a typed error', async () => {
+    // path.resolve on a non-string used to throw a raw TypeError before
+    // validateConfig ever ran — the config contract promises ConfigInvalidError.
+    for (const value of [true, 42, ['x']]) {
+      await assert.rejects(
+        loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x', envFile: value } }),
+        (error) => {
+          assert.ok(error instanceof ConfigInvalidError);
+          assert.deepStrictEqual(error.context.issues, [
+            { path: 'envFile', message: 'must be a non-empty string or false' },
+          ]);
+          return true;
+        },
+      );
+    }
   });
 });

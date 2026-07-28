@@ -21,9 +21,11 @@ class Changelog {
    *
    * Beyond the unique `name` index: `{status, batch}` serves the highest-batch
    * lookups (which would otherwise be a blocking in-memory sort, capped at
-   * 32 MB), `{batch}` serves rollback by batch, and `{status, name}` makes the
+   * 32 MB), `{batch}` serves rollback by batch, `{status, name}` makes the
    * hottest query of all — the applied set, sorted by name, read on every
-   * `up`/`status`/health check — a covered, sort-free index scan.
+   * `up`/`status`/health check — a covered, sort-free index scan, and
+   * `{status, appliedAt, name}` does the same for the newest-first ordering
+   * that `redo` and `down --steps` sort by.
    */
   async ensureIndexes(db) {
     await this.#coll(db).createIndexes([
@@ -31,6 +33,7 @@ class Changelog {
       { key: { status: 1, batch: -1 }, name: 'status_batch' },
       { key: { batch: 1 }, name: 'batch' },
       { key: { status: 1, name: 1 }, name: 'status_name' },
+      { key: { status: 1, appliedAt: -1, name: -1 }, name: 'status_appliedAt_name' },
     ]);
   }
 
@@ -97,6 +100,32 @@ class Changelog {
     return this.#coll(db).find({ status: 'applied' }).sort({ name: 1 }).toArray();
   }
 
+  /**
+   * The last N applied records, newest first (by `appliedAt`, name-desc
+   * tiebreak) — the server-side counterpart of `down --steps`. A covered
+   * sort+limit on the `status_appliedAt_name` index: never the whole applied
+   * history transferred and re-sorted client-side just to slice N.
+   */
+  async getLastAppliedN(db, n) {
+    return this.#coll(db)
+      .find({ status: 'applied' })
+      .sort({ appliedAt: -1, name: -1 })
+      .limit(n)
+      .toArray();
+  }
+
+  /**
+   * Applied records named strictly after `name`, ascending — what `down --to`
+   * reverts. The predicate is pushed down onto the `status_name` index instead
+   * of filtering the full applied history in JS.
+   */
+  async getAppliedAfter(db, name) {
+    return this.#coll(db)
+      .find({ status: 'applied', name: { $gt: name } })
+      .sort({ name: 1 })
+      .toArray();
+  }
+
   /** Return the highest batch number among currently-applied migrations, or null */
   async getLastBatch(db) {
     const docs = await this.#coll(db)
@@ -154,13 +183,44 @@ class Changelog {
   }
 
   /**
+   * Bulk counterpart of {@link markApplied}: one unordered bulkWrite instead of
+   * one round trip per record. Identical upsert-on-name semantics; the
+   * operations are independent (unique `name` keys), so unordered is safe and
+   * lets the server parallelize. Used by `import`, whose record count is set by
+   * whatever legacy changelog is being adopted.
+   */
+  async markAppliedBulk(db, records) {
+    if (records.length === 0) return;
+    const ops = new Array(records.length);
+    for (let i = 0; i < records.length; i++) {
+      const { name, ...fields } = records[i];
+      ops[i] = {
+        updateOne: {
+          filter: { name },
+          update: {
+            $set: fields,
+            $setOnInsert: { firstAppliedAt: records[i].appliedAt },
+            $unset: { revertedAt: '' },
+          },
+          upsert: true,
+        },
+      };
+    }
+    await this.#coll(db).bulkWrite(ops, { ordered: false });
+  }
+
+  /**
    * Mark a migration as reverted. Sets `status='reverted'` and `revertedAt=now`.
    * Never deletes the record — preserves the full audit history.
    *
    * Pass `session` to commit this together with the migration's `down()`.
+   *
+   * Returns the driver's update result: `matchedCount === 0` means the record
+   * was no longer `'applied'` (a concurrent peer got there first) — the caller
+   * decides what to do with that, since this module stays logger-free.
    */
   async markReverted(db, name, session) {
-    await this.#coll(db).updateOne(
+    return this.#coll(db).updateOne(
       { name, status: 'applied' },
       { $set: { status: 'reverted', revertedAt: new Date() } },
       session ? { session } : {},

@@ -62,6 +62,8 @@ describe('runMigrations (programmatic entry point)', () => {
     );
     assert.strictEqual(summary.upToDate, false);
     assert.strictEqual(summary.waited, false);
+    assert.strictEqual(summary.waitedMs, 0);
+    assert.strictEqual(summary.attempts, 1);
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 2);
   });
 
@@ -121,6 +123,9 @@ describe('runMigrations (programmatic entry point)', () => {
     ]);
 
     assert.strictEqual(summary.waited, true);
+    // The wait is observable, not just a boolean: how long and how many polls.
+    assert.ok(summary.waitedMs > 0);
+    assert.ok(summary.attempts >= 2);
     assert.deepStrictEqual(
       summary.applied.map((r) => r.status),
       ['applied'],

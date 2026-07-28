@@ -1,7 +1,10 @@
 const assert = require('node:assert/strict');
 const { describe, it, mock } = require('node:test');
 const { runMigration } = require('../../src/core/runner.js');
-const { MigrationExecutionFailedError } = require('../../src/errors/index.js');
+const {
+  MigrationExecutionFailedError,
+  MigrationTimeoutError,
+} = require('../../src/errors/index.js');
 
 function makeContext() {
   // withTransaction is the driver's retry-aware wrapper: it runs the body,
@@ -193,6 +196,41 @@ describe('runMigration', () => {
     );
     assert.strictEqual(warn.mock.callCount(), 1);
     assert.match(warn.mock.calls[0].arguments[0], /onError hook failed/);
+  });
+
+  it('should not surface an unhandledRejection when a timed-out body later rejects', async () => {
+    const { context, session } = makeContext();
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      let rejectLater;
+      const migration = {
+        up: mock.fn(() => new Promise((_resolve, reject) => (rejectLater = reject))),
+        down: mock.fn(),
+      };
+      await assert.rejects(
+        runMigration({
+          name: 'slow.ts',
+          migration,
+          direction: 'up',
+          context,
+          useTransaction: true,
+          timeoutMs: 20,
+        }),
+        MigrationTimeoutError,
+      );
+      // The session is already ended (finally block) while the body still
+      // runs — its late rejection mirrors the MongoExpiredSessionError case
+      // and must be swallowed, not escalated to the process.
+      assert.strictEqual(session.endSession.mock.callCount(), 1);
+      rejectLater(new Error('post-timeout failure'));
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepStrictEqual(unhandled, []);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('should wrap a non-Error throw in MigrationExecutionFailedError', async () => {

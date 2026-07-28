@@ -10,7 +10,6 @@ function registerCreate(program) {
       ['--js', 'Force a .js file (overrides config createExtension)'],
       ['--ts', 'Force a .ts file (overrides config createExtension)'],
       ['--template <path>', 'Use a custom template file'],
-      ['--json', 'Output machine-readable JSON ({ path })'],
     ],
     // Writing a file needs no database — no spinner, no pre-connect.
     spinner: false,
@@ -23,8 +22,7 @@ function registerCreate(program) {
       });
       return { path };
     },
-    // Human mode: core already logs "✔ Created …" — nothing extra to render.
-    render: () => undefined,
+    // No render: core already logs "✔ Created …" itself.
   });
 }
 

@@ -217,8 +217,44 @@ describe('lifecycle events (integration)', () => {
     await kit.disconnect();
 
     assert.strictEqual(seen[0].migration, '0001-bad.ts');
-    assert.ok(seen[0].error);
+    // A redacted string, never the raw Error: a driver message can echo the
+    // credentialed URI, and subscribers ship this payload as-is.
+    assert.strictEqual(typeof seen[0].error, 'string');
     assert.strictEqual(seen[1].success, false);
+    assert.strictEqual(typeof seen[1].error, 'string');
+    // The failure path still reports counts — "how far did it get?" is
+    // exactly the question when success is false.
+    assert.strictEqual(seen[1].total, 1);
+    assert.strictEqual(seen[1].applied, 0);
+  });
+
+  it('should count the migrations that landed before a mid-run failure', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-bad.ts', failingMigration());
+    const kit = migrator();
+    let end;
+    kit.on('run:end', (event) => (end = event));
+
+    await assert.rejects(kit.up());
+    await kit.disconnect();
+
+    assert.strictEqual(end.success, false);
+    assert.strictEqual(end.applied, 1);
+    assert.strictEqual(end.total, 2);
+  });
+
+  it('should carry ttlMs and acquireMs on lock:acquired and owner on lock events', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const kit = migrator();
+    let acquired;
+    kit.on('lock:acquired', (event) => (acquired = event));
+
+    await kit.up();
+    await kit.disconnect();
+
+    assert.strictEqual(acquired.ttlMs, 60_000);
+    assert.strictEqual(typeof acquired.acquireMs, 'number');
+    assert.strictEqual(acquired.owner, acquired.runId);
   });
 
   it('should contain a throwing listener rather than failing the run', async () => {

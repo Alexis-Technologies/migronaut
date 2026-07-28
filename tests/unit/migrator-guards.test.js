@@ -60,6 +60,18 @@ describe('MigratorKit filename guards', () => {
   });
 });
 
+describe('MigratorKit list filter guard', () => {
+  // An unknown filter used to silently return [] — indistinguishable from
+  // "no migrations", which is the worst possible answer to a typo.
+  const badFilters = ['reverted', 'Applied', '', 42, null, { $ne: null }];
+
+  for (const value of badFilters) {
+    it(`should reject ${JSON.stringify(value)} as a list() filter`, async () => {
+      await assert.rejects(guardedKit().list(value), ConfigInvalidError);
+    });
+  }
+});
+
 describe('MigratorKit import collection guards', () => {
   const badNames = [
     ['a system collection', 'system.users'],

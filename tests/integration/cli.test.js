@@ -191,7 +191,8 @@ describe('migronaut CLI (integration)', () => {
       'audit',
       '--json',
     ]);
-    assert.strictEqual(result.code, 1);
+    // 22 = AUDIT_FAILED — "a check failed" is distinguishable from a crash.
+    assert.strictEqual(result.code, 22);
     const report = JSON.parse(result.stdout);
     assert.strictEqual(report.ok, false);
     const connection = report.checks.find((check) => check.name === 'connection');
@@ -445,18 +446,37 @@ describe('migronaut CLI (integration)', () => {
     assert.ok(contents.includes("import type { MigronautConfig } from '@alexify/migronaut'"));
   });
 
-  it('should reject init --json --secret-provider as CONFIG_INVALID', async () => {
-    const result = await runCli(['init', '--json', '--secret-provider'], {}, project.dir);
+  it('should reject init --format json --secret-provider as CONFIG_INVALID', async () => {
+    const result = await runCli(['init', '--format', 'json', '--secret-provider'], {}, project.dir);
     // Preflight failures use the same typed envelope as everything else.
     assert.strictEqual(result.code, 6);
     assert.ok(result.stderr.includes('secret-provider'));
     assert.strictEqual(existsSync(path.join(project.dir, 'migronaut.config.json')), false);
   });
 
-  it('should exit 1 when init finds an existing config without --force', async () => {
+  it('should reject a stray init --json with a pointer to --format json', async () => {
+    // `--json` is the global output flag everywhere else; on init it used to
+    // silently mean "generate migronaut.config.json". Refusing loudly beats a
+    // wrapper script uniformly appending --json and getting a committed
+    // artifact in a different format.
+    const result = await runCli(['init', '--json'], {}, project.dir);
+    assert.strictEqual(result.code, 6);
+    assert.ok(result.stderr.includes('--format json'));
+    assert.strictEqual(existsSync(path.join(project.dir, 'migronaut.config.json')), false);
+  });
+
+  it('should generate migronaut.config.json via init --format json', async () => {
+    const result = await runCli(['init', '--format', 'json'], {}, project.dir);
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(existsSync(path.join(project.dir, 'migronaut.config.json')), true);
+  });
+
+  it('should exit 16 when init finds an existing config without --force', async () => {
     await runCli(['init'], {}, project.dir);
     const result = await runCli(['init'], {}, project.dir);
-    assert.strictEqual(result.code, 1);
+    // 16 = CONFIG_FILE_EXISTS: a provisioning script re-running init can tell
+    // "already initialized" from "init crashed" without parsing stderr.
+    assert.strictEqual(result.code, 16);
     assert.ok(result.stderr.includes('CONFIG_FILE_EXISTS'));
   });
 
@@ -539,14 +559,77 @@ describe('migronaut CLI (integration)', () => {
   });
 
   // ── status --check (feature 2) ───────────────────────────────────────────
-  it('should exit 1 from status --check when migrations are pending', async () => {
+  it('should exit 2 from status --check when migrations are pending', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     const pending = await runCli(baseArgs(['status', '--check']));
-    assert.strictEqual(pending.code, 1);
+    // A dedicated code: "database is behind" (act: migrate) must be
+    // distinguishable from "the check itself crashed" (act: page someone).
+    assert.strictEqual(pending.code, 2);
 
     await runCli(baseArgs(['up']));
     const clean = await runCli(baseArgs(['status', '--check']));
     assert.strictEqual(clean.code, 0);
+  });
+
+  it('should never let a crafted migration name emit raw ESC bytes', async () => {
+    // A changelog record is attacker-influenced (anyone with DB write access);
+    // its name reaches status output, which goes straight to a terminal.
+    await mongo.db.collection('_migronaut_migrations').insertOne({
+      name: 'evil-[2J[1;1H-clear.ts',
+      batch: 1,
+      status: 'applied',
+      appliedAt: new Date(),
+      duration: 1,
+      checksum: 'x',
+    });
+    const result = await runCli(baseArgs(['status']));
+    assert.strictEqual(result.code, 0);
+    assert.ok(!result.stdout.includes('[2J'), 'clear-screen must be stripped');
+    assert.ok(!result.stdout.includes('[1;1H'), 'cursor-move must be stripped');
+  });
+
+  it('should respect a logger from the config file instead of clobbering it', async () => {
+    // README documents `logger` in migronaut.config.js; through the CLI it
+    // used to be silently overwritten by the console logger. `logger: null`
+    // is the observable case: core's lines disappear, command output stays.
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    // The config lives in its own cwd, NOT in the migrations dir — a .js file
+    // there would itself be picked up as a (broken) migration.
+    const cwd = path.join(project.dir, 'app');
+    mkdirSync(cwd);
+    writeFileSync(
+      path.join(cwd, 'migronaut.config.js'),
+      `export default { uri: ${JSON.stringify(mongo.uri)}, dbName: ${JSON.stringify(DB)}, ` +
+        `migrationsDir: ${JSON.stringify(project.dir)}, logger: null };\n`,
+    );
+    const result = await runCli(['up'], {}, cwd);
+    assert.strictEqual(result.code, 0);
+    // Core's "✔ Applied" line is silenced by the config's logger: null…
+    assert.ok(!result.stdout.includes('Applied'), 'core lines must honor logger: null');
+    // …but the migration genuinely ran.
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
+  });
+
+  it('should accept --json before the subcommand, like every other global flag', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    // `migronaut --json status` used to fail with "unknown option" while
+    // `--verbose`/`--quiet` worked in both positions.
+    const result = await runCli(['--json', ...baseArgs(['status'])]);
+    assert.strictEqual(result.code, 0);
+    const rows = JSON.parse(result.stdout);
+    assert.strictEqual(rows[0].file, '0001-a.ts');
+  });
+
+  it('should show only the last N rows with status --limit', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    project.write('0003-c.ts', insertMigration('things', 'c'));
+    const result = await runCli(baseArgs(['status', '--limit', '2', '--json']));
+    assert.strictEqual(result.code, 0);
+    assert.deepStrictEqual(
+      JSON.parse(result.stdout).map((row) => row.file),
+      ['0002-b.ts', '0003-c.ts'],
+    );
   });
 
   // ── migronaut unlock (feature 3) ───────────────────────────────────────────────

@@ -420,8 +420,15 @@ describe('isEsmProject', () => {
     assert.strictEqual(await isEsmProject(nested), true);
   });
 
-  it('should default to CommonJS when the manifest is unreadable', async () => {
+  it('should surface a malformed manifest instead of walking past it', async () => {
+    // Silently continuing to the parent would adopt the *grandparent's*
+    // "type" and emit ESM into a CommonJS project — the exact failure this
+    // detection exists to prevent. The broken file is the user's to fix.
     writeFileSync(path.join(tmp, 'package.json'), 'not json at all');
-    assert.strictEqual(await isEsmProject(tmp), false);
+    await assert.rejects(isEsmProject(tmp), (error) => {
+      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      assert.match(error.message, /package\.json/);
+      return true;
+    });
   });
 });

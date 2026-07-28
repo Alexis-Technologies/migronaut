@@ -71,4 +71,37 @@ describe('applyEnvFile', () => {
       delete process.env[key];
     }
   });
+
+  it('should never copy prototype-polluting keys, even into a plain object', async () => {
+    // process.env coerces __proto__ harmlessly, but that is an implementation
+    // detail of process.env — with a plain-object target the assignment would
+    // write through to Object.prototype without the explicit guard.
+    const file = path.join(tmp, '.env');
+    writeFileSync(file, '__proto__=polluted\nconstructor=polluted\nSAFE=ok\n');
+    const env = {};
+    await applyEnvFile(file, env);
+    assert.strictEqual(env.SAFE, 'ok');
+    assert.strictEqual({}.polluted, undefined);
+    assert.ok(!Object.hasOwn(env, '__proto__'));
+    assert.strictEqual(Object.getPrototypeOf(env), Object.prototype);
+    assert.strictEqual(Object.prototype.constructor, Object);
+  });
+
+  it('should reject an oversized env file with a typed error', async () => {
+    const file = path.join(tmp, 'huge.env');
+    writeFileSync(file, `BIG=${'x'.repeat(1024 * 1024 + 1)}\n`);
+    await assert.rejects(applyEnvFile(file, {}), (error) => {
+      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      return true;
+    });
+  });
+
+  it('should reject a non-regular file instead of reading it', async () => {
+    // A directory (like /dev/zero, a device that reports size 0) is not a
+    // .env candidate; reading it would fail confusingly or hang.
+    await assert.rejects(applyEnvFile(tmp, {}), (error) => {
+      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      return true;
+    });
+  });
 });

@@ -185,9 +185,6 @@ class MigrationLock {
   }
 }
 
-/** Consecutive heartbeat errors tolerated before the lock is presumed lost */
-const MAX_RENEW_FAILURES = 3;
-
 /**
  * Run `fn(signal)` while holding the migration lock. The lock is always
  * released in a `finally` block. While `fn` runs, a heartbeat renews the lock
@@ -220,8 +217,11 @@ async function runWithLock(lock, options, fn) {
     }
   }
 
+  const acquireStart = Date.now();
   await lock.acquire(options.owner);
-  options.onLockAcquired?.();
+  // ttlMs and the acquisition latency give a subscriber enough to alert on
+  // ("acquire took 4s — the lock collection is contended") without a log parse.
+  options.onLockAcquired?.({ ttlMs: lock.ttlMs, acquireMs: Date.now() - acquireStart });
 
   const abortOnLoss = (options.onLockLost ?? 'abort') === 'abort';
   const loseLock = (reason) => {
@@ -246,12 +246,12 @@ async function runWithLock(lock, options, fn) {
   let consecutiveFailures = 0;
   let stopped = false;
 
-  // Hard deadline, independent of the failure counter: failures may be
-  // tolerated only while the lock cannot be reclaimed yet. Counting 3 misses
-  // at ttl/2 spacing tolerates 1.5×TTL — but the lock goes stale-reclaimable
-  // at 1×TTL, leaving a window where this run keeps migrating while a peer
-  // acquires. The deadline aborts strictly before that window opens; each
-  // successful renewal re-arms it.
+  // The hard deadline is the single failure escalation: renewal errors are
+  // tolerated (warned about below) exactly as long as the lock cannot be
+  // reclaimed yet. The lock goes stale-reclaimable at 1×TTL — the deadline
+  // aborts strictly before that window opens, and each successful renewal
+  // re-arms it. (A consecutive-failure counter used to sit alongside this,
+  // but firing at 1.5×TTL it could mathematically never beat the deadline.)
   const deadlineMarginMs = Math.min(Math.floor(intervalMs / 2), 5000);
   let deadline;
   const armDeadline = () => {
@@ -268,8 +268,15 @@ async function runWithLock(lock, options, fn) {
 
   // Tracked so the caller never returns with a renewal still in flight: a
   // stray query landing after disconnect() fails against a closed client.
+  // `pending` guards re-entrancy — when the DB is slow enough that a renewal
+  // spans a whole interval (the exact condition the heartbeat exists to
+  // survive), overlapping ticks would otherwise overwrite `inFlight` and let
+  // an earlier, still-unsettled renewal escape the final await.
   let inFlight;
+  let pending = false;
   const heartbeat = setInterval(() => {
+    if (pending) return;
+    pending = true;
     inFlight = lock
       .renew()
       .then((held) => {
@@ -284,21 +291,20 @@ async function runWithLock(lock, options, fn) {
       })
       .catch((error) => {
         if (stopped) return;
-        // A failing renewal may just be a blip, so tolerate a few in a row
-        // before concluding the lock is gone (the deadline above still caps
-        // the tolerance at the TTL).
+        // A failing renewal may just be a blip and is only warned about here.
+        // The TTL deadline (armDeadline above) is the sole escalation: it
+        // fires strictly before the lock becomes stale-reclaimable, so
+        // failures are tolerated exactly as long as they are harmless.
         consecutiveFailures += 1;
         const message = errorText(error);
-        options.logger.warn(
-          `⚠ Lock renewal failed (${consecutiveFailures}/${MAX_RENEW_FAILURES}): ${message}`,
-          {
-            event: 'lock:renew-failed',
-            consecutiveFailures,
-            maxRenewFailures: MAX_RENEW_FAILURES,
-            error: message,
-          },
-        );
-        if (consecutiveFailures >= MAX_RENEW_FAILURES) loseLock('renewal kept failing');
+        options.logger.warn(`⚠ Lock renewal failed (${consecutiveFailures} in a row): ${message}`, {
+          event: 'lock:renew-failed',
+          consecutiveFailures,
+          error: message,
+        });
+      })
+      .finally(() => {
+        pending = false;
       });
   }, intervalMs);
   heartbeat.unref?.();
@@ -339,4 +345,4 @@ async function runWithLock(lock, options, fn) {
   return result;
 }
 
-module.exports = { LOCK_ID, MAX_RENEW_FAILURES, MigrationLock, runWithLock, toLockInfo };
+module.exports = { LOCK_ID, MigrationLock, runWithLock, toLockInfo };

@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+// (table width budget tests stub process.stdout below)
 const { describe, it } = require('node:test');
 const {
   charWidth,
@@ -220,5 +221,47 @@ describe('control-character sanitization', () => {
     // Truncation happens on the stripped text, so no dangling color state.
     assert.ok(!cut.includes('\x1b'));
     assert.ok(visibleWidth(cut) <= 8);
+  });
+});
+
+describe('terminal width budget', () => {
+  const longName = `${'a'.repeat(70)}.ts`;
+  const row = {
+    file: longName,
+    status: 'applied',
+    batch: 1,
+    appliedAt: new Date('2024-01-01T12:00:00Z'),
+    duration: 5,
+    checksumOk: true,
+  };
+
+  /** Render with process.stdout temporarily reporting a TTY of `columns` */
+  function renderAt(columns) {
+    const hadTty = process.stdout.isTTY;
+    const hadColumns = process.stdout.columns;
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    Object.defineProperty(process.stdout, 'columns', { value: columns, configurable: true });
+    try {
+      return renderStatusTable([row]);
+    } finally {
+      Object.defineProperty(process.stdout, 'isTTY', { value: hadTty, configurable: true });
+      Object.defineProperty(process.stdout, 'columns', { value: hadColumns, configurable: true });
+    }
+  }
+
+  it('should shrink the migration column so rows fit an 80-column terminal', () => {
+    // Without the budget, a 70-char name plus the fixed columns is ~130
+    // columns — every row wraps into box-drawing noise over SSH.
+    const table = renderAt(80);
+    for (const line of stripAnsi(table).split('\n')) {
+      assert.ok(visibleWidth(line) <= 80, `line exceeds 80 columns: ${line.length}`);
+    }
+  });
+
+  it('should keep the static caps off-TTY so piped output stays stable', () => {
+    // Off-TTY (pipes, CI logs) output must not depend on the invoking
+    // terminal's size.
+    const table = renderStatusTable([row]);
+    assert.ok(stripAnsi(table).includes(`${'a'.repeat(59)}…`));
   });
 });

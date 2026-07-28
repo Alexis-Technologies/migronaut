@@ -8,14 +8,13 @@ function registerUp(program) {
     description: 'Run all pending migrations, or a single named file',
     args: [['[file]', 'Specific migration file to run']],
     options: [
-      ['--no-lock', 'Skip the concurrency lock (dev only)'],
       ['--to <file>', 'Apply pending migrations up to and including this file'],
       ['--strict', 'Abort on checksum mismatch'],
       ['-f, --force', 'Re-run an already-applied migration (requires a file)'],
       ['-y, --yes', 'Confirm --force non-interactively (required with --json)'],
       ['--step', 'Apply each migration as its own batch (revert individually later)'],
-      ['--json', 'Output machine-readable JSON of the run results'],
     ],
+    lockable: true,
     mutating: true,
     // Runs before any connection: validation and the confirmation prompt must
     // not cost a round trip, and their errors use the same typed envelope as
@@ -42,13 +41,12 @@ function registerUp(program) {
     },
     run: (migrator, opts, [file]) =>
       migrator.up(file, {
-        noLock: opts.lock === false,
+        noLock: opts.noLock,
         ...(opts.force ? { force: true } : {}),
         ...(opts.step ? { step: true } : {}),
         ...(opts.to ? { to: opts.to } : {}),
       }),
-    // Human mode: core logs every ✔ Applied line — nothing extra to render.
-    render: () => undefined,
+    // No render: core logs every ✔ Applied line itself.
   });
 }
 

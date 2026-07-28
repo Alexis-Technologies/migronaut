@@ -7,6 +7,7 @@ const {
   MigrationFileNotFoundError,
 } = require('../errors/index.js');
 const { formatStamp } = require('./date.js');
+const { errorText } = require('./error.js');
 
 /**
  * Convert an arbitrary migration name into a kebab-case slug. Unicode-aware —
@@ -225,8 +226,18 @@ async function isEsmProject(dir) {
     try {
       const raw = await fs.readFile(path.join(current, 'package.json'), 'utf8');
       return JSON.parse(raw).type === 'module';
-    } catch {
-      // No package.json here (or unreadable) — keep walking up.
+    } catch (error) {
+      // Only a *missing* package.json continues the walk. A malformed one
+      // (trailing comma) silently adopting the grandparent's "type" — and
+      // emitting ESM into a CommonJS project — is the exact failure this
+      // function exists to prevent.
+      if (error.code !== 'ENOENT') {
+        throw new ConfigInvalidError(
+          `Could not parse ${path.join(current, 'package.json')} while detecting the module system`,
+          { path: path.join(current, 'package.json'), cause: errorText(error) },
+          { cause: error },
+        );
+      }
     }
     const parent = path.dirname(current);
     if (parent === current) return false;
@@ -320,9 +331,9 @@ function configBody(values, createExtension) {
   // ── Lifecycle hooks (code only — not available in JSON config) ──
   // hooks: {
   //   beforeAll: async (ctx) => {},
-  //   afterAll: async (ctx) => {},
-  //   beforeEach: async (name, ctx) => {},
-  //   afterEach: async (name, duration, ctx) => {},
+  //   afterAll: async (ctx, summary) => {},        // summary: { success, applied, direction }
+  //   beforeEach: async (name, ctx, info) => {},    // info: { direction, index, total }
+  //   afterEach: async (name, duration, ctx, info) => {},
   //   onError: async (name, error, ctx) => {},
   // },`;
 }

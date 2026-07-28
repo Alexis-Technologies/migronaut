@@ -12,13 +12,12 @@ function registerImport(program) {
       ['--dry-run', 'Preview the mapping without writing anything'],
       ['--trust-hash', 'Reuse the source fileHash instead of recomputing from disk'],
       ['--force', 'Proceed even when the target changelog already has records'],
-      ['--no-lock', 'Skip the concurrency lock (dev only)'],
-      ['--json', 'Output machine-readable JSON instead of a table'],
     ],
+    lockable: true,
     mutating: true,
     run: (migrator, opts) =>
       migrator.import({
-        noLock: opts.lock === false,
+        noLock: opts.noLock,
         ...(opts.from ? { from: opts.from } : {}),
         ...(opts.to ? { to: opts.to } : {}),
         ...(opts.dryRun ? { dryRun: true } : {}),

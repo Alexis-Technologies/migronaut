@@ -132,7 +132,7 @@ When adding new code, follow the right-hand column — there should be no more `
 pnpm run lint              # oxlint src bin scripts tests bench
 pnpm run format              # oxfmt src bin scripts tests bench
 pnpm run format:check          # oxfmt --check src bin scripts tests bench
-pnpm test                        # test:unit then test:integration (~520 tests)
+pnpm test                        # test:unit then test:integration (~570 tests)
 pnpm run test:unit                 # unit only — fast, no MongoDB
 pnpm run test:integration            # integration only, serial (--test-concurrency=1)
 node --test tests/integration/up.test.js   # single file
@@ -180,6 +180,6 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
 
 See ARCHITECTURE.md §8 for the full list — highlights: `markApplied` upserts (needed for
 `redo`/`force`/`import`); `markReverted` never deletes (audit trail); migrate-mongo imports are
-forward-only and rejected by `down`/`redo`; `--json` on `init` means "generate
-`migronaut.config.json`", not "emit JSON output". Don't "fix" these without checking the doc
-first.
+forward-only and rejected by `down`/`redo`; `init` has no JSON output — `init --format json`
+generates `migronaut.config.json`, and a stray `init --json` is rejected with a pointer to
+`--format`. Don't "fix" these without checking the doc first.

@@ -48,7 +48,9 @@ let mongo;
 const DB = 'migronaut_runtime_test';
 
 before(async () => {
-  mongo = await startTestMongo(DB);
+  // A private server: this file forks real Node processes with their own
+  // runtime flags — nothing here should share state with the rest of the suite.
+  mongo = await startTestMongo(DB, { dedicated: true });
 });
 
 after(async () => {

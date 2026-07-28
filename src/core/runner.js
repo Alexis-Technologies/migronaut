@@ -37,6 +37,12 @@ async function withTimeout(promise, timeoutMs, name, direction) {
       promise,
       new Promise((_resolve, reject) => {
         timer = setTimeout(() => {
+          // The body keeps running after this rejects (see docblock), and its
+          // eventual rejection — e.g. MongoExpiredSessionError once the caller
+          // ends the session — would otherwise surface as an
+          // unhandledRejection long after the run already reported the
+          // timeout. Swallow it: the timeout is the reported failure.
+          Promise.resolve(promise).catch(() => {});
           reject(
             new MigrationTimeoutError(
               `Migration ${direction} timed out after ${timeoutMs}ms: ${name}`,

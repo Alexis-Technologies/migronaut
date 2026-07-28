@@ -13,7 +13,9 @@ const runnerPath = path.join(__dirname, '..', 'helpers', 'child-runner.js');
 const binPath = path.join(__dirname, '..', '..', 'bin', 'migronaut.js');
 
 before(async () => {
-  mongo = await startTestMongo(DB);
+  // A private server: this file SIGKILLs real child processes mid-write —
+  // nothing here should share state with the rest of the suite.
+  mongo = await startTestMongo(DB, { dedicated: true });
 });
 
 after(async () => {
@@ -246,6 +248,40 @@ describe('crash and signal handling (integration)', () => {
       applied.map((record) => record.name),
       ['0001-slow.ts'],
     );
+  });
+
+  it('should stop gracefully on SIGINT, mirroring the SIGTERM contract', async () => {
+    project.write('0001-slow.ts', blockingMigration('things', 'slow'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+
+    const first = startCli(['up']);
+    await waitForMigrationStarted('things', 'slow');
+    first.child.kill('SIGINT');
+    await release();
+    const exit = await first.exited;
+    // Ctrl-C follows the same graceful path as SIGTERM: 11 = RUN_ABORTED.
+    assert.strictEqual(exit.code, 11, 'a stopped run reports RUN_ABORTED');
+    assert.strictEqual(await mongo.db.collection(LOCK_COLLECTION).countDocuments(), 0);
+    const applied = await mongo.db.collection('_migronaut_migrations').find().toArray();
+    assert.deepStrictEqual(
+      applied.map((record) => record.name),
+      ['0001-slow.ts'],
+    );
+  });
+
+  it('should exit immediately with 130 on a second SIGINT', async () => {
+    project.write('0001-slow.ts', blockingMigration('things', 'slow'));
+
+    const first = startCli(['up']);
+    await waitForMigrationStarted('things', 'slow');
+    // First signal: graceful stop begins, the blocking migration keeps running
+    // (we never release it). Second signal: the operator cannot wait.
+    first.child.kill('SIGINT');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    first.child.kill('SIGINT');
+    const exit = await first.exited;
+    // 130 = 128 + SIGINT: the immediate-abort escape hatch.
+    assert.strictEqual(exit.code, 130);
   });
 });
 

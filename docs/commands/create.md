@@ -45,7 +45,7 @@ migronaut init [options]
 ```bash
 migronaut init                     # → migronaut.config.js (default)
 migronaut init --ts                # → migronaut.config.ts
-migronaut init --json              # → migronaut.config.json
+migronaut init --format json       # → migronaut.config.json
 migronaut init --secret-provider   # → a runtime secret-loading config (js/ts only)
 migronaut init --force             # overwrite an existing config file
 ```
@@ -58,7 +58,7 @@ migronaut init --force             # overwrite an existing config file
 | `--js` | Create `migronaut.config.js` (the explicit default). |
 | `--json` | Create `migronaut.config.json` (omits code-only options like `hooks`). |
 | `--secret-provider` | Generate a factory-function config wired to a secret manager (AWS example, provider-agnostic). `--json --secret-provider` is rejected. |
-| `--force` | Overwrite an existing config file (otherwise exits 1 with `CONFIG_FILE_EXISTS`). |
+| `--force` | Overwrite an existing config file (otherwise exits 16 with `CONFIG_FILE_EXISTS`). |
 
 The generated JS/TS templates document every option inline, including a commented `hooks` block. The
 `--uri` / `--db` / `--dir` global flags pre-fill the generated file.

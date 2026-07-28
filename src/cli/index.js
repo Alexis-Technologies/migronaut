@@ -28,6 +28,10 @@ function buildProgram() {
     .option('--verbose', 'Show debug output, including error causes')
     .option('--quiet', 'Suppress everything but errors')
     .option('--no-color', 'Disable colored output')
+    // Global like --verbose/--quiet: `migronaut --json status` and
+    // `migronaut status --json` must both work. `init` has no JSON output and
+    // rejects the flag with a pointer to `--format json`.
+    .option('--json', 'Output machine-readable JSON instead of human text')
     // Read straight from package.json at runtime — no build-time injection needed.
     .version(require('../../package.json').version);
 
@@ -81,4 +85,4 @@ async function run(argv) {
   }
 }
 
-module.exports = { buildProgram, run };
+module.exports = { run };

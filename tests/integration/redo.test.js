@@ -70,4 +70,28 @@ describe('MigratorKit.redo (integration)', () => {
     const results = await migrator.redo();
     assert.deepStrictEqual(results, []);
   });
+
+  it('should carry the down half in the error context when the re-apply fails', async () => {
+    project = makeProject();
+    // reloadMigrations so the rewritten file below is actually re-imported.
+    migrator = makeMigrator(mongo.uri, DB, project.dir, { reloadMigrations: true });
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await migrator.up();
+    project.write(
+      '0001-a.ts',
+      `export async function up() { throw new Error('re-apply boom'); }
+export async function down({ db }) { await db.collection('things').deleteMany({ marker: 'a' }); }
+`,
+    );
+    await assert.rejects(migrator.redo(), (error) => {
+      // The single most important fact after a failed redo: the migration is
+      // now *down*, not up — the revert row must survive into the error.
+      assert.deepStrictEqual(
+        error.context.results.map((r) => r.status),
+        ['reverted', 'error'],
+      );
+      assert.strictEqual(error.context.results[0].file, '0001-a.ts');
+      return true;
+    });
+  });
 });

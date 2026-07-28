@@ -134,7 +134,7 @@ Full docs, guides, and the API reference live at
 ## Commands
 
 Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--env-file`,
-`--no-env`, `--verbose`, `--quiet`, and `--no-color`.
+`--no-env`, `--verbose`, `--quiet`, `--no-color`, and `--json` (except `init` — see `init --format`).
 
 | Command | What it does |
 |---|---|
@@ -163,7 +163,7 @@ Most data commands (`up`, `down`, `redo`, `status`, `list`, `dry-run`, `import`,
 migronaut init                     # migronaut.config.js (default)
 migronaut init --js                # migronaut.config.js (explicit default)
 migronaut init --ts                # migronaut.config.ts
-migronaut init --json              # migronaut.config.json  (NOTE: here --json picks the file format)
+migronaut init --format json       # migronaut.config.json
 migronaut init --secret-provider   # async config that loads the URI from a secret manager (js/ts only)
 migronaut init --force             # overwrite an existing config file
 migronaut init --uri mongodb://localhost:27017 --db my_app   # prefill the generated config
@@ -212,7 +212,7 @@ migronaut redo --json              # machine-readable output (array of run resul
 
 # status — full status table
 migronaut status                   # the full status table
-migronaut status --check           # exit 1 if any migration is pending (CI gate)
+migronaut status --check           # exit 2 if any migration is pending (CI gate)
 migronaut status --json            # machine-readable output (array of status rows)
 
 # list — filtered status
@@ -230,7 +230,7 @@ migronaut dry-run up --to <file>   # preview a staged rollout up to <file>
 migronaut dry-run up --json        # machine-readable output (array of status rows)
 
 # audit — read-only health check
-migronaut audit                    # pass/warn/fail per check; exit 1 on any fail
+migronaut audit                    # pass/warn/fail per check; exit 22 on any fail
 migronaut audit --json             # machine-readable report
 
 # lock — inspect the current lock
@@ -248,10 +248,10 @@ migronaut unlock --json            # machine-readable output ({ "released": ...,
 `--config <path>` (explicit config file, overrides auto-discovery), `--env-file <path>` /
 `--no-env` (control `.env` loading), `--verbose` / `--quiet` (log level), `--no-color`.
 
-**`--json`** is accepted by every data command above (`up`, `down`, `redo`, `status`, `list`,
-`dry-run`, `import`, `create`, `audit`, `lock`, `unlock`) and prints one JSON document to stdout —
-see [CI & automation](#ci--automation). On `migronaut init` only, `--json` instead selects the
-config **file format** (`migronaut.config.json`).
+**`--json`** is a global flag (`migronaut --json status` and `migronaut status --json` both
+work) and prints one JSON document to stdout — see [CI & automation](#ci--automation). The one
+command without JSON output is `migronaut init`, whose deliverable is the config file itself:
+use `init --format <js|ts|json>` to pick the file format.
 
 </details>
 
@@ -445,7 +445,7 @@ stdout and exits `1`.
 migronaut up --json | jq '.[] | select(.status == "applied") | .file'
 
 # Fail a deploy step if the database isn't fully migrated
-migronaut status --check          # exits 1 when anything is pending, 0 otherwise
+migronaut status --check          # exits 2 when anything is pending, 0 otherwise
 
 # Inspect status as data
 migronaut status --json | jq 'map(select(.status == "pending")) | length'
@@ -459,8 +459,8 @@ A typical pipeline gate:
   run: npx migronaut status --check --uri "$MONGO_URI" --db "$MONGO_DB"
 ```
 
-> Note: `migronaut init --json` is the one exception — there `--json` means "write `migronaut.config.json`",
-> not machine-readable output (kept for backwards compatibility).
+> Note: `migronaut init` is the one command without JSON output — its deliverable is the
+> config file itself. `init --format json` writes `migronaut.config.json`.
 
 </details>
 
@@ -706,3 +706,6 @@ harness exists primarily to catch performance regressions between releases.
 ## License
 
 [MIT](./LICENSE) © Alexis Technologies
+
+Originally forked from `mongo-migrate-kit` by Santosh Gupta; MIT, attribution
+retained in [LICENSE](./LICENSE).

@@ -48,7 +48,7 @@ Rollbacks never delete history — the record is marked `reverted`. See [`migron
 
 Yes — TypeScript is first-class, with a fully-typed migration context and config. On **Node ≥ 22.18**
 `.ts` migrations load natively with zero setup. On older Node, run `migronaut` under a TypeScript loader
-like `tsx`, or author migrations as `.js` (which work on Node 18+). `migronaut` doesn't bundle a loader —
+like `tsx`, or author migrations as `.js` (which need no loader at all). `migronaut` doesn't bundle a loader —
 it uses your installed Node. See
 [Running TypeScript migrations](/guide/writing-migrations#running-typescript-migrations).
 

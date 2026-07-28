@@ -27,7 +27,9 @@ it was edited, and `—` for pending files.
 
 | Option | Description |
 |---|---|
-| `--check` | Exit with code **1** if any migration is pending. Ideal for CI deploy gates. |
+| `--check` | Exit with code **2** (`PENDING_MIGRATIONS`) if any migration is pending. Ideal for CI deploy gates. |
+| `--pending` | Show only pending migrations. |
+| `--limit <n>` | Show only the last N rows (not combinable with `--check`). |
 | `--json` | Emit the status rows as a JSON array on stdout. |
 
 Plus the [global flags](/guide/configuration#global-cli-flags).

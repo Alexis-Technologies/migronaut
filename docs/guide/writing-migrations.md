@@ -111,7 +111,7 @@ migration loads depends on your Node version:
 
 ::: tip The simplest path
 On **Node ≥ 22.18**, `.ts` migrations just work — nothing to install. If you're on older Node and
-don't want to set up a loader, author migrations as **`.js`**: they run everywhere on Node 18+ with
+don't want to set up a loader, author migrations as **`.js`**: they run everywhere with
 zero setup.
 :::
 
@@ -127,7 +127,7 @@ npm install -D tsx
 ```json
 {
   "scripts": {
-    "migrate": "node --import tsx node_modules/migronaut/dist/migronaut.cjs up"
+    "migrate": "node --import tsx node_modules/@alexify/migronaut/bin/migronaut.js up"
   }
 }
 ```

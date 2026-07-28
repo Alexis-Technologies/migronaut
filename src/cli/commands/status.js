@@ -1,5 +1,6 @@
-const { defineCommand } = require('../shared.js');
-const { renderStatusTable } = require('../table.js');
+const { ConfigInvalidError } = require('../../errors/index.js');
+const { defineCommand, EXIT_CODES } = require('../shared.js');
+const { renderRowsOrEmpty } = require('../table.js');
 
 /** Register the `status` command */
 function registerStatus(program) {
@@ -7,14 +8,30 @@ function registerStatus(program) {
     name: 'status',
     description: 'Show the full migration status table',
     options: [
-      ['--json', 'Output machine-readable JSON instead of a table'],
-      ['--check', 'Exit with code 1 if any migrations are pending (CI gate)'],
+      ['--check', 'Exit with code 2 if any migrations are pending (CI gate)'],
+      ['--pending', 'Show only pending migrations'],
+      ['--limit <n>', 'Show only the last N rows'],
     ],
-    run: (migrator) => migrator.status(),
-    render: (rows, { logger }) => {
-      if (rows.length === 0) logger.info('No migrations found');
-      else logger.info(renderStatusTable(rows));
+    preflight: (opts) => {
+      if (opts.limit !== undefined) {
+        const limit = Number(opts.limit);
+        if (!Number.isInteger(limit) || limit < 1) {
+          throw new ConfigInvalidError('--limit must be a positive integer', {
+            limit: opts.limit,
+          });
+        }
+        // --check answers "is ANY migration pending?" — a limited window could
+        // hide pending rows and report a clean gate that is not.
+        if (opts.check) {
+          throw new ConfigInvalidError('--check cannot be combined with --limit');
+        }
+      }
     },
+    run: async (migrator, opts) => {
+      const rows = opts.pending ? await migrator.list('pending') : await migrator.status();
+      return opts.limit !== undefined ? rows.slice(-Number(opts.limit)) : rows;
+    },
+    render: renderRowsOrEmpty,
     after: (rows, { logger, opts }) => {
       if (!opts.check) return;
       let pending = 0;
@@ -24,7 +41,9 @@ function registerStatus(program) {
       if (pending > 0) {
         // .error writes to stderr, so JSON stdout stays a single clean document.
         logger.error(`✖ ${pending} pending migration(s)`);
-        process.exitCode = 1;
+        // A dedicated code: a CI gate must be able to tell "database is
+        // behind" (act: migrate) from "the check itself crashed" (act: page).
+        process.exitCode = EXIT_CODES.PENDING_MIGRATIONS;
       }
     },
   });

@@ -27,7 +27,9 @@ constructor(config?: Partial<MigronautConfig>, options?: MigratorKitOptions)
 
 - `config` — any subset of [`MigronautConfig`](/guide/configuration#all-options). Anything omitted falls
   back to env vars, a config file, then defaults — the same precedence as the CLI.
-- `options` — runtime extras such as a `logger`, a `configPath`, or a `progress` reporter.
+- `options` — runtime extras: a `configPath`, a `progress` reporter, or a `fallbackLogger`
+  (used only when the resolved config supplies no `logger` of its own — pass `logger` in
+  `config` for the usual case).
 
 ::: tip Connection is lazy
 Most methods call `connect()` for you if you haven't. Call it explicitly when you want to control

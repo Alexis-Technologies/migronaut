@@ -1,14 +1,12 @@
 const { confirm, defineCommand, emitJson } = require('../shared.js');
+const { lockedAtText } = require('./lock.js');
 
 /** Register the `unlock` command (force-release a stuck migration lock) */
 function registerUnlock(program) {
   defineCommand(program, {
     name: 'unlock',
     description: 'Force-release a stuck migration lock left behind by a crashed run',
-    options: [
-      ['-y, --yes', 'Skip the confirmation prompt'],
-      ['--json', 'Output machine-readable JSON ({ released, holder })'],
-    ],
+    options: [['-y, --yes', 'Skip the confirmation prompt']],
     mutating: true,
     // Owns its output: the confirmation flow branches mid-way, so the shared
     // "emit what run() returned" envelope does not fit.
@@ -23,7 +21,7 @@ function registerUnlock(program) {
 
       // Confirm before clearing — unless --yes, or --json (non-interactive).
       if (!json && !opts.yes) {
-        const since = holder.lockedAt.toISOString();
+        const since = lockedAtText(holder.lockedAt);
         logger.warn(
           `⚠ Lock held by pid ${holder.pid} on ${holder.host} (${holder.executedBy}) since ${since}`,
         );

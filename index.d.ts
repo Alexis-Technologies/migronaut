@@ -463,7 +463,11 @@ export interface MigrationEvent extends MigronautEventBase {
   direction: 'up' | 'down';
   batch?: number;
   durationMs?: number;
-  error?: unknown;
+  /**
+   * Human-readable failure message (on `migration:error` only), with URI
+   * credentials already redacted — safe to ship to metrics/alerting as-is.
+   */
+  error?: string;
   /** Why the migration was skipped (on `migration:skipped` only) */
   reason?: string;
 }
@@ -481,11 +485,15 @@ export interface RunEndEvent extends MigronautEventBase {
   direction?: 'up' | 'down';
   /** Wall-clock duration of the whole run, lock wait included */
   durationMs?: number;
-  /** Result counts — present when the run produced a result list */
+  /**
+   * Result counts — present when the run produced a result list, including
+   * the failure path (counted from the partial results the error carries)
+   */
   applied?: number;
   reverted?: number;
   total?: number;
-  error?: unknown;
+  /** Redacted failure message — URI credentials are already masked */
+  error?: string;
 }
 
 export interface LockEvent extends MigronautEventBase {
@@ -493,6 +501,10 @@ export interface LockEvent extends MigronautEventBase {
   reason?: string;
   /** True when acquisition was skipped via `noLock` — no real lock existed */
   skipped?: boolean;
+  /** Lock TTL in ms (on `lock:acquired`) */
+  ttlMs?: number;
+  /** How long acquisition took in ms (on `lock:acquired`) */
+  acquireMs?: number;
 }
 
 /**
@@ -539,7 +551,10 @@ export interface RedoOptions {
 export interface CreateOptions {
   /** Path to a custom template file */
   template?: string;
-  /** Generate a `.js` file instead of `.ts` */
+  /**
+   * Force a `.js` (`true`) or `.ts` (`false`) file, overriding the config's
+   * `createExtension`. Leave unset to let the config decide (default: `'js'`).
+   */
   js?: boolean;
 }
 
@@ -583,6 +598,13 @@ export interface MigratorKitOptions {
    * library — it only calls these callbacks.
    */
   progress?: ProgressReporter;
+  /**
+   * Logger used only when the resolved config supplies no `logger` of its own.
+   * This is how the CLI injects its console logger without clobbering a
+   * `logger` (pino, or `null` for silence) declared in the user's config file.
+   * Programmatic callers usually set `config.logger` instead.
+   */
+  fallbackLogger?: MigronautLogger | null;
 }
 
 /**
@@ -629,10 +651,13 @@ export class MigratorKit extends EventEmitter {
   once<E extends keyof MigronautEvents>(event: E, listener: MigronautEvents[E]): this;
   off<E extends keyof MigronautEvents>(event: E, listener: MigronautEvents[E]): this;
   /**
-   * Stop the run in progress: the migration currently executing finishes, the
-   * remaining ones are skipped, the lock is released, and the in-flight call
-   * rejects with a {@link RunAbortedError} whose `context.results` lists what
-   * was applied. No-op when nothing is running.
+   * Stop the current or imminently-starting run: the migration currently
+   * executing finishes, the remaining ones are skipped, the lock is released,
+   * and the in-flight call rejects with a {@link RunAbortedError} whose
+   * `context.results` lists what was applied. A stop that arrives while config
+   * is loading or the connection is opening is remembered and applied as soon
+   * as the run reaches its lock; a pending stop is cleared when a run ends, so
+   * it can never abort a later, unrelated run.
    */
   stop(reason?: string): void;
   /** Preview what would run — never writes to the database */
@@ -696,6 +721,10 @@ export interface MigrationSummary {
   upToDate: boolean;
   /** True when this instance waited for a peer to release the lock before running */
   waited: boolean;
+  /** Total time (ms) spent waiting for a peer's lock. 0 when the lock was free */
+  waitedMs: number;
+  /** Number of `up` attempts made — 1 when the lock was free on the first try */
+  attempts: number;
 }
 
 /**
@@ -717,6 +746,17 @@ export function pendingMigrations(
   config?: Partial<MigronautConfig>,
   options?: MigratorKitOptions,
 ): Promise<StatusRow[]>;
+
+/**
+ * The CLI's exit-code map: one entry per {@link MigronautErrorCode}, plus two
+ * CLI-condition codes with no error class — `PENDING_MIGRATIONS` (from
+ * `status --check`) and `AUDIT_FAILED`. Lets a wrapper script mirror the
+ * CLI's exit semantics without hardcoding numbers. Anything unmapped exits 1;
+ * success is 0.
+ */
+export const EXIT_CODES: Readonly<
+  Record<MigronautErrorCode | 'PENDING_MIGRATIONS' | 'AUDIT_FAILED', number>
+>;
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 

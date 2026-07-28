@@ -5,6 +5,7 @@ const { ConfigInvalidError } = require('../errors/index.js');
 const { applyEnvFile } = require('../utils/env.js');
 const { errorText } = require('../utils/error.js');
 const { resolveLogger } = require('../utils/logger.js');
+const { redactDeep } = require('../utils/redact.js');
 
 /** Default values applied when no flag, env var, or config-file value is present */
 const DEFAULT_CONFIG = {
@@ -51,9 +52,9 @@ function isStringList(value) {
 
 /**
  * Validation spec for every checked config key: predicate + failure message.
- * `mongoose`, `hooks` and `logger` are deliberately unchecked — they hold
- * live instances the validator has nothing to say about. Unknown keys are
- * allowed, matching the previous zod (non-strict object) behavior.
+ * `mongoose`, `hooks`, `logger` and `client` are deliberately unchecked —
+ * they hold live instances the validator has nothing to say about. Unknown
+ * keys are allowed, matching the previous zod (non-strict object) behavior.
  */
 const CONFIG_KEYS = [
   { path: 'uri', check: isNonEmptyString, message: 'uri is required' },
@@ -263,9 +264,32 @@ async function discoverConfigFile(cwd) {
 async function loadConfigFile(filepath, lenient = false) {
   if (filepath.endsWith('.json')) {
     const raw = await fs.readFile(filepath, 'utf8');
-    return JSON.parse(raw);
+    try {
+      return JSON.parse(raw);
+    } catch (error) {
+      // A bare SyntaxError has no typed code, which breaks the CLI's exit-code
+      // mapping and `--json` error shape.
+      throw new ConfigInvalidError(
+        'Config file is not valid JSON',
+        { path: filepath, cause: errorText(error) },
+        { cause: error },
+      );
+    }
   }
-  const mod = await import(pathToFileURL(filepath).href);
+  let mod;
+  try {
+    mod = await import(pathToFileURL(filepath).href);
+  } catch (error) {
+    // Module-evaluation failures (syntax error, a throwing top-level statement)
+    // get the same treatment as a throwing factory below — including the
+    // lenient degradation for commands that never touch the database.
+    if (lenient) return null;
+    throw new ConfigInvalidError(
+      'Config file failed to load',
+      { path: filepath, cause: errorText(error) },
+      { cause: error },
+    );
+  }
   const exported = mod.default ?? mod;
 
   if (typeof exported === 'function') {
@@ -301,12 +325,27 @@ async function loadConfigFile(filepath, lenient = false) {
  */
 async function loadConfig(options = {}) {
   const cwd = options.cwd ?? process.cwd();
+  // The CLI's console logger, used only when neither flags nor the config file
+  // supply one — so this module's own lines honor `--verbose`/`--quiet` while
+  // a user's configured logger still wins.
+  const effectiveLogger = (value) =>
+    resolveLogger(value !== undefined ? value : options.fallbackLogger);
 
   // Resolved before the merge, because loading the .env file is what supplies
   // the MIGRONAUT_* variables the merge then reads. `false` opts out entirely —
   // a stray .env silently outranking a committed config is a nasty surprise.
   const envFile = options.flags?.envFile ?? process.env.MIGRONAUT_ENV_FILE ?? '.env';
-  if (envFile !== false) await applyEnvFile(path.resolve(cwd, envFile));
+  if (envFile !== false) {
+    // Checked here, before validateConfig runs, because path.resolve on a
+    // non-string throws a raw TypeError instead of the ConfigInvalidError the
+    // config contract promises.
+    if (!isNonEmptyString(envFile)) {
+      throw new ConfigInvalidError('Invalid configuration', {
+        issues: [{ path: 'envFile', message: 'must be a non-empty string or false' }],
+      });
+    }
+    await applyEnvFile(path.resolve(cwd, envFile));
+  }
 
   const merged = { ...DEFAULT_CONFIG };
 
@@ -322,7 +361,7 @@ async function loadConfig(options = {}) {
     // null means a lenient run whose factory failed — nothing usable from the
     // file, so fall through to env vars, flags and defaults.
     if (fileConfig === null) {
-      resolveLogger(options.flags?.logger).warn(
+      effectiveLogger(options.flags?.logger).warn(
         `⚠ Could not resolve ${path.basename(configFilePath)} — continuing without it`,
       );
     } else {
@@ -357,14 +396,31 @@ async function loadConfig(options = {}) {
     if (!KNOWN_CONFIG_KEYS.has(key)) (unknown ??= []).push(key);
   }
   if (unknown) {
-    resolveLogger(config.logger).debug(
+    effectiveLogger(config.logger).debug(
       `Unrecognized config key(s), ignored: ${unknown.join(', ')}`,
     );
   }
 
   if (config.logger && configFilePath) {
     // resolveLogger, not a direct call — config.logger may be a pino instance.
-    resolveLogger(config.logger).debug(`Loaded config from ${path.basename(configFilePath)}`);
+    effectiveLogger(config.logger).debug(`Loaded config from ${path.basename(configFilePath)}`);
+  }
+
+  // "Which config did it actually pick up?" — the merged result, once, at
+  // debug level. Live instances (client, mongoose, hooks, logger) are elided:
+  // they are not serializable and redactDeep rightly refuses to clone them.
+  {
+    const { client, mongoose, hooks, logger, ...rest } = config;
+    effectiveLogger(config.logger).debug(
+      `Resolved config (source: ${configFilePath ? path.basename(configFilePath) : 'env/flags/defaults'})`,
+      redactDeep({
+        ...rest,
+        ...(client ? { client: '[injected]' } : {}),
+        ...(mongoose ? { mongoose: '[injected]' } : {}),
+        ...(hooks ? { hooks: Object.keys(hooks) } : {}),
+        ...(logger !== undefined ? { logger: logger === null ? null : '[injected]' } : {}),
+      }),
+    );
   }
 
   return config;

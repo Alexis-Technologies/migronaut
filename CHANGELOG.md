@@ -44,11 +44,17 @@ Initial release. Requires **Node.js ≥ 22.18**.
 - **`migronaut audit`** — read-only health check (config, connectivity, transaction support,
   indexes, lock state, checksum drift, runtime) with pass/warn/fail per check
 - **`migronaut lock`** — inspect the current migration lock holder without modifying it
-- **`--json` machine-readable output** on every data command (`up`, `down`, `redo`, `status`,
-  `list`, `dry-run`, `import`, `create`, `unlock`) — a single JSON document on stdout; human logs
-  and the spinner go to stderr, so stdout stays pipe-safe
-- **`migronaut status --check`** — exits with code 1 when any migration is pending, for CI deploy
-  gates
+- **`--json` machine-readable output** as a global flag (`migronaut --json status` and
+  `migronaut status --json` both work) on every command — `up`, `down`, `redo`, `status`, `list`,
+  `dry-run`, `import`, `create`, `audit`, `lock`, `unlock` — a single JSON document on stdout;
+  human logs and the spinner go to stderr, so stdout stays pipe-safe. The one exception is
+  `init`, whose deliverable is the config file itself: `init --format <js|ts|json>` selects the
+  file format, and a stray `init --json` is rejected with a pointer to `--format`
+- **`migronaut status --check`** — exits with code 2 (`PENDING_MIGRATIONS`) when any migration is
+  pending, for CI deploy gates; `--pending` and `--limit <n>` filter the table
+- **Typed exit codes for every error** — each `MigronautError` code maps to a dedicated exit code
+  (idempotency cases included: `CONFIG_FILE_EXISTS` = 16, `IMPORT_TARGET_NOT_EMPTY` = 17), audit
+  failures exit 22, and the full map is exported from the package root as `EXIT_CODES`
 - **`migronaut unlock`** — force-release a stuck lock left behind by a crashed run, with holder
   info (pid / host / user / since) and a confirmation prompt (`--yes` to skip)
 - **`migronaut up <file> --force --yes`** — confirm a forced re-run non-interactively
@@ -86,13 +92,25 @@ Initial release. Requires **Node.js ≥ 22.18**.
 - **Credential redaction** — connection-string passwords are masked (`user:****@`) in every error
   message, `--json` payload, and `--verbose` stack the CLI emits
 - **Terminal-injection safety** — control characters in DB-sourced values (descriptions,
-  filenames) are stripped before table rendering
+  filenames, lock-holder fields) are stripped in the default logger's write path, the spinner and
+  table rendering; migronaut's own SGR colors survive, cursor movement and screen clearing do not.
+  Raw `Error` objects never reach event subscribers either — `migration:error` and `run:end`
+  carry a pre-redacted message string
+- **Unbounded-wait protection** — `runMigrations` validates `lockWaitTimeoutMs` /
+  `lockPollIntervalMs` up front (`ConfigInvalidError`), so a `NaN` can no longer turn the
+  lock-wait loop into an infinite retry storm; the summary reports `waitedMs` and `attempts`
+- **Preview parity** — `dry-run down` uses the exact selection the real `down` executes,
+  including the refusal of forward-only migrate-mongo imports, and lists rows in revert order
+- **`redo` correctness** — the target is resolved *inside* the lock (no race with a peer), and a
+  failed re-apply carries the already-reverted rows in `error.context.results`
+- **CLI logger fallback** — a `logger` from the config file (pino, or `null` for silence) is
+  respected by the CLI instead of being clobbered by its console logger
 - **Clear `.ts` runtime errors** — actionable messages when type stripping is disabled or a
   migration uses non-erasable TypeScript syntax (`enum`, `namespace`)
 - **`TransactionsUnsupportedError`** — `useTransaction` on a standalone server names the topology
   as the problem instead of blaming the migration
-- `prepublishOnly` runs `lint` + `format:check` + coverage-gated tests + `tsd` type tests, so a
-  broken release can't be published
+- `prepublishOnly` runs `lint` + `format:check` + coverage-gated tests + `tsd` type tests +
+  a strict `tsc` pass over `index.d.ts` (`check:dts`), so a broken release can't be published
 
 ### Documentation
 

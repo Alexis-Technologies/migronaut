@@ -20,17 +20,17 @@ export default {
     beforeAll: async (ctx) => {
       console.log('Starting migration batch…');
     },
-    /** Runs once after all migrations in the batch complete */
-    afterAll: async (ctx) => {
-      console.log('Batch complete.');
+    /** Runs once after the run ends — including when it failed */
+    afterAll: async (ctx, summary) => {
+      console.log(`Batch complete: ${summary.applied} applied (success: ${summary.success})`);
     },
     /** Runs before each individual migration */
-    beforeEach: async (name, ctx) => {
-      console.log(`→ ${name}`);
+    beforeEach: async (name, ctx, info) => {
+      console.log(`→ ${name} (${info.index + 1}/${info.total})`);
     },
     /** Runs after each migration completes successfully */
-    afterEach: async (name, duration, ctx) => {
-      console.log(`✓ ${name} (${duration}ms)`);
+    afterEach: async (name, duration, ctx, info) => {
+      console.log(`✓ ${name} (${duration}ms, ${info.direction})`);
     },
     /** Runs when a migration throws — before the error propagates */
     onError: async (name, error, ctx) => {

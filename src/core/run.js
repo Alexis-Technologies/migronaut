@@ -1,5 +1,5 @@
 const { setTimeout: delay } = require('node:timers/promises');
-const { LockAlreadyHeldError } = require('../errors/index.js');
+const { ConfigInvalidError, LockAlreadyHeldError } = require('../errors/index.js');
 const { MigratorKit } = require('./migrator.js');
 
 /**
@@ -53,8 +53,25 @@ async function runMigrations(config = {}, options = {}) {
     ...kitOptions
   } = options;
 
+  // Validated before anything connects. A NaN here (or any non-positive value)
+  // disables every deadline comparison below — `NaN > deadline` is always
+  // false — turning the wait loop into an unbounded retry storm against the
+  // lock collection that never returns and never surfaces the real error.
+  if (!Number.isFinite(lockWaitTimeoutMs) || lockWaitTimeoutMs <= 0) {
+    throw new ConfigInvalidError('lockWaitTimeoutMs must be a positive finite number', {
+      lockWaitTimeoutMs,
+    });
+  }
+  if (!Number.isFinite(lockPollIntervalMs) || lockPollIntervalMs <= 0) {
+    throw new ConfigInvalidError('lockPollIntervalMs must be a positive finite number', {
+      lockPollIntervalMs,
+    });
+  }
+
   const kit = new MigratorKit(config, kitOptions);
   let waited = false;
+  let waitedMs = 0;
+  let attempts = 0;
 
   try {
     await kit.connect();
@@ -68,8 +85,9 @@ async function runMigrations(config = {}, options = {}) {
 
     for (;;) {
       try {
+        attempts += 1;
         const applied = await kit.up(undefined, noLock ? { noLock: true } : {});
-        return { applied, upToDate: applied.length === 0, waited };
+        return { applied, upToDate: applied.length === 0, waited, waitedMs, attempts };
       } catch (error) {
         if (onLockHeld !== 'wait' || !(error instanceof LockAlreadyHeldError)) {
           throw error;
@@ -83,6 +101,12 @@ async function runMigrations(config = {}, options = {}) {
           logger.info('Migration lock held by another process — waiting for it to release…');
         }
         waited = true;
+        logger.debug('Migration lock still held — retrying', {
+          attempts,
+          waitedMs,
+          nextDelayMs: nextDelay,
+        });
+        waitedMs += nextDelay;
         await delay(nextDelay);
       }
     }

@@ -236,6 +236,24 @@ describe('MigratorKit.import (integration)', () => {
     assert.strictEqual(await mongo.db.collection(TARGET).countDocuments(), 2);
   });
 
+  it('should import across the bulk-chunk boundary without losing records', async () => {
+    setup();
+    // 1,203 records span two bulkWrite chunks (1000 + 203) — the boundary is
+    // where an off-by-one in the chunking would silently drop rows.
+    const docs = [];
+    for (let i = 0; i < 1203; i++) {
+      docs.push({
+        fileName: `${String(i).padStart(5, '0')}-m.js`,
+        appliedAt: new Date(2020, 0, 1, 0, 0, i % 60, i % 1000),
+        migrationBlock: i + 1,
+      });
+    }
+    await seedChangelog(docs);
+    const result = await migrator.import();
+    assert.strictEqual(result.imported, 1203);
+    assert.strictEqual(await mongo.db.collection(TARGET).countDocuments(), 1203);
+  });
+
   it('should report nothing to import for an empty source', async () => {
     setup();
     const result = await migrator.import();

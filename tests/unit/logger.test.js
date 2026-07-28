@@ -56,6 +56,29 @@ describe('createLogger', () => {
     assert.match(spy.mock.calls[0].arguments[0], /^hello\n$/);
   });
 
+  it('should strip terminal control sequences from every line by construction', () => {
+    // Messages embed migration names and lock-holder fields — values anyone
+    // with DB write access can influence. ESC[2J clears the operator's screen;
+    // it must never survive to the terminal.
+    const spy = mock.method(process.stdout, 'write', () => true);
+    createLogger().info('Applying \x1b[2J\x1b[1;1Hevil.ts…');
+    assert.strictEqual(spy.mock.callCount(), 1);
+    const written = spy.mock.calls[0].arguments[0];
+    assert.ok(!written.includes('\x1b[2J'));
+    assert.ok(!written.includes('\x1b[1;1H'));
+    assert.match(written, /evil\.ts/);
+  });
+
+  it('should preserve SGR color sequences while stripping the rest', () => {
+    // A rendered table arrives pre-colored; blanket stripping would leave
+    // "[32m" as visible garbage. Colors survive, cursor movement does not.
+    const spy = mock.method(process.stdout, 'write', () => true);
+    createLogger().info('\x1b[32mapplied\x1b[0m \x1b[2Jrest');
+    const written = spy.mock.calls[0].arguments[0];
+    assert.ok(written.includes('\x1b[32mapplied\x1b[0m'));
+    assert.ok(!written.includes('\x1b[2J'));
+  });
+
   it('should write warn/error to stderr', () => {
     const spy = mock.method(process.stderr, 'write', () => true);
     const logger = createLogger();

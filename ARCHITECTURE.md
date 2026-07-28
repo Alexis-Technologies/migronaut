@@ -451,8 +451,7 @@ step" section); this deep dive is purely about what runtime capability the *migr
 loaded* needs.
 
 **The caveat that confuses everyone:** the *shipped* CLI (`bin/migronaut.js`) runs as plain Node,
-with no bundler and no `tsx` at runtime (`tsx` is a devDependency only, used while developing this
-repo's own example migrations). So a `.ts` migration imports natively only on **Node ≥ 22.18**
+with no bundler and no `tsx` at runtime. So a `.ts` migration imports natively only on **Node ≥ 22.18**
 (built-in type stripping) or under a user-provided loader such as `tsx`. On older Node, `import('foo.ts')`
 throws `ERR_UNKNOWN_FILE_EXTENSION`. `tsLoadErrorOrNull()` detects exactly that and rethrows an
 actionable `MigrationInvalidExportError` ("use Node ≥ 22.18 / a TS loader / a .js file") instead of a
@@ -517,8 +516,10 @@ The high-impact ones for code changes:
   `assertReversible` and refuse them with `IrreversibleMigrationError`.
 - **Path traversal is blocked centrally in `#filepath()`** — every user-supplied migration name (even
   one read back from a tampered changelog) is validated there.
-- **`--json` is per-command, not global**, and is *not* on `init` (where `--json` means "generate
-  migronaut.config.json"). In JSON mode, human/progress output goes to stderr; stdout is one JSON doc.
+- **`--json` is a global flag** (`migronaut --json status` and `migronaut status --json` both work).
+  `init` is the one command with no JSON output — it rejects the flag with a pointer to
+  `--format json`, which selects the generated config file's format. In JSON mode, human/progress
+  output goes to stderr; stdout is one JSON doc.
 - **`down --steps` preserves selection order** (newest-first) via a `preserveOrder` flag, instead of
   the usual filename-desc sort.
 
@@ -527,7 +528,12 @@ The high-impact ones for code changes:
 ## 9. Testing strategy
 
 - **Runner:** Node's built-in [`node:test`](https://nodejs.org/api/test.html) — no external test
-  framework. `pnpm test` = `node --test "tests/unit/**/*.test.js" "tests/integration/**/*.test.js"`.
+  framework. `pnpm test` = `test:unit` then `test:integration`; the integration half runs
+  serially (`--test-concurrency=1`) against **one shared in-memory replica set** booted by
+  `--test-global-setup=tests/helpers/global-setup.js` (per-file isolation comes from distinct
+  database names + `dropDatabase()` in each `beforeEach`; `concurrency.test.js` and
+  `runtime-ts.test.js` opt out with `startTestMongo(db, { dedicated: true })` because they fork
+  real processes).
 - **Two tiers:**
   - `tests/unit/` — mock the DB; test pure logic (config precedence, checksum, loader, mapping,
     lock semantics with a fake collection, template, date, errors).
@@ -554,10 +560,11 @@ The high-impact ones for code changes:
 
 Useful commands:
 ```bash
-pnpm test                                  # unit + integration (~265 tests)
-node --test tests/integration/up.test.js   # one file
+pnpm test                                  # unit + integration (~570 tests)
+node --test tests/integration/up.test.js   # one file (boots its own replica set)
 pnpm run test:coverage                     # full suite under c8, gated at 90/90/90
 pnpm run test:types                        # tsd — index.d.ts vs tests/types/*.test-d.ts
+pnpm run check:dts                         # tsc --noEmit --strict over index.d.ts alone
 ```
 
 ## 10. No build, lint, release
@@ -569,7 +576,7 @@ pnpm run test:types                        # tsd — index.d.ts vs tests/types/*
   `.d.ts` in the repo — there is no generation step and no `tsc` pass over `src/`. Correctness is
   enforced only by `tsd` (`pnpm run test:types`), which checks it against
   [tests/types/index.test-d.ts](tests/types/index.test-d.ts).
-- **Lint/format:** `pnpm run lint` (`oxlint src bin scripts tests`), `pnpm run format` (`oxfmt` to
+- **Lint/format:** `pnpm run lint` (`oxlint src bin scripts tests bench`), `pnpm run format` (`oxfmt` to
   fix formatting), `pnpm run format:check` (`oxfmt --check`, no writes).
 - **Bundle-size report (informational only):** `pnpm run size` runs `scripts/size.js`, which uses
   esbuild to report library + CLI bundle size — it does not produce a published artifact.
@@ -583,7 +590,7 @@ pnpm run test:types                        # tsd — index.d.ts vs tests/types/*
   `ARCHITECTURE.md` live in the repo but are **never** shipped to npm.
 - **Release:** manual — bump `version` in `package.json`, write the entry in `CHANGELOG.md` by
   hand, commit and tag, then `pnpm run release` (= `pnpm publish`). `prepublishOnly` re-runs
-  lint + format:check + test:coverage + test:types as the pre-publish gate.
+  lint + format:check + test:coverage + test:types + check:dts as the pre-publish gate.
 - **Commits:** Conventional Commits required (`feat(scope):`, `fix(scope):`, `test(...)`, etc.).
 
 ## 11. Recipe: how to add a new command/feature

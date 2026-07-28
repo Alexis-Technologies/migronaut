@@ -88,7 +88,8 @@ pending=$(migronaut list --pending --json | jq 'length')
 echo "$pending migrations pending"
 ```
 
-On failure, the command prints `{ "error": { "code": "...", "message": "..." } }` and exits 1.
+On failure, the command prints `{ "error": { "code": "...", "message": "..." } }` and exits
+with the code's dedicated [exit code](/reference/cli#exit-codes) (`1` only for unclassified errors).
 
 ## Loading the connection from a secret manager
 

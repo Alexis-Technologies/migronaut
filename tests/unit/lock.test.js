@@ -265,11 +265,11 @@ describe('runWithLock', () => {
     ]);
   });
 
-  it('should abort via the TTL deadline before the failure counter is exhausted', async () => {
+  it('should abort via the TTL deadline when renewals keep failing', async () => {
     const { db, collection } = makeDb();
     // 200ms TTL → renew every 100ms, hard deadline at 150ms. Every renewal
-    // fails, so the failure counter alone would only abort at 300ms — past the
-    // point where a peer could reclaim the stale lock. The deadline must win.
+    // fails; the deadline is the sole escalation and must fire strictly
+    // before the lock becomes stale-reclaimable at 1×TTL.
     const lock = new MigrationLock(db, '_migronaut_locks', 0.2);
     let owner;
     collection.updateOne.mock.mockImplementation((_filter, update) => {
@@ -297,7 +297,62 @@ describe('runWithLock', () => {
         return true;
       },
     );
-    // Aborted around the deadline (~150ms), well before 3 × 100ms of failures.
+    // Aborted around the deadline (~150ms) — strictly before 1×TTL (200ms)
+    // plus scheduling slack.
     assert.ok(Date.now() - started < 280);
+  });
+
+  it('should report ttlMs and acquisition latency on lock:acquired', async () => {
+    const { db } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    let extra;
+    await runWithLock(
+      lock,
+      { logger: silentLogger, onLockAcquired: (e) => (extra = e) },
+      async () => 'ok',
+    );
+    assert.strictEqual(extra.ttlMs, 60_000);
+    assert.strictEqual(typeof extra.acquireMs, 'number');
+    assert.ok(extra.acquireMs >= 0);
+  });
+
+  it('should not start a second renewal while one is still in flight', async () => {
+    const { db, collection } = makeDb();
+    // 200ms TTL → tick every 100ms. The first renewal never settles until we
+    // let it; without the re-entrancy guard, every later tick would overwrite
+    // `inFlight` and fire its own overlapping renewal.
+    const lock = new MigrationLock(db, '_migronaut_locks', 0.2);
+    let owner;
+    let renewCalls = 0;
+    let releaseRenewal;
+    collection.updateOne.mock.mockImplementation((_filter, update) => {
+      const raw = ownerFromUpdate(update);
+      if (raw) {
+        owner = raw;
+        return Promise.resolve({ matchedCount: 1 });
+      }
+      renewCalls += 1;
+      // A renewal slower than the whole interval — the exact condition the
+      // heartbeat exists to survive.
+      return new Promise((resolve) => {
+        releaseRenewal = () => resolve({ matchedCount: 1 });
+      });
+    });
+    collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, owner }));
+    await runWithLock(
+      lock,
+      { logger: silentLogger },
+      () =>
+        new Promise((resolve) => {
+          // Ticks land at ~100/200/300ms; the renewal started at ~100ms stays
+          // stuck through the 200/300 ticks, then the run ends at ~325ms —
+          // comfortably before the 400ms tick could start a second renewal.
+          setTimeout(() => {
+            releaseRenewal?.();
+            setTimeout(resolve, 5);
+          }, 320);
+        }),
+    );
+    assert.strictEqual(renewCalls, 1);
   });
 });

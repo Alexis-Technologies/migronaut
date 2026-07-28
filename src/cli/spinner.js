@@ -1,3 +1,5 @@
+const { sanitize } = require('../utils/sanitize.js');
+
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const INTERVAL_MS = 80;
 const CLEAR_LINE = '\r\x1b[K';
@@ -20,7 +22,8 @@ function createSpinner(stream = process.stderr) {
 
   const start = (message) => {
     if (!stream.isTTY) return;
-    text = message ?? '';
+    // Spinner text embeds migration filenames — untrusted, straight to a TTY.
+    text = sanitize(message ?? '');
     if (timer === null) {
       timer = setInterval(render, INTERVAL_MS);
       if (typeof timer.unref === 'function') timer.unref();

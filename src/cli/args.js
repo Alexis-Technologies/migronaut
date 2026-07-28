@@ -118,7 +118,6 @@ class Command {
 
     let command = null;
     const positionals = [];
-    let helpTarget = null;
     // After a bare `--`, everything is a positional — the standard
     // end-of-options terminator.
     let optionsEnded = false;
@@ -134,8 +133,11 @@ class Command {
         continue;
       }
       if (token === '-h' || token === '--help') {
-        helpTarget = command ?? this;
-        continue;
+        // Short-circuit, commander-style: the user asking for help must get
+        // it even when a later token would fail the parse — mistyping a flag
+        // and appending --help to find out what went wrong is the exact case.
+        process.stdout.write(`${this.#helpText(command ?? this)}\n`);
+        return;
       }
       if ((token === '-V' || token === '--version') && this.#version !== null) {
         process.stdout.write(`${this.#version}\n`);
@@ -156,8 +158,15 @@ class Command {
           let value = inlineValue;
           if (value === undefined) {
             const next = tokens[i + 1];
-            if (next === undefined || (next.startsWith('-') && next !== '-')) {
-              return this.#fail(`option '${option.flags}' argument missing`);
+            // A leading digit after `-` is a negative number, not a flag —
+            // `--steps -1` should reach the core validator (which rejects it
+            // with an actionable message), not die as "argument missing".
+            const negativeNumber = next !== undefined && /^-\d/.test(next);
+            if (next === undefined || (next.startsWith('-') && next !== '-' && !negativeNumber)) {
+              return this.#fail(
+                `option '${option.flags}' argument missing ` +
+                  `(use ${option.long}=<value> for values starting with '-')`,
+              );
             }
             value = next;
             i++;
@@ -185,10 +194,6 @@ class Command {
       positionals.push(token);
     }
 
-    if (helpTarget !== null) {
-      process.stdout.write(`${this.#helpText(helpTarget)}\n`);
-      return;
-    }
     if (command === null) {
       process.stderr.write(`${this.#helpText(this)}\n`);
       process.exitCode = 1;

@@ -15,7 +15,6 @@ function registerDryRun(program) {
       ['--steps <n>', 'Preview reverting the last N migrations (down only)'],
       ['--batch <n>', 'Preview reverting a specific batch (down only)'],
       ['--to <file>', 'Preview migrating to this file (up: inclusive; down: exclusive)'],
-      ['--json', 'Output machine-readable JSON instead of a table'],
     ],
     preflight: (_opts, [direction]) => {
       if (direction !== 'up' && direction !== 'down') {

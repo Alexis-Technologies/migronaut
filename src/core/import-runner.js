@@ -1,15 +1,13 @@
-const fs = require('node:fs/promises');
 const { ImportTargetNotEmptyError } = require('../errors/index.js');
 const { computeChecksum } = require('../utils/checksum.js');
-const { mapLimit } = require('../utils/concurrency.js');
 const { Changelog } = require('./changelog.js');
 const { isMigrateMongoDoc, mapMigrateMongoDocs } = require('./import.js');
 
 /** Default source collection name used by migrate-mongo */
 const MIGRATE_MONGO_COLLECTION = 'changelog';
 
-/** Simultaneous changelog writes during an import */
-const WRITE_CONCURRENCY = 8;
+/** Records per bulkWrite — bounds a single request while keeping round trips rare */
+const IMPORT_CHUNK_SIZE = 1000;
 
 /**
  * Adopt an existing migrate-mongo `changelog` collection by mapping its records
@@ -118,14 +116,14 @@ async function runImport(deps, options, signal) {
     return { source, target, imported: 0, skipped, dryRun, rows };
   }
 
-  // Independent upserts keyed by unique `name` — safe to run concurrently,
-  // but paced so importing a large changelog does not flood the pool. The
-  // abort check inside the loop lets stop() / a lost lock halt a long import
-  // between writes instead of after all of them.
-  await mapLimit(records, WRITE_CONCURRENCY, (record) => {
+  // One unordered bulkWrite per chunk instead of one updateOne per record —
+  // adopting a 5,000-record changelog is 5 round trips, not 5,000, all while
+  // holding the migration lock. The abort check between chunks lets stop() /
+  // a lost lock halt a long import instead of running it to completion.
+  for (let start = 0; start < records.length; start += IMPORT_CHUNK_SIZE) {
     deps.assertNotAborted(signal);
-    return targetChangelog.markApplied(db, record);
-  });
+    await targetChangelog.markAppliedBulk(db, records.slice(start, start + IMPORT_CHUNK_SIZE));
+  }
 
   logger.info(
     `✔ Imported ${records.length} record(s) from "${source}" → "${target}"`,
@@ -144,21 +142,23 @@ async function resolveImportChecksum(filepath, fileHash, trustHash) {
   if (trustHash && fileHash) {
     return { checksum: fileHash, source: 'reused' };
   }
-  const exists = await fs
-    .access(filepath)
-    .then(() => true)
-    .catch(() => false);
-  if (exists) {
-    const recomputed = await computeChecksum(filepath);
-    if (fileHash && fileHash === recomputed) {
+  // computeChecksum directly, treating ENOENT as "missing" — an access()
+  // probe first would double the syscalls and open a TOCTOU window in which
+  // the answer can change anyway.
+  let recomputed;
+  try {
+    recomputed = await computeChecksum(filepath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    if (fileHash) {
       return { checksum: fileHash, source: 'reused' };
     }
-    return { checksum: recomputed, source: 'recomputed' };
+    return { checksum: '', source: 'missing' };
   }
-  if (fileHash) {
+  if (fileHash && fileHash === recomputed) {
     return { checksum: fileHash, source: 'reused' };
   }
-  return { checksum: '', source: 'missing' };
+  return { checksum: recomputed, source: 'recomputed' };
 }
 
 module.exports = { runImport };
