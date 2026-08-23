@@ -85,7 +85,9 @@ like `tsx`) — not on anything migronaut itself compiles.
 `MigronautLogger` is pino-compatible (`{debug, info, warn, error, child?}`), so a pino instance
 passes straight through `resolveLogger` (which binds `child({component: 'migronaut'})` once and
 guards every call — logging must never break a run). devDependencies are fine (`pino` is a devDep
-because the logger-adapter tests exercise the real thing).
+because the logger-adapter tests exercise the real thing; `@vercel/analytics` and
+`@vercel/speed-insights` are devDeps consumed only by the VitePress theme in
+`docs/.vitepress/theme/index.ts`, which never ships to npm).
 
 ## Repository layout
 
