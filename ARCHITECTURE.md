@@ -7,7 +7,7 @@
 > exists, how data flows through it, and every non-obvious nuance you need to make a safe change.
 >
 
-**Snapshot at time of writing:** v1.0.0 · Node ≥ 22.18 (engines; native TS type stripping is
+**Snapshot at time of writing:** v2.0.0 · Node ≥ 22.18 (engines; native TS type stripping is
 always available) · runtime deps: **none** — `package.json` has no `dependencies` key; `.env`
 loading, ANSI colors, the spinner, the arg parser, the table renderer and config validation are
 all hand-rolled in `src/` · peer deps: `mongodb`, optional `mongoose`.

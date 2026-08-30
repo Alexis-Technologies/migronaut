@@ -3,7 +3,28 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
-## Unreleased
+## v2.0.0 — 2026-08-30
+
+A major bump for three narrow contract changes (below); everything else is
+additive. Upgrading is a no-op for the most commonly scripted surface:
+`pendingMigrations()` / `list('pending')` still report a file as `pending`
+even when a failed attempt was recorded for it.
+
+### Breaking changes
+
+- **`unlock --json` now requires `--yes`.** Previously `--json` alone
+  force-released the lock; it now refuses with `CONFIG_INVALID` (exit 6), because
+  a non-interactive mode must never assume consent to a destructive action —
+  force-releasing a live run's lock enables exactly the concurrent migration the
+  lock exists to prevent. **Migration:** add `--yes` to any scripted
+  `migronaut unlock --json`.
+- **`StatusRow.status` and `MigrationStatus` gained `'failed'`.** A recorded
+  failed attempt now renders as `failed` in `status()` / `list('all')` instead of
+  `pending`. **Migration:** TypeScript consumers with an exhaustive `switch` over
+  the status must handle the new member; treat `'failed'` as outstanding work.
+- **`MigronautErrorCode` gained `'MIGRATION_OUT_OF_ORDER'`** (and `EXIT_CODES`
+  the matching key, exit 23). **Migration:** exhaustive `switch` statements over
+  the code union must handle it.
 
 ### Added
 
@@ -44,8 +65,8 @@ Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
   next lock holder.
 - **`lockWaitTimeoutMs` bounds stall, not total wait** — while a waiting `runMigrations` observes
   the holder's heartbeat advancing, the deadline re-arms; only a stalled holder times peers out.
-- **`unlock --json` (and the new `baseline`) require `--yes`** — non-interactive modes never
-  assume consent to a destructive action, matching `up --force --json`.
+- **`baseline` requires `--yes` in `--json` mode** — the same non-interactive
+  confirmation policy `up --force --json` and `unlock --json` follow.
 - **Failure telemetry carries timing** — `migration:error` events, error result rows and error
   contexts now include `durationMs`/`batch`; the run ends with a `✔ Done N applied in Xms`
   summary line.

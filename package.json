@@ -1,6 +1,6 @@
 {
   "name": "@alexify/migronaut",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Elegant, fast, fully-typed, zero-dependency MongoDB migrations for Node.js — adopts an existing migrate-mongo changelog in one command",
   "license": "MIT",
   "author": "Alex Dolid <dolid.sasha@gmail.com>",
