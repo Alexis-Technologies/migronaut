@@ -69,3 +69,29 @@ describe('errorText', () => {
     assert.strictEqual(errorText(7), '7');
   });
 });
+
+describe('redactUris — query-string secrets', () => {
+  it('should mask secret-bearing query parameters', () => {
+    assert.strictEqual(
+      redactUris('mongodb://host/db?proxyPassword=hunter2&tlsCertificateKeyFilePassword=pemPw'),
+      'mongodb://host/db?proxyPassword=****&tlsCertificateKeyFilePassword=****',
+    );
+    assert.strictEqual(
+      redactUris('mongodb://host/db?sslKeyPassword=legacy&retryWrites=true'),
+      'mongodb://host/db?sslKeyPassword=****&retryWrites=true',
+    );
+  });
+
+  it('should mask only the secret pairs inside authMechanismProperties', () => {
+    assert.strictEqual(
+      redactUris(
+        'mongodb+srv://c/?authMechanismProperties=SERVICE_NAME:mongodb,AWS_SESSION_TOKEN:FQoGtoken',
+      ),
+      'mongodb+srv://c/?authMechanismProperties=SERVICE_NAME:mongodb,AWS_SESSION_TOKEN:****',
+    );
+  });
+
+  it('should mask a password behind an empty username', () => {
+    assert.strictEqual(redactUris('mongodb://:pw@host/db'), 'mongodb://:****@host/db');
+  });
+});

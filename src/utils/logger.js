@@ -52,6 +52,13 @@ function createLogger(stream = process.stdout, level = 'info') {
 
 const hasMethod = (value, name) => typeof value?.[name] === 'function';
 
+/** A sink is usable when it exposes any of the four level methods */
+const isUsableSink = (value) =>
+  hasMethod(value, 'info') ||
+  hasMethod(value, 'debug') ||
+  hasMethod(value, 'warn') ||
+  hasMethod(value, 'error');
+
 /**
  * Wrap a sink method so a throwing user logger can never break a migration run.
  * `pinoStyle` swaps the argument order to `(fields, msg)`, which is what pino
@@ -75,10 +82,12 @@ const adapters = new WeakMap();
  * Resolve the effective logger from a config value: `null` → silent,
  * `undefined` → default console logger, otherwise the user's logger adapted
  * to the four-method surface. A pino-style `child` is bound once with a
- * `component` field; a missing `debug`/`warn`/`error` falls back to `info`
- * (or `debug` when only that exists), and every call is guarded so a
- * throwing logger can never abort a half-applied run. A structurally unfit
- * value (no `info`/`debug` function) silences output instead of crashing.
+ * `component` field; a missing method falls back to the nearest present one
+ * of similar severity (a warn/error-only logger keeps its warn/error output —
+ * its missing debug/info become no-ops, never a reason to silence failures),
+ * and every call is guarded so a throwing logger can never abort a
+ * half-applied run. A structurally unfit value (no level method at all)
+ * silences output instead of crashing.
  *
  * A logger exposing `child()` is treated as pino-style, so structured fields
  * are passed as the first argument rather than the second.
@@ -86,21 +95,30 @@ const adapters = new WeakMap();
 function resolveLogger(logger) {
   if (logger === null) return silentLogger;
   if (logger === undefined) return createLogger();
-  if (typeof logger !== 'object' || (!hasMethod(logger, 'info') && !hasMethod(logger, 'debug'))) {
+  if (typeof logger !== 'object' || !isUsableSink(logger)) {
     return silentLogger;
   }
   const cached = adapters.get(logger);
   if (cached !== undefined) return cached;
   const pinoStyle = hasMethod(logger, 'child');
   const child = pinoStyle ? logger.child({ component: 'migronaut' }) : null;
-  const sink = child && (hasMethod(child, 'info') || hasMethod(child, 'debug')) ? child : logger;
-  const base = hasMethod(sink, 'info') ? sink.info.bind(sink) : sink.debug.bind(sink);
-  const pick = (name) => (hasMethod(sink, name) ? sink[name].bind(sink) : base);
+  const sink = child && isUsableSink(child) ? child : logger;
+  const noop = () => {};
+  // Fallback preference per level: same severity first, then the neighbors a
+  // reader of that sink would expect. debug/info never escalate to warn/error
+  // (running commentary must not masquerade as problems); warn/error always
+  // find SOME sink so failures stay visible.
+  const pick = (order) => {
+    for (const name of order) {
+      if (hasMethod(sink, name)) return sink[name].bind(sink);
+    }
+    return noop;
+  };
   const adapter = {
-    debug: guard(pick('debug'), pinoStyle),
-    info: guard(pick('info'), pinoStyle),
-    warn: guard(pick('warn'), pinoStyle),
-    error: guard(pick('error'), pinoStyle),
+    debug: guard(pick(['debug', 'info']), pinoStyle),
+    info: guard(pick(['info', 'debug']), pinoStyle),
+    warn: guard(pick(['warn', 'info', 'debug', 'error']), pinoStyle),
+    error: guard(pick(['error', 'warn', 'info', 'debug']), pinoStyle),
   };
   adapters.set(logger, adapter);
   return adapter;

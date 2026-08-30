@@ -27,9 +27,9 @@ function isTransactionsUnsupported(error) {
  * timeout buys is the *run* stopping instead of hanging forever — which also
  * lets the lock's TTL expire, so a wedged migration no longer blocks every
  * other instance indefinitely. Migrations that need real cancellation should
- * watch `ctx.signal`.
+ * watch `ctx.signal`, which `onTimeout` aborts when the timer fires.
  */
-async function withTimeout(promise, timeoutMs, name, direction) {
+async function withTimeout(promise, timeoutMs, name, direction, onTimeout) {
   if (!timeoutMs) return promise;
   let timer;
   try {
@@ -43,16 +43,19 @@ async function withTimeout(promise, timeoutMs, name, direction) {
           // unhandledRejection long after the run already reported the
           // timeout. Swallow it: the timeout is the reported failure.
           Promise.resolve(promise).catch(() => {});
-          reject(
-            new MigrationTimeoutError(
-              `Migration ${direction} timed out after ${timeoutMs}ms: ${name}`,
-              {
-                name,
-                direction,
-                timeoutMs,
-              },
-            ),
+          const timeoutError = new MigrationTimeoutError(
+            `Migration ${direction} timed out after ${timeoutMs}ms: ${name}`,
+            {
+              name,
+              direction,
+              timeoutMs,
+            },
           );
+          // Told, not just abandoned: the caller aborts the context's signal
+          // with this error, so a body that watches ctx.signal can stop
+          // writing instead of racing whoever acquires the lock next.
+          onTimeout?.(timeoutError);
+          reject(timeoutError);
         }, timeoutMs);
         timer.unref?.();
       }),
@@ -77,7 +80,10 @@ async function withTimeout(promise, timeoutMs, name, direction) {
  *
  * On any error the `onError` hook is invoked before a
  * MigrationExecutionFailedError is thrown — the error is never swallowed, and a
- * throwing hook cannot mask the original failure.
+ * throwing hook cannot mask the original failure. The one exception: when the
+ * body succeeded and only the (non-transactional) changelog write failed, the
+ * error carries `context.phase = 'changelog-write'` and `onError` is not fired —
+ * the migration itself did not fail.
  */
 async function runMigration(params) {
   const { name, migration, direction, context, useTransaction, hooks, onSuccess, logger } = params;
@@ -87,30 +93,71 @@ async function runMigration(params) {
 
   const start = Date.now();
   let session;
-  let runtimeContext = context;
+  // JavaScript cannot cancel a running body, but it can tell it to stop: this
+  // controller feeds the context's signal, so the documented "watch ctx.signal"
+  // advice covers the migration's own timeout too — not only lock loss and
+  // stop(). Without it a timed-out body keeps writing after the lock is
+  // released, racing whoever acquires it next.
+  const timedOut = new AbortController();
+  const signal = context.signal
+    ? AbortSignal.any([context.signal, timedOut.signal])
+    : timedOut.signal;
+  let runtimeContext = { ...context, signal };
+  const onTimeout = (timeoutError) => timedOut.abort(timeoutError);
   let duration = 0;
+  // 'body' while the migration's own code runs; 'changelog' once it committed
+  // and only the record write remains. The two failures need different
+  // reporting: a changelog failure after a committed body must not read as
+  // "the migration failed" — that invites a re-run of already-applied writes.
+  let phase = 'body';
 
   try {
     if (useTransaction) {
       session = context.client.startSession();
-      runtimeContext = { ...context, session };
+      runtimeContext = { ...runtimeContext, session };
       // withTransaction may run the body more than once when the driver retries
-      // a transient failure, so duration is re-measured on each attempt.
+      // a transient failure, so duration is re-measured on each attempt. The
+      // changelog write stays inside the transaction, so a failure there
+      // aborts the body's writes too — 'body' phase is accurate throughout.
       await session.withTransaction(async () => {
         const attemptStart = Date.now();
-        await withTimeout(fn(runtimeContext), timeoutMs, name, direction);
+        await withTimeout(fn(runtimeContext), timeoutMs, name, direction, onTimeout);
         duration = Date.now() - attemptStart;
         await onSuccess?.(duration, session);
       });
     } else {
-      await withTimeout(fn(runtimeContext), timeoutMs, name, direction);
+      await withTimeout(fn(runtimeContext), timeoutMs, name, direction, onTimeout);
       duration = Date.now() - start;
+      phase = 'changelog';
       await onSuccess?.(duration, undefined);
     }
 
     return { duration };
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
+    // Failures deserve timing data as much as successes — a slow-then-failing
+    // migration is exactly what an operator alerts on.
+    const elapsed = Date.now() - start;
+
+    // Without a transaction the body's writes are already committed when the
+    // changelog write fails — say exactly that, instead of the generic
+    // "migration failed" that would invite re-running committed writes. The
+    // onError hook is for migration failures, so it does not fire here.
+    if (phase === 'changelog') {
+      throw new MigrationExecutionFailedError(
+        `Migration ${direction} succeeded but recording it in the changelog failed: ${name} — ` +
+          'its own writes are committed; verify the changelog before re-running',
+        {
+          name,
+          direction,
+          phase: 'changelog-write',
+          bodySucceeded: true,
+          durationMs: elapsed,
+          cause: err.message,
+        },
+        { cause: err },
+      );
+    }
 
     if (hooks?.onError) {
       // A throwing onError hook must not replace the real cause.
@@ -122,14 +169,17 @@ async function runMigration(params) {
       }
     }
 
-    if (err instanceof MigrationTimeoutError) throw err;
+    if (err instanceof MigrationTimeoutError) {
+      err.context = { durationMs: elapsed, ...err.context };
+      throw err;
+    }
     // A standalone deployment refusing the transaction is a topology problem,
     // not a bug in the migration — say so instead of blaming the file.
     if (useTransaction && isTransactionsUnsupported(err)) {
       throw new TransactionsUnsupportedError(
         `Cannot run ${name} in a transaction — this deployment is standalone. ` +
           'Set useTransaction: false, or run against a replica set / mongos.',
-        { name, direction, cause: err.message },
+        { name, direction, durationMs: elapsed, cause: err.message },
         { cause: err },
       );
     }
@@ -137,7 +187,7 @@ async function runMigration(params) {
       `Migration ${direction} failed: ${name}`,
       // The message is duplicated into context because that is what survives
       // JSON serialization; `cause` keeps the real Error (and its stack).
-      { name, direction, cause: err.message },
+      { name, direction, durationMs: elapsed, cause: err.message },
       { cause: err },
     );
   } finally {

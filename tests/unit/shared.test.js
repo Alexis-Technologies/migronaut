@@ -117,4 +117,19 @@ describe('attachSignalHandlers', () => {
       detach();
     }
   });
+
+  it('should expose stopRequested so callers can honor a pre-run signal', () => {
+    // A signal during the CLI's cosmetic pre-connect makes migrator.stop() a
+    // no-op (no run window exists yet) — this flag is how withMigrator keeps
+    // the handler's "then stopping" promise honest.
+    const migrator = { stop: mock.fn() };
+    const detach = attachSignalHandlers(migrator, undefined, silentLogger);
+    try {
+      assert.strictEqual(detach.stopRequested(), false);
+      process.listeners('SIGINT').at(-1)();
+      assert.strictEqual(detach.stopRequested(), true);
+    } finally {
+      detach();
+    }
+  });
 });

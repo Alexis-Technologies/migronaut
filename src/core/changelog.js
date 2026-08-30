@@ -95,9 +95,18 @@ class Changelog {
     return this.#coll(db).findOne({ name });
   }
 
-  /** Return every currently-applied record, sorted by name ascending */
+  /**
+   * Every currently-applied record's `{name, checksum}`, sorted by name
+   * ascending — exactly what the strict bulk drift check consumes (the name
+   * doubles as the applied-set key). Projected like the module's other reads;
+   * widen the projection if a new caller needs more.
+   */
   async getApplied(db) {
-    return this.#coll(db).find({ status: 'applied' }).sort({ name: 1 }).toArray();
+    return this.#coll(db)
+      .find({ status: 'applied' })
+      .sort({ name: 1 })
+      .project({ _id: 0, name: 1, checksum: 1 })
+      .toArray();
   }
 
   /**
@@ -158,28 +167,53 @@ class Changelog {
   }
 
   /**
+   * The update document shared by markApplied and markAppliedBulk.
+   *
+   * `appliedAt` is stamped in **server time** (`$currentDate`) when the record
+   * does not carry one — the same clock discipline the lock's `$$NOW` uses:
+   * `redo` and `down --steps` sort by `appliedAt`, and a client-stamped value
+   * lets a skewed host mis-order the revert selection. An explicit `appliedAt`
+   * (import adopting a legacy changelog's historical timestamps) is written
+   * verbatim. `firstAppliedAt` is audit-only metadata, never sorted on, so its
+   * client-clock `$setOnInsert` fallback is acceptable ($setOnInsert cannot
+   * express server time).
+   */
+  static #appliedUpdate(record) {
+    // `name` comes from the filter on insert, so it must not also appear in an
+    // update operator (MongoDB rejects the conflicting path).
+    const { name, appliedAt, ...fields } = record;
+    const update = {
+      $set: fields,
+      // A re-apply clears the stale revert marker — and the failure trace a
+      // markFailed() from an earlier crashed attempt may have left.
+      $unset: { revertedAt: '', failedAt: '', error: '' },
+    };
+    if (appliedAt !== undefined) {
+      update.$set.appliedAt = appliedAt;
+      update.$setOnInsert = { firstAppliedAt: appliedAt };
+    } else {
+      update.$currentDate = { appliedAt: true };
+      update.$setOnInsert = { firstAppliedAt: new Date() };
+    }
+    return update;
+  }
+
+  /**
    * Record a migration as applied. Upserts on `name` so re-applying a
    * previously-reverted migration (e.g. via `redo`) cannot violate the unique
    * index. Uses `$set` rather than a whole-document replace so audit fields
    * survive a re-apply: `firstAppliedAt` is stamped once, and the stale
-   * `revertedAt` from an earlier rollback is cleared.
+   * `revertedAt` from an earlier rollback is cleared. `appliedAt` is stamped
+   * server-side unless the record carries one — see {@link #appliedUpdate}.
    *
    * Pass `session` to make this write part of the migration's transaction, so
    * the migration and its changelog record commit together.
    */
   async markApplied(db, record, session) {
-    // `name` comes from the filter on insert, so it must not also appear in an
-    // update operator (MongoDB rejects the conflicting path).
-    const { name, ...fields } = record;
-    await this.#coll(db).updateOne(
-      { name },
-      {
-        $set: fields,
-        $setOnInsert: { firstAppliedAt: record.appliedAt },
-        $unset: { revertedAt: '' },
-      },
-      { upsert: true, ...(session ? { session } : {}) },
-    );
+    await this.#coll(db).updateOne({ name: record.name }, Changelog.#appliedUpdate(record), {
+      upsert: true,
+      ...(session ? { session } : {}),
+    });
   }
 
   /**
@@ -193,15 +227,10 @@ class Changelog {
     if (records.length === 0) return;
     const ops = new Array(records.length);
     for (let i = 0; i < records.length; i++) {
-      const { name, ...fields } = records[i];
       ops[i] = {
         updateOne: {
-          filter: { name },
-          update: {
-            $set: fields,
-            $setOnInsert: { firstAppliedAt: records[i].appliedAt },
-            $unset: { revertedAt: '' },
-          },
+          filter: { name: records[i].name },
+          update: Changelog.#appliedUpdate(records[i]),
           upsert: true,
         },
       };
@@ -222,8 +251,30 @@ class Changelog {
   async markReverted(db, name, session) {
     return this.#coll(db).updateOne(
       { name, status: 'applied' },
-      { $set: { status: 'reverted', revertedAt: new Date() } },
+      // Server time, like markApplied's appliedAt — one clock for the whole trail.
+      { $set: { status: 'reverted' }, $currentDate: { revertedAt: true } },
       session ? { session } : {},
+    );
+  }
+
+  /**
+   * Best-effort trace of a failed `up` attempt, so a crash-and-restart leaves
+   * DB-side evidence of what was in flight ("did the crashed run start X?")
+   * instead of depending on process logs that may not have been captured.
+   *
+   * The filter excludes `'applied'` records: a forced re-run's failure must
+   * never demote a migration the changelog says is applied — the upsert then
+   * collides on the unique `name` index, and the caller swallows that. Every
+   * read path filters on `status: 'applied'`, so a `'failed'` record never
+   * changes what runs; the next successful apply overwrites it (and clears
+   * `failedAt`/`error`).
+   */
+  async markFailed(db, record) {
+    const { name, ...fields } = record;
+    await this.#coll(db).updateOne(
+      { name, status: { $ne: 'applied' } },
+      { $set: { ...fields, status: 'failed' }, $currentDate: { failedAt: true } },
+      { upsert: true },
     );
   }
 }

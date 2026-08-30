@@ -1,6 +1,6 @@
 const { createInterface } = require('node:readline/promises');
 const { createSpinner } = require('./spinner.js');
-const { ConfigInvalidError, MigronautError } = require('../errors/index.js');
+const { ConfigInvalidError, MigronautError, RunAbortedError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { createLogger } = require('../utils/logger.js');
 const { redactDeep, redactUris } = require('../utils/redact.js');
@@ -50,7 +50,11 @@ const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
  * exits immediately for an operator who cannot wait.
  *
  * Returns a function that removes the handlers again, so a long-lived process
- * calling the CLI repeatedly does not accumulate them.
+ * calling the CLI repeatedly does not accumulate them. The function carries a
+ * `stopRequested()` accessor: a signal that lands while nothing is running yet
+ * (the cosmetic pre-connect) makes `migrator.stop()` a no-op, so the caller
+ * must consult this flag itself before starting the run — otherwise the
+ * handler's "then stopping" promise above would be a lie.
  */
 function attachSignalHandlers(migrator, spinner, logger) {
   let stopping = false;
@@ -76,9 +80,11 @@ function attachSignalHandlers(migrator, spinner, logger) {
     process.on(signal, handler);
     handlers.push([signal, handler]);
   }
-  return () => {
+  const detach = () => {
     for (const [signal, handler] of handlers) process.off(signal, handler);
   };
+  detach.stopRequested = () => stopping;
+  return detach;
 }
 
 /**
@@ -224,6 +230,12 @@ async function withMigrator(opts, fn, options = {}) {
         spinner?.stop();
         throw error;
       }
+    }
+    // A signal during the pre-connect lands before any run window exists, so
+    // migrator.stop() was a no-op — honor it here, before starting the run the
+    // handler already told the operator would be stopped.
+    if (detachSignals.stopRequested?.()) {
+      throw new RunAbortedError('Stopped by signal before the run started', { results: [] });
     }
     await fn(migrator, { logger, json, opts });
   } catch (error) {

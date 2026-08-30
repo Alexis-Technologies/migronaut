@@ -249,3 +249,33 @@ describe('resolveLogger', () => {
     assert.deepStrictEqual(calls[1], ['plain']);
   });
 });
+
+describe('resolveLogger — warn/error-only loggers', () => {
+  it('should keep warn/error output instead of silencing the whole logger', () => {
+    // "errors only, please" is a plausible JS-caller shape; discarding it made
+    // a failed production run print nothing.
+    const calls = [];
+    const logger = resolveLogger({
+      warn: (msg) => calls.push(['warn', msg]),
+      error: (msg) => calls.push(['error', msg]),
+    });
+    logger.debug('quiet');
+    logger.info('quiet');
+    logger.warn('careful');
+    logger.error('boom');
+    assert.deepStrictEqual(calls, [
+      ['warn', 'careful'],
+      ['error', 'boom'],
+    ]);
+  });
+
+  it('should never escalate debug/info into a warn/error sink', () => {
+    const calls = [];
+    const logger = resolveLogger({ error: (msg) => calls.push(msg) });
+    logger.debug('commentary');
+    logger.info('commentary');
+    assert.deepStrictEqual(calls, []);
+    logger.error('real problem');
+    assert.deepStrictEqual(calls, ['real problem']);
+  });
+});

@@ -432,3 +432,72 @@ describe('isEsmProject', () => {
     });
   });
 });
+
+describe('generated config defaults stay pinned to DEFAULT_CONFIG', () => {
+  // The templates assert "the values below are the built-in defaults" and then
+  // hand-write those values in three places (js/ts body, JSON template,
+  // secret-provider options) — a changed default in config.js would otherwise
+  // leave `migronaut init` emitting stale values while still claiming they are
+  // the defaults. Pinned at the test level, not by a runtime import, so the
+  // utils layer keeps knowing nothing about core.
+  const { DEFAULT_CONFIG } = require('../../src/core/config.js');
+
+  // The scalar keys every template body displays with its default value.
+  const displayed = [
+    'migrationsCollection',
+    'lockCollection',
+    'lockTTLSeconds',
+    'strict',
+    'useTransaction',
+    'sequential',
+  ];
+  // The templates quote strings with single quotes (house style), not JSON.
+  const rendered = (value) => (typeof value === 'string' ? `'${value}'` : String(value));
+  const renderedExtensions = `[${DEFAULT_CONFIG.fileExtensions.map((e) => `'${e}'`).join(', ')}]`;
+
+  for (const [label, content] of [
+    ['defaultConfigJs', defaultConfigJs()],
+    ['defaultConfigTs', defaultConfigTs()],
+    ['secretConfigJs', secretConfigJs()],
+    ['secretConfigTs', secretConfigTs()],
+  ]) {
+    it(`should show the current defaults in ${label}`, () => {
+      for (const key of displayed) {
+        assert.ok(
+          content.includes(`${key}: ${rendered(DEFAULT_CONFIG[key])}`),
+          `${label} shows a stale default for '${key}'`,
+        );
+      }
+      assert.ok(
+        content.includes(`fileExtensions: ${renderedExtensions}`),
+        `${label} shows stale fileExtensions`,
+      );
+    });
+  }
+
+  it('should keep the JSON template deep-equal to DEFAULT_CONFIG for shared keys', () => {
+    const config = JSON.parse(defaultConfigJson());
+    for (const key of [...displayed, 'fileExtensions', 'createExtension', 'migrationsDir']) {
+      assert.deepStrictEqual(
+        config[key],
+        DEFAULT_CONFIG[key],
+        `defaultConfigJson drifted from DEFAULT_CONFIG for '${key}'`,
+      );
+    }
+  });
+});
+
+describe('maskUriCredentials — query-string secrets', () => {
+  it('should mask secrets carried as query parameters and flag them as credentials', () => {
+    const result = maskUriCredentials('mongodb://host/db?tlsCertificateKeyFilePassword=pemPw');
+    assert.strictEqual(result.uri, 'mongodb://host/db?tlsCertificateKeyFilePassword=****');
+    assert.strictEqual(result.hasCredentials, true);
+    assert.strictEqual(result.masked, true);
+  });
+
+  it('should mask both the userinfo password and query secrets together', () => {
+    const result = maskUriCredentials('mongodb://u:pw@host/db?proxyPassword=hunter2');
+    assert.strictEqual(result.uri, 'mongodb://u:****@host/db?proxyPassword=****');
+    assert.strictEqual(result.masked, true);
+  });
+});

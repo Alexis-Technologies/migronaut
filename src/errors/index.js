@@ -183,11 +183,24 @@ class ImportTargetNotEmptyError extends MigronautError {
   }
 }
 
-/** Thrown when attempting to roll back a migrate-mongo-imported (forward-only) migration */
+/** Thrown when attempting to roll back a forward-only (imported or baselined) migration */
 class IrreversibleMigrationError extends MigronautError {
   constructor(message, context, options) {
     super('MIGRATION_IRREVERSIBLE', message, context, options);
     this.name = 'IrreversibleMigrationError';
+  }
+}
+
+/**
+ * Thrown by a bulk `up` under `onOutOfOrder: 'error'` when a pending migration
+ * sorts before the newest applied one — a file merged late from a parallel
+ * branch, which would otherwise run after migrations authored later and leave
+ * environments with different effective apply orders.
+ */
+class OutOfOrderMigrationError extends MigronautError {
+  constructor(message, context, options) {
+    super('MIGRATION_OUT_OF_ORDER', message, context, options);
+    this.name = 'OutOfOrderMigrationError';
   }
 }
 
@@ -212,4 +225,5 @@ module.exports = {
   NotAppliedError,
   ImportTargetNotEmptyError,
   IrreversibleMigrationError,
+  OutOfOrderMigrationError,
 };

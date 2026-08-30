@@ -199,17 +199,31 @@ describe('MigrationLock.renew', () => {
 });
 
 describe('MigrationLock.release', () => {
-  it('should delete the lock document', async () => {
+  it('should delete the lock document scoped to the held owner token', async () => {
     const { db, collection } = makeDb();
     const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await lock.acquire();
     await lock.release();
-    assert.deepStrictEqual(collection.deleteOne.mock.calls[0].arguments, [{ _id: LOCK_ID }]);
+    const [filter] = collection.deleteOne.mock.calls[0].arguments;
+    assert.strictEqual(filter._id, LOCK_ID);
+    assert.strictEqual(filter.owner, lock.owner ?? filter.owner);
+    assert.ok(typeof filter.owner === 'string' && filter.owner.length > 0);
+  });
+
+  it('should be a no-op when no owner token is held', async () => {
+    const { db, collection } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    // An unscoped delete here would be forceRelease() without its opt-in —
+    // releasing twice (or before acquiring) must never steal a peer's lock.
+    await lock.release();
+    assert.strictEqual(collection.deleteOne.mock.callCount(), 0);
   });
 
   it('should throw LockReleaseFailedError when delete fails', async () => {
     const { db, collection } = makeDb();
-    collection.deleteOne.mock.mockImplementationOnce(() => Promise.reject(new Error('boom')));
     const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await lock.acquire();
+    collection.deleteOne.mock.mockImplementationOnce(() => Promise.reject(new Error('boom')));
     await assert.rejects(lock.release(), LockReleaseFailedError);
   });
 });

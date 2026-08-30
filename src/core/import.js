@@ -1,3 +1,12 @@
+const { mapLimit } = require('../utils/concurrency.js');
+
+/**
+ * Simultaneous checksum resolutions. Each one is a file read — an unbounded
+ * fan-out over a thousands-record legacy changelog would exhaust the
+ * descriptor limit (EMFILE), the exact hazard mapLimit exists for.
+ */
+const CHECKSUM_CONCURRENCY = 16;
+
 /** Returns true when a value looks like a usable migrate-mongo changelog doc */
 function isMigrateMongoDoc(value) {
   return (
@@ -30,13 +39,11 @@ async function mapMigrateMongoDocs(docs, options) {
     return delta !== 0 ? delta : a.fileName.localeCompare(b.fileName);
   });
 
-  // Independent per-doc disk reads — resolve them concurrently rather than
-  // one at a time.
-  const checksumPromises = [];
-  for (const doc of sorted) {
-    checksumPromises.push(options.resolveChecksum(doc.fileName, doc.fileHash));
-  }
-  const resolutions = await Promise.all(checksumPromises);
+  // Independent per-doc disk reads — resolved concurrently, but bounded:
+  // mapLimit preserves input order exactly like Promise.all would.
+  const resolutions = await mapLimit(sorted, CHECKSUM_CONCURRENCY, (doc) =>
+    options.resolveChecksum(doc.fileName, doc.fileHash),
+  );
 
   const records = [];
   for (let index = 0; index < sorted.length; index++) {

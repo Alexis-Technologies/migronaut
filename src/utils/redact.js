@@ -8,12 +8,45 @@
  * and the URI may sit anywhere inside a larger message (unlike
  * `maskUriCredentials` in template.js, which is anchored to a whole-string URI).
  */
-const URI_CREDENTIALS = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:@/\s]+):([^@/\s]+)@/g;
+const URI_CREDENTIALS = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:@/\s]*):([^@/\s]+)@/g;
 
-/** Mask `scheme://user:secret@` as `scheme://user:****@` anywhere in `text` */
+/**
+ * Query parameters whose value is a secret. The userinfo form is not the only
+ * place a MongoDB URI carries credentials: TLS key passphrases and proxy
+ * passwords travel as plain query parameters and would otherwise survive
+ * redaction into logs, error context and `--json` output.
+ */
+const URI_QUERY_SECRETS =
+  /([?&](?:tlsCertificateKeyFilePassword|proxyPassword|sslKeyPassword)=)[^&\s]+/gi;
+
+/**
+ * `authMechanismProperties` is a comma-separated `KEY:VALUE` list; only the
+ * values of secret-bearing keys (AWS_SESSION_TOKEN et al.) are masked, so
+ * non-secret properties (SERVICE_NAME, …) stay readable.
+ */
+const AUTH_MECHANISM_PROPS = /([?&]authMechanismProperties=)([^&\s]+)/gi;
+const SENSITIVE_PROP_KEY = /TOKEN|SECRET|PASSWORD/i;
+
+/**
+ * Mask credentials anywhere in `text`: `scheme://user:secret@` (an empty
+ * username still hides the password), secret-bearing query parameters, and
+ * secret values inside `authMechanismProperties`.
+ */
 function redactUris(text) {
   if (typeof text !== 'string') return text;
-  return text.replace(URI_CREDENTIALS, '$1$2:****@');
+  return text
+    .replace(URI_CREDENTIALS, '$1$2:****@')
+    .replace(URI_QUERY_SECRETS, '$1****')
+    .replace(AUTH_MECHANISM_PROPS, (_match, prefix, value) => {
+      const pairs = value.split(',');
+      for (let i = 0; i < pairs.length; i++) {
+        const colon = pairs[i].indexOf(':');
+        if (colon === -1) continue;
+        const key = pairs[i].slice(0, colon);
+        if (SENSITIVE_PROP_KEY.test(key)) pairs[i] = `${key}:****`;
+      }
+      return `${prefix}${pairs.join(',')}`;
+    });
 }
 
 /**

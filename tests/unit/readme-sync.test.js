@@ -23,8 +23,8 @@ function registeredCommandNames() {
 describe('README / docs stay in sync with the registered CLI commands', () => {
   const names = registeredCommandNames();
 
-  it('should find every registered command (sanity: 12 commands)', () => {
-    assert.strictEqual(names.length, 12);
+  it('should find every registered command (sanity: 13 commands)', () => {
+    assert.strictEqual(names.length, 13);
   });
 
   it('should mention every command in the README Commands table', () => {
@@ -45,5 +45,22 @@ describe('README / docs stay in sync with the registered CLI commands', () => {
         `docs/reference/cli.md does not mention "migronaut ${name}"`,
       );
     }
+  });
+
+  it('should pair every ENV_KEYS variable with its config key in the README table', () => {
+    // The env-var table has the same drift profile that created this file:
+    // ENV_KEYS grows with every new scalar config key, and the README copy is
+    // hand-written. Derived from the exported table, like config.test.js.
+    const { ENV_KEYS } = require(path.join(repoRoot, 'src', 'core', 'config.js'));
+    const readme = readFileSync(path.join(repoRoot, 'README.md'), 'utf8');
+    for (const spec of ENV_KEYS) {
+      assert.ok(
+        readme.includes(`| \`${spec.env}\` | \`${spec.path}\` |`),
+        `README env table is missing the ${spec.env} → ${spec.path} row`,
+      );
+    }
+    // The one env var deliberately outside the table (it selects the .env file
+    // the table's values are read from).
+    assert.ok(readme.includes('| `MIGRONAUT_ENV_FILE` | `envFile` |'));
   });
 });

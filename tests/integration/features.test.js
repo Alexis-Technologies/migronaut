@@ -287,8 +287,13 @@ export async function down() {}
       return true;
     });
     await kit.disconnect();
-    // It was never recorded as applied.
-    assert.strictEqual(await mongo.db.collection('_migronaut_migrations').countDocuments(), 0);
+    // Never recorded as applied — but the failed attempt leaves its trace, so
+    // post-incident forensics no longer depend on captured process logs.
+    const docs = await mongo.db.collection('_migronaut_migrations').find().toArray();
+    assert.strictEqual(docs.length, 1);
+    assert.strictEqual(docs[0].status, 'failed');
+    assert.match(docs[0].error, /timed out/);
+    assert.ok(docs[0].failedAt instanceof Date);
   });
 
   it('should let a per-file timeoutMs override the global one', async () => {
@@ -394,5 +399,158 @@ describe('audit (integration)', () => {
     const lock = report.checks.find((check) => check.name === 'lock');
     assert.strictEqual(lock.status, 'warn');
     assert.match(lock.detail, /migronaut unlock/);
+  });
+});
+
+describe('out-of-order detection (integration)', () => {
+  const { OutOfOrderMigrationError } = require('../../src/errors/index.js');
+
+  /** Apply the newer file first, then merge an older one from a "branch" */
+  async function applyNewerThenMergeOlder(overrides = {}) {
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    const kit = migrator(overrides);
+    await kit.up();
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    return kit;
+  }
+
+  it('should warn by default and still apply the late arrival', async () => {
+    const warns = [];
+    const kit = await applyNewerThenMergeOlder({
+      logger: { debug: () => {}, info: () => {}, error: () => {}, warn: (m) => warns.push(m) },
+    });
+    const results = await kit.up();
+    await kit.disconnect();
+    assert.strictEqual(results[0].file, '0001-a.ts');
+    assert.strictEqual(results[0].status, 'applied');
+    assert.ok(
+      warns.some((m) => m.includes('Out-of-order') && m.includes('0001-a.ts')),
+      'expected an out-of-order warning naming the late file',
+    );
+  });
+
+  it('should refuse the run under onOutOfOrder: error', async () => {
+    const kit = await applyNewerThenMergeOlder({ onOutOfOrder: 'error' });
+    await assert.rejects(kit.up(), (error) => {
+      assert.ok(error instanceof OutOfOrderMigrationError);
+      assert.strictEqual(error.code, 'MIGRATION_OUT_OF_ORDER');
+      assert.deepStrictEqual(error.context.names, ['0001-a.ts']);
+      return true;
+    });
+    await kit.disconnect();
+    // Nothing ran.
+    assert.strictEqual(await mongo.db.collection('things').countDocuments({ marker: 'a' }), 0);
+  });
+
+  it('should apply silently under onOutOfOrder: allow', async () => {
+    const warns = [];
+    const kit = await applyNewerThenMergeOlder({
+      onOutOfOrder: 'allow',
+      logger: { debug: () => {}, info: () => {}, error: () => {}, warn: (m) => warns.push(m) },
+    });
+    const results = await kit.up();
+    await kit.disconnect();
+    assert.strictEqual(results[0].status, 'applied');
+    assert.ok(!warns.some((m) => m.includes('Out-of-order')));
+  });
+
+  it('should mark late-arriving pending rows in status()', async () => {
+    const kit = await applyNewerThenMergeOlder();
+    const rows = await kit.status();
+    await kit.disconnect();
+    const late = rows.find((row) => row.file === '0001-a.ts');
+    const applied = rows.find((row) => row.file === '0002-b.ts');
+    assert.strictEqual(late.outOfOrder, true);
+    assert.strictEqual(applied.outOfOrder, undefined);
+  });
+
+  it('should never flag a normal down-then-up cycle', async () => {
+    const warns = [];
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    const kit = migrator({
+      logger: { debug: () => {}, info: () => {}, error: () => {}, warn: (m) => warns.push(m) },
+    });
+    await kit.up();
+    await kit.down();
+    const results = await kit.up();
+    await kit.disconnect();
+    assert.strictEqual(results.length, 2);
+    assert.ok(!warns.some((m) => m.includes('Out-of-order')));
+  });
+});
+
+describe('failed-attempt trace (integration)', () => {
+  it('should record a status:failed trace when a migration throws', async () => {
+    project.write('0001-boom.ts', failingMigration());
+    const kit = migrator();
+    try {
+      await assert.rejects(kit.up());
+    } finally {
+      await kit.disconnect();
+    }
+
+    const doc = await mongo.db
+      .collection('_migronaut_migrations')
+      .findOne({ name: '0001-boom.ts' });
+    assert.strictEqual(doc.status, 'failed');
+    assert.match(doc.error, /intentional failure/);
+    assert.ok(doc.failedAt instanceof Date);
+    assert.strictEqual(typeof doc.runId, 'string');
+  });
+
+  it('should surface the failed row in status() while keeping it pending for runs', async () => {
+    project.write('0001-boom.ts', failingMigration());
+    const kit = migrator();
+    try {
+      await assert.rejects(kit.up());
+      const rows = await kit.status();
+      assert.strictEqual(rows[0].status, 'failed');
+      assert.match(rows[0].error, /intentional failure/);
+      // Still pending work: the readiness probe counts it.
+      const pending = await kit.list('pending');
+      assert.strictEqual(pending.length, 1);
+    } finally {
+      await kit.disconnect();
+    }
+  });
+
+  it('should overwrite the failed trace once the migration finally applies', async () => {
+    project.write('0001-flaky.ts', failingMigration());
+    // reloadMigrations: Node caches dynamic import() by path, and this test
+    // rewrites the SAME filename mid-run — the documented cache gotcha.
+    const kit = migrator({ reloadMigrations: true });
+    try {
+      await assert.rejects(kit.up());
+      // The author fixes the file; the next up applies it cleanly.
+      project.write('0001-flaky.ts', insertMigration('things', 'fixed'));
+      const results = await kit.up();
+      assert.strictEqual(results[0].status, 'applied');
+    } finally {
+      await kit.disconnect();
+    }
+    const doc = await mongo.db
+      .collection('_migronaut_migrations')
+      .findOne({ name: '0001-flaky.ts' });
+    assert.strictEqual(doc.status, 'applied');
+    assert.strictEqual(doc.error, undefined);
+    assert.strictEqual(doc.failedAt, undefined);
+  });
+
+  it('should never demote an applied record when a forced re-run fails', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    // reloadMigrations, so the sabotaged rewrite below actually executes
+    // instead of the cached original module.
+    const kit = migrator({ reloadMigrations: true });
+    try {
+      await kit.up();
+      // Sabotage the file, then force a re-run that fails.
+      project.write('0001-a.ts', failingMigration());
+      await assert.rejects(kit.up('0001-a.ts', { force: true }));
+    } finally {
+      await kit.disconnect();
+    }
+    const doc = await mongo.db.collection('_migronaut_migrations').findOne({ name: '0001-a.ts' });
+    assert.strictEqual(doc.status, 'applied');
   });
 });

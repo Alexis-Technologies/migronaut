@@ -1,8 +1,96 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
-## v1.0.0
+## v2.0.0 — 2026-08-30
+
+A major bump for three narrow contract changes (below); everything else is
+additive. Upgrading is a no-op for the most commonly scripted surface:
+`pendingMigrations()` / `list('pending')` still report a file as `pending`
+even when a failed attempt was recorded for it.
+
+### Breaking changes
+
+- **`unlock --json` now requires `--yes`.** Previously `--json` alone
+  force-released the lock; it now refuses with `CONFIG_INVALID` (exit 6), because
+  a non-interactive mode must never assume consent to a destructive action —
+  force-releasing a live run's lock enables exactly the concurrent migration the
+  lock exists to prevent. **Migration:** add `--yes` to any scripted
+  `migronaut unlock --json`.
+- **`StatusRow.status` and `MigrationStatus` gained `'failed'`.** A recorded
+  failed attempt now renders as `failed` in `status()` / `list('all')` instead of
+  `pending`. **Migration:** TypeScript consumers with an exhaustive `switch` over
+  the status must handle the new member; treat `'failed'` as outstanding work.
+- **`MigronautErrorCode` gained `'MIGRATION_OUT_OF_ORDER'`** (and `EXIT_CODES`
+  the matching key, exit 23). **Migration:** exhaustive `switch` statements over
+  the code union must handle it.
+
+### Added
+
+- **`migronaut baseline`** — adopt an existing database with no prior migration tool: mark
+  migration files on disk as applied (checksum from disk, one shared batch, `origin: 'baseline'`)
+  without executing them. Forward-only, idempotent, confirmation-gated.
+- **Out-of-order detection** — a bulk `up` flags pending migrations that sort before the newest
+  applied one (a file merged late from a parallel branch). New scalar config `onOutOfOrder:
+  'warn' | 'error' | 'allow'` (default `'warn'`, env `MIGRONAUT_ON_OUT_OF_ORDER`), a new
+  `MIGRATION_OUT_OF_ORDER` error code (exit 23), `outOfOrder` on `StatusRow`, and an `ordering`
+  check in `audit`.
+- **Failed-attempt traces** — a failing `up` now leaves a best-effort `status: 'failed'` record
+  (error text, `failedAt`, `runId`) in the changelog; `status` renders it as `failed` while every
+  run path still retries the file; a successful apply clears the trace. A forced re-run's failure
+  never demotes an `applied` record.
+- **Audit-trail read surface** — `StatusRow` now carries `executedBy`, `environment`, `runId`,
+  `revertedAt` and `origin` from the changelog record, so `status --json` can answer "who ran
+  migration X, from which run, and was it ever reverted?".
+- **`onKit` option on `runMigrations`** — receive the internally-constructed `MigratorKit` before
+  connect and subscribe to its lifecycle events (metrics without log parsing).
+- **`createLogger` export** — the default console logger (with level control) for programmatic
+  callers.
+- **`cwd` option on `MigratorKit`** — scope config discovery, `.env` loading and a relative
+  `migrationsDir` to a project root, for processes hosting kits for several projects.
+- **ESM-interop integration test** pinning the "ESM consumers still work" promise.
+
+### Changed
+
+- **Server-time changelog stamps** — `appliedAt`/`revertedAt`/`failedAt` are stamped with the
+  server clock (`$currentDate`, matching the lock's `$$NOW` discipline) unless the record carries
+  an explicit `appliedAt` (import), so `redo`/`down --steps` ordering is immune to host clock skew.
+- **Non-transactional changelog-write failures are reported distinctly** — when a migration's own
+  writes committed but recording them failed, the error now says exactly that (context
+  `phase: 'changelog-write'`, `bodySucceeded: true`) instead of the generic "migration failed"
+  that invited re-running committed writes.
+- **A timed-out migration is told to stop** — `timeoutMs` now aborts `ctx.signal` (with the
+  `MigrationTimeoutError` as reason), so cooperative bodies stop writing instead of racing the
+  next lock holder.
+- **`lockWaitTimeoutMs` bounds stall, not total wait** — while a waiting `runMigrations` observes
+  the holder's heartbeat advancing, the deadline re-arms; only a stalled holder times peers out.
+- **`baseline` requires `--yes` in `--json` mode** — the same non-interactive
+  confirmation policy `up --force --json` and `unlock --json` follow.
+- **Failure telemetry carries timing** — `migration:error` events, error result rows and error
+  contexts now include `durationMs`/`batch`; the run ends with a `✔ Done N applied in Xms`
+  summary line.
+- Signals during the CLI's pre-connect now abort the run (exit 11) instead of being silently
+  dropped; partial-results lists survive hook/load failures and lock-release failures; lock
+  warn lines carry `runId`; import interruptions report progress and that a `--force` re-run
+  resumes idempotently.
+
+### Fixed / hardened
+
+- URI redaction now masks query-string secrets (`tlsCertificateKeyFilePassword`, `proxyPassword`,
+  `sslKeyPassword`, secret `authMechanismProperties` values) and empty-username passwords —
+  in logs, errors, `--json`, events, and `init`-generated config files (which now warn about
+  query-string secrets too).
+- Terminal sanitization strips the whole C1 control block (DCS/OSC/PM/APC, not just CSI), and
+  `bin/migronaut.js`'s last-resort handlers sanitize their output.
+- `MigrationLock.release()` without a held owner token is a no-op instead of an unscoped delete;
+  an uncontended `acquire()` takes one round trip instead of two.
+- Import checksum resolution is concurrency-bounded (no EMFILE on thousands-record changelogs);
+  the strict drift check reuses the instance checksum cache; `dry-run up` fetches applied names
+  instead of full records; a warn/error-only injected logger keeps its output instead of being
+  silenced entirely.
+
+## v1.0.0 — 2026-07-28
 
 Initial release. Requires **Node.js ≥ 22.18**.
 

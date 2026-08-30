@@ -2,12 +2,12 @@
 
 ## Supported versions
 
-migronaut is pre-1.0-release; only the latest published version receives fixes.
+Only the latest published version receives fixes.
 
 | Version | Supported |
 |---|---|
-| 1.0.x | ✅ |
-| < 1.0 | ❌ |
+| 2.0.x | ✅ |
+| < 2.0 | ❌ |
 
 ## Reporting a vulnerability
 

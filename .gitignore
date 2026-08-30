@@ -121,3 +121,8 @@ dist
 .pnpm-store
 
 .tmp
+
+# VitePress (the bare `dist` / `.cache` rules above do not match these paths)
+docs/.vitepress/dist
+docs/.vitepress/cache
+/.claude/launch.json

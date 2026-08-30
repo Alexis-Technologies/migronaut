@@ -20,11 +20,12 @@ describe('config schema sync', () => {
   // itself. Live instances (hooks, logger, mongoose, client) are .ts/.js-only
   // and deliberately absent; clientOptions IS a plain object, so it stays.
   it('should describe every validated config key, and nothing else', () => {
-    // Reach the internal table through the module — the test breaks loudly if
-    // the export shape changes, which is the point.
-    const configSource = readRepoFile('src/core/config.js');
-    const keyMatches = [...configSource.matchAll(/^\s*(?:{ )?path: '([a-zA-Z]+)'/gm)];
-    const validated = new Set(keyMatches.map((match) => match[1]));
+    // Through the exported table, not a regex over the source: config.js
+    // exports CONFIG_KEYS for exactly this kind of pin (config.test.js already
+    // consumes ENV_KEYS the same way), and a source-text scrape silently
+    // depends on the formatter's current line-wrapping.
+    const { CONFIG_KEYS } = require(path.join(repoRoot, 'src', 'core', 'config.js'));
+    const validated = new Set(CONFIG_KEYS.map((spec) => spec.path));
     assert.ok(validated.size >= 15, 'expected to find the CONFIG_KEYS table');
 
     const properties = new Set(Object.keys(schema.properties));
@@ -58,9 +59,18 @@ describe('config schema sync', () => {
     );
   });
 
-  it('should default createExtension to js, matching DEFAULT_CONFIG', () => {
+  it('should state the same default as DEFAULT_CONFIG for every shared key', () => {
+    // Every schema default is a hand-written copy of a DEFAULT_CONFIG value;
+    // pinning only a sample lets the rest drift (envFile's '.env' is resolved
+    // in loadConfig rather than DEFAULT_CONFIG, so it is checked literally).
     const { DEFAULT_CONFIG } = require(path.join(repoRoot, 'src', 'core', 'config.js'));
-    assert.strictEqual(schema.properties.createExtension.default, DEFAULT_CONFIG.createExtension);
-    assert.strictEqual(schema.properties.lockTTLSeconds.default, DEFAULT_CONFIG.lockTTLSeconds);
+    for (const [key, value] of Object.entries(DEFAULT_CONFIG)) {
+      assert.deepStrictEqual(
+        schema.properties[key]?.default,
+        value,
+        `schema default for '${key}' drifted from DEFAULT_CONFIG`,
+      );
+    }
+    assert.strictEqual(schema.properties.envFile.default, '.env');
   });
 });

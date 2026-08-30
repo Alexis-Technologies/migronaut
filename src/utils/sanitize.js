@@ -8,9 +8,14 @@
  * clear the screen, or restyle everything printed after them.
  */
 
-/** Control characters stripped from untrusted values (tab and newline survive) */
+/**
+ * Control characters stripped from untrusted values (tab and newline survive).
+ * The full C1 block (U+0080-U+009F) is included: CSI, OSC, DCS, PM and APC are
+ * single-codepoint escape introducers on terminals that decode C1, and none of
+ * them is ever legitimate text.
+ */
 // oxlint-disable-next-line no-control-regex -- stripping control characters is the point
-const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f\u009b]/g;
+const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f\u0080-\u009f]/g;
 
 /**
  * SGR color sequences (`ESC[…m`) to preserve, or a control character to drop.
@@ -19,7 +24,7 @@ const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f\u009b]/g;
  * titles — has no legitimate reason to be in a log line.
  */
 // oxlint-disable-next-line no-control-regex -- stripping control characters is the point
-const SGR_OR_CONTROL = /(\u001b\[[0-9;]*m)|[\u0000-\u0008\u000b-\u001f\u007f\u009b]/g;
+const SGR_OR_CONTROL = /(\u001b\[[0-9;]*m)|[\u0000-\u0008\u000b-\u001f\u007f\u0080-\u009f]/g;
 
 /**
  * Strip every terminal control character from an untrusted value. For data

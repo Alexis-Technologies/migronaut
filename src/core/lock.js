@@ -81,13 +81,14 @@ class MigrationLock {
       owner: { $literal: owner },
     };
 
+    let result;
     try {
       // Upsert on plain `_id` — upserts reject `$expr` filters (server error
       // 224), so the staleness decision lives in the pipeline instead, still
       // in server time: take the lock when no `lockedAt` exists (fresh insert)
       // or the holder is stale; otherwise keep the current document untouched.
       // The read-back below tells those outcomes apart.
-      await collection.updateOne(
+      result = await collection.updateOne(
         { _id: LOCK_ID },
         [
           {
@@ -116,6 +117,15 @@ class MigrationLock {
         });
       }
       throw error;
+    }
+
+    // A fresh upsert-insert on the unique `_id` already proves ownership — no
+    // other outcome can insert — and it is the common uncontended path, since
+    // release() deletes the document after every clean run. Skipping the
+    // read-back halves that path's round trips.
+    if (result.upsertedCount === 1) {
+      this.#owner = owner;
+      return;
     }
 
     // Confirm we are the holder. A fresh lock left the document untouched, and
@@ -166,12 +176,16 @@ class MigrationLock {
 
   /**
    * Release the lock by deleting the lock document. Scoped to our `owner` token
-   * (when held) so we never delete a lock that has since been reclaimed by
-   * another process.
+   * so we never delete a lock that has since been reclaimed by another process.
+   * With no token held this is a no-op — an unscoped delete here would be
+   * `forceRelease()` without its deliberate opt-in, and a future caller
+   * releasing twice (or before acquiring) must not silently steal a peer's
+   * live lock.
    * @throws {LockReleaseFailedError} when the delete operation fails
    */
   async release() {
-    const filter = this.#owner ? { _id: LOCK_ID, owner: this.#owner } : { _id: LOCK_ID };
+    if (!this.#owner) return;
+    const filter = { _id: LOCK_ID, owner: this.#owner };
     try {
       await this.#db.collection(this.#collectionName).deleteOne(filter);
       this.#owner = undefined;
@@ -332,8 +346,16 @@ async function runWithLock(lock, options, fn) {
   } catch (releaseError) {
     // Never let a release failure replace the reason the run failed: that would
     // report "Failed to release migration lock" instead of the actual migration
-    // error. When the run succeeded, the release failure is the only news.
-    if (!failed) throw releaseError;
+    // error. When the run succeeded, the release failure is the only news —
+    // but the migrations DID apply, and that list must survive onto the error,
+    // or "everything applied, only the lock cleanup failed" (the lock document
+    // self-heals via its TTL) is indistinguishable from a failed run.
+    if (!failed) {
+      if (releaseError instanceof LockReleaseFailedError && Array.isArray(result)) {
+        releaseError.context = { ...releaseError.context, results: [...result] };
+      }
+      throw releaseError;
+    }
     const message = errorText(releaseError);
     options.logger.warn(`⚠ Failed to release the migration lock: ${message}`, {
       event: 'lock:release-failed',

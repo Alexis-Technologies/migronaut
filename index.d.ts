@@ -51,14 +51,15 @@ export interface MigrationModule {
 
 // ─── Changelog ────────────────────────────────────────────────────────────────
 
-export type MigrationStatus = 'applied' | 'reverted';
+export type MigrationStatus = 'applied' | 'reverted' | 'failed';
 
 /**
  * Where a changelog record originated. `'migrate-mongo'` marks a record adopted
- * via `migronaut import`; such records are forward-only and cannot be reverted by migronaut.
- * Absent (or `'migronaut'`) means a natively-applied, reversible migration.
+ * via `migronaut import`, `'baseline'` one stamped by `migronaut baseline`; both are
+ * forward-only and cannot be reverted by migronaut. Absent (or `'migronaut'`)
+ * means a natively-applied, reversible migration.
  */
-export type MigrationOrigin = 'migronaut' | 'migrate-mongo';
+export type MigrationOrigin = 'migronaut' | 'migrate-mongo' | 'baseline';
 
 /** A single record in the _migronaut_migrations changelog collection */
 export interface MigrationRecord {
@@ -71,6 +72,10 @@ export interface MigrationRecord {
   /** When this migration was applied the *first* time; survives a re-apply */
   firstAppliedAt?: Date;
   revertedAt?: Date;
+  /** When the last failed attempt was recorded (status `'failed'` only) */
+  failedAt?: Date;
+  /** Redacted message of the last failed attempt (status `'failed'` only) */
+  error?: string;
   /** Execution time in milliseconds */
   duration: number;
   /** SHA-256 hash of the file at time of execution */
@@ -237,6 +242,19 @@ export interface MigronautConfig {
    * - `'warn'` — log and keep going.
    */
   onLockLost?: 'abort' | 'warn';
+  /**
+   * What a bulk `up` does when a pending migration sorts before the newest
+   * applied one — a file merged late from a parallel branch, which would apply
+   * out of authoring order (environments migrated at different times then
+   * disagree on the effective order).
+   *
+   * - `'warn'` (default) — log the late arrivals and apply them.
+   * - `'error'` — refuse the run with an {@link OutOfOrderMigrationError}.
+   * - `'allow'` — apply silently.
+   *
+   * A single-file `up` (an explicit, deliberate target) is never checked.
+   */
+  onOutOfOrder?: 'warn' | 'error' | 'allow';
   /** Mongoose instance — required only if your migrations use Mongoose models */
   mongoose?: MongooseLike;
   hooks?: MigrationHooks;
@@ -288,8 +306,8 @@ export type LogMethod = (msg: string, fields?: Record<string, unknown>) => void;
 // ─── Progress Reporter ─────────────────────────────────────────────────────────
 
 /**
- * Receives migration lifecycle callbacks so a presentation layer (e.g. an ora
- * spinner) can react. Deliberately separate from {@link MigrationHooks}: hooks
+ * Receives migration lifecycle callbacks so a presentation layer (e.g. a
+ * progress spinner) can react. Deliberately separate from {@link MigrationHooks}: hooks
  * run user DB logic inside the migration; this only drives a UI indicator and
  * never touches the database.
  */
@@ -318,13 +336,39 @@ export interface RunResult {
 
 export interface StatusRow {
   file: string;
-  status: 'applied' | 'pending';
+  /**
+   * `'failed'` marks a recorded failed attempt — the file still counts as
+   * pending for every run path (the next `up` retries it), but the failure is
+   * surfaced instead of rendering as a plain pending row. A reverted record
+   * reports as `'pending'`, with `revertedAt` carrying its history.
+   */
+  status: 'applied' | 'pending' | 'failed';
   batch: number | null;
   appliedAt: Date | null;
   duration: number | null;
   /** null = never applied, true = match, false = mismatch */
   checksumOk: boolean | null;
   description?: string;
+  /** Who ran it — from the changelog's audit trail, when recorded */
+  executedBy?: string;
+  /** Environment stamped at apply time, when recorded */
+  environment?: string;
+  /** Correlation id of the run that wrote the record, when recorded */
+  runId?: string;
+  /** When the migration was reverted — present on reverted history rows */
+  revertedAt?: Date;
+  /** `'migrate-mongo'` / `'baseline'` mark forward-only adopted records */
+  origin?: MigrationOrigin;
+  /** Redacted message of the last failed attempt (status `'failed'` only) */
+  error?: string;
+  /** When the last failed attempt was recorded (status `'failed'` only) */
+  failedAt?: Date;
+  /**
+   * Present (true) on a not-yet-applied row that sorts before the newest
+   * applied migration — a file merged late from a parallel branch, which will
+   * apply out of authoring order. See `MigronautConfig.onOutOfOrder`.
+   */
+  outOfOrder?: true;
   /**
    * Present (true) when the changelog record's name is not a plain filename —
    * a legacy or tampered record. The row is reported as-is instead of failing
@@ -411,7 +455,8 @@ export type MigronautErrorCode =
   | 'CONNECTION_FAILED'
   | 'NOT_APPLIED'
   | 'IMPORT_TARGET_NOT_EMPTY'
-  | 'MIGRATION_IRREVERSIBLE';
+  | 'MIGRATION_IRREVERSIBLE'
+  | 'MIGRATION_OUT_OF_ORDER';
 
 // ─── Config file format ─────────────────────────────────────────────────────────
 
@@ -486,7 +531,7 @@ export interface MigrationEvent extends MigronautEventBase {
 }
 
 export interface RunStartEvent extends MigronautEventBase {
-  /** Which command started the run: 'up' | 'down' | 'redo' | 'import' */
+  /** Which command started the run: 'up' | 'down' | 'redo' | 'import' | 'baseline' */
   command?: string;
   direction?: 'up' | 'down';
 }
@@ -585,6 +630,24 @@ export interface InitOptions {
   secretProvider?: boolean;
 }
 
+/** Options for {@link MigratorKit.baseline} */
+export interface BaselineOptions {
+  /** Baseline pending files up to and including this one, instead of all */
+  to?: string;
+  /** Skip lock acquisition (dev only) */
+  noLock?: boolean;
+}
+
+/** Outcome of a {@link MigratorKit.baseline} call */
+export interface BaselineSummary {
+  /** Files marked applied by this call, in name order */
+  baselined: string[];
+  /** Files on disk that were already applied (or beyond `--to`) and untouched */
+  skipped: number;
+  /** The shared batch number stamped on the baselined records; null when none */
+  batch: number | null;
+}
+
 /** Options for {@link MigratorKit.import} */
 export interface ImportOptions {
   /** Source collection to read. Default: `changelog` (migrate-mongo's default) */
@@ -606,8 +669,15 @@ export interface MigratorKitOptions {
   /** Explicit config file path — overrides auto-discovery */
   configPath?: string;
   /**
+   * Project root this instance resolves against: config-file discovery, the
+   * `.env` file and a relative `migrationsDir`. Defaults to `process.cwd()`.
+   * Set it when one process hosts kits for several projects, so their
+   * relative paths stop sharing one global working directory.
+   */
+  cwd?: string;
+  /**
    * Optional lifecycle reporter, invoked around each migration's execution so a
-   * UI (the CLI's ora spinner) can show progress. Core never imports a spinner
+   * UI (the CLI's spinner) can show progress. Core never imports a spinner
    * library — it only calls these callbacks.
    */
   progress?: ProgressReporter;
@@ -698,6 +768,14 @@ export class MigratorKit extends EventEmitter {
    * records into our schema and writing them to `migrationsCollection`.
    */
   import(options?: ImportOptions): Promise<ImportResult>;
+  /**
+   * Adopt an existing database with no prior migration tool: mark migration
+   * files on disk as applied — checksums from disk, one shared batch,
+   * `origin: 'baseline'` — without executing anything. Forward-only:
+   * `down`/`redo` refuse baselined records. Idempotent: already-applied names
+   * are skipped, so a partial baseline can simply be re-run.
+   */
+  baseline(options?: BaselineOptions): Promise<BaselineSummary>;
 }
 
 // ─── Programmatic entry points ─────────────────────────────────────────────────
@@ -717,13 +795,23 @@ export interface RunMigrationsOptions extends MigratorKitOptions {
    */
   onLockHeld?: OnLockHeld;
   /**
-   * Max time (ms) to wait when `onLockHeld: 'wait'`. Default: 90000 — sized to
-   * outlast a peer's typical run plus one lock TTL, so parallel deploys don't
-   * give up while a healthy peer is still migrating.
+   * Max time (ms) to wait when `onLockHeld: 'wait'` **without observing holder
+   * progress**. While the holder's heartbeat visibly advances its lock, the
+   * deadline is re-armed — a healthy peer working through a long backlog never
+   * times its waiting peers out; only a stalled holder runs this budget down.
+   * Default: 90000.
    */
   lockWaitTimeoutMs?: number;
   /** Poll interval (ms) while waiting for the lock. Default: 500 */
   lockPollIntervalMs?: number;
+  /**
+   * Receives the internally-constructed {@link MigratorKit} right after
+   * construction (before connect), so an embedding application can subscribe
+   * to its lifecycle events — `kit.on('migration:success', …)` for metrics,
+   * lock telemetry, runId correlation — while keeping the managed
+   * connect/run/disconnect lifecycle.
+   */
+  onKit?: (kit: MigratorKit) => void;
 }
 
 /** Outcome of a {@link runMigrations} call */
@@ -770,6 +858,21 @@ export function pendingMigrations(
 export const EXIT_CODES: Readonly<
   Record<MigronautErrorCode | 'PENDING_MIGRATIONS' | 'AUDIT_FAILED', number>
 >;
+
+// ─── Logger factory ───────────────────────────────────────────────────────────
+
+/** Threshold accepted by {@link createLogger} — drops anything less severe */
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/**
+ * Create the default console logger (pino-compatible surface, terminal-escape
+ * sanitization and colors included). `debug`/`info` write to `stream`
+ * (stdout by default); `warn`/`error` always write to stderr. For programmatic
+ * callers who want migronaut's own output at a chosen verbosity — e.g.
+ * `logger: createLogger(process.stdout, 'debug')` — without hand-writing a
+ * four-method logger.
+ */
+export function createLogger(stream?: NodeJS.WritableStream, level?: LogLevel): MigronautLogger;
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -897,7 +1000,16 @@ export class ImportTargetNotEmptyError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }
 
-/** Thrown when attempting to roll back a migrate-mongo-imported (forward-only) migration */
+/** Thrown when attempting to roll back a forward-only (imported or baselined) migration */
 export class IrreversibleMigrationError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by a bulk `up` under `onOutOfOrder: 'error'` when a pending migration
+ * sorts before the newest applied one — a file merged late from a parallel
+ * branch. `context.names` lists the late arrivals.
+ */
+export class OutOfOrderMigrationError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }

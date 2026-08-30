@@ -23,6 +23,22 @@ change before it touches your database.
 
 </div>
 
+> [!TIP]
+> ### 🔄 Already using `migrate-mongo`? Switch in under a minute.
+>
+> `migronaut` adopts your existing `changelog` **as-is** — no re-running migrations, no data loss, no rewriting
+> files. Point it at the same database and bring your whole history over in one command:
+>
+> ```bash
+> migronaut import     # one-time: adopt your migrate-mongo changelog (it's never modified)
+> migronaut up         # applies only what's new — your past migrations are recognized as already applied
+> ```
+>
+> Your applied history is preserved and new migrations run normally. Your `up`/`down`/`create`/`status`
+> mental model carries over 1:1 — you just gain dry-runs, single-file control, real rollbacks, hooks,
+> and locking. No `migrate-mongo` history at all? `migronaut baseline` adopts an existing database
+> with no prior tool. → **[See how it works](#advanced-features)**
+
 ---
 
 ## Reasons to choose it
@@ -35,6 +51,10 @@ change before it touches your database.
 - **No race conditions** — an atomic MongoDB lock stops two deploys running migrations at once.
 - **Tamper detection** — SHA-256 checksums catch a migration edited after it was applied.
 - **Audit trail kept** — a rollback updates the record, it never deletes it.
+- **Adopt any existing database** — `migronaut import` for a migrate-mongo history,
+  `migronaut baseline` when there was no migration tool at all.
+- **Out-of-order detection** — a migration merged late from a parallel branch is flagged
+  (warn by default, `onOutOfOrder: 'error'` to refuse) instead of silently applying.
 - **Lifecycle hooks** — `beforeAll`, `afterAll`, `beforeEach`, `afterEach`, `onError`.
 - **Opt-in transactions** — wrap a migration so it fully commits or fully aborts.
 - **TypeScript, ESM & CommonJS** — all run with no `ts-node` plumbing.
@@ -51,13 +71,15 @@ change before it touches your database.
 | Roll back a specific batch (not just the last)  |        ❌        |          ✅          |
 | Dry-run preview                                 |        ❌        |          ✅          |
 | `redo` (down + up)                              |        ❌        |          ✅          |
-| SHA-256 checksum / tamper detection             |        ❌        |          ✅          |
+| Concurrency lock                                | opt-in, TTL-only | ✅ always on: heartbeat, owner token, abort-on-loss, `lock`/`unlock` CLI |
+| Checksum / tamper detection                     | opt-in `useFileHash` (re-runs changed files) | ✅ enforced drift detection: per-row `checksumOk`, `--strict`, `audit` |
 | Lifecycle hooks                                 |        ❌        |          ✅          |
 | First-class TypeScript (built-in)               |        ❌        |          ✅          |
 | History preserved on rollback (never deleted)   |        ❌        |          ✅          |
 | Adopt an existing `migrate-mongo` changelog     |        —        | ✅ `migronaut import` |
 
-<sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026. It has since added transaction access
+<sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026 (v14: optional
+`lockCollectionName`/`lockTtl` lock, optional `useFileHash`). It has since added transaction access
 via a `client` argument; `migronaut` exposes the same plus a declarative per-file `useTransaction` flag.</sub>
 
 ### How it compares to `mongo-migrate-kit`
@@ -86,21 +108,6 @@ floor is a trade-off, not a win: it is what buys `.ts` migrations with no loader
 with no dependency.</sub>
 
 → **[Full comparison, and what stayed the same](https://migronaut.vercel.app/guide/vs-mongo-migrate-kit)**
-
-> [!TIP]
-> ### 🔄 Already using `migrate-mongo`? Switch in under a minute.
->
-> `migronaut` adopts your existing `changelog` **as-is** — no re-running migrations, no data loss, no rewriting
-> files. Point it at the same database and bring your whole history over in one command:
->
-> ```bash
-> migronaut import     # one-time: adopt your migrate-mongo changelog (it's never modified)
-> migronaut up         # applies only what's new — your past migrations are recognized as already applied
-> ```
->
-> Your applied history is preserved and new migrations run normally. Your `up`/`down`/`create`/`status`
-> mental model carries over 1:1 — you just gain dry-runs, single-file control, real rollbacks, hooks,
-> and locking. → **[See how it works](#advanced-features)**
 
 ---
 
@@ -168,6 +175,7 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--
 |---|---|
 | `migronaut init` | Create a documented `migronaut.config.*` in the current directory |
 | `migronaut import` | Adopt an existing `migrate-mongo` changelog (one-time, forward-only) |
+| `migronaut baseline` | Mark existing migration files as applied without running them (adopt an existing DB) |
 | `migronaut create <name>` | Generate a timestamped migration file |
 | `migronaut up [file]` | Run all pending migrations, one named file, or up to `--to <file>` |
 | `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, one file, or to `--to <file>` |
@@ -179,8 +187,8 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--
 | `migronaut lock` | Show who currently holds the migration lock |
 | `migronaut unlock` | Force-release a stuck lock left behind by a crashed run |
 
-Most data commands (`up`, `down`, `redo`, `status`, `list`, `dry-run`, `import`, `create`,
-`audit`, `lock`, `unlock`) accept **`--json`** for machine-readable output — see
+Most data commands (`up`, `down`, `redo`, `status`, `list`, `dry-run`, `import`, `baseline`,
+`create`, `audit`, `lock`, `unlock`) accept **`--json`** for machine-readable output — see
 [CI & automation](#ci--automation).
 
 <details>
@@ -205,6 +213,12 @@ migronaut import --trust-hash      # reuse migrate-mongo's fileHash instead of r
 migronaut import --force           # proceed even if the migronaut changelog already has records
 migronaut import --no-lock         # skip the concurrency lock (local dev only)
 migronaut import --json            # machine-readable output
+
+# baseline — adopt an existing database (no prior migration tool)
+migronaut baseline                 # mark ALL pending files as applied, without running them
+migronaut baseline --to <file>     # only files up to and including <file>
+migronaut baseline --yes           # skip the confirmation prompt (required with --json)
+migronaut baseline --json          # machine-readable output ({ "baselined": [...], ... })
 
 # create — generate a migration file
 migronaut create <name>            # file type follows config `createExtension` (default .js)
@@ -580,6 +594,11 @@ await migrator.disconnect();
 All errors extend `MigronautError` and carry a typed `code` (`LOCK_ALREADY_HELD`, `CHECKSUM_MISMATCH`,
 `NOT_APPLIED`, …), so `catch` blocks stay type-safe.
 
+> [!NOTE]
+> Running several kits against several databases in **one process**? Pass `envFile: false` and
+> explicit `uri`/`dbName` to each — `.env` loading mutates the shared `process.env` (dotenv
+> semantics), so different env files could otherwise leak `MIGRONAUT_*` values between kits.
+
 </details>
 
 ---
@@ -592,7 +611,9 @@ All errors extend `MigronautError` and carry a typed `code` (`LOCK_ALREADY_HELD`
 
 A config file is optional and auto-discovered in the working directory as `migronaut.config.ts`,
 `migronaut.config.js`, or `migronaut.config.json`. Run `migronaut init` to generate one — it ships fully commented,
-so every setting lives in one documented place:
+so every setting lives in one documented place. A generated `migronaut.config.json` points its
+`$schema` at the hosted copy for editor completion; offline or air-gapped setups can point it at
+the copy every install already ships: `./node_modules/@alexify/migronaut/migronaut.schema.json`.
 
 ```js
 // migronaut.config.js — generated by `migronaut init`, every option explained
@@ -671,6 +692,7 @@ optional rather than merely discouraged:
 | `MIGRONAUT_TEMPLATE_PATH` | `templatePath` | — *(built-in template)* |
 | `MIGRONAUT_TIMEOUT_MS` | `timeoutMs` | — *(no timeout)* |
 | `MIGRONAUT_ON_LOCK_LOST` | `onLockLost` | `abort` |
+| `MIGRONAUT_ON_OUT_OF_ORDER` | `onOutOfOrder` | `warn` |
 | `MIGRONAUT_ENSURE_INDEXES` | `ensureIndexes` | `true` |
 | `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` | `false` |
 | `MIGRONAUT_ENV_FILE` | `envFile` | `.env` |
