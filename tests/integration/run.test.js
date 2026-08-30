@@ -177,3 +177,29 @@ describe('pendingMigrations (readiness probe)', () => {
     assert.deepStrictEqual(await pendingMigrations(config()), []);
   });
 });
+
+describe('runMigrations onKit (integration)', () => {
+  it('should hand out the kit before connect, so listeners see every event', async () => {
+    project = makeProject();
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+
+    const events = [];
+    const summary = await runMigrations(config(), {
+      onKit: (kit) => {
+        for (const name of ['run:start', 'migration:success', 'run:end', 'lock:acquired']) {
+          kit.on(name, (payload) => events.push([name, payload]));
+        }
+      },
+    });
+
+    assert.strictEqual(summary.applied.length, 1);
+    const names = events.map(([name]) => name);
+    assert.ok(names.includes('run:start'));
+    assert.ok(names.includes('migration:success'));
+    assert.ok(names.includes('lock:acquired'));
+    assert.strictEqual(events.at(-1)[0], 'run:end');
+    // The whole point: metrics without parsing log lines.
+    const success = events.find(([name]) => name === 'migration:success')[1];
+    assert.strictEqual(typeof success.durationMs, 'number');
+  });
+});

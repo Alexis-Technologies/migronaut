@@ -675,7 +675,7 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(await mongo.db.collection('_migronaut_locks').countDocuments(), 0);
   });
 
-  it('should return the released holder as JSON with unlock --json', async () => {
+  it('should refuse unlock --json without --yes (non-interactive needs explicit consent)', async () => {
     await mongo.db.collection('_migronaut_locks').insertOne({
       _id: 'migronaut_lock',
       lockedAt: new Date(),
@@ -684,7 +684,27 @@ describe('migronaut CLI (integration)', () => {
       executedBy: 'ghost',
       owner: 'stale-token',
     });
+    // Same policy as `up --force --json`: a non-interactive mode never assumes
+    // consent to a destructive action — force-releasing a live lock enables
+    // the exact concurrent-run scenario the lock exists to prevent.
     const result = await runCli(baseArgs(['unlock', '--json']));
+    assert.strictEqual(result.code, 6);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.error.code, 'CONFIG_INVALID');
+    assert.match(parsed.error.message, /--yes/);
+    assert.strictEqual(await mongo.db.collection('_migronaut_locks').countDocuments(), 1);
+  });
+
+  it('should return the released holder as JSON with unlock --json --yes', async () => {
+    await mongo.db.collection('_migronaut_locks').insertOne({
+      _id: 'migronaut_lock',
+      lockedAt: new Date(),
+      pid: 4242,
+      host: 'crashed-host',
+      executedBy: 'ghost',
+      owner: 'stale-token',
+    });
+    const result = await runCli(baseArgs(['unlock', '--json', '--yes']));
     assert.strictEqual(result.code, 0);
     const parsed = JSON.parse(result.stdout);
     assert.strictEqual(parsed.released, true);
@@ -981,5 +1001,39 @@ describe('migronaut CLI — quiet mode and output safety (integration)', () => {
     });
     assert.ok(!result.stderr.includes('EPIPE'));
     assert.ok(!result.stderr.includes('Unhandled'));
+  });
+});
+
+describe('baseline CLI (integration)', () => {
+  it('should refuse baseline --json without --yes (non-interactive needs explicit consent)', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const result = await runCli(baseArgs(['baseline', '--json']));
+    assert.strictEqual(result.code, 6);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.error.code, 'CONFIG_INVALID');
+    assert.match(parsed.error.message, /--yes/);
+    assert.strictEqual(await mongo.db.collection('_migronaut_migrations').countDocuments(), 0);
+  });
+
+  it('should baseline files as applied with --json --yes, without executing them', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    const result = await runCli(baseArgs(['baseline', '--json', '--yes']));
+    assert.strictEqual(result.code, 0);
+    const parsed = JSON.parse(result.stdout);
+    assert.deepStrictEqual(parsed.baselined, ['0001-a.ts', '0002-b.ts']);
+    assert.strictEqual(parsed.skipped, 0);
+    // Nothing executed; records marked applied and forward-only.
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+    const doc = await mongo.db.collection('_migronaut_migrations').findOne({ name: '0001-a.ts' });
+    assert.strictEqual(doc.status, 'applied');
+    assert.strictEqual(doc.origin, 'baseline');
+  });
+
+  it('should abort when the baseline confirmation is declined', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const result = await runCli(baseArgs(['baseline']), {}, undefined, 'n\n');
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(await mongo.db.collection('_migronaut_migrations').countDocuments(), 0);
   });
 });

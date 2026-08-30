@@ -99,15 +99,20 @@ async function runAudit(deps) {
     record('lock', 'warn', `Could not read the lock: ${errorText(error)}`);
   }
 
-  // 6. Checksum drift and missing files, from the same rows `status` renders.
+  // 6. Checksum drift, missing files, pending count and ordering, from the
+  //    same rows `status` renders.
   try {
     const rows = await deps.status();
-    // One pass over the rows collects both signals.
+    // One pass over the rows collects every signal.
     const drifted = [];
+    const outOfOrder = [];
     let pending = 0;
     for (const row of rows) {
       if (row.checksumOk === false) drifted.push(row.file);
-      if (row.status === 'pending') pending += 1;
+      // A recorded failed attempt still counts as pending work — the file
+      // will be retried by the next `up`.
+      if (row.status === 'pending' || row.status === 'failed') pending += 1;
+      if (row.outOfOrder) outOfOrder.push(row.file);
     }
     if (drifted.length > 0) {
       record('checksums', 'fail', `Edited after being applied: ${drifted.join(', ')}`);
@@ -115,6 +120,15 @@ async function runAudit(deps) {
       record('checksums', 'pass', 'No drift among applied migrations');
     }
     record('pending', pending === 0 ? 'pass' : 'warn', `${pending} pending migration(s)`);
+    if (outOfOrder.length > 0) {
+      record(
+        'ordering',
+        'warn',
+        `Pending but older than the newest applied migration: ${outOfOrder.join(', ')}`,
+      );
+    } else {
+      record('ordering', 'pass', 'No out-of-order pending migrations');
+    }
   } catch (error) {
     record('checksums', 'warn', `Could not read status: ${errorText(error)}`);
   }

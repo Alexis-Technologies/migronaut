@@ -1,5 +1,6 @@
 const { Command } = require('./args.js');
 const { registerAudit } = require('./commands/audit.js');
+const { registerBaseline } = require('./commands/baseline.js');
 const { registerCreate } = require('./commands/create.js');
 const { registerDown } = require('./commands/down.js');
 const { registerDryRun } = require('./commands/dry-run.js');
@@ -37,6 +38,7 @@ function buildProgram() {
 
   registerInit(program);
   registerImport(program);
+  registerBaseline(program);
   registerUp(program);
   registerDown(program);
   registerRedo(program);

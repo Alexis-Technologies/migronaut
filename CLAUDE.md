@@ -152,7 +152,7 @@ pnpm run docs:dev                        # vitepress dev docs
 
 `prepublishOnly` runs lint + format:check + test:coverage + test:types + check:dts — treat that as
 the pre-merge gate. There is no `build` script and nothing to run before testing or publishing;
-`files` in `package.json` ships `index.js`, `index.d.ts`, `bin/`, and `src/` as-is.
+`files` in `package.json` ships `index.js`, `index.d.ts`, `migronaut.schema.json`, `bin/`, and `src/` as-is.
 
 ## Conventions (enforced by oxlint/oxfmt + review)
 

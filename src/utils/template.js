@@ -8,6 +8,7 @@ const {
 } = require('../errors/index.js');
 const { formatStamp } = require('./date.js');
 const { errorText } = require('./error.js');
+const { redactUris } = require('./redact.js');
 
 /**
  * Convert an arbitrary migration name into a kebab-case slug. Unicode-aware —
@@ -255,21 +256,34 @@ const exportStatement = (esm, expression) =>
  * Mask the password in a connection URI (`user:secret@` → `user:****@`) so a
  * generated config file never carries plaintext credentials. Regex-based, not
  * `new URL()` — multi-host mongodb URIs (`mongodb://h1:27017,h2:27017/db`) fail
- * WHATWG URL parsing. `hasCredentials` is true whenever a userinfo part exists;
- * `masked` only when a non-empty password was actually replaced.
+ * WHATWG URL parsing. `hasCredentials` is true whenever a userinfo part exists
+ * or a query-string secret was masked; `masked` only when a secret was
+ * actually replaced.
  */
 function maskUriCredentials(uri) {
   const match = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^@/]+)@(.*)$/.exec(uri);
-  if (!match) {
-    return { uri, hasCredentials: false, masked: false };
+  let out = uri;
+  let hasCredentials = false;
+  let masked = false;
+  if (match) {
+    const [, scheme, userinfo, rest] = match;
+    hasCredentials = true;
+    const colon = userinfo.indexOf(':');
+    if (colon !== -1 && colon !== userinfo.length - 1) {
+      const username = userinfo.slice(0, colon);
+      out = `${scheme}${username}:****@${rest}`;
+      masked = true;
+    }
   }
-  const [, scheme, userinfo, rest] = match;
-  const colon = userinfo.indexOf(':');
-  if (colon === -1 || colon === userinfo.length - 1) {
-    return { uri, hasCredentials: true, masked: false };
+  // Secrets can also travel as query parameters (TLS key passphrases, proxy
+  // passwords, session tokens) — redactUris masks exactly those, and an
+  // already-masked `user:****@` round-trips unchanged, so comparing the
+  // result tells whether a query secret was found.
+  const queryMasked = redactUris(out);
+  if (queryMasked !== out) {
+    return { uri: queryMasked, hasCredentials: true, masked: true };
   }
-  const username = userinfo.slice(0, colon);
-  return { uri: `${scheme}${username}:****@${rest}`, hasCredentials: true, masked: true };
+  return { uri: out, hasCredentials, masked };
 }
 
 /** Merge caller-supplied config values over the built-in defaults */

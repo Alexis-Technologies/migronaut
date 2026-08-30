@@ -1,7 +1,7 @@
 {
   "name": "@alexify/migronaut",
   "version": "1.0.0",
-  "description": "Elegant, fast, fully-typed, zero-dependency MongoDB migrations for Node.js",
+  "description": "Elegant, fast, fully-typed, zero-dependency MongoDB migrations for Node.js — adopts an existing migrate-mongo changelog in one command",
   "license": "MIT",
   "author": "Alex Dolid <dolid.sasha@gmail.com>",
   "repository": {
@@ -70,13 +70,16 @@
     "migrations",
     "mongodb-migration",
     "mongodb-migrations",
+    "mongodb-migrate",
     "database-migration",
     "schema-migration",
     "migrate-mongo",
+    "migrate-mongo-alternative",
     "mongoose",
     "mongoose-migration",
     "rollback",
     "transactions",
+    "zero-dependency",
     "cli",
     "typescript",
     "nosql"

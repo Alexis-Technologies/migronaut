@@ -46,7 +46,7 @@ describe('Changelog (mocked DB)', () => {
     // fields preserved across a re-import.
     assert.strictEqual(first.update.$set.name, undefined);
     assert.ok(first.update.$setOnInsert.firstAppliedAt instanceof Date);
-    assert.deepStrictEqual(first.update.$unset, { revertedAt: '' });
+    assert.deepStrictEqual(first.update.$unset, { revertedAt: '', failedAt: '', error: '' });
   });
 
   it('markAppliedBulk should skip the round trip entirely for zero records', async () => {
@@ -72,9 +72,36 @@ describe('Changelog (mocked DB)', () => {
     const { db, collection } = makeDb();
     await new Changelog('_migronaut_migrations').markApplied(db, makeRecord({ name: 'a.ts' }));
     const [, update] = collection.updateOne.mock.calls[0].arguments;
-    // firstAppliedAt survives a re-apply; a stale revertedAt is cleared.
+    // firstAppliedAt survives a re-apply; a stale revertedAt — and the trace
+    // of an earlier failed attempt — are cleared.
     assert.ok(update.$setOnInsert.firstAppliedAt instanceof Date);
-    assert.deepStrictEqual(update.$unset, { revertedAt: '' });
+    assert.deepStrictEqual(update.$unset, { revertedAt: '', failedAt: '', error: '' });
+  });
+
+  it('markApplied should stamp appliedAt in server time when the record has none', async () => {
+    const { db, collection } = makeDb();
+    const record = makeRecord({ name: 'a.ts' });
+    delete record.appliedAt;
+    await new Changelog('_migronaut_migrations').markApplied(db, record);
+    const [, update] = collection.updateOne.mock.calls[0].arguments;
+    // $currentDate = the server's clock, matching the lock's $$NOW discipline —
+    // the revert-selection sorts must not depend on this host's clock.
+    assert.deepStrictEqual(update.$currentDate, { appliedAt: true });
+    assert.strictEqual(update.$set.appliedAt, undefined);
+    assert.ok(update.$setOnInsert.firstAppliedAt instanceof Date);
+  });
+
+  it('markApplied should write an explicit appliedAt verbatim (import history)', async () => {
+    const { db, collection } = makeDb();
+    const appliedAt = new Date('2020-01-02T03:04:05Z');
+    await new Changelog('_migronaut_migrations').markApplied(
+      db,
+      makeRecord({ name: 'a.ts', appliedAt }),
+    );
+    const [, update] = collection.updateOne.mock.calls[0].arguments;
+    assert.strictEqual(update.$set.appliedAt, appliedAt);
+    assert.strictEqual(update.$currentDate, undefined);
+    assert.strictEqual(update.$setOnInsert.firstAppliedAt, appliedAt);
   });
 
   it('markApplied should pass the session through when given one', async () => {
@@ -91,7 +118,26 @@ describe('Changelog (mocked DB)', () => {
     const [filter, update] = collection.updateOne.mock.calls[0].arguments;
     assert.deepStrictEqual(filter, { name: 'a.ts', status: 'applied' });
     assert.strictEqual(update.$set.status, 'reverted');
-    assert.ok(update.$set.revertedAt instanceof Date);
+    // Server time, like markApplied's appliedAt — one clock for the trail.
+    assert.deepStrictEqual(update.$currentDate, { revertedAt: true });
+  });
+
+  it('markFailed should upsert a failed trace without touching applied records', async () => {
+    const { db, collection } = makeDb();
+    await new Changelog('_migronaut_migrations').markFailed(db, {
+      name: 'a.ts',
+      error: 'boom',
+      runId: 'run-1',
+    });
+    const [filter, update, options] = collection.updateOne.mock.calls[0].arguments;
+    // The $ne filter means an existing 'applied' record never matches — the
+    // upsert then collides on the unique name index, which the caller swallows.
+    assert.deepStrictEqual(filter, { name: 'a.ts', status: { $ne: 'applied' } });
+    assert.strictEqual(update.$set.status, 'failed');
+    assert.strictEqual(update.$set.error, 'boom');
+    assert.strictEqual(update.$set.name, undefined);
+    assert.deepStrictEqual(update.$currentDate, { failedAt: true });
+    assert.deepStrictEqual(options, { upsert: true });
   });
 
   it('markReverted should pass the session through when given one', async () => {

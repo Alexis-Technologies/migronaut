@@ -54,6 +54,7 @@ can tell how far the run got. The exit code identifies the failure — see
 | `CONNECTION_FAILED` | `ConnectionFailedError` | Couldn't connect to MongoDB | Verify `uri`/`dbName` and that Mongo is up |
 | `NOT_APPLIED` | `NotAppliedError` | Tried to revert a migration that isn't applied | Run `migronaut status` to see what's applied |
 | `IMPORT_TARGET_NOT_EMPTY` | `ImportTargetNotEmptyError` | `migronaut import` target already has records | Use `--force` to import anyway |
-| `MIGRATION_IRREVERSIBLE` | `IrreversibleMigrationError` | Tried to revert an imported migrate-mongo record | Write a new forward migration instead |
+| `MIGRATION_IRREVERSIBLE` | `IrreversibleMigrationError` | Tried to revert a forward-only record ([imported](/commands/import) or [baselined](/commands/baseline)) | Write a new forward migration instead |
+| `MIGRATION_OUT_OF_ORDER` | `OutOfOrderMigrationError` | A bulk `up` under `onOutOfOrder: 'error'` found a pending migration sorting before the newest applied one (a file merged late from a parallel branch) | Apply it deliberately with `onOutOfOrder: 'warn'` or `'allow'` |
 
 See [Troubleshooting](/guide/troubleshooting) for step-by-step fixes for the most common ones.

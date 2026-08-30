@@ -1,4 +1,4 @@
-const { ImportTargetNotEmptyError } = require('../errors/index.js');
+const { ImportTargetNotEmptyError, MigronautError } = require('../errors/index.js');
 const { computeChecksum } = require('../utils/checksum.js');
 const { Changelog } = require('./changelog.js');
 const { isMigrateMongoDoc, mapMigrateMongoDocs } = require('./import.js');
@@ -52,7 +52,14 @@ async function runImport(deps, options, signal) {
       valid.push(doc);
     } else {
       skipped += 1;
-      logger.warn('⚠ Skipping source doc without a usable fileName');
+      // The _id is the only handle the operator has for locating the offending
+      // source document — an anonymous count is undebuggable after the fact.
+      // String() keeps an ObjectId safe for any sink; the default logger
+      // already sanitizes terminal escapes in DB-derived text.
+      logger.warn(
+        `⚠ Skipping source doc without a usable fileName (_id: ${String(doc?._id)})`,
+        deps.fields({ source, docId: String(doc?._id) }),
+      );
     }
   }
 
@@ -91,7 +98,10 @@ async function runImport(deps, options, signal) {
       );
       rowSources.set(fileName, resolved.source);
       if (resolved.source === 'missing') {
-        logger.warn(`⚠ File not found on disk: ${fileName} — checksum unverifiable`);
+        logger.warn(
+          `⚠ File not found on disk: ${fileName} — checksum unverifiable`,
+          deps.fields({ file: fileName, checksumSource: 'missing' }),
+        );
       }
       return resolved;
     },
@@ -120,9 +130,27 @@ async function runImport(deps, options, signal) {
   // adopting a 5,000-record changelog is 5 round trips, not 5,000, all while
   // holding the migration lock. The abort check between chunks lets stop() /
   // a lost lock halt a long import instead of running it to completion.
-  for (let start = 0; start < records.length; start += IMPORT_CHUNK_SIZE) {
-    deps.assertNotAborted(signal);
-    await targetChangelog.markAppliedBulk(db, records.slice(start, start + IMPORT_CHUNK_SIZE));
+  let written = 0;
+  try {
+    for (let start = 0; start < records.length; start += IMPORT_CHUNK_SIZE) {
+      deps.assertNotAborted(signal);
+      await targetChangelog.markAppliedBulk(db, records.slice(start, start + IMPORT_CHUNK_SIZE));
+      written += Math.min(IMPORT_CHUNK_SIZE, records.length - start);
+    }
+  } catch (error) {
+    // Earlier chunks are already committed; without a count the operator only
+    // discovers the half-populated target when the next plain `import` throws
+    // ImportTargetNotEmptyError. Recovery is safe — the upserts are keyed on
+    // `name`, so a --force re-run is idempotent and simply resumes.
+    logger.warn(
+      `⚠ Import interrupted after ${written}/${records.length} record(s) — ` +
+        'a --force re-run is idempotent and will resume',
+      deps.fields({ source, target, imported: written, total: records.length }),
+    );
+    if (error instanceof MigronautError && error.context) {
+      error.context = { ...error.context, imported: written, total: records.length };
+    }
+    throw error;
   }
 
   logger.info(

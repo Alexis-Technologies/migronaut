@@ -93,6 +93,7 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `templatePath` | `string` | — | Path to a custom migration template |
 | `environment` | `string` | `NODE_ENV` → `'production'` | Value stamped on the `environment` field of changelog records |
 | `onLockLost` | `'abort' \| 'warn'` | `'abort'` | What to do if the lock is lost mid-run |
+| `onOutOfOrder` | `'warn' \| 'error' \| 'allow'` | `'warn'` | What a bulk `up` does with a pending migration that sorts before the newest applied one |
 | `envFile` | `string \| false` | `'.env'` | `.env` file to load, or `false` to load none |
 | `ensureIndexes` | `boolean` | `true` | Create the changelog indexes on first connect |
 | `clientOptions` | `MongoClientOptions` | — | Driver options: TLS, AWS IAM / X.509 auth, proxies, pool sizing |
@@ -112,6 +113,14 @@ one-argument logger keeps working unchanged.
 `runId` is a per-run correlation id: it is also the lock's owner token and is
 stored on every changelog record that run writes, so a leftover lock can be
 traced to the exact migrations it was holding.
+
+`onOutOfOrder` is about files merged late from a parallel branch: on a bulk
+`up`, a pending migration that sorts *before* the newest applied one would
+apply out of authoring order. `'warn'` (default) logs the late arrivals and
+applies them; `'error'` refuses the run with `MIGRATION_OUT_OF_ORDER`
+(exit 23); `'allow'` applies silently. A single-file `up` — an explicit,
+deliberate target — is never checked. `status` marks such rows
+`outOfOrder: true`, and `audit` reports them in its `ordering` check.
 
 ::: tip Connection timeout
 The driver waits up to 30 s (its default `serverSelectionTimeoutMS`) before a
@@ -145,6 +154,7 @@ config file is never required" literally true, not just a slogan. These
 | `MIGRONAUT_TEMPLATE_PATH` | `templatePath` |
 | `MIGRONAUT_TIMEOUT_MS` | `timeoutMs` |
 | `MIGRONAUT_ON_LOCK_LOST` | `onLockLost` |
+| `MIGRONAUT_ON_OUT_OF_ORDER` | `onOutOfOrder` |
 | `MIGRONAUT_ENSURE_INDEXES` | `ensureIndexes` |
 | `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` |
 | `MIGRONAUT_ENV_FILE` | `envFile` |

@@ -39,3 +39,13 @@ describe('runMigrations option validation', () => {
     });
   }
 });
+
+describe('runMigrations onKit validation', () => {
+  it('should reject a non-function onKit before connecting', async () => {
+    await assert.rejects(runMigrations(config, { onKit: 'listen' }), (error) => {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.match(error.message, /onKit/);
+      return true;
+    });
+  });
+});

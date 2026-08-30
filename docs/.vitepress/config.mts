@@ -116,6 +116,7 @@ export default defineConfig({
           text: 'Introduction',
           items: [
             { text: 'Why migronaut?', link: '/guide/why' },
+            { text: 'vs. migrate-mongo', link: '/guide/vs-migrate-mongo' },
             { text: 'vs. mongo-migrate-kit', link: '/guide/vs-mongo-migrate-kit' },
             { text: 'Core Concepts', link: '/guide/concepts' },
             { text: 'Getting Started', link: '/guide/getting-started' },
@@ -129,6 +130,8 @@ export default defineConfig({
             { text: 'Migration Files', link: '/guide/writing-migrations' },
             { text: 'Transactions', link: '/guide/transactions' },
             { text: 'Lifecycle Hooks', link: '/guide/hooks' },
+            { text: 'Using Mongoose', link: '/guide/mongoose' },
+            { text: 'Seeding Data', link: '/guide/seeding' },
           ],
         },
         {
@@ -173,6 +176,7 @@ export default defineConfig({
           text: 'Operations',
           items: [
             { text: 'migronaut import', link: '/commands/import' },
+            { text: 'migronaut baseline', link: '/commands/baseline' },
             { text: 'migronaut lock', link: '/commands/lock' },
             { text: 'migronaut unlock', link: '/commands/unlock' },
           ],

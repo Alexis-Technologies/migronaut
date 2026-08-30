@@ -95,6 +95,9 @@ Combined short flags are not supported: write `-f -y`, not `-fy`.
 | `migronaut import --dry-run` | Preview the mapping |
 | `migronaut import --trust-hash` | Reuse migrate-mongo's `fileHash` |
 | `migronaut import --force` | Import into a non-empty changelog |
+| [`migronaut baseline`](/commands/baseline) | Mark existing files as applied without running them |
+| `migronaut baseline --to <file>` | Baseline only files up to and including that one |
+| `migronaut baseline --yes` | Skip the confirmation prompt (required with `--json`) |
 | `migronaut lock` | Show who holds the migration lock |
 | `migronaut lock --json` | Machine-readable `{ held, holder }` |
 | `migronaut audit` | Check config, connectivity, transactions, indexes, lock, checksums |

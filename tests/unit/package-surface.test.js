@@ -74,6 +74,29 @@ describe('package entry point', () => {
 });
 
 describe('declaration file', () => {
+  it('should list every runtime error code in the MigronautErrorCode union', () => {
+    // The one lockstep surface nothing else pins: classes and exit codes are
+    // checked both ways above, but the code-literal union can silently omit a
+    // new code — tsc/tsd cannot force it in, since subclasses do not narrow
+    // `code`. Same textual-pin style schema-sync uses.
+    const dts = readRepoFile('index.d.ts');
+    const unionMatch = /export type MigronautErrorCode =([\s\S]*?);/.exec(dts);
+    assert.ok(unionMatch, 'expected the MigronautErrorCode union in index.d.ts');
+    const declared = new Set([...unionMatch[1].matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]));
+
+    const errors = require(path.join(repoRoot, 'src', 'errors', 'index.js'));
+    const runtime = new Set();
+    for (const [name, ErrorClass] of Object.entries(errors)) {
+      if (name === 'MigronautError' || typeof ErrorClass !== 'function') continue;
+      runtime.add(new ErrorClass('probe').code);
+    }
+    assert.deepStrictEqual(
+      [...declared].sort(),
+      [...runtime].sort(),
+      'MigronautErrorCode union and runtime error codes must match exactly',
+    );
+  });
+
   it('should not import from the optional mongoose peer', () => {
     // mongoose is an optional peer: a hard import makes index.d.ts fail to
     // resolve for everyone who never installs it. A structural MongooseLike

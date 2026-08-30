@@ -33,6 +33,12 @@ function jitteredDelay(baseMs) {
  * the race to acquire the lock block until the migrating peer finishes, then
  * confirm there is nothing left to apply.
  *
+ * Running several kits against several databases in ONE process: pass
+ * `envFile: false` and supply `uri`/`dbName` directly. `.env` loading mutates
+ * the shared process.env (dotenv semantics, override: false), so two kits
+ * with different env files would otherwise leak `MIGRONAUT_*` values into each
+ * other's config resolution.
+ *
  * @example
  * ```js
  * const { runMigrations } = require('@alexify/migronaut');
@@ -50,8 +56,13 @@ async function runMigrations(config = {}, options = {}) {
     onLockHeld = 'throw',
     lockWaitTimeoutMs = DEFAULT_LOCK_WAIT_TIMEOUT_MS,
     lockPollIntervalMs = DEFAULT_LOCK_POLL_INTERVAL_MS,
+    onKit,
     ...kitOptions
   } = options;
+
+  if (onKit !== undefined && typeof onKit !== 'function') {
+    throw new ConfigInvalidError('onKit must be a function', { onKit: typeof onKit });
+  }
 
   // Validated before anything connects. A NaN here (or any non-positive value)
   // disables every deadline comparison below — `NaN > deadline` is always
@@ -69,6 +80,10 @@ async function runMigrations(config = {}, options = {}) {
   }
 
   const kit = new MigratorKit(config, kitOptions);
+  // Handed out before connect so listeners catch every lifecycle event —
+  // this is the metrics/alerting injection point for apps that embed
+  // runMigrations and cannot reach the internally-constructed kit otherwise.
+  onKit?.(kit);
   let waited = false;
   let waitedMs = 0;
   let attempts = 0;
@@ -82,6 +97,10 @@ async function runMigrations(config = {}, options = {}) {
     // The clock starts at the first contention, not before the first attempt —
     // otherwise a slow initial attempt eats the whole waiting budget.
     let deadline;
+    // The holder's lockedAt from the last refusal: its heartbeat advances it
+    // every TTL/2, so a change between polls is proof of a live, progressing
+    // peer.
+    let lastHolderLockedAt;
 
     for (;;) {
       try {
@@ -92,7 +111,20 @@ async function runMigrations(config = {}, options = {}) {
         if (onLockHeld !== 'wait' || !(error instanceof LockAlreadyHeldError)) {
           throw error;
         }
-        deadline ??= Date.now() + lockWaitTimeoutMs;
+        // The timeout bounds *stall* time, not total wait: while the holder's
+        // heartbeat visibly advances, it is healthy and working through its
+        // backlog — timing out then would crash-loop every waiting instance
+        // on exactly the deploys (a large first backlog) that take longest.
+        // Only a holder that stops renewing runs the deadline down.
+        const holderLockedAt = error.context?.holder?.lockedAt?.getTime?.();
+        const holderAdvanced =
+          holderLockedAt !== undefined &&
+          lastHolderLockedAt !== undefined &&
+          holderLockedAt > lastHolderLockedAt;
+        if (deadline === undefined || holderAdvanced) {
+          deadline = Date.now() + lockWaitTimeoutMs;
+        }
+        if (holderLockedAt !== undefined) lastHolderLockedAt = holderLockedAt;
         const nextDelay = jitteredDelay(lockPollIntervalMs);
         if (Date.now() + nextDelay > deadline) {
           throw error;

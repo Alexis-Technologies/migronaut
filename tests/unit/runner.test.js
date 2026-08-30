@@ -251,3 +251,127 @@ describe('runMigration', () => {
     );
   });
 });
+
+describe('runMigration — changelog-write phase (non-transactional)', () => {
+  it('should report a changelog failure after a committed body as its own phase', async () => {
+    const { context } = makeContext();
+    const migration = {
+      up: mock.fn(() => Promise.resolve(undefined)),
+      down: mock.fn(() => Promise.resolve(undefined)),
+    };
+    // The generic "migration failed" would invite re-running writes that are
+    // already committed — the phase marker is what lets the operator (and a
+    // --json consumer) tell the two apart.
+    await assert.rejects(
+      runMigration({
+        name: 'a.ts',
+        migration,
+        direction: 'up',
+        context,
+        useTransaction: false,
+        onSuccess: () => Promise.reject(new Error('primary stepped down')),
+      }),
+      (error) => {
+        assert.ok(error instanceof MigrationExecutionFailedError);
+        assert.strictEqual(error.context.phase, 'changelog-write');
+        assert.strictEqual(error.context.bodySucceeded, true);
+        assert.match(error.message, /succeeded but recording it/);
+        return true;
+      },
+    );
+  });
+
+  it('should not fire onError for a changelog-write failure (the migration did not fail)', async () => {
+    const { context } = makeContext();
+    const onError = mock.fn(() => Promise.resolve(undefined));
+    await assert.rejects(
+      runMigration({
+        name: 'a.ts',
+        migration: { up: () => Promise.resolve(undefined), down: () => Promise.resolve(undefined) },
+        direction: 'up',
+        context,
+        useTransaction: false,
+        hooks: { onError },
+        onSuccess: () => Promise.reject(new Error('boom')),
+      }),
+    );
+    assert.strictEqual(onError.mock.callCount(), 0);
+  });
+});
+
+describe('runMigration — timeout aborts ctx.signal', () => {
+  it('should abort the context signal when the timeout fires', async () => {
+    const { context } = makeContext();
+    let observedSignal;
+    const migration = {
+      // A cooperative body: parks forever unless the signal tells it to stop.
+      up: (ctx) => {
+        observedSignal = ctx.signal;
+        return new Promise((_resolve, reject) => {
+          ctx.signal.addEventListener('abort', () => reject(ctx.signal.reason), { once: true });
+        });
+      },
+      down: () => Promise.resolve(undefined),
+    };
+    await assert.rejects(
+      runMigration({
+        name: 'slow.ts',
+        migration,
+        direction: 'up',
+        context,
+        useTransaction: false,
+        timeoutMs: 20,
+      }),
+      MigrationTimeoutError,
+    );
+    assert.ok(observedSignal.aborted, 'ctx.signal must be aborted on timeout');
+    assert.ok(observedSignal.reason instanceof MigrationTimeoutError);
+  });
+
+  it('should compose the run signal with the timeout signal', async () => {
+    const { context } = makeContext();
+    const runController = new AbortController();
+    let observedSignal;
+    const migration = {
+      up: (ctx) => {
+        observedSignal = ctx.signal;
+        return Promise.resolve(undefined);
+      },
+      down: () => Promise.resolve(undefined),
+    };
+    await runMigration({
+      name: 'a.ts',
+      migration,
+      direction: 'up',
+      context: { ...context, signal: runController.signal },
+      useTransaction: false,
+    });
+    // Aborting the run signal must reach the composed context signal too.
+    assert.strictEqual(observedSignal.aborted, false);
+    runController.abort(new Error('stop'));
+    assert.strictEqual(observedSignal.aborted, true);
+  });
+});
+
+describe('runMigration — failure timing', () => {
+  it('should attach durationMs to the failure context', async () => {
+    const { context } = makeContext();
+    await assert.rejects(
+      runMigration({
+        name: 'a.ts',
+        migration: {
+          up: () => Promise.reject(new Error('nope')),
+          down: () => Promise.resolve(undefined),
+        },
+        direction: 'up',
+        context,
+        useTransaction: false,
+      }),
+      (error) => {
+        assert.strictEqual(typeof error.context.durationMs, 'number');
+        assert.ok(error.context.durationMs >= 0);
+        return true;
+      },
+    );
+  });
+});

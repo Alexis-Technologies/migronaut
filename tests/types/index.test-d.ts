@@ -2,6 +2,7 @@ import { pino } from 'pino';
 import { expectAssignable, expectError, expectType } from 'tsd';
 import {
   type AuditReport,
+  type BaselineSummary,
   ChecksumMismatchError,
   EXIT_CODES,
   HookFailedError,
@@ -14,6 +15,7 @@ import {
   type MigronautConfig,
   type MigronautErrorCode,
   type MigronautLogger,
+  OutOfOrderMigrationError,
   type ProgressReporter,
   RunAbortedError,
   type RunEndEvent,
@@ -21,6 +23,7 @@ import {
   type RunStartEvent,
   type StatusRow,
   TransactionsUnsupportedError,
+  createLogger,
   pendingMigrations,
   runMigrations,
 } from '../../index.js';
@@ -74,6 +77,12 @@ expectType<Promise<RunResult[]>>(kit.redo(undefined, { noLock: true }));
 // Resilience/audit config keys
 expectAssignable<Partial<MigronautConfig>>({ onLockLost: 'warn', environment: 'staging' });
 
+// Out-of-order policy is a closed union
+expectAssignable<Partial<MigronautConfig>>({ onOutOfOrder: 'error' });
+expectError<Partial<MigronautConfig>>({ onOutOfOrder: 'ignore' });
+expectAssignable<MigronautError>(new OutOfOrderMigrationError('late arrival'));
+expectAssignable<MigronautErrorCode>('MIGRATION_OUT_OF_ORDER');
+
 // .env control: a path, or false to load nothing
 expectAssignable<Partial<MigronautConfig>>({ envFile: '.env.ci' });
 expectAssignable<Partial<MigronautConfig>>({ envFile: false });
@@ -116,6 +125,8 @@ expectType<Promise<string>>(kit.create('add users index', { js: true }));
 expectType<Promise<string>>(kit.init({ format: 'ts', secretProvider: true }));
 expectError(kit.init({ format: 'yaml' }));
 expectType<Promise<ImportResult>>(kit.import({ from: 'changelog', dryRun: true }));
+expectType<Promise<BaselineSummary>>(kit.baseline({ to: '0002-b.ts' }));
+expectType<Promise<BaselineSummary>>(kit.baseline());
 expectType<Promise<LockInfo | null>>(kit.lockInfo());
 expectType<Promise<LockInfo | null>>(kit.forceUnlock());
 
@@ -176,6 +187,15 @@ expectType<
   }>
 >(runMigrations({}, { onLockHeld: 'wait', lockWaitTimeoutMs: 90_000, lockPollIntervalMs: 250 }));
 expectError(runMigrations({}, { onLockHeld: 'retry' }));
+// onKit hands out the internally-constructed kit for event subscriptions.
+void runMigrations({}, { onKit: (k) => void expectType<MigratorKit>(k) });
+
+// ─── cwd scoping and the exported logger factory ─────────────────────────────
+
+new MigratorKit({}, { cwd: '/srv/app' });
+expectType<MigronautLogger>(createLogger());
+expectType<MigronautLogger>(createLogger(process.stdout, 'debug'));
+expectError(createLogger(process.stdout, 'chatty'));
 
 // ─── Error codes and construction options ────────────────────────────────────
 
@@ -185,10 +205,16 @@ expectAssignable<MigronautError>(new TransactionsUnsupportedError('standalone'))
 new MigronautError('CONFIG_INVALID', 'bad', { issues: [] }, { cause: new Error('inner') });
 new ChecksumMismatchError('mismatch', { name: 'x' }, { cause: new Error('inner') });
 
-// ─── StatusRow invalid marker ────────────────────────────────────────────────
+// ─── StatusRow markers and audit-trail surface ───────────────────────────────
 
 declare const row: StatusRow;
 expectType<true | undefined>(row.invalid);
+expectType<true | undefined>(row.outOfOrder);
+expectType<'applied' | 'pending' | 'failed'>(row.status);
+expectType<string | undefined>(row.executedBy);
+expectType<string | undefined>(row.runId);
+expectType<Date | undefined>(row.revertedAt);
+expectType<Date | undefined>(row.failedAt);
 
 // ─── EXIT_CODES map and CLI logger fallback ──────────────────────────────────
 

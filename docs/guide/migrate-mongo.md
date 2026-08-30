@@ -14,6 +14,12 @@ migronaut up         # applies only what's new — past migrations are recognize
 Your applied history is preserved and new migrations run normally. Your `up`/`down`/`create`/`status`
 mental model carries over 1:1.
 
+::: tip No migrate-mongo history?
+If your database predates any migration tool — changes applied by hand, no `changelog` collection to
+import — adopt it with [`migronaut baseline`](/commands/baseline) instead: it marks your
+reconstructed migration files as applied without running them.
+:::
+
 ## What `migronaut import` does
 
 `migronaut import` reads your existing `migrate-mongo` changelog collection and records that history in the

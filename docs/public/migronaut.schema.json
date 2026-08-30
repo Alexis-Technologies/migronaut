@@ -99,6 +99,15 @@
       "default": "abort",
       "description": "What to do when the lock is lost mid-run"
     },
+    "onOutOfOrder": {
+      "enum": [
+        "warn",
+        "error",
+        "allow"
+      ],
+      "default": "warn",
+      "description": "What a bulk `up` does when a pending migration sorts before the newest applied one (a file merged late from a parallel branch)"
+    },
     "envFile": {
       "oneOf": [
         {

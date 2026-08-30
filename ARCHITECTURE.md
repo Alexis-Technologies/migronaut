@@ -79,18 +79,22 @@ src/
 │   ├── runner.js            # Execute ONE migration up()/down() (+ transactions)
 │   ├── context.js           # Build the MigrationContext passed to each migration
 │   ├── audit.js             # runAudit() — the read-only health-check flow
+│   ├── baseline.js          # runBaseline() — mark existing files applied without running them
 │   ├── import.js            # PURE migrate-mongo → MigrationRecord mapping
 │   ├── import-runner.js     # runImport() — the impure import flow (read/map/write)
 │   └── run.js               # Programmatic helpers: runMigrations(), pendingMigrations()
 ├── utils/
 │   ├── logger.js            # Pino-compatible logger (default console, silent, pino adapter)
 │   ├── colors.js            # ANSI palette + FORCE_COLOR/NO_COLOR/TTY detection + stripAnsi
+│   ├── concurrency.js       # mapLimit() — bounded fan-out for per-file reads/writes
 │   ├── env.js               # .env loader — native util.parseEnv, override:false semantics
 │   ├── checksum.js          # SHA-256 file hashing
-│   ├── redact.js            # Mask user:password@ in strings leaving the process
+│   ├── redact.js            # Mask credentials (userinfo + query secrets) leaving the process
+│   ├── sanitize.js          # Strip terminal control chars (C0 + full C1) from untrusted text
 │   ├── error.js             # errorText() — stringify caught errors, redaction built in
 │   ├── loader.js            # Dynamic-import a migration file (.ts/.js, ESM/CJS)
 │   ├── template.js          # Generate migration files & config files
+│   ├── user.js              # safeUsername() — MIGRONAUT_USER, else the OS user
 │   └── date.js              # Dependency-free timestamp formatting
 └── cli/
     ├── index.js             # CLI root: registers commands + global flags
@@ -247,15 +251,26 @@ Each entry: **responsibility · key exports · nuances you must know.**
     first-applied timestamp and clears the stale revert marker instead of erasing both.
   - `markReverted` **never deletes** — it sets `status:'reverted'` + `revertedAt`. Audit history is
     sacred.
+  - `appliedAt`/`revertedAt`/`failedAt` are stamped in **server time** (`$currentDate`) unless the
+    record carries an explicit `appliedAt` (import adopting historical timestamps) — the same
+    clock discipline the lock's `$$NOW` uses, because `redo`/`down --steps` sort by `appliedAt`
+    and a skewed client clock would mis-order the revert selection.
+  - `markFailed` leaves a best-effort `status:'failed'` trace of a failed `up` attempt (error text,
+    `failedAt`, `runId`). Its filter excludes `'applied'` records — a forced re-run's failure can
+    never demote a migration the changelog says is applied — and every read path filters on
+    `status:'applied'`, so a failed trace never changes what runs; the next successful apply
+    overwrites it and clears `failedAt`/`error`.
   - Both accept an optional trailing `session`. The runner passes the migration's own session so the
     changelog write **commits inside the migration's transaction** — without that, a crash between
     the commit and the record leaves a migration applied but unrecorded, and the next `up` runs it
     again.
-  - `ensureIndexes` creates the three indexes the read paths use — unique `name`,
-    `{status, batch}` (applied-set and highest-batch lookups) and `{batch}` (rollback by
-    batch) — in one `createIndexes` round trip. Called once per `MigratorKit` instance, not
-    once per `connect()`, and skipped entirely by `ensureIndexes: false` for deployments
-    where the app user cannot create indexes.
+  - `ensureIndexes` creates the **five** indexes the read paths use — unique `name`
+    (`name_unique`), `{status, batch}` (`status_batch`, highest-batch lookups), `{batch}`
+    (`batch`, rollback by batch), `{status, name}` (`status_name`, the covered applied-set
+    read) and `{status, appliedAt, name}` (`status_appliedAt_name`, newest-first ordering for
+    `redo`/`down --steps`) — in one `createIndexes` round trip. Called once per `MigratorKit`
+    instance, not once per `connect()`, and skipped entirely by `ensureIndexes: false` for
+    deployments where the app user cannot create indexes.
   - `getMaxBatch` is an indexed `sort({batch:-1}).limit(1)`, not a scan: the next batch
     number must be derived without loading the whole changelog, and it counts reverted
     records so a rolled-back batch number is never handed out twice.
@@ -287,9 +302,10 @@ Each entry: **responsibility · key exports · nuances you must know.**
 
 ### `src/core/migrator.js` — the orchestrator (the heart)
 - **Responsibility:** every command's flow. `up`/`down`/`redo`/`dryRun`/`status`/`list`/`audit`/
-  `create`/`init`/`import`/`lockInfo`/`forceUnlock`, plus connection lifecycle. The bodies of
-  `audit` and `import` live in [audit.js](src/core/audit.js) and
-  [import-runner.js](src/core/import-runner.js); the migrator only injects its capabilities.
+  `create`/`init`/`import`/`baseline`/`lockInfo`/`forceUnlock`, plus connection lifecycle. The
+  bodies of `audit`, `import` and `baseline` live in [audit.js](src/core/audit.js),
+  [import-runner.js](src/core/import-runner.js) and [baseline.js](src/core/baseline.js); the
+  migrator only injects its capabilities.
 - **Shape:** public method validates + connects + wraps the *private* `runX` worker in `runWithLock`.
   The `runX` worker is where the actual sequencing lives. This split keeps lock handling in one
   place. `up` and `down` share the same execution skeleton (`#runSequence` for
@@ -310,6 +326,14 @@ Each entry: **responsibility · key exports · nuances you must know.**
   the pure [import.js](src/core/import.js), and write with bounded concurrency, checking the abort
   signal between writes.
 - **Key export:** `runImport(deps, options, signal)`.
+
+### `src/core/baseline.js` — adopt an existing database (no prior tool)
+- **Responsibility:** the `migronaut baseline` flow — mark migration files on disk as applied
+  (checksums hashed from disk, one shared batch, `origin: 'baseline'`) without executing anything,
+  for databases whose state predates any migration tool. Forward-only like import (`down`/`redo`
+  refuse the records), idempotent (already-applied names are skipped, so a re-run resumes).
+- **Key export:** `runBaseline(deps, options, signal)` — same `runX(deps)` injection pattern as
+  audit and import.
 
 ### `src/core/run.js` — programmatic entry points
 - **Responsibility:** the "blessed" lifecycle-safe helpers for app startup / serverless / tests.
@@ -358,6 +382,9 @@ Each entry: **responsibility · key exports · nuances you must know.**
   combined short flags (`-fy`), variadic arguments. `util.parseArgs` was rejected: absent on
   Node 18.0–18.2, no `--no-x` before 22.4, no subcommands/help.
 - **shared.js** — the CLI's workhorse:
+  - `defineCommand(program, spec)` — the envelope every data command registers through:
+    `optsWithGlobals`, presentation-only `preflight`, `withMigrator`, JSON-vs-`render` routing,
+    and `after` for exit-code logic. Command files stay pure declaration because of it.
   - `withMigrator(opts, fn, {spinner, json})` — constructs `MigratorKit`, drives the spinner,
     routes output for `--json`, runs `fn`, **always disconnects**, maps errors to exit code 1.
   - `partialFromOpts` — flags → `Partial<MigronautConfig>`.
@@ -373,8 +400,12 @@ Each entry: **responsibility · key exports · nuances you must know.**
   canonical example (force/yes/json pre-flight rules + delegation).
 
 ### `bin/migronaut.js`
-- Seven lines: require `run`, call it with `process.argv`, print + exit 1 on an unhandled throw.
-  The shipped binary **is** this file — plain CJS with a `#!/usr/bin/env node` shebang, no build.
+- The CLI shebang entry: require `run`, call it with `process.argv`, and hold the last-resort
+  handlers — EPIPE-tolerant stream error handlers (a closed pipe after printing what fit is
+  success), `unhandledRejection`/`uncaughtException` formatted through `errorText` +
+  `sanitizeTerminal` so even an escaped error never prints a raw credentialed URI or terminal
+  escapes. The shipped binary **is** this file — plain CJS with a `#!/usr/bin/env node` shebang,
+  no build.
 
 ---
 
@@ -401,22 +432,24 @@ with `undefined`. This is why precedence works cleanly.
 File: [lock.js](src/core/lock.js). The lock is a single document `{_id:'migronaut_lock'}` in
 `_migronaut_locks`. Three mechanisms combine:
 
-**(a) Atomic test-and-set with stale reclaim** — `acquire()`:
-```
-updateOne(
-  { _id:'migronaut_lock', lockedAt: { $lt: now - ttl } },   // matches only a stale/absent lock
-  { $set: { ...holderInfo, owner: randomUUID() } },
-  { upsert:true }
-)
-```
-- If a **fresh** lock exists, the filter doesn't match and the upsert collides on `_id` →
+**(a) Atomic test-and-set with stale reclaim, judged in server time** — `acquire()` upserts on
+plain `{_id}` with an **aggregation-pipeline update**: a `$replaceWith`/`$cond` stage that
+installs the new holder document when no `lockedAt` exists (fresh insert) or the current one is
+older than `$$NOW - ttl`, and otherwise keeps `$$ROOT` untouched. Staleness is decided and
+`lockedAt` stamped in **server time** (`$$NOW`), never the client clock — comparing one host's
+clock against a timestamp another host wrote means a pod running 90s fast steals every healthy
+lock, and one running slow never reclaims a dead one. String fields in the holder document are
+`$literal`-guarded so a value starting with `$` can never be interpreted as a field path.
+- Two processes racing the very **first** insert: the loser collides on `_id` →
   duplicate-key error → `LockAlreadyHeldError` (with the current holder attached).
-- If **no** lock or a **stale** one exists, the upsert inserts/overwrites it.
+- A fresh **upsert-insert** (`upsertedCount === 1`) already proves ownership — the common
+  uncontended path (release deletes the document after every clean run) takes one round trip and
+  skips the read-back below.
 
-**(b) Owner-token readback (closes a race)** — after the upsert, `acquire()` reads the doc back and
-checks `owner === ourToken`. If two processes both reclaim the same stale lock, both `updateOne`s
-succeed but only the last writer's `owner` survives; the loser sees a different token and throws
-instead of running concurrently ([lock.js:75](src/core/lock.js#L75)).
+**(b) Owner-token readback (closes the reclaim race)** — for the non-insert outcomes, `acquire()`
+reads the doc back and checks `owner === ourToken`. If two processes both reclaim the same stale
+lock, both pipeline updates succeed but only the last writer's `owner` survives; the loser sees a
+different token and throws instead of running concurrently.
 
 **(c) Heartbeat (makes long migrations safe)** — `runWithLock` starts a `setInterval` that calls
 `renew()` every `ttlMs/2`. `renew()` is scoped to `{_id, owner}` so it only refreshes *our* lock and
@@ -426,8 +459,11 @@ query outlives the call and lands after the client is closed.
 
 **(d) Losing the lock aborts the run** — `runWithLock` owns an `AbortController` and passes its
 `signal` to the work function. A `renew()` that matches nothing means another process owns the lock,
-so the signal is aborted immediately with a `LockLostError`; a renewal that *errors* is tolerated for
-`MAX_RENEW_FAILURES` attempts first, since a single failure is often a blip. `#runUp`/`#runDown` check
+so the signal is aborted immediately with a `LockLostError`. A renewal that *errors* is only warned
+about: the single escalation is a **TTL deadline** (`armDeadline`) that fires strictly before the
+lock becomes stale-reclaimable and is re-armed by every successful renewal — so transient failures
+are tolerated exactly as long as they are harmless, and the run aborts just before a peer could
+legally steal the lock. `#runUp`/`#runDown` check
 the signal **between** migrations — the only safe point, where the previous migration has committed
 and the next has not started. Set `onLockLost: 'warn'` to keep the old warn-and-continue behavior.
 `MigratorKit.stop()` (and the CLI's SIGINT/SIGTERM handler) aborts through the same path with a
@@ -523,8 +559,21 @@ The high-impact ones for code changes:
 - **`createExtension` defaults to `'js'`** and `.ts` is opt-in — because of the shipped-binary
   runtime caveat above. The "first-class .ts" claim is about *authoring/types*, not guaranteed
   runtime on the shipped CJS binary.
-- **migrate-mongo imports are forward-only** (`origin:'migrate-mongo'`). `down`/`redo` preflight
-  `assertReversible` and refuse them with `IrreversibleMigrationError`.
+- **migrate-mongo imports and baselined records are forward-only** (`origin:'migrate-mongo'` /
+  `origin:'baseline'`). `down`/`redo` preflight `assertReversible` and refuse them with
+  `IrreversibleMigrationError` — imported files use a signature migronaut cannot run, and
+  baselined ones were never executed by migronaut at all.
+- **A `status:'failed'` record does not make a migration "not pending".** It is a best-effort
+  forensic trace of a failed `up` attempt; every run path still treats the file as pending and
+  retries it, and a successful apply overwrites the trace. Only `status()`/`audit` surface it.
+- **Out-of-order detection warns by default** (`onOutOfOrder: 'warn'`): a bulk `up` names pending
+  files that sort before the newest applied one instead of silently applying them late; `'error'`
+  refuses the run, `'allow'` silences it. A single-file `up` is exempt — an explicit target is
+  deliberate.
+- **`--json` is non-interactive, and destructive confirmation needs an explicit `--yes` there.**
+  `up <file> --force`, `unlock` and `baseline` all follow the same rule: in `--json` mode without
+  `--yes` they refuse with a typed `CONFIG_INVALID` instead of assuming consent or hanging on a
+  prompt no one can answer. New confirmation-bearing commands must copy this policy.
 - **Path traversal is blocked centrally in `#filepath()`** — every user-supplied migration name (even
   one read back from a tampered changelog) is validated there.
 - **`--json` is a global flag** (`migronaut --json status` and `migronaut status --json` both work).
@@ -597,11 +646,16 @@ pnpm run check:dts                         # tsc --noEmit --strict over index.d.
   throwaway in-memory MongoDB replica set for the run. Not run in CI; results are hand-copied
   into the README's Benchmarks section before releases.
 - **Published artifact:** exactly what `files` in [package.json](package.json) lists —
-  `index.js`, `index.d.ts`, `bin`, `src`, `README.md`, `CHANGELOG.md`. `docs/`, `blog/`, and this
-  `ARCHITECTURE.md` live in the repo but are **never** shipped to npm.
-- **Release:** manual — bump `version` in `package.json`, write the entry in `CHANGELOG.md` by
-  hand, commit and tag, then `pnpm run release` (= `pnpm publish`). `prepublishOnly` re-runs
+  `index.js`, `index.d.ts`, `migronaut.schema.json`, `bin`, `src`, `README.md`, `CHANGELOG.md`.
+  `docs/`, `blog/`, and this `ARCHITECTURE.md` live in the repo but are **never** shipped to npm.
+- **Release:** manual — bump `version` in `package.json`, write the dated entry in `CHANGELOG.md`
+  by hand, commit and tag, then `pnpm run release` (= `pnpm publish`). `prepublishOnly` re-runs
   lint + format:check + test:coverage + test:types + check:dts as the pre-publish gate.
+- **Publish-account hygiene:** the npm account publishing this package keeps 2FA required for
+  publishes ("Require two-factor authentication and disallow tokens" in the package's npm access
+  settings, or granular tokens with short expiry). For a zero-dependency package marketed on its
+  absent supply-chain surface, the account itself is the one remaining door — this is the manual
+  release flow's only (and sufficient) safeguard; no CI or provenance pipeline is used.
 - **Commits:** Conventional Commits required (`feat(scope):`, `fix(scope):`, `test(...)`, etc.).
 
 ## 11. Recipe: how to add a new command/feature
@@ -630,8 +684,9 @@ Concrete worked path — say you're adding `migronaut verify` (re-checks all che
    same PR.
 9. **Docs** — update `README.md` and add `docs/commands/verify.md` for the user site. Update the
    relevant section of this file if you introduced a nuance.
-10. **Verify:** `pnpm run lint` → `pnpm run format:check` → `pnpm test` → `pnpm run test:types`
-    (this is exactly what `prepublishOnly` runs — no build step to add).
+10. **Verify:** `pnpm run lint` → `pnpm run format:check` → `pnpm run test:coverage` →
+    `pnpm run test:types` → `pnpm run check:dts` (this is exactly what `prepublishOnly` runs —
+    no build step to add; note the coverage-gated `test:coverage`, not plain `pnpm test`).
 
 **Where logic goes (decision rule):** mutation sequencing → a `runX` worker in `migrator.js`; a
 reusable mechanism (hashing, locking, mapping) → its own `core/`/`utils/` module; anything about how

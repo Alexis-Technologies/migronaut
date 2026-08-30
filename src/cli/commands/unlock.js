@@ -1,3 +1,4 @@
+const { ConfigInvalidError } = require('../../errors/index.js');
 const { confirm, defineCommand, emitJson } = require('../shared.js');
 const { lockedAtText } = require('./lock.js');
 
@@ -19,8 +20,17 @@ function registerUnlock(program) {
         return undefined;
       }
 
-      // Confirm before clearing — unless --yes, or --json (non-interactive).
-      if (!json && !opts.yes) {
+      // Confirm before clearing. --json is non-interactive, so it requires an
+      // explicit --yes instead of silently proceeding — force-releasing a live
+      // run's lock enables exactly the concurrent-migration scenario the lock
+      // exists to prevent, and the CLI's one destructive-confirmation policy
+      // (see `up --force`) is: non-interactive modes never assume consent.
+      if (!opts.yes) {
+        if (json) {
+          throw new ConfigInvalidError(
+            'unlock needs confirmation — pass --yes to confirm in --json mode',
+          );
+        }
         const since = lockedAtText(holder.lockedAt);
         logger.warn(
           `⚠ Lock held by pid ${holder.pid} on ${holder.host} (${holder.executedBy}) since ${since}`,

@@ -7,7 +7,12 @@ const { errorText } = require('../utils/error.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { redactDeep } = require('../utils/redact.js');
 
-/** Default values applied when no flag, env var, or config-file value is present */
+/**
+ * Default values applied when no flag, env var, or config-file value is
+ * present. The single canonical home for every effective default — a use-site
+ * `??` fallback would hide these from the schema/template sync tests and let
+ * the same fact drift across hand-written copies.
+ */
 const DEFAULT_CONFIG = {
   migrationsDir: './migrations',
   migrationsCollection: '_migronaut_migrations',
@@ -18,6 +23,10 @@ const DEFAULT_CONFIG = {
   fileExtensions: ['.ts', '.js'],
   createExtension: 'js',
   sequential: false,
+  ensureIndexes: true,
+  onLockLost: 'abort',
+  onOutOfOrder: 'warn',
+  reloadMigrations: false,
 };
 
 /** Candidate config file names, checked in priority order within the cwd */
@@ -96,6 +105,12 @@ const CONFIG_KEYS = [
     path: 'onLockLost',
     check: (value) => value === 'abort' || value === 'warn',
     message: "must be 'abort' or 'warn'",
+    optional: true,
+  },
+  {
+    path: 'onOutOfOrder',
+    check: (value) => value === 'warn' || value === 'error' || value === 'allow',
+    message: "must be 'warn', 'error' or 'allow'",
     optional: true,
   },
   {
@@ -248,6 +263,11 @@ const ENV_KEYS = [
   { env: 'MIGRONAUT_TEMPLATE_PATH', path: 'templatePath', parse: parseString },
   { env: 'MIGRONAUT_TIMEOUT_MS', path: 'timeoutMs', parse: parsePositiveInteger },
   { env: 'MIGRONAUT_ON_LOCK_LOST', path: 'onLockLost', parse: parseEnum(['abort', 'warn']) },
+  {
+    env: 'MIGRONAUT_ON_OUT_OF_ORDER',
+    path: 'onOutOfOrder',
+    parse: parseEnum(['warn', 'error', 'allow']),
+  },
   { env: 'MIGRONAUT_ENSURE_INDEXES', path: 'ensureIndexes', parse: parseBoolean },
   { env: 'MIGRONAUT_RELOAD_MIGRATIONS', path: 'reloadMigrations', parse: parseBoolean },
 ];
@@ -394,7 +414,10 @@ async function loadConfig(options = {}) {
     : await discoverConfigFile(cwd);
 
   if (configFilePath) {
-    if (!(await pathExists(configFilePath))) {
+    // Only an explicit --config path needs the probe (a typo deserves a clear
+    // "not found") — discovery already proved existence, and re-checking it
+    // would pay a redundant fs.access on every invocation.
+    if (options.configPath && !(await pathExists(configFilePath))) {
       throw new ConfigInvalidError('Config file not found', { path: configFilePath });
     }
     const fileConfig = await loadConfigFile(configFilePath, options.lenient ?? false);
