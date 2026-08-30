@@ -313,17 +313,24 @@ describe('runMigration — timeout aborts ctx.signal', () => {
       },
       down: () => Promise.resolve(undefined),
     };
-    await assert.rejects(
-      runMigration({
-        name: 'slow.ts',
-        migration,
-        direction: 'up',
-        context,
-        useTransaction: false,
-        timeoutMs: 20,
-      }),
-      MigrationTimeoutError,
-    );
+    // `up` never settles on its own and the context is a mock, so the unref'ed
+    // timeout timer is the only pending handle — see tests/helpers/event-loop.js.
+    const release = keepEventLoopAlive();
+    try {
+      await assert.rejects(
+        runMigration({
+          name: 'slow.ts',
+          migration,
+          direction: 'up',
+          context,
+          useTransaction: false,
+          timeoutMs: 20,
+        }),
+        MigrationTimeoutError,
+      );
+    } finally {
+      release();
+    }
     assert.ok(observedSignal.aborted, 'ctx.signal must be aborted on timeout');
     assert.ok(observedSignal.reason instanceof MigrationTimeoutError);
   });
