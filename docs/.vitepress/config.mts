@@ -21,6 +21,9 @@ const keywords = [
   'schema migration mongodb',
   'migrate-mongo alternative',
   'mongoose migration',
+  'mongodb migration queue',
+  'bullmq migration',
+  'mongodb migration service',
   'mongodb migration cli',
   'zero dependency mongodb migration',
   'mongo-migrate-kit',
@@ -100,7 +103,7 @@ export default defineConfig({
       { text: 'Reference', link: '/reference/cli', activeMatch: '/reference/' },
       {
         // Hand-synced with package.json "version" — part of the release checklist.
-        text: 'v2.0.0',
+        text: 'v2.1.0',
         items: [
           { text: 'Changelog', link: `${repo}/blob/main/CHANGELOG.md` },
           { text: 'npm', link: 'https://www.npmjs.com/package/@alexify/migronaut' },
@@ -138,6 +141,7 @@ export default defineConfig({
           text: 'Going Further',
           items: [
             { text: 'Programmatic API', link: '/guide/api' },
+            { text: 'Migrations as a Queue (BullMQ)', link: '/guide/bullmq' },
             { text: 'CI/CD & Deployment', link: '/guide/ci-cd' },
             { text: 'Troubleshooting', link: '/guide/troubleshooting' },
             { text: 'Migrating from migrate-mongo', link: '/guide/migrate-mongo' },

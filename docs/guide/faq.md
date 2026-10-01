@@ -92,6 +92,13 @@ Run `migronaut up` as a deploy step, and gate deploys with `migronaut status --c
 migrations are pending). Every data command supports `--json` for machine-readable output. There are
 GitHub Actions and Docker recipes in [CI/CD & Deployment](/guide/ci-cd).
 
+## Can I run migrations as background jobs, or as a service?
+
+Yes. `@alexify/migronaut/bullmq` enqueues each pending migration as its own BullMQ job and applies
+them in order with a single-concurrency worker — trigger it from an HTTP endpoint, a schedule, or a
+deploy hook that waits for the result. BullMQ is injected, so it adds no dependency. See
+[Migrations as a Queue](/guide/bullmq).
+
 ## Does it work with Mongoose?
 
 Yes. Pass your Mongoose instance in config and it's available as `ctx.mongoose` inside migrations.

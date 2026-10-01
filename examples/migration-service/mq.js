@@ -1,0 +1,33 @@
+const path = require('node:path');
+const { Queue, QueueEvents, Worker } = require('bullmq');
+const IORedis = require('ioredis');
+const { createMigrationQueue } = require('@alexify/migronaut/bullmq');
+
+// REDIS_URL is needed before migronaut resolves its own config (which is when
+// it would load .env), so load the file here. Absent in containers — fine.
+try {
+  process.loadEnvFile(path.join(__dirname, '.env'));
+} catch {
+  // No .env: the environment is already set (docker, k8s, CI).
+}
+
+// One Redis client, owned by this module. BullMQ requires
+// `maxRetriesPerRequest: null` of a client it shares with Workers.
+const connection = new IORedis(process.env.REDIS_URL ?? 'redis://127.0.0.1:6379', {
+  maxRetriesPerRequest: null,
+});
+
+const mq = createMigrationQueue({
+  // The connection string and database come from MIGRONAUT_URI / MIGRONAUT_DB.
+  config: { migrationsDir: path.join(__dirname, 'migrations') },
+  // BullMQ is injected: migronaut never imports it, so this app decides the version.
+  bullmq: { Queue, Worker, QueueEvents },
+  connection,
+  // One queue per database. A second database is a second createMigrationQueue
+  // with its own queueName.
+  queueName: 'migrations',
+  // Keep finished jobs around: `wait()` and GET /migrations/jobs/:id read them.
+  jobOptions: { removeOnComplete: { count: 1000 }, removeOnFail: { count: 5000 } },
+});
+
+module.exports = { connection, mq };

@@ -135,6 +135,29 @@ class Changelog {
       .toArray();
   }
 
+  /**
+   * Applied records that were applied *after* `record`, newest first — the
+   * revert order `down --steps` uses (`appliedAt`, name-desc tiebreak). An
+   * `ordered` rollback refuses while any exist: undoing effects is only safe in
+   * reverse of the order they were made. A record with no `appliedAt` (a
+   * hand-edited or legacy document) treats every other applied record as
+   * newer — the conservative answer.
+   */
+  async getAppliedNewerThan(db, { appliedAt, name }) {
+    const filter =
+      appliedAt instanceof Date
+        ? {
+            status: 'applied',
+            $or: [{ appliedAt: { $gt: appliedAt } }, { appliedAt, name: { $gt: name } }],
+          }
+        : { status: 'applied', name: { $ne: name } };
+    return this.#coll(db)
+      .find(filter)
+      .sort({ appliedAt: -1, name: -1 })
+      .project({ _id: 0, name: 1, appliedAt: 1, batch: 1 })
+      .toArray();
+  }
+
   /** Return the highest batch number among currently-applied migrations, or null */
   async getLastBatch(db) {
     const docs = await this.#coll(db)

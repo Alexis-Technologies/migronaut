@@ -13,6 +13,7 @@ const {
   LockAlreadyHeldError,
   LockLostError,
   LockReleaseFailedError,
+  MigrationBlockedError,
   MigrationExecutionFailedError,
   MigrationFileExistsError,
   MigrationFileNotFoundError,
@@ -23,6 +24,8 @@ const {
   MigronautError,
   NotAppliedError,
   OutOfOrderMigrationError,
+  QueueJobFailedError,
+  QueueJobInvalidError,
   RunAbortedError,
 } = require('./errors/index.js');
 
@@ -53,6 +56,7 @@ module.exports = {
   LockAlreadyHeldError,
   LockLostError,
   LockReleaseFailedError,
+  MigrationBlockedError,
   MigrationExecutionFailedError,
   MigrationFileExistsError,
   MigrationFileNotFoundError,
@@ -63,5 +67,7 @@ module.exports = {
   MigronautError,
   NotAppliedError,
   OutOfOrderMigrationError,
+  QueueJobFailedError,
+  QueueJobInvalidError,
   RunAbortedError,
 };

@@ -52,7 +52,7 @@ describe('package entry point', () => {
       const instance = new ErrorClass('probe');
       codes.add(instance.code);
     }
-    assert.ok(codes.size >= 19, 'expected every error subclass to carry a code');
+    assert.ok(codes.size >= 22, 'expected every error subclass to carry a code');
     for (const code of codes) {
       assert.strictEqual(
         typeof api.EXIT_CODES[code],
@@ -107,6 +107,104 @@ describe('declaration file', () => {
     const code = dts.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     assert.ok(!/from ['"]mongoose['"]/.test(code), 'index.d.ts must not import mongoose');
     assert.ok(dts.includes('interface MongooseLike'));
+  });
+});
+
+describe('bullmq subpath', () => {
+  const { readdirSync } = require('node:fs');
+  /** Source text with comments removed — the docs legitimately quote what the code must not do */
+  const stripComments = (source) =>
+    source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  it('should expose the adapter through its own entry point', () => {
+    const adapter = require(path.join(repoRoot, 'bullmq.js'));
+    assert.strictEqual(typeof adapter.createMigrationQueue, 'function');
+    assert.strictEqual(typeof adapter.createMigrationProcessor, 'function');
+    assert.ok(Object.isFrozen(adapter.JOB_NAMES));
+  });
+
+  it('should keep the adapter out of the package root', () => {
+    // Importing migronaut must cost nothing to someone who never queues: the
+    // root barrel neither exports nor loads the adapter.
+    const api = require(path.join(repoRoot, 'index.js'));
+    const adapter = require(path.join(repoRoot, 'bullmq.js'));
+    for (const name of Object.keys(adapter)) {
+      assert.strictEqual(api[name], undefined, `${name} leaked into the package root`);
+    }
+    assert.ok(!/require\(['"]\.\/bullmq/.test(stripComments(readRepoFile('src/index.js'))));
+  });
+
+  it('should declare every runtime export in bullmq.d.ts — and nothing that is not exported', () => {
+    const adapter = require(path.join(repoRoot, 'bullmq.js'));
+    const dts = readRepoFile('bullmq.d.ts');
+    for (const name of Object.keys(adapter)) {
+      assert.ok(
+        dts.includes(`export class ${name}`) ||
+          dts.includes(`export function ${name}`) ||
+          dts.includes(`export const ${name}`),
+        `${name} is exported at runtime but missing from bullmq.d.ts`,
+      );
+    }
+    const declared = [...dts.matchAll(/^export (?:class|function|const) (\w+)/gm)];
+    assert.ok(declared.length >= 10, 'expected the declaration file to list the adapter surface');
+    for (const [, name] of declared) {
+      assert.notStrictEqual(adapter[name], undefined, `${name} is declared but not exported`);
+    }
+  });
+
+  it('should never require bullmq from src — it is injected, not depended on', () => {
+    // The rule that keeps the package zero-dependency, made executable: one
+    // `require('bullmq')` would make the adapter crash for anyone who relies on
+    // injection alone, and would pin a BullMQ version for everyone else.
+    const offenders = [];
+    const walk = (dir) => {
+      for (const entry of readdirSync(path.join(repoRoot, dir), { withFileTypes: true })) {
+        const relative = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) walk(relative);
+        else if (entry.name.endsWith('.js')) {
+          const code = stripComments(readRepoFile(relative));
+          if (
+            /require\(\s*['"]bullmq['"]\s*\)|from\s+['"]bullmq['"]|import\(\s*['"]bullmq/.test(code)
+          ) {
+            offenders.push(relative);
+          }
+        }
+      }
+    };
+    walk('src');
+    assert.deepStrictEqual(offenders, []);
+  });
+
+  it('should not import bullmq from either declaration file', () => {
+    // Structural BullMQ*Like types stand in for it, as MongooseLike does for
+    // mongoose — a hard import would break both files for users without bullmq.
+    for (const file of ['bullmq.d.ts', 'index.d.ts']) {
+      const code = stripComments(readRepoFile(file));
+      assert.ok(!/from ['"]bullmq['"]/.test(code), `${file} must not import bullmq`);
+    }
+    assert.ok(readRepoFile('bullmq.d.ts').includes('interface BullMQQueueLike'));
+    // The dependency arrow points one way: the subpath builds on the root.
+    assert.ok(!/from ['"]\.\/bullmq/.test(stripComments(readRepoFile('index.d.ts'))));
+  });
+
+  it('should publish the subpath in the exports map, types first', () => {
+    assert.strictEqual(Object.keys(packageJson.exports)[0], '.');
+    assert.deepStrictEqual(packageJson.exports['./bullmq'], {
+      types: './bullmq.d.ts',
+      default: './bullmq.js',
+    });
+    assert.deepStrictEqual(Object.keys(packageJson.exports['./bullmq']), ['types', 'default']);
+    for (const entry of ['bullmq.js', 'bullmq.d.ts']) {
+      assert.ok(packageJson.files.includes(entry), `${entry} must be in "files"`);
+    }
+  });
+
+  it('should keep bullmq and its Redis client as test-only devDependencies', () => {
+    for (const name of ['bullmq', 'ioredis']) {
+      assert.strictEqual(packageJson.peerDependencies[name], undefined);
+      assert.strictEqual(packageJson.peerDependenciesMeta?.[name], undefined);
+      assert.strictEqual(typeof packageJson.devDependencies[name], 'string');
+    }
   });
 });
 

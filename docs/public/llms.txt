@@ -12,6 +12,8 @@ Key facts:
 - CLI binary: `migronaut`
 - Requires Node.js >= 22.18 and MongoDB >= 5.0; supports TypeScript, ESM, and CommonJS
 - Zero runtime dependencies; `mongodb` is a required peer, `mongoose` an optional one
+- Optional queue adapter at `@alexify/migronaut/bullmq`: migrations as BullMQ jobs (one migration
+  per job). BullMQ is injected by the caller (`bullmq: { Queue, Worker }`) — never a dependency
 - License: MIT
 - Repository: https://github.com/Alexis-Technologies/migronaut
 
@@ -27,6 +29,7 @@ Key facts:
 - [Transactions](https://migronaut.vercel.app/guide/transactions): Opt-in MongoDB transactions per file or globally
 - [Lifecycle Hooks](https://migronaut.vercel.app/guide/hooks): beforeAll, afterAll, beforeEach, afterEach, onError
 - [Programmatic API](https://migronaut.vercel.app/guide/api): The MigratorKit class, methods, and result types
+- [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq): Run migrations as BullMQ jobs — a migration service with ordering, batches, scheduling, and enqueue-and-wait
 - [CI/CD & Deployment](https://migronaut.vercel.app/guide/ci-cd): GitHub Actions, Docker, deploy gates, and JSON output
 - [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting): Common errors and how to fix them
 - [Migrating from migrate-mongo](https://migronaut.vercel.app/guide/migrate-mongo): Adopt an existing migrate-mongo changelog

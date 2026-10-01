@@ -456,7 +456,10 @@ export type MigronautErrorCode =
   | 'NOT_APPLIED'
   | 'IMPORT_TARGET_NOT_EMPTY'
   | 'MIGRATION_IRREVERSIBLE'
-  | 'MIGRATION_OUT_OF_ORDER';
+  | 'MIGRATION_OUT_OF_ORDER'
+  | 'MIGRATION_BLOCKED'
+  | 'QUEUE_JOB_INVALID'
+  | 'QUEUE_JOB_FAILED';
 
 // ─── Config file format ─────────────────────────────────────────────────────────
 
@@ -488,6 +491,22 @@ export interface UpOptions {
    * Mutually exclusive with a filename and `steps`.
    */
   to?: string;
+  /**
+   * Stamp this batch number on what the run applies, instead of the next free
+   * one ({@link MigratorKit.nextBatch}). A label, not a reservation: it may
+   * equal a batch already in use, which is how several single-file runs become
+   * one rollback unit — the queue adapter gives every job of an enqueue group
+   * the same value. Positive integer; mutually exclusive with `step`.
+   */
+  batch?: number;
+  /**
+   * Refuse ({@link MigrationBlockedError}) to apply the named file while an
+   * earlier file on disk is still pending — the invariant a bulk `up` gets by
+   * construction, enforced from the changelog rather than from the caller's
+   * memory. Also makes the single-file run honour `strict` drift checks and
+   * `onOutOfOrder` like a bulk run. Requires a filename.
+   */
+  ordered?: boolean;
 }
 
 /** Options for {@link MigratorKit.down} */
@@ -508,6 +527,12 @@ export interface DownOptions {
    * to the same state. Mutually exclusive with `batch`, `steps` and a filename.
    */
   to?: string;
+  /**
+   * Refuse ({@link MigrationBlockedError}) to revert the named file while a
+   * migration applied *after* it is still applied — reverts must go newest
+   * first (by `appliedAt`, the order `steps` uses). Requires a filename.
+   */
+  ordered?: boolean;
 }
 
 /** Payload common to every lifecycle event */
@@ -720,6 +745,13 @@ export class MigratorKit extends EventEmitter {
    * removed, or null if no lock was held.
    */
   forceUnlock(): Promise<LockInfo | null>;
+  /**
+   * The batch number the next `up` would use (highest recorded batch + 1,
+   * reverted and failed records included). A peek, not a reservation — pair it
+   * with `up(name, { batch })` to stamp several single-file runs as one batch.
+   * Connects if needed.
+   */
+  nextBatch(): Promise<number>;
   /** Run all pending migrations, or a specific named file */
   up(filename?: string, options?: UpOptions): Promise<RunResult[]>;
   /** Rollback the last batch, a specific batch, a specific file, or the last N steps */
@@ -1011,5 +1043,35 @@ export class IrreversibleMigrationError extends MigronautError {
  * branch. `context.names` lists the late arrivals.
  */
 export class OutOfOrderMigrationError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by an `ordered` single-file `up`/`down` that would run out of
+ * sequence: an earlier migration is still pending (`up`), or one applied later
+ * is still applied (`down`). `context.name`, `context.direction` and
+ * `context.blockedBy` (the migrations that must go first).
+ */
+export class MigrationBlockedError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by the queue adapter (`@alexify/migronaut/bullmq`) when a job's
+ * payload fails the contract check — an unknown job name or data version, a
+ * migration name that is not a bare filename, malformed group fields. Job data
+ * is untrusted input. `context.jobId`, `context.issue`.
+ */
+export class QueueJobInvalidError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by a queue group's `wait()` when one of its jobs failed or the wait
+ * timed out. `context.failedReason` is the worker's (redacted) message,
+ * `context.results` the jobs that finished before it, plus `groupId`, `jobId`,
+ * `migration`, `direction` and `timedOut`.
+ */
+export class QueueJobFailedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }

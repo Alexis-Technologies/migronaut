@@ -63,6 +63,11 @@ features:
     details: Every run records duration, checksum, environment, user, and batch in an append-only changelog. A rollback updates the record, never removes it.
     link: /commands/status
     linkText: migronaut status
+  - icon: 📬
+    title: Migrations as a queue
+    details: Optional BullMQ adapter — one migration per job, applied in order by a worker. A migration service you trigger over HTTP, on a schedule, or from a deploy hook. BullMQ is injected, never a dependency.
+    link: /guide/bullmq
+    linkText: Migrations as a Queue
   - icon: 📘
     title: TypeScript & JavaScript
     details: .ts (native on Node 22.18+, or via a loader like tsx), ESM, and CommonJS all just work, with a fully-typed context and config.

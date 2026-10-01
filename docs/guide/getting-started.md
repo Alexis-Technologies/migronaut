@@ -25,7 +25,8 @@ The CLI binary is `migronaut`. Run it with your package manager's runner (`npx m
 
 ::: tip Requirements
 Node.js **≥ 22.18**, MongoDB **≥ 5.0**. `mongoose` is an optional peer dependency — only needed if
-your migrations use Mongoose models.
+your migrations use Mongoose models. `bullmq` is needed only for the optional
+[queue adapter](/guide/bullmq), and you install it yourself.
 :::
 
 ## 1. Create a config file

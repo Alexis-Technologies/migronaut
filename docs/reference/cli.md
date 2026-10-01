@@ -137,4 +137,8 @@ working unchanged. The full map is also exported from the package root as
 | `20` | `MIGRATION_INVALID_EXPORT` — a migration file without valid `up`/`down` |
 | `21` | `LOCK_RELEASE_FAILED` — the lock could not be released |
 | `22` | `AUDIT_FAILED` — an `audit` check failed (warnings stay `0`) |
+| `23` | `MIGRATION_OUT_OF_ORDER` — a late-merged file, under `onOutOfOrder: 'error'` |
+| `24` | `MIGRATION_BLOCKED` — an ordered single-file run would go out of sequence |
+| `25` | `QUEUE_JOB_INVALID` — a [queue job](/guide/bullmq) payload failed validation |
+| `26` | `QUEUE_JOB_FAILED` — a queue group's `wait()` saw a job fail or time out |
 | `130` / `143` | Killed by a second SIGINT / SIGTERM |

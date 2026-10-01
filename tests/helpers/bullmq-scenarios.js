@@ -1,0 +1,754 @@
+const assert = require('node:assert/strict');
+const os = require('node:os');
+const { afterEach, beforeEach, it } = require('node:test');
+const { createMigrationQueue } = require('../../bullmq.js');
+const {
+  ConfigInvalidError,
+  MigrationBlockedError,
+  QueueJobFailedError,
+} = require('../../src/errors/index.js');
+const { failingMigration, insertMigration, makeProject } = require('./project.js');
+
+const LOCK_COLLECTION = '_migronaut_locks';
+const CHANGELOG = '_migronaut_migrations';
+
+/** A migration whose up() takes `ms` and records whether its signal was aborted meanwhile */
+function slowMigration(collection, value, ms) {
+  return `export async function up({ db, signal }) {
+  await new Promise((resolve) => setTimeout(resolve, ${ms}));
+  await db.collection('${collection}').insertOne({ marker: '${value}', aborted: signal?.aborted ?? null });
+}
+export async function down({ db }) {
+  await db.collection('${collection}').deleteMany({ marker: '${value}' });
+}
+`;
+}
+
+/** A migration whose failure message carries a credentialed URI */
+function leakyMigration() {
+  return `export async function up() {
+  throw new Error('cannot reach mongodb://admin:hunter2@db.internal:27017/app');
+}
+export async function down() {}
+`;
+}
+
+/**
+ * The adapter's behaviour, written once and run twice: against the in-tree
+ * fake BullMQ (always — this is where the coverage comes from) and against the
+ * real library on a real Redis (when one is available). Running the same
+ * assertions on both is what keeps the fake honest: a scenario that passes
+ * here and fails there means the fake models BullMQ wrongly.
+ *
+ * `harness`:
+ * - `fake`            — true for the in-tree double (enables the fake-only scenarios)
+ * - `mongo()`         — `{ uri, db }` of the test MongoDB
+ * - `dbName`
+ * - `bullmq()`        — `{ Queue, Worker, QueueEvents }`
+ * - `connection()`    — the `connection` for this test
+ * - `prefix()`        — a key prefix unique to this test, or undefined
+ * - `logsOf(queue, id)` — a job's log rows
+ * - `obliterate(queue)` — drop the queue's keys after the test
+ */
+function defineBullMQScenarios(harness) {
+  let project;
+  let connection;
+  let prefix;
+  const opened = [];
+
+  beforeEach(async () => {
+    await harness.mongo().db.dropDatabase();
+    project = makeProject();
+    connection = harness.connection();
+    prefix = harness.prefix();
+  });
+
+  afterEach(async () => {
+    for (const mq of opened.splice(0)) {
+      await harness.obliterate(mq.queue).catch(() => undefined);
+      await mq.close({ force: true }).catch(() => undefined);
+    }
+    project?.cleanup();
+  });
+
+  function createQueue(overrides = {}) {
+    const { config, ...rest } = overrides;
+    const mq = createMigrationQueue({
+      config: {
+        uri: harness.mongo().uri,
+        dbName: harness.dbName,
+        migrationsDir: project.dir,
+        logger: null,
+        // A fix to a migration file must be picked up by the long-lived kit —
+        // in production that is a redeploy; here it is the same process.
+        reloadMigrations: true,
+        ...config,
+      },
+      bullmq: harness.bullmq(),
+      connection,
+      ...(prefix !== undefined ? { prefix } : {}),
+      lockWait: { lockPollIntervalMs: 20, lockWaitTimeoutMs: 5000 },
+      ...rest,
+    });
+    opened.push(mq);
+    return mq;
+  }
+
+  const write = (name, body) => project.write(name, body);
+  const three = () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    write('0002-b.js', insertMigration('things', 'b'));
+    write('0003-c.js', insertMigration('things', 'c'));
+  };
+  const markers = async () =>
+    (await harness.mongo().db.collection('things').find().sort({ _id: 1 }).toArray()).map(
+      (doc) => doc.marker,
+    );
+  const records = () => harness.mongo().db.collection(CHANGELOG).find().sort({ name: 1 }).toArray();
+
+  /** Poll until every job has finished, then return their views */
+  async function settled(mq, ids, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const views = await Promise.all(ids.map((id) => mq.getJob(id)));
+      if (views.every((view) => view && (view.state === 'completed' || view.state === 'failed'))) {
+        return views;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`jobs did not settle: ${views.map((view) => view?.state).join(', ')}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+  }
+
+  async function holdLock() {
+    await harness.mongo().db.collection(LOCK_COLLECTION).insertOne({
+      _id: 'migronaut_lock',
+      lockedAt: new Date(),
+      pid: 999_999,
+      host: os.hostname(),
+      executedBy: 'peer',
+      owner: 'peer-token',
+    });
+  }
+  const releaseLock = () =>
+    harness.mongo().db.collection(LOCK_COLLECTION).deleteOne({ _id: 'migronaut_lock' });
+
+  // ─── Applying ──────────────────────────────────────────────────────────────
+
+  it('should apply every pending migration as its own job, in order, under one batch', async () => {
+    three();
+    const mq = createQueue();
+    const expectedBatch = await mq.kit.nextBatch();
+    const group = await mq.enqueueUp();
+
+    assert.strictEqual(group.direction, 'up');
+    assert.strictEqual(group.batch, expectedBatch);
+    assert.strictEqual(group.upToDate, false);
+    assert.deepStrictEqual(
+      group.jobs.map((job) => [job.migration, job.index]),
+      [
+        ['0001-a.js', 0],
+        ['0002-b.js', 1],
+        ['0003-c.js', 2],
+      ],
+    );
+    assert.deepStrictEqual(group.deduplicated, []);
+    assert.strictEqual(await harness.mongo().db.collection('things').countDocuments(), 0);
+
+    await mq.startWorker();
+    const { results } = await group.wait({ timeoutMs: 10_000 });
+
+    assert.deepStrictEqual(
+      results.map((result) => [result.migration, result.status, result.batch]),
+      [
+        ['0001-a.js', 'applied', expectedBatch],
+        ['0002-b.js', 'applied', expectedBatch],
+        ['0003-c.js', 'applied', expectedBatch],
+      ],
+    );
+    assert.ok(results.every((result) => typeof result.runId === 'string'));
+    assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
+    const changelog = await records();
+    assert.deepStrictEqual(
+      changelog.map((record) => [record.status, record.batch]),
+      [
+        ['applied', expectedBatch],
+        ['applied', expectedBatch],
+        ['applied', expectedBatch],
+      ],
+    );
+    // Each job is its own run: the record's runId is the one the job reported.
+    assert.deepStrictEqual(
+      changelog.map((record) => record.runId),
+      results.map((result) => result.runId),
+    );
+    assert.deepStrictEqual(await mq.pending(), []);
+  });
+
+  it('should give every migration job a single attempt and a readable trail', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue();
+    const group = await mq.enqueueUp();
+    const live = await mq.queue.getJob(group.jobs[0].id);
+    assert.strictEqual(live.opts.attempts, 1);
+
+    await mq.startWorker();
+    await group.wait({ timeoutMs: 10_000 });
+    const view = await mq.getJob(group.jobs[0].id);
+    assert.strictEqual(view.state, 'completed');
+    assert.strictEqual(view.name, 'up');
+    assert.strictEqual(view.returnvalue.status, 'applied');
+    assert.strictEqual(view.progress.phase, 'completed');
+    assert.strictEqual(view.data.groupId, group.groupId);
+    const logs = await harness.logsOf(mq.queue, group.jobs[0].id);
+    assert.ok(
+      logs.some((row) => /Applied 0001-a\.js/.test(row)),
+      logs.join(' | '),
+    );
+  });
+
+  it('should apply only up to `to`, and one named file on request', async () => {
+    three();
+    const mq = createQueue();
+    await mq.startWorker();
+    const upTo = await mq.enqueueUp(undefined, { to: '0002-b.js' });
+    assert.deepStrictEqual(
+      upTo.jobs.map((job) => job.migration),
+      ['0001-a.js', '0002-b.js'],
+    );
+    await upTo.wait({ timeoutMs: 10_000 });
+
+    const single = await mq.enqueueUp('0003-c.js');
+    assert.strictEqual(single.jobs.length, 1);
+    await single.wait({ timeoutMs: 10_000 });
+    assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
+    // Two enqueues, two batches — a rollback would take only the second.
+    assert.notStrictEqual(single.batch, upTo.batch);
+  });
+
+  it('should report up to date — and add no job — when nothing is pending', async () => {
+    const mq = createQueue();
+    const group = await mq.enqueueUp();
+    assert.strictEqual(group.upToDate, true);
+    assert.deepStrictEqual(group.jobs, []);
+    assert.strictEqual(group.batch, null);
+    assert.deepStrictEqual((await group.wait()).results, []);
+  });
+
+  // ─── Ordering and failure ──────────────────────────────────────────────────
+
+  it('should refuse a single file while an earlier one is still pending', async () => {
+    three();
+    const mq = createQueue();
+    await mq.startWorker();
+    const group = await mq.enqueueUp('0002-b.js');
+    const [view] = await settled(mq, [group.jobs[0].id]);
+
+    assert.strictEqual(view.state, 'failed');
+    assert.match(view.failedReason, /0002-b\.js is blocked/);
+    assert.match(view.failedReason, /0001-a\.js/);
+    assert.strictEqual(view.progress.code, 'MIGRATION_BLOCKED');
+    assert.deepStrictEqual(await markers(), []);
+    assert.deepStrictEqual(await records(), [], 'a blocked job leaves no trace in the changelog');
+  });
+
+  it('should run that same file when the job opts out of the order guard', async () => {
+    three();
+    const mq = createQueue();
+    await mq.startWorker();
+    const group = await mq.enqueueUp('0002-b.js', { ordered: false });
+    await group.wait({ timeoutMs: 10_000 });
+    assert.deepStrictEqual(await markers(), ['b']);
+  });
+
+  it('should stop the line at a failed migration, then resume once it is fixed', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    write('0002-b.js', failingMigration());
+    write('0003-c.js', insertMigration('things', 'c'));
+    const mq = createQueue();
+    await mq.startWorker();
+
+    const group = await mq.enqueueUp();
+    await assert.rejects(group.wait({ timeoutMs: 10_000 }), (error) => {
+      assert.ok(error instanceof QueueJobFailedError);
+      assert.strictEqual(error.context.migration, '0002-b.js');
+      assert.strictEqual(error.context.jobId, group.jobs[1].id);
+      assert.strictEqual(error.context.timedOut, false);
+      // The cause travels with the message: it is all the queue ever sees.
+      assert.match(error.context.failedReason, /intentional failure/);
+      assert.strictEqual(error.context.results.length, 1);
+      assert.strictEqual(error.context.results[0].status, 'applied');
+      return true;
+    });
+
+    const [first, second, third] = await settled(
+      mq,
+      group.jobs.map((job) => job.id),
+    );
+    assert.strictEqual(first.state, 'completed');
+    assert.strictEqual(second.state, 'failed');
+    assert.strictEqual(second.progress.code, 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(second.attemptsMade, 1, 'a failed migration is not retried');
+    // The third never ran: it was refused because the second is still pending.
+    assert.strictEqual(third.state, 'failed');
+    assert.strictEqual(third.progress.code, 'MIGRATION_BLOCKED');
+    assert.deepStrictEqual(await markers(), ['a']);
+    assert.deepStrictEqual(
+      (await mq.status()).map((row) => [row.file, row.status]),
+      [
+        ['0001-a.js', 'applied'],
+        ['0002-b.js', 'failed'],
+        ['0003-c.js', 'pending'],
+      ],
+    );
+
+    write('0002-b.js', insertMigration('things', 'b'));
+    const retry = await mq.enqueueUp();
+    assert.deepStrictEqual(
+      retry.jobs.map((job) => job.migration),
+      ['0002-b.js', '0003-c.js'],
+    );
+    assert.deepStrictEqual(retry.deduplicated, [], 'the failed jobs released their dedup keys');
+    assert.notStrictEqual(retry.batch, group.batch);
+    const { results } = await retry.wait({ timeoutMs: 10_000 });
+    assert.deepStrictEqual(
+      results.map((result) => result.status),
+      ['applied', 'applied'],
+    );
+    assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
+  });
+
+  it('should absorb a second enqueue of the same pending files', async () => {
+    three();
+    const mq = createQueue();
+    const first = await mq.enqueueUp();
+    const second = await mq.enqueueUp();
+
+    assert.deepStrictEqual(second.deduplicated, ['0001-a.js', '0002-b.js', '0003-c.js']);
+    assert.deepStrictEqual(
+      second.jobs.map((job) => job.id),
+      first.jobs.map((job) => job.id),
+      'a deduplicated add points at the job that will do the work',
+    );
+
+    await mq.startWorker();
+    // Both callers can wait: they are waiting on the same three jobs.
+    const [a, b] = await Promise.all([
+      first.wait({ timeoutMs: 10_000 }),
+      second.wait({ timeoutMs: 10_000 }),
+    ]);
+    assert.deepStrictEqual(a.results, b.results);
+    assert.deepStrictEqual(await markers(), ['a', 'b', 'c'], 'each migration ran exactly once');
+    assert.strictEqual((await mq.enqueueUp()).upToDate, true);
+  });
+
+  it('should complete a stale duplicate job as skipped instead of re-applying', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue();
+    const group = await mq.enqueueUp();
+    // Applied by another route (a CLI run) before the worker gets to the job.
+    await mq.kit.up();
+    await mq.startWorker();
+    const { results } = await group.wait({ timeoutMs: 10_000 });
+    assert.strictEqual(results[0].status, 'skipped');
+    assert.strictEqual(results[0].reason, 'Already applied');
+    assert.deepStrictEqual(await markers(), ['a']);
+  });
+
+  it('should keep the order with two workers on the same queue', async () => {
+    three();
+    const one = createQueue();
+    const two = createQueue();
+    await Promise.all([one.startWorker(), two.startWorker()]);
+    const group = await one.enqueueUp();
+    const { results } = await group.wait({ timeoutMs: 15_000 });
+    assert.deepStrictEqual(
+      results.map((result) => result.status),
+      ['applied', 'applied', 'applied'],
+    );
+    assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
+  });
+
+  // ─── The MongoDB lock ──────────────────────────────────────────────────────
+
+  it('should wait for a run that holds the MongoDB lock, then apply', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue();
+    await holdLock();
+    const group = await mq.enqueueUp();
+    await mq.startWorker();
+    setTimeout(() => releaseLock().catch(() => undefined), 150);
+
+    const { results } = await group.wait({ timeoutMs: 10_000 });
+    assert.strictEqual(results[0].status, 'applied');
+    assert.ok(results[0].lockWaitMs > 0, 'the wait is reported on the result');
+    const logs = await harness.logsOf(mq.queue, group.jobs[0].id);
+    assert.ok(
+      logs.some((row) => /waiting/.test(row)),
+      logs.join(' | '),
+    );
+  });
+
+  it('should fail the job — retryably — when the lock never frees', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue({ lockWait: { lockPollIntervalMs: 20, lockWaitTimeoutMs: 120 } });
+    await holdLock();
+    const group = await mq.enqueueUp();
+    await mq.startWorker();
+    const [view] = await settled(mq, [group.jobs[0].id]);
+    assert.strictEqual(view.state, 'failed');
+    assert.strictEqual(view.progress.code, 'LOCK_ALREADY_HELD');
+    assert.deepStrictEqual(await markers(), []);
+  });
+
+  // ─── Rolling back ──────────────────────────────────────────────────────────
+
+  it('should roll back the last batch newest-first, one job per migration', async () => {
+    three();
+    const mq = createQueue();
+    await mq.startWorker();
+    await (await mq.enqueueUp()).wait({ timeoutMs: 10_000 });
+
+    const group = await mq.enqueueDown();
+    assert.strictEqual(group.direction, 'down');
+    assert.strictEqual(group.batch, null);
+    assert.deepStrictEqual(
+      group.jobs.map((job) => job.migration),
+      ['0003-c.js', '0002-b.js', '0001-a.js'],
+    );
+    const { results } = await group.wait({ timeoutMs: 10_000 });
+    assert.deepStrictEqual(
+      results.map((result) => result.status),
+      ['reverted', 'reverted', 'reverted'],
+    );
+    assert.deepStrictEqual(await markers(), []);
+    assert.ok((await records()).every((record) => record.status === 'reverted'));
+  });
+
+  it('should roll back the last N steps, and refuse a rollback that skips newer work', async () => {
+    three();
+    const mq = createQueue();
+    await mq.startWorker();
+    await (await mq.enqueueUp()).wait({ timeoutMs: 10_000 });
+
+    await assert.rejects(mq.enqueueDown('0001-a.js'), (error) => {
+      assert.ok(error instanceof MigrationBlockedError);
+      assert.deepStrictEqual(error.context.blockedBy, ['0003-c.js', '0002-b.js']);
+      return true;
+    });
+
+    const oneStep = await mq.enqueueDown(undefined, { steps: 1 });
+    assert.deepStrictEqual(
+      oneStep.jobs.map((job) => job.migration),
+      ['0003-c.js'],
+    );
+    await oneStep.wait({ timeoutMs: 10_000 });
+    assert.deepStrictEqual(await markers(), ['a', 'b']);
+
+    const backTo = await mq.enqueueDown(undefined, { to: '0001-a.js' });
+    assert.deepStrictEqual(
+      backTo.jobs.map((job) => job.migration),
+      ['0002-b.js'],
+    );
+    await backTo.wait({ timeoutMs: 10_000 });
+    assert.deepStrictEqual(await markers(), ['a']);
+  });
+
+  it('should refuse, on the worker, a rollback job that skips newer work', async () => {
+    three();
+    const mq = createQueue();
+    await mq.startWorker();
+    await (await mq.enqueueUp()).wait({ timeoutMs: 10_000 });
+
+    // The same job, hand-added: the producer's own check is not the only guard.
+    const job = await mq.queue.add(
+      'down',
+      { v: 1, direction: 'down', migration: '0001-a.js', groupId: 'manual', index: 0, total: 1 },
+      { attempts: 1 },
+    );
+    const [view] = await settled(mq, [job.id]);
+    assert.strictEqual(view.state, 'failed');
+    assert.strictEqual(view.progress.code, 'MIGRATION_BLOCKED');
+    assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
+  });
+
+  it('should complete a rollback job for a migration that is not applied as skipped', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue();
+    await mq.startWorker();
+    const job = await mq.queue.add(
+      'down',
+      { v: 1, direction: 'down', migration: '0001-a.js', groupId: 'manual', index: 0, total: 1 },
+      { attempts: 1 },
+    );
+    const [view] = await settled(mq, [job.id]);
+    assert.strictEqual(view.state, 'completed');
+    assert.deepStrictEqual(view.returnvalue, {
+      migration: '0001-a.js',
+      direction: 'down',
+      status: 'skipped',
+      reason: 'Not applied',
+      lockWaitMs: 0,
+    });
+  });
+
+  it('should re-run an applied migration when forced', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue();
+    await mq.startWorker();
+    await (await mq.enqueueUp()).wait({ timeoutMs: 10_000 });
+
+    assert.strictEqual((await mq.enqueueUp('0001-a.js')).upToDate, true);
+    const forced = await mq.enqueueUp('0001-a.js', { force: true });
+    const { results } = await forced.wait({ timeoutMs: 10_000 });
+    assert.strictEqual(results[0].status, 'applied');
+    assert.deepStrictEqual(await markers(), ['a', 'a']);
+    const [record] = await records();
+    assert.strictEqual(record.batch, forced.batch);
+    assert.ok(record.firstAppliedAt <= record.appliedAt);
+  });
+
+  // ─── Untrusted payloads, redaction ─────────────────────────────────────────
+
+  it('should refuse a hand-crafted job whose migration is a path', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue();
+    await mq.startWorker();
+    const traversal = await mq.queue.add(
+      'up',
+      {
+        v: 1,
+        direction: 'up',
+        migration: '../../etc/passwd',
+        groupId: 'x',
+        index: 0,
+        total: 1,
+        batch: 1,
+      },
+      { attempts: 1 },
+    );
+    const future = await mq.queue.add(
+      'up',
+      { v: 2, direction: 'up', migration: '0001-a.js', groupId: 'x', index: 0, total: 1, batch: 1 },
+      { attempts: 1 },
+    );
+    const views = await settled(mq, [traversal.id, future.id]);
+    for (const view of views) {
+      assert.strictEqual(view.state, 'failed');
+      assert.match(view.failedReason, /Invalid migration job/);
+    }
+    assert.deepStrictEqual(await markers(), []);
+    assert.strictEqual(
+      await harness.mongo().db.collection(LOCK_COLLECTION).countDocuments(),
+      0,
+      'an invalid job never reaches the lock',
+    );
+  });
+
+  it('should not retry a non-retryable failure even when a job was given attempts', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    write('0002-b.js', insertMigration('things', 'b'));
+    const mq = createQueue();
+    await mq.startWorker();
+    // Enqueued some other way, with retries: the blocked job must still fail once.
+    const job = await mq.queue.add(
+      'up',
+      { v: 1, direction: 'up', migration: '0002-b.js', groupId: 'x', index: 0, total: 1, batch: 1 },
+      { attempts: 3 },
+    );
+    const [view] = await settled(mq, [job.id]);
+    assert.strictEqual(view.state, 'failed');
+    assert.strictEqual(view.attemptsMade, 1);
+    assert.strictEqual(view.progress.code, 'MIGRATION_BLOCKED');
+  });
+
+  it('should keep credentials out of what the queue stores', async () => {
+    write('0001-a.js', leakyMigration());
+    const mq = createQueue();
+    await mq.startWorker();
+    const group = await mq.enqueueUp();
+    const [view] = await settled(mq, [group.jobs[0].id]);
+    assert.strictEqual(view.state, 'failed');
+    assert.ok(!view.failedReason.includes('hunter2'), view.failedReason);
+    assert.match(view.failedReason, /admin:\*\*\*\*@/);
+    const live = await mq.queue.getJob(group.jobs[0].id);
+    assert.ok(!JSON.stringify(live.stacktrace ?? []).includes('hunter2'));
+    const logs = await harness.logsOf(mq.queue, group.jobs[0].id);
+    assert.ok(logs.length > 0);
+    assert.ok(
+      logs.every((row) => !row.includes('hunter2')),
+      logs.join(' | '),
+    );
+  });
+
+  // ─── sync and scheduling ───────────────────────────────────────────────────
+
+  it('should plan and enqueue everything pending from a sync job', async () => {
+    three();
+    const mq = createQueue();
+    await mq.startWorker();
+    const sync = await mq.queue.add('sync', { v: 1, kind: 'sync' }, { attempts: 1 });
+    const [view] = await settled(mq, [sync.id]);
+    assert.strictEqual(view.state, 'completed');
+    assert.strictEqual(view.returnvalue.kind, 'sync');
+    assert.strictEqual(view.returnvalue.enqueued, 3);
+    assert.deepStrictEqual(view.returnvalue.migrations, ['0001-a.js', '0002-b.js', '0003-c.js']);
+
+    // The migration jobs the sync job added run after it, in the same queue.
+    const deadline = Date.now() + 10_000;
+    while ((await markers()).length < 3 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
+    const batches = new Set((await records()).map((record) => record.batch));
+    assert.deepStrictEqual([...batches], [view.returnvalue.batch]);
+
+    const again = await mq.queue.add('sync', { v: 1, kind: 'sync' }, { attempts: 1 });
+    const [second] = await settled(mq, [again.id]);
+    assert.strictEqual(second.returnvalue.upToDate, true);
+    assert.strictEqual(second.returnvalue.enqueued, 0);
+  });
+
+  it('should register and remove a schedule', async () => {
+    const mq = createQueue();
+    await mq.schedule({ every: 3_600_000 });
+    await mq.schedule({ every: 3_600_000 });
+    assert.strictEqual(await mq.unschedule(), true);
+    assert.strictEqual(await mq.unschedule(), false);
+  });
+
+  if (harness.fake) {
+    it('should migrate on a scheduler tick', async () => {
+      three();
+      const mq = createQueue();
+      await mq.startWorker();
+      await mq.schedule({ every: 60_000, to: '0002-b.js' });
+      const tick = await mq.queue._tick('migronaut-sync');
+      const [view] = await settled(mq, [tick.id]);
+      assert.deepStrictEqual(view.returnvalue.migrations, ['0001-a.js', '0002-b.js']);
+      const deadline = Date.now() + 10_000;
+      while ((await markers()).length < 2 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      assert.deepStrictEqual(await markers(), ['a', 'b']);
+    });
+
+    it('should make a stalled job harmless: the re-run finds the work done', async () => {
+      write('0001-a.js', slowMigration('things', 'a', 60));
+      const mq = createQueue();
+      const worker = await mq.startWorker();
+      const group = await mq.enqueueUp();
+      // As if the worker died mid-migration and BullMQ handed the job on.
+      await new Promise((resolve) => mq.kit.once('migration:start', resolve));
+      worker._simulateStall(group.jobs[0].id);
+
+      const { results } = await group.wait({ timeoutMs: 10_000 });
+      assert.strictEqual(results[0].status, 'skipped');
+      assert.deepStrictEqual(await markers(), ['a'], 'applied exactly once');
+      assert.strictEqual((await records()).length, 1);
+    });
+  }
+
+  // ─── Waiting, cancelling, closing ──────────────────────────────────────────
+
+  it('should time out a wait on a paused queue, and say so', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue();
+    await mq.startWorker();
+    await mq.pause();
+    const group = await mq.enqueueUp();
+    await assert.rejects(group.wait({ timeoutMs: 150 }), (error) => {
+      assert.ok(error instanceof QueueJobFailedError);
+      assert.strictEqual(error.context.timedOut, true);
+      return true;
+    });
+    assert.deepStrictEqual(await markers(), []);
+
+    await mq.resume();
+    const { results } = await group.wait({ timeoutMs: 10_000 });
+    assert.strictEqual(results[0].status, 'applied');
+  });
+
+  it('should need QueueEvents to wait, and accept one at wait time', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const { Queue, Worker, QueueEvents } = harness.bullmq();
+    const mq = createQueue({ bullmq: { Queue, Worker } });
+    await mq.startWorker();
+    const group = await mq.enqueueUp();
+    await assert.rejects(group.wait(), ConfigInvalidError);
+
+    const queueEvents = new QueueEvents(mq.queueName, {
+      connection,
+      ...(prefix !== undefined ? { prefix } : {}),
+    });
+    try {
+      const { results } = await group.wait({ queueEvents, timeoutMs: 10_000 });
+      assert.strictEqual(results[0].status, 'applied');
+    } finally {
+      await queueEvents.close();
+    }
+  });
+
+  it('should hand the cancellation to the migration through its signal', async () => {
+    write('0001-a.js', slowMigration('things', 'a', 400));
+    const mq = createQueue();
+    const worker = await mq.startWorker();
+    const group = await mq.enqueueUp();
+    await new Promise((resolve) => mq.kit.once('migration:start', resolve));
+    assert.strictEqual(worker.cancelJob(group.jobs[0].id, 'operator cancelled'), true);
+
+    // A body already running is never interrupted from outside — it is told,
+    // through ctx.signal, and finishes on its own terms.
+    const { results } = await group.wait({ timeoutMs: 10_000 });
+    assert.strictEqual(results[0].status, 'applied');
+    const [doc] = await harness.mongo().db.collection('things').find().toArray();
+    assert.strictEqual(doc.aborted, true, 'the migration saw its signal abort');
+  });
+
+  it('should finish the migration in flight on close, and resume the rest later', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    write('0002-b.js', slowMigration('things', 'b', 150));
+    write('0003-c.js', insertMigration('things', 'c'));
+    const mq = createQueue();
+    await mq.startWorker();
+    const group = await mq.enqueueUp();
+    await new Promise((resolve) => {
+      mq.kit.on('migration:start', (event) => {
+        if (event.migration === '0002-b.js') resolve();
+      });
+    });
+    await mq.close();
+
+    assert.deepStrictEqual(await markers(), ['a', 'b'], 'the second migration was not cut short');
+    await assert.rejects(mq.enqueueUp(), /closed/);
+
+    const next = createQueue();
+    assert.deepStrictEqual(
+      (await next.status()).map((row) => row.status),
+      ['applied', 'applied', 'pending'],
+    );
+    await next.startWorker();
+    const [third] = await settled(next, [group.jobs[2].id]);
+    assert.strictEqual(third.state, 'completed');
+    assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
+    const batches = new Set((await records()).map((record) => record.batch));
+    assert.strictEqual(batches.size, 1, 'the group kept its batch across the restart');
+  });
+
+  it('should read status and the lock straight from MongoDB', async () => {
+    three();
+    const mq = createQueue();
+    assert.deepStrictEqual(
+      (await mq.pending()).map((row) => row.file),
+      ['0001-a.js', '0002-b.js', '0003-c.js'],
+    );
+    assert.strictEqual(await mq.lockInfo(), null);
+    await holdLock();
+    assert.strictEqual((await mq.lockInfo()).executedBy, 'peer');
+    await releaseLock();
+    assert.strictEqual((await mq.audit()).ok, true);
+  });
+}
+
+module.exports = { defineBullMQScenarios };

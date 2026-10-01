@@ -7,10 +7,11 @@
 > exists, how data flows through it, and every non-obvious nuance you need to make a safe change.
 >
 
-**Snapshot at time of writing:** v2.0.0 · Node ≥ 22.18 (engines; native TS type stripping is
+**Snapshot at time of writing:** v2.1.0 · Node ≥ 22.18 (engines; native TS type stripping is
 always available) · runtime deps: **none** — `package.json` has no `dependencies` key; `.env`
 loading, ANSI colors, the spinner, the arg parser, the table renderer and config validation are
-all hand-rolled in `src/` · peer deps: `mongodb`, optional `mongoose`.
+all hand-rolled in `src/` · peer deps: `mongodb`, optional `mongoose` · BullMQ (the optional queue
+adapter) is injected by the caller — not a dependency, not a peer.
 
 ---
 
@@ -39,7 +40,10 @@ migronaut is a MongoDB migration tool with two faces over **one engine**:
 - **A programmatic API** (`MigratorKit` + helper functions) — for app startup, serverless, tests.
 
 Both faces are thin. All real logic lives in **one orchestrator class**, [`MigratorKit`](src/core/migrator.js),
-which coordinates a handful of small, single-responsibility modules:
+which coordinates a handful of small, single-responsibility modules. A third, optional consumer —
+the **queue adapter** (`@alexify/migronaut/bullmq`, [§6.6](#66-the-queue-adapter-bullmq)) — sits
+on top of the same public API as "your code" does: it runs each migration as a BullMQ job by
+calling `kit.up(name)` / `kit.down(name)`.
 
 ```
             ┌────────────────────────────────────────────────┐
@@ -67,14 +71,17 @@ If you internalize those three, the rest is detail.
 
 ```
 index.js                     # module.exports = require('./src/index.js') — package entry point
-index.d.ts                   # Hand-written public type surface — the ONLY .d.ts in the repo
+index.d.ts                   # Hand-written types for the package root
+bullmq.js                    # module.exports = require('./src/bullmq/index.js') — the ./bullmq subpath
+bullmq.d.ts                  # Hand-written types for the subpath (structural BullMQ types)
 src/
-├── index.js                 # Public API barrel — the ONLY thing users import
+├── index.js                 # Public API barrel of the package root
 ├── errors/index.js          # MigronautError base + one subclass per error code
 ├── core/                    # The engine
 │   ├── migrator.js          # MigratorKit — orchestrates everything (the heart)
 │   ├── config.js            # Config loader + built-in validation + precedence
 │   ├── lock.js              # MongoDB distributed lock + heartbeat + runWithLock()
+│   ├── lock-wait.js         # withLockWait() — the one wait-for-the-lock loop (run.js + queue jobs)
 │   ├── changelog.js         # Read/write the _migronaut_migrations collection
 │   ├── runner.js            # Execute ONE migration up()/down() (+ transactions)
 │   ├── context.js           # Build the MigrationContext passed to each migration
@@ -93,19 +100,28 @@ src/
 │   ├── sanitize.js          # Strip terminal control chars (C0 + full C1) from untrusted text
 │   ├── error.js             # errorText() — stringify caught errors, redaction built in
 │   ├── loader.js            # Dynamic-import a migration file (.ts/.js, ESM/CJS)
+│   ├── migration-name.js    # isBareFilename() — the one rule for a safe migration name
 │   ├── template.js          # Generate migration files & config files
 │   ├── user.js              # safeUsername() — MIGRONAUT_USER, else the OS user
 │   └── date.js              # Dependency-free timestamp formatting
-└── cli/
-    ├── index.js             # CLI root: registers commands + global flags
-    ├── args.js              # Zero-dependency commander-compatible arg parser
-    ├── shared.js            # withMigrator(), confirm(), emitJson(), partialFromOpts()
-    ├── spinner.js           # Minimal TTY spinner — start/stop, no-op when piped
-    ├── table.js             # Box-drawing table renderers (status/list/import)
-    └── commands/*.js        # One file per command — thin wrappers over MigratorKit
+├── cli/
+│   ├── index.js             # CLI root: registers commands + global flags
+│   ├── args.js              # Zero-dependency commander-compatible arg parser
+│   ├── shared.js            # withMigrator(), confirm(), emitJson(), partialFromOpts()
+│   ├── spinner.js           # Minimal TTY spinner — start/stop, no-op when piped
+│   ├── table.js             # Box-drawing table renderers (status/list/import)
+│   └── commands/*.js        # One file per command — thin wrappers over MigratorKit
+└── bullmq/                  # The queue adapter — never requires bullmq (it is injected)
+    ├── index.js             # Public API barrel of the ./bullmq subpath
+    ├── jobs.js              # The job contract: names, data version, validation, dedup ids
+    ├── producer.js          # planUpJobs/planDownJobs + enqueueUp/enqueueDown → group handle
+    ├── processor.js         # createMigrationProcessor() — runs ONE job (the Worker's function)
+    ├── wait.js              # waitForGroup() — enqueue-and-wait over QueueEvents
+    └── service.js           # MigrationQueue / createMigrationQueue() — the facade
 
 bin/migronaut.js             # CLI shebang entry → calls cli/index.js run()
-tests/                       # unit/ (mocked) + integration/ (mongodb-memory-server)
+tests/                       # unit/ (mocked) + integration/ (mongodb-memory-server) + helpers/
+examples/                    # Runnable example apps (own package.json; never published)
 docs/                        # VitePress user-facing site (dev-only, never published to npm)
 ```
 
@@ -124,6 +140,7 @@ There are three layers. Keep logic in the lowest layer it belongs to.
 | **Presentation** | `cli/`, `bin/` | Parse args, render tables/JSON, spinner, prompts, exit codes | Contain migration logic; touch the DB directly |
 | **Orchestration** | `core/migrator.js`, `core/run.js` | Sequence the steps of each command; own the connection lifecycle | Import the spinner or table renderer; render tables |
 | **Mechanism** | `core/{lock,changelog,runner,context,import,config}.js`, `utils/` | One job each, pure-ish, unit-testable | Know about the CLI; call `console.*` |
+| **Integration adapter** | `bullmq.js`, `src/bullmq/` | Drive the kit's *public* API from queue jobs; own the Queue/Worker lifecycle | Require a mechanism module (`lock`, `changelog`, `runner`) or touch the DB; `require('bullmq')`; call `console.*` |
 
 **Why this matters for you:** the CLI's spinner lives *entirely* in the CLI layer
 ([cli/spinner.js](src/cli/spinner.js), driven from [cli/shared.js](src/cli/shared.js)) and is
@@ -190,8 +207,9 @@ Key observations:
 Each entry: **responsibility · key exports · nuances you must know.**
 
 ### `index.d.ts` — the shared vocabulary (hand-written, repo root)
-- **Responsibility:** the entire public type surface, maintained by hand in lockstep with
-  `src/index.js` (no generation step; correctness enforced by tsd).
+- **Responsibility:** the public type surface of the package root, maintained by hand in lockstep
+  with `src/index.js` (no generation step; correctness enforced by tsd). The `./bullmq` subpath has
+  its own [bullmq.d.ts](bullmq.d.ts), which imports from this file — never the other way round.
 - **Key types:** `MigronautConfig`, `MigronautConfigInput` (object *or* factory fn), `MigrationContext`,
   `MigrationModule`, `MigrationRecord`, `MigrationHooks`, `MigronautLogger` (pino-compatible
   `{debug, info, warn, error, child?}`), `RunResult`, `StatusRow`,
@@ -314,7 +332,16 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **Nuances:** `#filepath(name)` centralizes **path-traversal defense** — every user-supplied name
   flows through it. Batch numbers come from `nextBatch()` (monotonic max+1). `down --steps` and its
   dry-run share `selectLastApplied` + `assertStepsValid`. `assertReversible` preflights
-  migrate-mongo records before any write.
+  migrate-mongo records before any write. `connect()` is safe under overlapping calls (they share
+  one in-flight connection) — a long-lived kit in a service is called from several places at once.
+- **Sequenced single-file runs:** `up(file, { batch, ordered })`, `down(file, { ordered })` and the
+  public `nextBatch()` exist so something *outside* the kit can split one logical run into
+  single-file calls without losing what a bulk run guarantees. `batch` stamps a caller-chosen
+  number (a label, not a reservation). `ordered` makes a single-file `up` read the full applied
+  set — so the `strict` drift check and `onOutOfOrder` apply as in a bulk run — and refuse with
+  `MigrationBlockedError` while an earlier file is pending (`#assertUpNotBlocked`), checked inside
+  the lock and before `beforeAll`. For `down` it refuses while a migration applied *later* (by
+  `appliedAt`) is still applied (`#assertDownNotBlocked`).
 
 ### `src/core/audit.js` — read-only health check
 - **Responsibility:** the `migronaut audit` checks (config, connectivity, transactions, indexes,
@@ -342,6 +369,30 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **Nuances:** both manage their own connect/disconnect in a `finally`. `runMigrations` adds
   multi-instance lock handling: `onLockHeld: 'wait'` polls past `LockAlreadyHeldError` up to
   `lockWaitTimeoutMs`. See the [deep dive](#65-the-programmatic-api-runjs).
+
+### `src/core/lock-wait.js` — the wait-for-the-lock loop
+- **Responsibility:** `withLockWait(attempt, options)` — retry `attempt()` while it rejects with
+  `LockAlreadyHeldError`, bounded by a *stall* budget that re-arms whenever the holder's `lockedAt`
+  advanced (a live peer is never timed out). Shared by `runMigrations` and the queue processor.
+- **Key exports:** `withLockWait`, `assertLockWaitOptions`, the two default budgets.
+- **Nuances:** an optional `signal` aborts the sleep *between* attempts (never an attempt in
+  progress) — that is how a worker shutdown interrupts a job that is waiting for the lock.
+  `kit.stop()` cannot do it: between attempts no run is in flight for it to stop.
+
+### `src/bullmq/` — the queue adapter
+Five small modules behind the `./bullmq` subpath; see [§6.6](#66-the-queue-adapter-bullmq) for
+the design.
+- **`jobs.js`** — the contract shared by producer and worker: job names (`up`/`down`/`sync`), the
+  versioned data shape, `parseJobData` (validation of *untrusted* payloads), `dedupId`.
+- **`producer.js`** — `planUpJobs`/`planDownJobs` (the plan *is* `kit.dryRun`, so it can never
+  disagree with a run) and `enqueueUp`/`enqueueDown` (one atomic `addBulk`, returns the group
+  handle).
+- **`processor.js`** — `createMigrationProcessor()`: the function a Worker runs. Validate →
+  connect → `withLockWait(kit.up|down)` → map the result; classify failures; forward kit events to
+  the job as log rows and progress.
+- **`wait.js`** — `waitForGroup()`: sequential `job.waitUntilFinished` under one time budget.
+- **`service.js`** — `MigrationQueue`: validates everything before constructing anything, owns
+  what it constructs (and only that), closes in dependency order.
 
 ### `src/utils/`
 - **logger.js** — pino-compatible surface `{debug, info, warn, error}`. `createLogger(stream)`
@@ -519,6 +570,74 @@ File: [run.js](src/core/run.js).
   connect/run/disconnect dance (and never leak a connection). They are exported from
   [src/index.js](src/index.js) alongside `MigratorKit`.
 
+### 6.6 The queue adapter (BullMQ)
+Files: [src/bullmq/](src/bullmq/). Entry point: `@alexify/migronaut/bullmq`.
+
+**What it is.** Pending migrations enqueued on a BullMQ queue, **one migration per job**, applied
+by a worker — so migronaut can run as a service. Each job is nothing more than a single-file run:
+`kit.up(name, { batch, ordered: true })` or `kit.down(name, { ordered: true })`.
+
+**The governing idea: Redis holds intent, MongoDB holds truth.** A job says *what was asked*.
+Whether it may run, and whether it already did, is decided from the changelog when it executes.
+Every design choice below follows from refusing to trust the queue's memory:
+
+- **Order is enforced in the kit, not arranged in the queue.** A flat FIFO queue with worker
+  concurrency 1 gives the order in the normal case; the `ordered` guard (inside the MongoDB lock)
+  gives it in every other one — a second worker, a misconfigured concurrency, a hand-added job, a
+  CLI run in between. Flows (parent/child jobs) were rejected: their API differs across BullMQ
+  majors, they cannot be combined with deduplication, and they would move the ordering truth into
+  Redis.
+- **A failed migration stops the line by itself.** The jobs behind it find it still pending and
+  fail as `MIGRATION_BLOCKED` without running. No queue pause, no cross-job state.
+- **`attempts: 1`, always.** A BullMQ retry re-queues the job *behind* the waiting ones, so the
+  migrations after it would run first — and be blocked. The one transient condition worth retrying,
+  a held lock, is waited out *inside* the job (`withLockWait`), where order is kept. `jobOptions`
+  that reorder, delay or re-run a job are rejected by name.
+- **Duplicates are harmless by construction.** Two instances enqueuing at boot: the second
+  `addBulk` is absorbed by BullMQ deduplication (simple mode — the key lives only while the job is
+  waiting or active, so a later down → up is never blocked, which a custom `jobId` would do for as
+  long as the finished job is retained). A job that slips through anyway finds its migration
+  applied and *completes* as `skipped`. A stalled job re-run by BullMQ does the same.
+- **One batch per enqueue.** The producer peeks `nextBatch()` once and every job carries it, so
+  `down` reverts a whole enqueue like a whole `up`. It is a peek, not a reservation: two enqueues
+  (or a CLI run) racing between peek and first apply share the number and merge into one batch —
+  accepted, because the alternative is a counter document on a read path, and dedup + the guard
+  already rule out double or out-of-order application.
+- **Rollbacks are ordered by `appliedAt`, not by name.** An ordered rollback must be the top of the
+  applied stack; the producer checks it up front (one synchronous `MigrationBlockedError` instead
+  of a group failing halfway) and each job re-checks it under the lock. Name order would deadlock a
+  batch that holds a file merged late.
+
+**BullMQ is injected.** `createMigrationQueue({ bullmq: { Queue, Worker, QueueEvents } })` takes
+classes or instances; nothing under `src/` requires `bullmq` (pinned by a unit test), and
+`bullmq.d.ts` types it structurally. Consequences worth knowing: the adapter feature-detects what
+it can (`setGlobalConcurrency`, `upsertJobScheduler`); it cannot `throw new UnrecoverableError`, so
+"do not retry" is signalled the way BullMQ itself checks it — by the error's `name` — and only for
+jobs that have more than one attempt, so the adapter's own jobs keep their typed class names.
+
+**The processor has exactly three declared parameters** (`job, token, signal`): BullMQ passes the
+cancellation signal only when `processor.length >= 3`. The signal (and `processor.shutdown()`)
+is bridged to `kit.stop()` and to the lock wait. A migration body that is already running is never
+interrupted — it finishes and the job completes; that is the same rule `stop()` has always had.
+
+**One kit, one job at a time.** A processor holds one long-lived `MigratorKit` and serializes jobs
+through a promise chain, because a kit rejects overlapping runs. Across processes the MongoDB lock
+does that. Global concurrency 1 (set when the worker starts, where BullMQ supports it) is an
+optimization — it stops idle pods from each taking a job and queuing on the lock — never the thing
+correctness rests on.
+
+**Ownership.** `MigrationQueue` closes what it constructed and nothing else: an injected Queue or
+QueueEvents instance, the Redis `connection`, an injected kit and its `MongoClient` all stay open.
+Its constructor validates every option *before* constructing the Queue — a Queue opens a Redis
+connection, and a constructor that throws afterwards would leak it. `close()` runs in dependency
+order: stop taking the lock → worker → QueueEvents → Queue → kit.
+
+**Untrusted input.** Job data comes back from Redis. `parseJobData` checks it against the contract
+before the kit is touched (version, names, positions, and the migration name with the same
+`isBareFilename` rule `#filepath` uses); the kit then re-validates. Everything BullMQ stores about
+a failure — message, stack, log rows — goes through the redaction chokepoint first, and the cause
+is folded into the message because `failedReason` is all a dashboard shows.
+
 ---
 
 ## 7. Cross-cutting conventions
@@ -530,8 +649,8 @@ has no rule for either) — catch these in review.
 - **Types:** plain CommonJS, not TypeScript — no `import`/`export` syntax, no type annotations in
   `src/`/`bin/`. JSDoc comments document intent for the reader/editor but are never type-checked
   (no `tsc`/`checkJs` pass over them). The only checked type surface is the hand-written
-  [index.d.ts](index.d.ts), verified against [tests/types/index.test-d.ts](tests/types/index.test-d.ts)
-  via `tsd`. JSDoc on public methods is still expected.
+  [index.d.ts](index.d.ts) and [bullmq.d.ts](bullmq.d.ts), verified against
+  [tests/types/](tests/types/) via `tsd`. JSDoc on public methods is still expected.
 - **Errors:** never `throw new Error`. Always a `MigronautError` subclass with a typed `code`. Never
   swallow — rethrow or route to `onError`.
 - **Logging:** never `console.*`. Always the injected `MigronautLogger`. Core resolves it via
@@ -540,9 +659,13 @@ has no rule for either) — catch these in review.
   (config files are the sole default-export-shaped exception, since they may export an object or a
   factory function directly).
 - **Style:** oxfmt/oxlint — single quotes, semicolons, 100-col, no unused vars/imports.
-- **Public surface:** anything users should touch must be re-exported from [src/index.js](src/index.js)
-  **and** typed in [index.d.ts](index.d.ts) — the two are maintained by hand in lockstep. If it's not
-  in both, it's private.
+- **Public surface:** anything users should touch must be re-exported from an entry point's barrel
+  **and** typed in that entry's declaration file — [src/index.js](src/index.js) +
+  [index.d.ts](index.d.ts) for the package root, [src/bullmq/index.js](src/bullmq/index.js) +
+  [bullmq.d.ts](bullmq.d.ts) for the subpath. Each pair is maintained by hand in lockstep. If it's
+  not in both, it's private — and the `exports` map makes that literal: nothing else is reachable.
+- **Injected, never required:** third-party integrations come in through options. `src/` never
+  requires `bullmq` (a unit test greps for it), and no `.d.ts` imports an optional package.
 
 ---
 
@@ -582,6 +705,17 @@ The high-impact ones for code changes:
   output goes to stderr; stdout is one JSON doc.
 - **`down --steps` preserves selection order** (newest-first) via a `preserveOrder` flag, instead of
   the usual filename-desc sort.
+- **`batch` on `up` is a label, not a reservation** — it may equal a batch already in use (that is
+  how several single-file runs become one rollback unit), and `nextBatch()` is a peek that two
+  callers can get the same answer from.
+- **Queue jobs get exactly one attempt**, forced over whatever the caller configured — see
+  [§6.6](#66-the-queue-adapter-bullmq). Do not "add retries": they reorder the queue.
+- **A queue job behind a failed migration fails (`MIGRATION_BLOCKED`) rather than waiting**, and a
+  job for an already-applied migration *completes* as `skipped`. Both are the queue doing its job.
+- **Non-retryable queue errors are renamed `UnrecoverableError` only when the job has
+  `attempts > 1`.** The adapter cannot import BullMQ's class; BullMQ matches the name. With the
+  adapter's own single-attempt jobs there is nothing to prevent, so the typed name stays.
+- **`beforeAll`/`afterAll` fire once per queue job**, because each job is its own run.
 
 ---
 
@@ -604,15 +738,32 @@ The high-impact ones for code changes:
   `makeProject` (throwaway migrations dir with `write`/`tamper`/`cleanup`), `makeMigrator`
   (a `MigratorKit` pointed at the test mongo with `logger:null`), and migration-body factories
   (`insertMigration`, `failingMigration`).
+- **The queue adapter needs no Redis to be tested.**
+  [fake-bullmq.js](tests/helpers/fake-bullmq.js) is an in-memory double of the slice of BullMQ the
+  adapter uses (its header lists exactly which behaviours it reproduces and which it does not), and
+  [stub-kit.js](tests/helpers/stub-kit.js) a stand-in kit for the unit tier. The end-to-end
+  behaviour is written **once**, in [bullmq-scenarios.js](tests/helpers/bullmq-scenarios.js), and
+  run twice: by `tests/integration/bullmq.test.js` against the fake (always — this carries the
+  adapter's coverage) and by `tests/integration/bullmq-redis.test.js` against the real `bullmq`
+  package on a real Redis. The second run is what keeps the first honest: when they disagree, the
+  fake is wrong. Add adapter behaviour to the scenario module, not to either file.
 - **Rules:** every feature ships with tests in the same PR. Silence the logger (`logger:null`). No
-  `.only`/`.skip` committed. Test file names mirror source names. Coverage gate: **90% lines / 90%
+  `.only`/`.skip` committed — the single sanctioned exception is `bullmq-redis.test.js`, which
+  skips itself *with a reason* when `MIGRONAUT_TEST_REDIS_URL` is unset: an environment-capability
+  skip (CI sets the variable via a Redis service), not a disabled test. The coverage gate must pass
+  without it. Test file names mirror source names. Coverage gate: **90% lines / 90%
   funcs / 90% branches**, enforced via `c8` (`pnpm run test:coverage`).
 - **Gotcha:** Node caches dynamic `import()` by path. A test that rewrites the *same* migration
   filename mid-run will re-load the *cached* module. Use a new filename, or assert via a read-only
   path (`pendingMigrations`), when you need "changed file" behavior.
-- **Type coverage:** the public type surface ([index.d.ts](index.d.ts)) is checked separately by
-  `tsd` against [tests/types/index.test-d.ts](tests/types/index.test-d.ts) — `pnpm run test:types`.
+- **Type coverage:** the public type surface ([index.d.ts](index.d.ts), [bullmq.d.ts](bullmq.d.ts))
+  is checked separately by `tsd` against [tests/types/](tests/types/) — `pnpm run test:types`.
   This is a type-assertion pass over hand-written types, not a build/typecheck step.
+  `bullmq.test-d.ts` also asserts that the *real* BullMQ classes satisfy the structural
+  `BullMQ*Like` types — the one place that claim is checked, since the declaration file itself
+  never imports bullmq. `esm-interop.test.js` additionally compiles a `nodenext` consumer, the only
+  check that `exports["./bullmq"].types` resolves for modern TypeScript (tsd and `check:dts` use
+  classic resolution, which ignores the exports map).
 - **Concurrency note:** the lock-heartbeat integration tests use real timers; running the *full*
   integration suite in parallel (many concurrent `mongodb-memory-server` replica sets) can make
   timing-sensitive tests flaky under heavy CPU contention. They're stable in isolation — not a
@@ -620,11 +771,14 @@ The high-impact ones for code changes:
 
 Useful commands:
 ```bash
-pnpm test                                  # unit + integration (~570 tests)
+pnpm test                                  # unit + integration (~1060 tests)
 node --test tests/integration/up.test.js   # one file (boots its own replica set)
 pnpm run test:coverage                     # full suite under c8, gated at 90/90/90
-pnpm run test:types                        # tsd — index.d.ts vs tests/types/*.test-d.ts
-pnpm run check:dts                         # tsc --noEmit --strict over index.d.ts alone
+pnpm run test:types                        # tsd — index.d.ts + bullmq.d.ts vs tests/types/*.test-d.ts
+pnpm run check:dts                         # tsc --noEmit --strict over both .d.ts files alone
+# opt-in: the adapter scenarios against the real bullmq + Redis (CI runs this)
+docker run --rm -d -p 6379:6379 redis:7-alpine
+MIGRONAUT_TEST_REDIS_URL=redis://127.0.0.1:6379 node --test tests/integration/bullmq-redis.test.js
 ```
 
 ## 10. No build, lint, release
@@ -632,22 +786,27 @@ pnpm run check:dts                         # tsc --noEmit --strict over index.d.
 - **No build step, ever.** migronaut ships exactly what's in `src/`/`bin/` — plain CommonJS, no
   compile pass for authors or consumers. The package version is read from `package.json` at
   runtime (`bin/migronaut.js`), not injected at build time.
-- **Types:** the single hand-written [index.d.ts](index.d.ts) at the package root is the only
-  `.d.ts` in the repo — there is no generation step and no `tsc` pass over `src/`. Correctness is
-  enforced only by `tsd` (`pnpm run test:types`), which checks it against
-  [tests/types/index.test-d.ts](tests/types/index.test-d.ts).
-- **Lint/format:** `pnpm run lint` (`oxlint src bin scripts tests bench`), `pnpm run format` (`oxfmt` to
-  fix formatting), `pnpm run format:check` (`oxfmt --check`, no writes).
+- **Types:** two hand-written declaration files at the package root, one per entry point —
+  [index.d.ts](index.d.ts) and [bullmq.d.ts](bullmq.d.ts). There is no generation step and no `tsc`
+  pass over `src/`. Correctness is enforced by `tsd` (`pnpm run test:types`) against
+  [tests/types/](tests/types/), and `pnpm run check:dts` compiles both files in one program.
+- **Lint/format:** `pnpm run lint` (`oxlint src bin scripts tests bench examples`), `pnpm run format`
+  (`oxfmt` to fix formatting), `pnpm run format:check` (`oxfmt --check`, no writes). The two root
+  shims (`index.js`, `bullmq.js`) are one-line re-exports and are not in the globs.
 - **Bundle-size report (informational only):** `pnpm run size` runs `scripts/size.js`, which uses
-  esbuild to report library + CLI bundle size — it does not produce a published artifact.
+  esbuild to report library, CLI and queue-adapter bundle size — it does not produce a published
+  artifact. `bullmq` is deliberately *not* marked external there: the adapter never imports it, so
+  an accidental `require('bullmq')` would show up as a jump in the adapter's number.
 - **Benchmarks (informational only, manual):** `pnpm run bench` runs `bench/bench.js`, a
   zero-dependency `node:perf_hooks` harness measuring ops/sec for the hottest paths
   (`checksum`, `loader`, `Changelog`, `MigrationLock`) — the DB-bound scenarios spin up a
   throwaway in-memory MongoDB replica set for the run. Not run in CI; results are hand-copied
   into the README's Benchmarks section before releases.
 - **Published artifact:** exactly what `files` in [package.json](package.json) lists —
-  `index.js`, `index.d.ts`, `migronaut.schema.json`, `bin`, `src`, `README.md`, `CHANGELOG.md`.
-  `docs/`, `blog/`, and this `ARCHITECTURE.md` live in the repo but are **never** shipped to npm.
+  `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`, `migronaut.schema.json`, `bin`, `src`,
+  `README.md`, `CHANGELOG.md`. The `exports` map exposes two entry points (`.` and `./bullmq`) and
+  nothing else. `docs/`, `blog/`, `examples/` and this `ARCHITECTURE.md` live in the repo but are
+  **never** shipped to npm.
 - **Release:** manual — bump `version` in `package.json`, write the dated entry in `CHANGELOG.md`
   by hand, commit and tag, then `pnpm run release` (= `pnpm publish`). `prepublishOnly` re-runs
   lint + format:check + test:coverage + test:types + check:dts as the pre-publish gate.
@@ -663,8 +822,10 @@ pnpm run check:dts                         # tsc --noEmit --strict over index.d.
 Concrete worked path — say you're adding `migronaut verify` (re-checks all checksums):
 
 1. **Types** ([index.d.ts](index.d.ts)) — add any new result/option type and, if needed, a new
-   `MigronautErrorCode` literal. This is the *only* `.d.ts` in the repo; there is no per-file or
-   generated alternative.
+   `MigronautErrorCode` literal. Each entry point has exactly one hand-written `.d.ts`
+   (`index.d.ts` for the root, `bullmq.d.ts` for the queue adapter); there is no per-file or
+   generated alternative. A change to the adapter's surface goes in `src/bullmq/index.js` +
+   `bullmq.d.ts` instead, and its behaviour in `tests/helpers/bullmq-scenarios.js`.
 2. **Errors** ([src/errors/index.js](src/errors/index.js)) — add the matching `MigronautError`
    subclass.
 3. **Core logic** ([src/core/migrator.js](src/core/migrator.js)) — add a public method `verify()`.
@@ -696,6 +857,11 @@ it *looks* or *exits* → the CLI layer.
 
 - **Batch** — a group of migrations applied together, sharing a `batch` number; the unit `down`
   reverts by default.
+- **Enqueue group** — the jobs one `enqueueUp()`/`enqueueDown()` call added to the queue; an `up`
+  group shares one batch.
+- **Job contract** — the versioned shape of a queue job's data (`src/bullmq/jobs.js`), validated
+  by the worker as untrusted input.
+- **Sync job** — the queue job a schedule tick adds: it plans what is pending and enqueues it.
 - **Changelog** — the `_migronaut_migrations` collection; the append-mostly audit trail of `MigrationRecord`s.
 - **Checksum** — SHA-256 of a migration file at apply time; re-checked later to detect tampering.
 - **Context** — the `{ db, client, mongoose?, session? }` object passed into every `up`/`down`.

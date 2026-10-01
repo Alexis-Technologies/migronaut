@@ -90,3 +90,56 @@ describe('MigratorKit import collection guards', () => {
     });
   }
 });
+
+describe('MigratorKit sequenced-run option guards', () => {
+  // `batch` and `ordered` are what a queue job passes for every migration, so
+  // a malformed value must be refused before anything connects — never stamped
+  // into the changelog or quietly ignored.
+  const badBatches = [0, -1, 1.5, '3', Number.NaN, null];
+
+  for (const value of badBatches) {
+    it(`should reject ${JSON.stringify(value)} as an up() batch`, async () => {
+      await assert.rejects(guardedKit().up('0001-a.js', { batch: value }), (error) => {
+        assert.ok(error instanceof ConfigInvalidError);
+        assert.ok(Object.hasOwn(error.context, 'batch'));
+        return true;
+      });
+    });
+  }
+
+  it('should reject an explicit batch combined with step', async () => {
+    await assert.rejects(guardedKit().up(undefined, { batch: 3, step: true }), (error) => {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.match(error.message, /--batch with --step/);
+      return true;
+    });
+  });
+
+  for (const value of ['yes', 1, null, {}]) {
+    it(`should reject ${JSON.stringify(value)} as ordered`, async () => {
+      await assert.rejects(guardedKit().up('0001-a.js', { ordered: value }), ConfigInvalidError);
+      await assert.rejects(guardedKit().down('0001-a.js', { ordered: value }), ConfigInvalidError);
+    });
+  }
+
+  it('should reject ordered without a filename — a bulk run is in order by construction', async () => {
+    for (const run of [
+      guardedKit().up(undefined, { ordered: true }),
+      guardedKit().down(undefined, { ordered: true }),
+    ]) {
+      await assert.rejects(run, (error) => {
+        assert.ok(error instanceof ConfigInvalidError);
+        assert.match(error.message, /requires a filename/);
+        return true;
+      });
+    }
+  });
+
+  it('should let ordered: false through without a filename', () => {
+    // Reaches the connection attempt — a different failure, not a guard one.
+    return assert.rejects(guardedKit().up(undefined, { ordered: false }), (error) => {
+      assert.ok(!(error instanceof ConfigInvalidError));
+      return true;
+    });
+  });
+});

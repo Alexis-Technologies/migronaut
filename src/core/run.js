@@ -1,21 +1,11 @@
-const { setTimeout: delay } = require('node:timers/promises');
-const { ConfigInvalidError, LockAlreadyHeldError } = require('../errors/index.js');
+const { ConfigInvalidError } = require('../errors/index.js');
+const {
+  DEFAULT_LOCK_POLL_INTERVAL_MS,
+  DEFAULT_LOCK_WAIT_TIMEOUT_MS,
+  assertLockWaitOptions,
+  withLockWait,
+} = require('./lock-wait.js');
 const { MigratorKit } = require('./migrator.js');
-
-/**
- * Longer than the default 60s lock TTL on purpose: with a shorter budget, a peer
- * migration that outlives it makes every waiting instance fail to boot, even
- * though the peer is healthy and still holding a valid lock.
- */
-const DEFAULT_LOCK_WAIT_TIMEOUT_MS = 90_000;
-const DEFAULT_LOCK_POLL_INTERVAL_MS = 500;
-/** ±25% jitter so N instances booting together stop polling in lockstep */
-const POLL_JITTER_RATIO = 0.25;
-
-function jitteredDelay(baseMs) {
-  const spread = baseMs * POLL_JITTER_RATIO;
-  return Math.max(1, Math.round(baseMs - spread + Math.random() * spread * 2));
-}
 
 /**
  * Run all pending migrations and return a summary — the blessed one-call entry
@@ -64,84 +54,32 @@ async function runMigrations(config = {}, options = {}) {
     throw new ConfigInvalidError('onKit must be a function', { onKit: typeof onKit });
   }
 
-  // Validated before anything connects. A NaN here (or any non-positive value)
-  // disables every deadline comparison below — `NaN > deadline` is always
-  // false — turning the wait loop into an unbounded retry storm against the
-  // lock collection that never returns and never surfaces the real error.
-  if (!Number.isFinite(lockWaitTimeoutMs) || lockWaitTimeoutMs <= 0) {
-    throw new ConfigInvalidError('lockWaitTimeoutMs must be a positive finite number', {
-      lockWaitTimeoutMs,
-    });
-  }
-  if (!Number.isFinite(lockPollIntervalMs) || lockPollIntervalMs <= 0) {
-    throw new ConfigInvalidError('lockPollIntervalMs must be a positive finite number', {
-      lockPollIntervalMs,
-    });
-  }
+  // Validated before anything connects — see assertLockWaitOptions.
+  assertLockWaitOptions({ lockWaitTimeoutMs, lockPollIntervalMs });
 
   const kit = new MigratorKit(config, kitOptions);
   // Handed out before connect so listeners catch every lifecycle event —
   // this is the metrics/alerting injection point for apps that embed
   // runMigrations and cannot reach the internally-constructed kit otherwise.
   onKit?.(kit);
-  let waited = false;
-  let waitedMs = 0;
-  let attempts = 0;
 
   try {
     await kit.connect();
-    // Resolved AFTER connect, from the kit's own merged config: a `logger:
-    // null` in the config file must silence this module's lines too, not only
-    // the kit's own.
-    const logger = kit.logger;
-    // The clock starts at the first contention, not before the first attempt —
-    // otherwise a slow initial attempt eats the whole waiting budget.
-    let deadline;
-    // The holder's lockedAt from the last refusal: its heartbeat advances it
-    // every TTL/2, so a change between polls is proof of a live, progressing
-    // peer.
-    let lastHolderLockedAt;
-
-    for (;;) {
-      try {
-        attempts += 1;
-        const applied = await kit.up(undefined, noLock ? { noLock: true } : {});
-        return { applied, upToDate: applied.length === 0, waited, waitedMs, attempts };
-      } catch (error) {
-        if (onLockHeld !== 'wait' || !(error instanceof LockAlreadyHeldError)) {
-          throw error;
-        }
-        // The timeout bounds *stall* time, not total wait: while the holder's
-        // heartbeat visibly advances, it is healthy and working through its
-        // backlog — timing out then would crash-loop every waiting instance
-        // on exactly the deploys (a large first backlog) that take longest.
-        // Only a holder that stops renewing runs the deadline down.
-        const holderLockedAt = error.context?.holder?.lockedAt?.getTime?.();
-        const holderAdvanced =
-          holderLockedAt !== undefined &&
-          lastHolderLockedAt !== undefined &&
-          holderLockedAt > lastHolderLockedAt;
-        if (deadline === undefined || holderAdvanced) {
-          deadline = Date.now() + lockWaitTimeoutMs;
-        }
-        if (holderLockedAt !== undefined) lastHolderLockedAt = holderLockedAt;
-        const nextDelay = jitteredDelay(lockPollIntervalMs);
-        if (Date.now() + nextDelay > deadline) {
-          throw error;
-        }
-        if (!waited) {
-          logger.info('Migration lock held by another process — waiting for it to release…');
-        }
-        waited = true;
-        logger.debug('Migration lock still held — retrying', {
-          attempts,
-          waitedMs,
-          nextDelayMs: nextDelay,
-        });
-        waitedMs += nextDelay;
-        await delay(nextDelay);
-      }
-    }
+    const {
+      result: applied,
+      waited,
+      waitedMs,
+      attempts,
+    } = await withLockWait(() => kit.up(undefined, noLock ? { noLock: true } : {}), {
+      onLockHeld,
+      lockWaitTimeoutMs,
+      lockPollIntervalMs,
+      // Resolved AFTER connect, from the kit's own merged config: a `logger:
+      // null` in the config file must silence the wait lines too, not only
+      // the kit's own.
+      logger: kit.logger,
+    });
+    return { applied, upToDate: applied.length === 0, waited, waitedMs, attempts };
   } finally {
     await kit.disconnect().catch(() => undefined);
   }

@@ -56,5 +56,8 @@ can tell how far the run got. The exit code identifies the failure — see
 | `IMPORT_TARGET_NOT_EMPTY` | `ImportTargetNotEmptyError` | `migronaut import` target already has records | Use `--force` to import anyway |
 | `MIGRATION_IRREVERSIBLE` | `IrreversibleMigrationError` | Tried to revert a forward-only record ([imported](/commands/import) or [baselined](/commands/baseline)) | Write a new forward migration instead |
 | `MIGRATION_OUT_OF_ORDER` | `OutOfOrderMigrationError` | A bulk `up` under `onOutOfOrder: 'error'` found a pending migration sorting before the newest applied one (a file merged late from a parallel branch) | Apply it deliberately with `onOutOfOrder: 'warn'` or `'allow'` |
+| `MIGRATION_BLOCKED` | `MigrationBlockedError` | An `ordered` single-file run (every [queue job](/guide/bullmq) is one) would go out of sequence: an earlier migration is still pending (`up`), or one applied later is still applied (`down`) | `context.blockedBy` names what must go first — fix or apply those, then enqueue again |
+| `QUEUE_JOB_INVALID` | `QueueJobInvalidError` | A [queue job](/guide/bullmq)'s payload failed the contract check — unknown job name or data version, a migration name that is not a bare filename | Enqueue through `enqueueUp`/`enqueueDown`; `context.issue` says what was wrong |
+| `QUEUE_JOB_FAILED` | `QueueJobFailedError` | A queue group's `wait()` saw one of its jobs fail, or timed out | `context.failedReason` is the worker's message, `context.results` what finished before it |
 
 See [Troubleshooting](/guide/troubleshooting) for step-by-step fixes for the most common ones.

@@ -43,6 +43,11 @@ production run before committing to it.
 
 Plus the [global flags](/guide/configuration#global-cli-flags).
 
+A preview applies the same refusals as the run: a rollback that would touch a forward-only record
+is rejected, and — since v2.1.0 — so is a bulk `dry-run up` under
+[`onOutOfOrder: 'error'`](/guide/configuration#all-options) when a pending file was merged late
+(under the default `'warn'` it prints the warning and still lists the plan).
+
 ::: tip Read-only
 Because a dry-run never writes, it takes no concurrency lock and is always safe to run against
 production.

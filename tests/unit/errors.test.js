@@ -38,7 +38,7 @@ describe('domain error classes', () => {
   );
 
   it('should cover every exported subclass (sanity)', () => {
-    assert.ok(subclasses.length >= 19, 'expected the full error taxonomy');
+    assert.ok(subclasses.length >= 22, 'expected the full error taxonomy');
   });
 
   it('should give every subclass a distinct code', () => {

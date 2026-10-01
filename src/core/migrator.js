@@ -11,6 +11,7 @@ const {
   ConnectionFailedError,
   HookFailedError,
   IrreversibleMigrationError,
+  MigrationBlockedError,
   MigrationFileNotFoundError,
   MigrationInvalidNameError,
   MigronautError,
@@ -23,6 +24,7 @@ const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { loadMigrationFile } = require('../utils/loader.js');
 const { resolveLogger } = require('../utils/logger.js');
+const { isBareFilename } = require('../utils/migration-name.js');
 const {
   createConfigFile,
   createMigrationFile,
@@ -75,6 +77,8 @@ class MigratorKit extends EventEmitter {
   #fallbackLogger;
   /** False when the client was injected by the caller, who keeps ownership of it */
   #ownsClient = true;
+  /** The connect() in flight, so overlapping callers share one client instead of racing */
+  #connecting;
   /**
    * Project root this instance resolves against — config discovery, the .env
    * file and a relative migrationsDir. Defaults to process.cwd(); an explicit
@@ -221,6 +225,16 @@ class MigratorKit extends EventEmitter {
     if (this.#client && this.#db) {
       return;
     }
+    // A long-lived kit serves overlapping callers (a status probe while a
+    // queue job starts). Without this, each would open its own MongoClient
+    // and all but the last would leak their pools.
+    this.#connecting ??= this.#openConnection(config).finally(() => {
+      this.#connecting = undefined;
+    });
+    return this.#connecting;
+  }
+
+  async #openConnection(config) {
     const startedAt = Date.now();
     try {
       if (config.client) {
@@ -477,6 +491,19 @@ class MigratorKit extends EventEmitter {
     return toLockInfo(await this.#buildLock().forceRelease());
   }
 
+  /**
+   * The batch number the next `up` would use — a peek, not a reservation: two
+   * callers asking before either applies get the same number. Counts reverted
+   * and failed records too, so a rolled-back number is never handed out again.
+   * Pair it with `up(name, { batch })` to stamp several single-file runs as one
+   * batch.
+   */
+  async nextBatch() {
+    await this.#ensureConfig();
+    await this.connect();
+    return this.#nextBatch();
+  }
+
   /** Internal accessors that assume a successful connect() */
   #requireDb() {
     if (!this.#db) {
@@ -522,15 +549,7 @@ class MigratorKit extends EventEmitter {
    */
   #filepath(name) {
     const dir = this.#migrationsPath();
-    if (
-      typeof name !== 'string' ||
-      name.length === 0 ||
-      name === '.' ||
-      name === '..' ||
-      name.includes('/') ||
-      name.includes('\\') ||
-      name.includes('\0')
-    ) {
+    if (!isBareFilename(name)) {
       throw new MigrationInvalidNameError(
         'Invalid migration name — must be a bare filename with no path segments',
         { name },
@@ -655,6 +674,61 @@ class MigratorKit extends EventEmitter {
     if (!Number.isInteger(batch) || batch < 1) {
       throw new ConfigInvalidError('--batch must be a positive integer', { batch });
     }
+  }
+
+  /**
+   * Validate `ordered`: a boolean, and only meaningful for a named file — a
+   * bulk run is in order by construction, so asking for it there is a caller
+   * mistake worth naming rather than silently ignoring.
+   */
+  #assertOrderedValid(ordered, filename) {
+    if (ordered === undefined) return;
+    if (typeof ordered !== 'boolean') {
+      throw new ConfigInvalidError('ordered must be a boolean', { ordered });
+    }
+    if (ordered && !filename) {
+      throw new ConfigInvalidError('ordered requires a filename', { ordered });
+    }
+  }
+
+  /**
+   * `ordered` guard for a single-file `up`: refuse while an earlier file on
+   * disk is still pending. Pending means "no applied record" — a `'failed'`
+   * trace counts, so a migration that failed stops the line exactly like one
+   * that never ran. Checked inside the lock and before `beforeAll`, so a
+   * blocked run fires no hooks and consumes no batch number.
+   */
+  async #assertUpNotBlocked(name, appliedNames) {
+    const blockedBy = [];
+    for (const file of await this.#listMigrationFiles()) {
+      if (file >= name) break;
+      if (!appliedNames.has(file)) blockedBy.push(file);
+    }
+    if (blockedBy.length === 0) return;
+    throw new MigrationBlockedError(
+      `${name} is blocked: ${blockedBy.length} earlier migration(s) still pending: ` +
+        blockedBy.join(', '),
+      { name, direction: 'up', blockedBy },
+    );
+  }
+
+  /**
+   * `ordered` guard for a single-file `down`: refuse while a migration applied
+   * *after* this one is still applied. "After" is chronological (`appliedAt`),
+   * not alphabetical — the order `down --steps` reverts in, and the only one
+   * that undoes effects in reverse of how they were made. Name order would
+   * deadlock a batch holding a file merged late from a parallel branch.
+   */
+  async #assertDownNotBlocked(record) {
+    const newer = await this.#requireChangelog().getAppliedNewerThan(this.#requireDb(), record);
+    if (newer.length === 0) return;
+    const blockedBy = [];
+    for (const later of newer) blockedBy.push(later.name);
+    throw new MigrationBlockedError(
+      `${record.name} is blocked: ${blockedBy.length} later migration(s) still applied: ` +
+        blockedBy.join(', '),
+      { name: record.name, direction: 'down', blockedBy },
+    );
   }
 
   /**
@@ -905,7 +979,16 @@ class MigratorKit extends EventEmitter {
   /** Run all pending migrations, or a specific named file */
   async up(filename, options = {}) {
     this.#assertFilename(filename);
-    this.#assertToValid(options.to, filename, options);
+    // `to` is checked against a filename only: unlike `down`, an explicit
+    // `batch` here is a label for whatever gets applied, not a selector.
+    this.#assertToValid(options.to, filename);
+    this.#assertBatchValid(options.batch);
+    if (options.batch !== undefined && options.step) {
+      throw new ConfigInvalidError('Cannot combine --batch with --step', {
+        batch: options.batch,
+      });
+    }
+    this.#assertOrderedValid(options.ordered, filename);
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();
@@ -922,29 +1005,44 @@ class MigratorKit extends EventEmitter {
     const changelog = this.#requireChangelog();
     const logger = this.#logger;
 
-    // A strict bulk run needs the applied records' checksums anyway, so fetch
-    // full records once and derive the name set from them; a single-file run
-    // needs only that file's record, so one getByName is both the
-    // applied-check and the checksum source; otherwise the cheaper covered
+    // An `ordered` single-file run is one step of a sequence someone else is
+    // driving (a queue job), so it must uphold what a bulk run would: it reads
+    // the full applied set, and with it the strict drift check and the
+    // out-of-order policy apply — otherwise splitting a run into jobs would
+    // silently drop both.
+    const ordered = filename !== undefined && options.ordered === true;
+    const fullSet = !filename || ordered;
+    // A strict full-set run needs the applied records' checksums anyway, so
+    // fetch full records once and derive the name set from them; a plain
+    // single-file run needs only that file's record, so one getByName is both
+    // the applied-check and the checksum source; otherwise the cheaper covered
     // name query suffices.
-    const strictBulk = !filename && config.strict && !force;
+    const strictBulk = fullSet && config.strict && !force;
     const appliedRecords = strictBulk ? await changelog.getApplied(db) : undefined;
     const appliedNames = new Set();
     let singleRecord = null;
     if (filename) {
       singleRecord = await changelog.getByName(db, filename);
       if (singleRecord?.status === 'applied') appliedNames.add(filename);
-    } else if (appliedRecords) {
-      for (const record of appliedRecords) appliedNames.add(record.name);
-    } else {
-      for (const name of await changelog.getAppliedNames(db)) appliedNames.add(name);
+    }
+    if (fullSet) {
+      if (appliedRecords) {
+        for (const record of appliedRecords) appliedNames.add(record.name);
+      } else {
+        for (const name of await changelog.getAppliedNames(db)) appliedNames.add(name);
+      }
     }
 
     const targets = await this.#selectUpTargets(filename, options, appliedNames);
     // Pending files are the only bulk targets, so the per-target checksum
     // check below can never see an applied one. Verify them up front instead,
     // otherwise `up --strict` over a bulk run would police nothing.
-    if (!filename && strictBulk) await this.#assertNoChecksumDrift(appliedRecords);
+    if (strictBulk) await this.#assertNoChecksumDrift(appliedRecords);
+    // An already-applied target is exempt (unless forced): a duplicate job
+    // for it must report the usual "skipped", not a failure.
+    if (ordered && (force || !appliedNames.has(filename))) {
+      await this.#assertUpNotBlocked(filename, appliedNames);
+    }
     this.#assertOrderIntact(targets, appliedNames);
 
     if (targets.length === 0) {
@@ -956,8 +1054,10 @@ class MigratorKit extends EventEmitter {
     // Without --step every file in this run shares one batch. With --step each
     // applied file gets its own sequential batch (base, base+1, …) so a later
     // `down` can revert them individually. Only successful applies advance the
-    // counter, so --step never leaves gaps.
-    const baseBatch = await this.#nextBatch();
+    // counter, so --step never leaves gaps. An explicit `batch` is a label the
+    // caller chose — it may equal one already in use, which is how several
+    // single-file runs end up as one rollback unit.
+    const baseBatch = options.batch ?? (await this.#nextBatch());
     let appliedCount = 0;
 
     return this.#runSequence({
@@ -1098,6 +1198,7 @@ class MigratorKit extends EventEmitter {
     this.#assertStepsValid(options.steps, filename, options.batch);
     this.#assertBatchValid(options.batch);
     this.#assertToValid(options.to, filename, options);
+    this.#assertOrderedValid(options.ordered, filename);
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();
@@ -1190,6 +1291,7 @@ class MigratorKit extends EventEmitter {
       logger.info('Nothing to rollback', this.#fields({ direction: 'down' }));
       return [];
     }
+    if (filename && options.ordered === true) await this.#assertDownNotBlocked(toRevert[0]);
 
     const names = this.#downNames(toRevert, preserveOrder);
 
@@ -1349,6 +1451,10 @@ class MigratorKit extends EventEmitter {
       // The same selection (and preflight) the real `up` executes, so a
       // preview never invents a pending row for a file that does not exist.
       names = await this.#selectUpTargets(filename, options, applied);
+      // …and the same order policy: under onOutOfOrder: 'error' the real run
+      // refuses, so the preview must too instead of listing rows it would
+      // never apply. A single file is exempt, exactly as in `up`.
+      if (!filename) this.#assertOrderIntact(names, applied);
     } else {
       // The same selection the real `down` executes — including the
       // irreversible-import refusal, so a preview can never show a rollback

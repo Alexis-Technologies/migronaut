@@ -3,6 +3,71 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
+## v2.1.0 — 2026-10-01
+
+Migrations as a queue. Additive: nothing changes for anyone who does not use the
+new entry point, with the two narrow exceptions listed under **Changed**.
+
+### Added
+
+- **`@alexify/migronaut/bullmq`** — a new entry point that runs migrations as
+  [BullMQ](https://docs.bullmq.io/) jobs, **one migration per job**, so migronaut can be a
+  migration service: enqueue from an HTTP handler, a schedule or a deploy hook, and let a worker
+  apply them in order.
+  - `createMigrationQueue(options)` — the facade: `enqueueUp` / `enqueueDown` (returning a group
+    handle with `wait()`), `startWorker`, `status` / `pending` / `audit` / `lockInfo`, `getJob`,
+    `pause` / `resume`, `schedule` / `unschedule`, `close`.
+  - `createMigrationProcessor(options)` — the processor on its own, for a Worker you construct
+    (NestJS, BullMQ Pro), plus `enqueueUp` / `enqueueDown` / `planUpJobs` / `planDownJobs` /
+    `waitForGroup` for a Queue you own.
+  - **BullMQ is injected, never depended on** — `bullmq: { Queue, Worker, QueueEvents }` from
+    your own install. The package still has no `dependencies` and gains no peer; `src/` never
+    imports `bullmq` (a test enforces it).
+  - **Order comes from MongoDB, not from Redis.** Every job is a single-file run under the usual
+    lock; it refuses while an earlier migration is still pending, so a failed migration stops the
+    line (`MIGRATION_BLOCKED` for the jobs behind it). Jobs get one attempt on purpose — a BullMQ
+    retry re-queues behind the waiting jobs — and a held lock is waited out inside the job.
+  - **One batch per enqueue**, so `down` still rolls back a whole deploy; duplicate enqueues are
+    deduplicated, and a job whose migration is already applied completes as `skipped`.
+  - Job payloads are validated as untrusted input; messages, stacks and job logs are redacted.
+- **`bullmq.d.ts`** — hand-written types for the entry point, with structural `BullMQ*Like`
+  interfaces instead of an import of `bullmq`, generic over the classes you inject.
+- **`up(file, { batch })`** — stamp an explicit batch number instead of the next free one, and
+  **`MigratorKit.nextBatch()`** to peek at it: together they let several single-file runs form one
+  batch.
+- **`up(file, { ordered: true })` / `down(file, { ordered: true })`** — refuse a single-file run
+  that would go out of sequence (`MigrationBlockedError`); an ordered `up` also applies the
+  `strict` drift check and the `onOutOfOrder` policy a bulk run would.
+- **Three error codes**: `MIGRATION_BLOCKED` (exit 24), `QUEUE_JOB_INVALID` (25),
+  `QUEUE_JOB_FAILED` (26), with `MigrationBlockedError`, `QueueJobInvalidError` and
+  `QueueJobFailedError` exported from the package root.
+- **Runnable example** — `examples/migration-service`: a queue, a worker and a plain `node:http`
+  API (not published to npm).
+
+### Changed
+
+- **`MigronautErrorCode` gained three members** (above). TypeScript consumers with an exhaustive
+  `switch` over the code union need a `default` branch or the new cases.
+- **`dryRun('up')` now applies the out-of-order policy** of the run it previews: under
+  `onOutOfOrder: 'error'` a bulk preview refuses with `MIGRATION_OUT_OF_ORDER` instead of listing
+  rows the run would reject; under `'warn'` it logs the warning. A single-file preview is exempt,
+  as the single-file run is.
+- **`connect()` is safe to call concurrently** — overlapping first calls on one `MigratorKit`
+  share a single connection instead of each opening (and all but one leaking) a client. Matters
+  for a long-lived kit serving several callers.
+- The lock-wait loop of `runMigrations` moved to `src/core/lock-wait.js`, shared with the queue
+  processor; `runMigrations` behaves exactly as before.
+
+### Fixed
+
+- `docs/reference/cli.md` lists exit code `23` (`MIGRATION_OUT_OF_ORDER`), missing since v2.0.0.
+
+### Tooling
+
+- An in-tree fake BullMQ carries the adapter's unit and integration tests; the same scenarios run
+  against the real `bullmq` package when `MIGRONAUT_TEST_REDIS_URL` is set, which CI now does
+  (a Redis service on the `test` job). `bullmq` and `ioredis` are devDependencies for that only.
+
 ## v2.0.0 — 2026-08-30
 
 A major bump for three narrow contract changes (below); everything else is

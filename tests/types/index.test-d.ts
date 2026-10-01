@@ -9,6 +9,7 @@ import {
   type ImportResult,
   type LockInfo,
   LockLostError,
+  MigrationBlockedError,
   type MigrationEvent,
   MigratorKit,
   MigronautError,
@@ -17,6 +18,8 @@ import {
   type MigronautLogger,
   OutOfOrderMigrationError,
   type ProgressReporter,
+  QueueJobFailedError,
+  QueueJobInvalidError,
   RunAbortedError,
   type RunEndEvent,
   type RunResult,
@@ -225,3 +228,22 @@ expectType<number>(EXIT_CODES.AUDIT_FAILED);
 expectError(EXIT_CODES.NOT_A_CODE);
 new MigratorKit({}, { fallbackLogger: null });
 new MigratorKit({}, { fallbackLogger: pino() });
+
+// ─── Sequenced single-file runs (what the queue adapter is built on) ─────────
+
+expectType<Promise<RunResult[]>>(kit.up('0003-c.ts', { batch: 7, ordered: true }));
+expectType<Promise<RunResult[]>>(kit.down('0003-c.ts', { ordered: true }));
+expectType<Promise<number>>(kit.nextBatch());
+expectError(kit.up('0003-c.ts', { batch: 'seven' }));
+expectError(kit.up('0003-c.ts', { ordered: 'yes' }));
+expectAssignable<MigronautError>(
+  new MigrationBlockedError('blocked', { name: 'x', direction: 'up', blockedBy: ['a'] }),
+);
+expectAssignable<MigronautError>(new QueueJobInvalidError('bad payload'));
+expectAssignable<MigronautError>(new QueueJobFailedError('job failed'));
+expectAssignable<MigronautErrorCode>('MIGRATION_BLOCKED');
+expectAssignable<MigronautErrorCode>('QUEUE_JOB_INVALID');
+expectAssignable<MigronautErrorCode>('QUEUE_JOB_FAILED');
+expectType<number>(EXIT_CODES.MIGRATION_BLOCKED);
+expectType<number>(EXIT_CODES.QUEUE_JOB_INVALID);
+expectType<number>(EXIT_CODES.QUEUE_JOB_FAILED);

@@ -19,6 +19,11 @@ await migrator.disconnect();
 console.log(results); // → RunResult[]
 ```
 
+::: tip Need migrations as background jobs?
+[Migrations as a Queue](/guide/bullmq) runs each migration as a BullMQ job — a migration service
+you trigger over HTTP, on a schedule, or from a deploy hook.
+:::
+
 ## `new MigratorKit(config?, options?)`
 
 ```ts
@@ -62,6 +67,7 @@ up, even from a different project's env file.
 | `init(options?)` | `Promise<string>` | Generate a config file; returns its path. |
 | `import(options?)` | `Promise<ImportResult>` | Adopt a migrate-mongo changelog. |
 | `baseline(options?)` | `Promise<BaselineSummary>` | Mark files applied without executing them — the [`migronaut baseline`](/commands/baseline) command's engine. |
+| `nextBatch()` | `Promise<number>` | The batch number the next `up` would use — a peek, not a reservation. |
 | `lockInfo()` | `Promise<LockInfo \| null>` | Inspect the current lock holder, if any. |
 | `forceUnlock()` | `Promise<LockInfo \| null>` | Force-release the lock; returns who held it. |
 | `stop(reason?)` | `void` | Ask an in-flight run to stop cleanly after the current migration. |
@@ -74,6 +80,27 @@ migration files as applied — checksums from disk, one shared batch, `origin: '
 executing anything, and resolves to `{ baselined, skipped, batch }`. Baselined records are
 forward-only (`down`/`redo` refuse them), and already-applied names are skipped, so a partial
 baseline can simply be re-run. See [`migronaut baseline`](/commands/baseline).
+
+### Driving a run one file at a time
+
+Two `up` options — and one for `down` — let something outside the kit (a queue, a workflow engine)
+split one logical run into single-file calls without losing what a bulk run guarantees:
+
+```ts
+const batch = await migrator.nextBatch();
+for (const file of ['0007-a.js', '0008-b.js']) {
+  await migrator.up(file, { batch, ordered: true });
+}
+```
+
+- **`batch`** stamps the given number instead of the next free one, so the files form one batch and
+  a later `down` reverts them together. Mutually exclusive with `step`.
+- **`ordered`** (needs a filename) refuses with `MigrationBlockedError` while an earlier file is
+  still pending — and makes the single-file run honour `strict` drift checks and `onOutOfOrder`
+  like a bulk run. On `down(file, { ordered: true })` it refuses while a migration applied *later*
+  is still applied.
+
+This is exactly what the [BullMQ adapter](/guide/bullmq) does for every job.
 
 ::: tip `MigratorKit` is an `EventEmitter`
 Subscribe to `run:start`, `run:end`, `migration:start`, `migration:success`, `migration:skipped`,
@@ -253,5 +280,5 @@ try {
 ```
 
 Exported error classes include `LockAlreadyHeldError`, `ChecksumMismatchError`,
-`ConnectionFailedError`, `NotAppliedError`, `IrreversibleMigrationError`, and more — see the full
-table in the [Error Codes reference](/reference/error-codes).
+`ConnectionFailedError`, `NotAppliedError`, `IrreversibleMigrationError`, `MigrationBlockedError`,
+and more — see the full table in the [Error Codes reference](/reference/error-codes).

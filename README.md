@@ -43,7 +43,8 @@ change before it touches your database.
 
 ## Reasons to choose it
 
-- **Zero dependencies** — no runtime dependencies at all; only the `mongodb` driver as a peer.
+- **Zero dependencies** — no runtime dependencies at all; only the `mongodb` driver as a peer
+  (Mongoose and BullMQ are optional integrations you inject — never installed for you).
   Instant installs, nothing extra in your lockfile, no supply-chain surface.
 - **Run a single migration** — `migronaut up <file>`, not just "all pending".
 - **Roll back anything** — a batch (`--batch 3`), the last N (`--steps 2`), one file, or `redo`.
@@ -61,6 +62,9 @@ change before it touches your database.
 - **Zero config files required** — drive everything from env vars if you prefer.
 - **Pino-friendly logging** — the `logger` option is pino-compatible; pass a pino instance directly
   and migronaut logs through it (with a `component: 'migronaut'` child binding).
+- **Migrations as a queue (optional)** — `@alexify/migronaut/bullmq` runs each migration as its own
+  BullMQ job, in order, so migronaut can be a migration service: trigger it over HTTP, on a
+  schedule, or from a deploy hook that waits for the result.
 
 ### How it compares to `migrate-mongo`
 
@@ -101,6 +105,7 @@ via a `client` argument; `migronaut` exposes the same plus a declarative per-fil
 | Changelog written inside the migration's transaction |   ❌        |          ✅          |
 | Credentials masked in errors, logs and `--json` |        ❌        |          ✅          |
 | Pino-compatible logger                          |        ❌        |          ✅          |
+| BullMQ queue adapter (`/bullmq` entry point)    |        ❌        |          ✅          |
 | Node floor                                      |      ≥ 18       |      ≥ 22.18        |
 
 <sub>Compared against `mongo-migrate-kit` 1.2.2 — the version this project forked from. The Node
@@ -161,7 +166,7 @@ Full docs, guides, and the API reference live at
 - [Core Concepts](https://migronaut.vercel.app/guide/concepts) — migrations, batches, the changelog, locking
 - [Getting Started](https://migronaut.vercel.app/guide/getting-started) & [Tutorial](https://migronaut.vercel.app/guide/tutorial)
 - [Configuration](https://migronaut.vercel.app/guide/configuration) · [Writing Migrations](https://migronaut.vercel.app/guide/writing-migrations) · [Transactions](https://migronaut.vercel.app/guide/transactions) · [Hooks](https://migronaut.vercel.app/guide/hooks)
-- [Programmatic API](https://migronaut.vercel.app/guide/api) · [CI/CD](https://migronaut.vercel.app/guide/ci-cd) · [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting)
+- [Programmatic API](https://migronaut.vercel.app/guide/api) · [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq) · [CI/CD](https://migronaut.vercel.app/guide/ci-cd) · [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting)
 - Reference: [CLI Cheatsheet](https://migronaut.vercel.app/reference/cli) · [Error Codes](https://migronaut.vercel.app/reference/error-codes)
 
 ---
@@ -598,6 +603,47 @@ All errors extend `MigronautError` and carry a typed `code` (`LOCK_ALREADY_HELD`
 > Running several kits against several databases in **one process**? Pass `envFile: false` and
 > explicit `uri`/`dbName` to each — `.env` loading mutates the shared `process.env` (dotenv
 > semantics), so different env files could otherwise leak `MIGRONAUT_*` values between kits.
+
+</details>
+
+<details>
+<summary><b>Migrations as a queue</b> — a migration service on BullMQ, one migration per job</summary>
+
+<br>
+
+`@alexify/migronaut/bullmq` enqueues each pending migration as its own BullMQ job and applies them
+in order with a single-concurrency worker. BullMQ is **injected** — it is your dependency, never
+migronaut's:
+
+```js
+const { Queue, Worker, QueueEvents } = require('bullmq');
+const { createMigrationQueue } = require('@alexify/migronaut/bullmq');
+
+const mq = createMigrationQueue({
+  config: { uri: process.env.MIGRONAUT_URI, dbName: 'my_app' },
+  bullmq: { Queue, Worker, QueueEvents },
+  connection: { host: 'redis', port: 6379 },
+});
+
+await mq.startWorker();                  // the process that applies migrations
+
+const group = await mq.enqueueUp();      // one job per pending migration, one shared batch
+const { results } = await group.wait();  // optional: block until they all finished
+
+await mq.enqueueDown();                  // roll the last batch back, newest first
+await mq.schedule({ every: 300_000 });   // or keep the database migrated on a schedule
+```
+
+- **Order comes from MongoDB, not from Redis.** Every job is a normal single-file run under the
+  usual lock, and refuses while an earlier migration is still pending — so a failed migration
+  stops the line (`MIGRATION_BLOCKED`), and a CLI `migronaut up` at the same moment is safe.
+- **One attempt per job, on purpose** — a queue retry would let later migrations overtake the
+  failed one. Duplicate enqueues are deduplicated; an already-applied migration completes as
+  `skipped`.
+- **Bring your own Worker** with `createMigrationProcessor()` (NestJS, BullMQ Pro).
+
+→ **[Migrations as a Queue](https://migronaut.vercel.app/guide/bullmq)** ·
+[runnable example service](examples/migration-service)
 
 </details>
 

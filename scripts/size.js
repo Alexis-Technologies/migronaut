@@ -11,6 +11,12 @@
  * Peer dependencies (mongodb, mongoose) are external — every consumer already
  * installs them separately, so bundling them in would double-count size that
  * isn't migronaut's own.
+ *
+ * `bullmq` is deliberately NOT external: the queue adapter never imports it
+ * (the caller injects the classes), so there is nothing to externalize — and
+ * leaving it out makes this report a tripwire. An accidental
+ * `require('bullmq')` would bundle all of BullMQ and the adapter's number
+ * would jump by an order of magnitude.
  */
 
 const { gzipSync } = require('node:zlib');
@@ -23,6 +29,8 @@ const PEER_DEPS = ['mongodb', 'mongoose'];
 const ENTRIES = [
   { label: 'library entry (@alexify/migronaut)', entry: 'index.js' },
   { label: 'CLI (bin/migronaut)', entry: 'bin/migronaut.js' },
+  // Includes the core it builds on — what a subpath-only consumer loads.
+  { label: 'BullMQ adapter (@alexify/migronaut/bullmq)', entry: 'bullmq.js' },
 ];
 
 async function bundle(entry, minify) {
