@@ -206,6 +206,48 @@ describe('bullmq subpath', () => {
   });
 });
 
+describe('OpenTelemetry', () => {
+  // Injected like everything else: the tracer and the meter arrive through the
+  // `telemetry` option, and BullMQ's telemetry object through `bullmq.telemetry`.
+  const packages = [
+    '@opentelemetry/api',
+    '@opentelemetry/sdk-trace-node',
+    '@opentelemetry/sdk-metrics',
+    '@opentelemetry/instrumentation-mongodb',
+    'bullmq-otel',
+  ];
+  const imports = /(?:require\(|from|import\()\s*['"](?:@opentelemetry\/|bullmq-otel)/;
+
+  it('should never require an OpenTelemetry package from src or the CLI', () => {
+    // One `require('@opentelemetry/api')` would crash every install that does
+    // not trace — which is nearly all of them — and pin an API version for the
+    // rest.
+    const offenders = [...sourceFiles('src'), ...sourceFiles('bin')].filter((file) =>
+      imports.test(stripComments(readRepoFile(file))),
+    );
+    assert.deepStrictEqual(offenders, []);
+  });
+
+  it('should not import one from either declaration file', () => {
+    // Structural MigronautTracer / MigronautMeter stand in, as MongooseLike
+    // does for mongoose.
+    for (const file of ['index.d.ts', 'bullmq.d.ts']) {
+      assert.ok(!imports.test(stripComments(readRepoFile(file))), `${file} must not import it`);
+    }
+    const dts = readRepoFile('index.d.ts');
+    assert.ok(dts.includes('interface MigronautTracer'));
+    assert.ok(dts.includes('interface MigronautMeter'));
+  });
+
+  it('should keep every OpenTelemetry package a test-only devDependency', () => {
+    for (const name of packages) {
+      assert.strictEqual(packageJson.peerDependencies[name], undefined);
+      assert.strictEqual(packageJson.peerDependenciesMeta?.[name], undefined);
+      assert.strictEqual(typeof packageJson.devDependencies[name], 'string');
+    }
+  });
+});
+
 describe('identifier minting', () => {
   it('should mint ids in one module only — the one `generateId` replaces', () => {
     // A stray `randomUUID()` anywhere else would be an id the `generateId`

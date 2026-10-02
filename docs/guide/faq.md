@@ -99,6 +99,13 @@ them in order with a single-concurrency worker — trigger it from an HTTP endpo
 deploy hook that waits for the result. BullMQ is injected, so it adds no dependency. See
 [Migrations as a Queue](/guide/bullmq).
 
+## Can I trace migrations with OpenTelemetry?
+
+Yes. Pass a tracer and/or a meter from your own `@opentelemetry/api` as the `telemetry` option:
+every run and every migration becomes a span — active while the migration runs, so an instrumented
+MongoDB driver nests its command spans under it — and their durations are recorded as metrics.
+OpenTelemetry is injected, never a dependency. See [OpenTelemetry](/guide/opentelemetry).
+
 ## Does it work with Mongoose?
 
 Yes. Pass your Mongoose instance in config and it's available as `ctx.mongoose` inside migrations.
@@ -109,7 +116,7 @@ Mongoose is an optional peer dependency — you only need it if your migrations 
 Yes. Every scalar option has an `MIGRONAUT_*` environment variable, so exporting `MIGRONAUT_URI` and
 `MIGRONAUT_DB` is enough to run — no config file required. Only the non-scalar options
 (`fileExtensions`, `clientOptions`, `generateId`, and live handles like `client`, `mongoose`,
-`hooks` and `logger`) need a config file or the programmatic API. See [Configuration](/guide/configuration).
+`hooks`, `logger` and `telemetry`) need a config file or the programmatic API. See [Configuration](/guide/configuration).
 
 ## How does it prevent two deploys running migrations at once?
 

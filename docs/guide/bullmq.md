@@ -68,7 +68,7 @@ Three rules explain every behaviour on this page:
 
 | Option | | |
 |---|---|---|
-| `bullmq` | **required** | `{ Queue, Worker?, QueueEvents? }` — classes from your `bullmq`, or instances you already have. `Worker` is needed by `startWorker()`, `QueueEvents` by `wait()` |
+| `bullmq` | **required** | `{ Queue, Worker?, QueueEvents?, telemetry? }` — classes from your `bullmq`, or instances you already have. `Worker` is needed by `startWorker()`, `QueueEvents` by `wait()`. `telemetry` is BullMQ's own telemetry object (`new BullMQOtel(…)`), handed to the Queue and the Worker — see [OpenTelemetry](/guide/opentelemetry#through-a-bullmq-queue) |
 | `connection` | required with classes | BullMQ's `connection` (options or your Redis client). Passed through untouched, **never closed** |
 | `config` | | Migronaut config for the kit the queue creates. Omit to resolve from `migronaut.config.*` / `MIGRONAUT_*`. Its [`generateId`](/guide/configuration#custom-id-format), if set, is also what mints group ids |
 | `kit` | | A `MigratorKit` you own, instead of `config` — never disconnected by `close()` |
@@ -243,6 +243,9 @@ on the lock. One is the honest setting.
 - **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, and the failure line.
 - **Kit events**: `mq.kit.on('migration:success', …)` — the same [lifecycle events](/guide/api) as everywhere else.
 - **Worker events**: `mq.worker.on('failed', …)`.
+- **Traces**: pass `bullmq.telemetry` and the kit's `telemetry` option, and one trace runs from the
+  request that enqueued, through Redis, to the MongoDB commands the migration issued — see
+  [OpenTelemetry](/guide/opentelemetry#through-a-bullmq-queue).
 
 ## Graceful shutdown
 

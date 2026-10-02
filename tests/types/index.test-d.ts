@@ -1,3 +1,12 @@
+import {
+  type Counter,
+  type Histogram,
+  type MetricOptions,
+  type Span,
+  type SpanOptions,
+  metrics,
+  trace,
+} from '@opentelemetry/api';
 import { pino } from 'pino';
 import { expectAssignable, expectError, expectType } from 'tsd';
 import {
@@ -15,8 +24,15 @@ import {
   MigratorKit,
   MigronautError,
   type MigronautConfig,
+  type MigronautCounter,
   type MigronautErrorCode,
+  type MigronautHistogram,
   type MigronautLogger,
+  type MigronautMeter,
+  type MigronautMetricOptions,
+  type MigronautSpan,
+  type MigronautTelemetry,
+  type MigronautTracer,
   OutOfOrderMigrationError,
   type ProgressReporter,
   QueueJobFailedError,
@@ -271,3 +287,72 @@ expectError<Partial<MigronautConfig>>({ generateId: () => 42 });
 expectError<Partial<MigronautConfig>>({ generateId: (prefix: string) => prefix });
 // The kit mints in the same format for code above it (the queue adapter's group ids).
 expectType<Promise<string>>(kit.generateId());
+
+// ─── Telemetry: the real OpenTelemetry API satisfies the structural types ────
+// index.d.ts never imports @opentelemetry/api, so this is where that claim is
+// checked against the real package (a devDependency). Each part is asserted on
+// its own: `expectAssignable<MigronautTracer>(realTracer)` alone would pass
+// even with a wrong span or options type — a real Tracer's two-argument
+// overload matches almost anything.
+declare const realSpan: Span;
+declare const realHistogram: Histogram;
+declare const realCounter: Counter;
+const realTracer = trace.getTracer('@alexify/migronaut');
+const realMeter = metrics.getMeter('@alexify/migronaut');
+
+// What migronaut calls on a span exists on a real one …
+expectAssignable<MigronautSpan>(realSpan);
+// … what it passes when starting one is what a real tracer accepts …
+declare const spanOptions: Parameters<MigronautTracer['startActiveSpan']>[1];
+expectAssignable<SpanOptions>(spanOptions);
+// … and the tracer as a whole fits.
+expectAssignable<MigronautTracer>(realTracer);
+
+expectAssignable<MigronautHistogram>(realHistogram);
+expectAssignable<MigronautCounter>(realCounter);
+declare const metricOptions: MigronautMetricOptions;
+expectAssignable<MetricOptions>(metricOptions);
+expectAssignable<MigronautMeter>(realMeter);
+
+// Called the way the kit calls it, through the structural type: three
+// arguments, the callback's result handed back.
+const viaStructural: MigronautTracer = realTracer;
+expectType<Promise<number>>(
+  viaStructural.startActiveSpan(
+    'migronaut.run',
+    { attributes: { a: 1, b: 'x', c: true } },
+    async (span) => {
+      span.setAttribute('migronaut.run.applied', 2);
+      span.setStatus({ code: 2, message: 'failed' });
+      span.end();
+      return 1;
+    },
+  ),
+);
+const viaStructuralMeter: MigronautMeter = realMeter;
+viaStructuralMeter
+  .createHistogram('migronaut.run.duration', {
+    unit: 's',
+    description: 'd',
+    advice: { explicitBucketBoundaries: [0.1, 1] },
+  })
+  .record(1.5, { 'migronaut.run.command': 'up' });
+viaStructuralMeter.createCounter('migronaut.lock.lost').add(1);
+
+// Config: a tracer, a meter, both, or off.
+expectAssignable<Partial<MigronautConfig>>({ telemetry: { tracer: realTracer, meter: realMeter } });
+expectAssignable<Partial<MigronautConfig>>({ telemetry: { tracer: realTracer } });
+expectAssignable<Partial<MigronautConfig>>({ telemetry: { meter: realMeter } });
+expectAssignable<Partial<MigronautConfig>>({ telemetry: {} });
+expectAssignable<Partial<MigronautConfig>>({ telemetry: null });
+expectAssignable<MigronautTelemetry>({ tracer: null, meter: null });
+new MigratorKit({ telemetry: { tracer: realTracer } });
+void runMigrations({ telemetry: { tracer: realTracer, meter: realMeter } });
+// A name is not a tracer, and neither is the API module's own shape.
+expectError<Partial<MigronautConfig>>({ telemetry: 'otel' });
+expectError<Partial<MigronautConfig>>({ telemetry: { trace, metrics } });
+expectError<Partial<MigronautConfig>>({ telemetry: { tracer: {} } });
+expectError<Partial<MigronautConfig>>({ telemetry: { tracer: realMeter } });
+expectError<Partial<MigronautConfig>>({
+  telemetry: { meter: { createHistogram: () => realHistogram } },
+});

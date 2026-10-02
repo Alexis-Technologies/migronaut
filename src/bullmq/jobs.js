@@ -158,12 +158,21 @@ function migrationJobOptions(jobOptions, direction, migration) {
   };
 }
 
-/** The job a scheduler tick produces: plan what is pending, enqueue it */
+/**
+ * The job a scheduler tick produces: plan what is pending, enqueue it.
+ *
+ * `omitContext` keeps the tick out of whatever trace registered the schedule:
+ * BullMQ builds each iteration from the previous job's options, so a trace
+ * context stored there would be inherited by every tick after it, and one
+ * trace would grow for as long as the schedule lives. Each tick starts its own
+ * instead; the migrations it enqueues still hang under it. A no-op for a queue
+ * without telemetry.
+ */
 function buildSyncJobTemplate({ to } = {}) {
   return {
     name: JOB_NAMES.SYNC,
     data: { v: JOB_DATA_VERSION, kind: 'sync', ...(to !== undefined ? { to } : {}) },
-    opts: { ...MIGRATION_JOB_OPTIONS },
+    opts: { ...MIGRATION_JOB_OPTIONS, telemetry: { omitContext: true } },
   };
 }
 

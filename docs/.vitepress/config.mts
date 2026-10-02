@@ -24,6 +24,7 @@ const keywords = [
   'mongodb migration queue',
   'bullmq migration',
   'mongodb migration service',
+  'mongodb migration opentelemetry',
   'mongodb migration cli',
   'zero dependency mongodb migration',
   'mongo-migrate-kit',
@@ -142,6 +143,7 @@ export default defineConfig({
           items: [
             { text: 'Programmatic API', link: '/guide/api' },
             { text: 'Migrations as a Queue (BullMQ)', link: '/guide/bullmq' },
+            { text: 'OpenTelemetry', link: '/guide/opentelemetry' },
             { text: 'CI/CD & Deployment', link: '/guide/ci-cd' },
             { text: 'Troubleshooting', link: '/guide/troubleshooting' },
             { text: 'Migrating from migrate-mongo', link: '/guide/migrate-mongo' },

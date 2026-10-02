@@ -63,9 +63,10 @@ function isStringList(value) {
  * Validation spec for every checked config key: predicate + failure message.
  * `mongoose`, `hooks`, `logger` and `client` are deliberately unchecked —
  * they hold live instances the validator has nothing to say about.
- * `generateId` is code-only too, but it has exactly one valid shape, so
- * validateConfig checks it on its own rather than through this table (which a
- * test pins against the JSON schema — and a function has no place there).
+ * `generateId` and `telemetry` are code-only too, but each has exactly one
+ * valid shape, so validateConfig checks them on their own rather than through
+ * this table (which a test pins against the JSON schema — and a function or a
+ * tracer has no place there).
  * Unknown keys are allowed, matching the previous zod (non-strict object)
  * behavior.
  */
@@ -141,12 +142,61 @@ const CONFIG_KEYS = [
 
 /**
  * Every key the merged config legitimately carries: the validated ones plus
- * the code-only ones (the live instances and `generateId`). Used only to
- * *mention* typos (`migrationsDirectory`, `useTransactions`) at debug level —
- * unknown keys stay allowed, matching the documented non-strict contract.
+ * the code-only ones (the live instances, `generateId` and `telemetry`). Used
+ * only to *mention* typos (`migrationsDirectory`, `useTransactions`) at debug
+ * level — unknown keys stay allowed, matching the documented non-strict
+ * contract.
  */
-const KNOWN_CONFIG_KEYS = new Set(['logger', 'hooks', 'mongoose', 'client', 'generateId']);
+const KNOWN_CONFIG_KEYS = new Set([
+  'logger',
+  'hooks',
+  'mongoose',
+  'client',
+  'generateId',
+  'telemetry',
+]);
 for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
+
+/** The two parts of `telemetry` — anything else in it is a typo, mentioned at debug level */
+const TELEMETRY_KEYS = new Set(['tracer', 'meter']);
+
+const hasMethods = (value, names) => {
+  if (typeof value !== 'object' || value === null) return false;
+  for (const name of names) {
+    if (typeof value[name] !== 'function') return false;
+  }
+  return true;
+};
+
+/**
+ * Issues with the `telemetry` option. Absent, `null` and an empty object all
+ * mean "off" — a config that builds it conditionally must not have to special-
+ * case the disabled branch. What is present has to be usable: a tracer that
+ * cannot start a span would fail on the first run, long after the mistake.
+ */
+function telemetryIssues(telemetry) {
+  if (telemetry === undefined || telemetry === null) return [];
+  if (typeof telemetry !== 'object' || Array.isArray(telemetry)) {
+    return [{ path: 'telemetry', message: 'must be an object' }];
+  }
+  const issues = [];
+  if (telemetry.tracer != null && !hasMethods(telemetry.tracer, ['startActiveSpan'])) {
+    issues.push({
+      path: 'telemetry.tracer',
+      message: 'must be an OpenTelemetry Tracer (an object with startActiveSpan)',
+    });
+  }
+  if (
+    telemetry.meter != null &&
+    !hasMethods(telemetry.meter, ['createHistogram', 'createCounter'])
+  ) {
+    issues.push({
+      path: 'telemetry.meter',
+      message: 'must be an OpenTelemetry Meter (an object with createHistogram and createCounter)',
+    });
+  }
+  return issues;
+}
 
 /**
  * Validate the merged config, returning a list of `{ path, message }` issues
@@ -175,6 +225,7 @@ function validateConfig(config, options = {}) {
   if (config.generateId !== undefined && typeof config.generateId !== 'function') {
     issues.push({ path: 'generateId', message: 'must be a function' });
   }
+  for (const issue of telemetryIssues(config.telemetry)) issues.push(issue);
   return issues;
 }
 
@@ -253,8 +304,8 @@ const parseString = (value) => value;
  * Every *scalar* config option has an entry here, which is what makes the
  * documented "a config file is never required" promise literally true. Options
  * holding non-scalars — `fileExtensions`, `clientOptions`, `client`, `mongoose`,
- * `hooks`, `logger`, `generateId` — are config-file/API only; an env var cannot
- * express them.
+ * `hooks`, `logger`, `generateId`, `telemetry` — are config-file/API only; an
+ * env var cannot express them.
  *
  * MIGRONAUT_ENV_FILE is deliberately absent: it selects which .env file to load,
  * so it has to be read before this table can run (see loadConfig).
@@ -469,6 +520,13 @@ async function loadConfig(options = {}) {
   for (const key in config) {
     if (!KNOWN_CONFIG_KEYS.has(key)) (unknown ??= []).push(key);
   }
+  // Same for `telemetry`: handing over the whole `@opentelemetry/api` module
+  // (`trace`, `metrics`) instead of a tracer and a meter turns it off silently.
+  if (config.telemetry) {
+    for (const key in config.telemetry) {
+      if (!TELEMETRY_KEYS.has(key)) (unknown ??= []).push(`telemetry.${key}`);
+    }
+  }
   if (unknown) {
     effectiveLogger(config.logger).debug(
       `Unrecognized config key(s), ignored: ${unknown.join(', ')}`,
@@ -481,11 +539,11 @@ async function loadConfig(options = {}) {
   }
 
   // "Which config did it actually pick up?" — the merged result, once, at
-  // debug level. Live instances (client, mongoose, hooks, logger) and the
-  // generateId function are elided: they are not serializable and redactDeep
-  // rightly refuses to clone them.
+  // debug level. Live instances (client, mongoose, hooks, logger, telemetry)
+  // and the generateId function are elided: they are not serializable and
+  // redactDeep rightly refuses to clone them.
   {
-    const { client, mongoose, hooks, logger, generateId, ...rest } = config;
+    const { client, mongoose, hooks, logger, generateId, telemetry, ...rest } = config;
     effectiveLogger(config.logger).debug(
       `Resolved config (source: ${configFilePath ? path.basename(configFilePath) : 'env/flags/defaults'})`,
       redactDeep({
@@ -495,6 +553,7 @@ async function loadConfig(options = {}) {
         ...(hooks ? { hooks: Object.keys(hooks) } : {}),
         ...(logger !== undefined ? { logger: logger === null ? null : '[injected]' } : {}),
         ...(generateId ? { generateId: '[injected]' } : {}),
+        ...(telemetry ? { telemetry: '[injected]' } : {}),
       }),
     );
   }

@@ -597,6 +597,146 @@ describe('validateConfig', () => {
     );
   });
 
+  describe('telemetry', () => {
+    const tracer = { startActiveSpan() {} };
+    const meter = { createHistogram() {}, createCounter() {} };
+    const recorder = () => {
+      const lines = [];
+      return {
+        lines,
+        logger: {
+          debug: (msg, fields) => lines.push({ msg, fields }),
+          info() {},
+          warn() {},
+          error() {},
+        },
+      };
+    };
+
+    it('should accept a tracer, a meter, both, or neither', () => {
+      for (const telemetry of [
+        { tracer, meter },
+        { tracer },
+        { meter },
+        // Off, in every shape a config that builds it conditionally produces.
+        undefined,
+        null,
+        {},
+        { tracer: undefined, meter: null },
+      ]) {
+        assert.deepStrictEqual(validateConfig(validConfig({ telemetry })), []);
+      }
+    });
+
+    it('should refuse a telemetry that is not an object', () => {
+      // What a JSON config can hold, plus an array — none of them a tracer.
+      for (const telemetry of ['otel', 7, true, [], [tracer]]) {
+        assert.deepStrictEqual(validateConfig(validConfig({ telemetry })), [
+          { path: 'telemetry', message: 'must be an object' },
+        ]);
+      }
+    });
+
+    it('should refuse a tracer that cannot start a span, naming the key', () => {
+      for (const bad of ['tracer', 7, {}, { startActiveSpan: 'yes' }, () => {}]) {
+        assert.deepStrictEqual(validateConfig(validConfig({ telemetry: { tracer: bad } })), [
+          {
+            path: 'telemetry.tracer',
+            message: 'must be an OpenTelemetry Tracer (an object with startActiveSpan)',
+          },
+        ]);
+      }
+    });
+
+    it('should refuse a meter missing either instrument factory', () => {
+      for (const bad of [
+        'meter',
+        {},
+        { createHistogram() {} },
+        { createCounter() {} },
+        { createHistogram() {}, createCounter: 1 },
+      ]) {
+        assert.deepStrictEqual(validateConfig(validConfig({ telemetry: { meter: bad } })), [
+          {
+            path: 'telemetry.meter',
+            message:
+              'must be an OpenTelemetry Meter (an object with createHistogram and createCounter)',
+          },
+        ]);
+      }
+    });
+
+    it('should report a bad tracer and a bad meter together', () => {
+      const issues = validateConfig(validConfig({ telemetry: { tracer: {}, meter: {} } }));
+      assert.deepStrictEqual(
+        issues.map((issue) => issue.path),
+        ['telemetry.tracer', 'telemetry.meter'],
+      );
+    });
+
+    it('should keep telemetry out of the scalar key table — it is code-only', () => {
+      assert.ok(!CONFIG_KEYS.some((spec) => spec.path.startsWith('telemetry')));
+      assert.ok(!ENV_KEYS.some((spec) => spec.path.startsWith('telemetry')));
+      assert.ok(!('telemetry' in DEFAULT_CONFIG));
+    });
+
+    it('should carry telemetry through, known and elided from the debug dump', async () => {
+      const { lines, logger } = recorder();
+      const telemetry = { tracer, meter };
+      const config = await loadConfig({
+        cwd: tmp,
+        flags: { uri: 'mongodb://x:27017', dbName: 'x', logger, telemetry },
+      });
+      assert.strictEqual(config.telemetry, telemetry);
+      assert.ok(!lines.some((line) => line.msg.startsWith('Unrecognized config key')));
+      const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+      assert.strictEqual(dump.fields.telemetry, '[injected]');
+    });
+
+    it('should leave telemetry out of the debug dump when none is configured', async () => {
+      const { lines, logger } = recorder();
+      await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x', logger } });
+      const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+      assert.ok(!('telemetry' in dump.fields));
+    });
+
+    it('should mention a stray key inside telemetry — the whole API module is the usual one', async () => {
+      // `telemetry: require('@opentelemetry/api')` validates (no tracer, no
+      // meter — "off") and would otherwise do nothing without a word.
+      const { lines, logger } = recorder();
+      await loadConfig({
+        cwd: tmp,
+        flags: {
+          uri: 'mongodb://x:27017',
+          dbName: 'x',
+          logger,
+          telemetry: { trace: {}, metrics: {}, tracer },
+        },
+      });
+      const mention = lines.find((line) => line.msg.startsWith('Unrecognized config key'));
+      assert.strictEqual(
+        mention.msg,
+        'Unrecognized config key(s), ignored: telemetry.trace, telemetry.metrics',
+      );
+    });
+
+    it('should reject an unusable telemetry through loadConfig', async () => {
+      await assert.rejects(
+        loadConfig({
+          cwd: tmp,
+          flags: { uri: 'mongodb://x:27017', dbName: 'x', telemetry: 'otel' },
+        }),
+        (error) => {
+          assert.ok(error instanceof ConfigInvalidError);
+          assert.deepStrictEqual(error.context.issues, [
+            { path: 'telemetry', message: 'must be an object' },
+          ]);
+          return true;
+        },
+      );
+    });
+  });
+
   it('should surface issues through loadConfig as ConfigInvalidError context', async () => {
     try {
       await loadConfig({

@@ -5,8 +5,8 @@ Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
 ## v2.1.0 — 2026-10-01
 
-Migrations as a queue, and ids in your own format. Additive: nothing changes for anyone who
-uses neither, with the narrow exceptions listed under **Changed**.
+Migrations as a queue, ids in your own format, and OpenTelemetry. Additive: nothing changes for
+anyone who uses none of them, with the narrow exceptions listed under **Changed**.
 
 ### Added
 
@@ -58,6 +58,42 @@ uses neither, with the narrow exceptions listed under **Changed**.
   own ids to match (it is how the queue adapter mints group ids). Resolves the config; does not
   connect.
 - **`IdGenerator` type** — `() => string`, exported from the package root.
+- **`telemetry` config option** — OpenTelemetry traces and metrics through a tracer and/or a meter
+  from your own `@opentelemetry/api`: `telemetry: { tracer, meter }`. One option covers the kit,
+  the CLI (through `migronaut.config.js`/`.ts`), `runMigrations` and the queue adapter.
+  - **Spans**: `migronaut.run` for every run that acquired the lock, and a child
+    `migronaut.migration` for every migration executed. The migration's span is the *active* one
+    while its hooks, its `up`/`down` and its changelog write run — so an instrumented MongoDB
+    driver nests its command spans under the migration that issued them. That is what lifecycle
+    events cannot do, and why this lives in the kit: at application startup there is no ambient
+    span, and the driver instrumentation records nothing without a parent.
+  - **Metrics**: `migronaut.run.duration`, `migronaut.migration.duration` and
+    `migronaut.lock.acquire.duration` (histograms, in seconds, with boundaries from 10ms to an
+    hour), and the counters `migronaut.lock.refused` and `migronaut.lock.lost`.
+  - **Failures** set the span's status to `ERROR` with a redacted message, and `error.type` — on
+    the span and on the metric point — to the typed error code. No exception event is recorded: it
+    would carry the unredacted message and stack.
+  - **A run that never got the lock emits no span.** A caller polling for a busy lock retries the
+    whole run every few hundred milliseconds; the refusals are counted
+    (`migronaut.lock.refused`) instead.
+  - **Injected, like the logger** — `@opentelemetry/api` is neither a dependency nor a peer, and
+    `src/` never imports it (a test enforces it). The types are structural: `MigronautTracer`,
+    `MigronautSpan`, `MigronautMeter`, `MigronautHistogram`, `MigronautCounter`,
+    `MigronautMetricOptions`, `MigronautAttributes` and `MigronautTelemetry`, exported from the
+    package root.
+  - **It can never fail a run.** Every call into the tracer, a span, the meter and an instrument
+    is guarded, and a tracer that throws before or after running the work — or runs it twice —
+    still gets each migration executed exactly once.
+  - Code-only, like `logger` and `generateId`. The span, attribute and metric names are new and
+    should be treated as experimental.
+- **`bullmq.telemetry`** — `createMigrationQueue({ bullmq: { Queue, Worker, telemetry } })` hands
+  BullMQ's own telemetry object (`new BullMQOtel({ tracerName })` from `bullmq-otel`) to the Queue
+  and the Worker it constructs. Together with the kit's `telemetry` it gives one trace from the
+  request that enqueued, across Redis, to the MongoDB commands in the worker. Until now the facade
+  built its Queue without it, so the enqueuing side of that trace could not be joined.
+  `workerOptions.telemetry` and `startWorker({ telemetry })` override it for the worker alone.
+- **OpenTelemetry in the example** — `examples/migration-service` gains `tracing.js` and a Jaeger
+  in its `docker-compose.yml`: set `OTEL_EXPORTER_OTLP_ENDPOINT` and every enqueue is one trace.
 
 ### Changed
 
@@ -80,15 +116,30 @@ uses neither, with the narrow exceptions listed under **Changed**.
   never exposed by `lock`, `lockInfo()` or error context.
 - **A `generateId` config key that is not a function is now rejected** (`CONFIG_INVALID`). The key
   was previously unknown and ignored, like any stray key.
+- **A `telemetry` config key that is not usable is now rejected** (`CONFIG_INVALID`): it must be an
+  object whose `tracer` has `startActiveSpan` and whose `meter` has `createHistogram` and
+  `createCounter`. Absent, `null` and `{}` all mean "off". The key was previously unknown and
+  ignored.
+- **A scheduled `sync` job no longer joins the trace that registered its schedule.** Its template
+  now carries `telemetry: { omitContext: true }`: BullMQ builds each scheduler iteration from the
+  previous job's options, so with telemetry on, every tick would otherwise have been appended to
+  one ever-growing trace. Each tick is a trace of its own; no effect on a queue without telemetry.
 
 ### Fixed
 
 - `docs/reference/cli.md` lists exit code `23` (`MIGRATION_OUT_OF_ORDER`), missing since v2.0.0.
+- The events table in `docs/guide/hooks.md` had fallen behind the payloads: it now lists
+  `migration:skipped`, the `command` / `durationMs` / count fields of `run:start` and `run:end`,
+  and `ttlMs` / `acquireMs` on `lock:acquired`.
 
 ### Tooling
 
 - A unit test pins `src/utils/id.js` as the only module that mints an identifier, so no id can
   bypass `generateId`.
+- A unit test pins that nothing under `src/` or `bin/`, and neither declaration file, imports an
+  `@opentelemetry/*` package or `bullmq-otel`; they are devDependencies only. The structural types
+  are checked part by part against the real `@opentelemetry/api`, and one integration test runs the
+  real `@opentelemetry/instrumentation-mongodb` to prove the driver's spans nest under a migration.
 - An in-tree fake BullMQ carries the adapter's unit and integration tests; the same scenarios run
   against the real `bullmq` package when `MIGRONAUT_TEST_REDIS_URL` is set, which CI now does
   (a Redis service on the `test` job). `bullmq` and `ioredis` are devDependencies for that only.

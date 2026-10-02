@@ -1,4 +1,5 @@
 import { Job, type Processor, Queue, QueueEvents, Worker } from 'bullmq';
+import { BullMQOtel } from 'bullmq-otel';
 import { expectAssignable, expectError, expectType } from 'tsd';
 import {
   type BullMQJobLike,
@@ -64,6 +65,17 @@ const mq = createMigrationQueue({ bullmq: { Queue, Worker, QueueEvents }, connec
 expectAssignable<Promise<{ [index: string]: number }>>(mq.queue.getJobCounts());
 expectType<boolean>((await mq.startWorker()).isRunning());
 expectType<MigratorKit>(mq.kit);
+
+// BullMQ's own telemetry object rides in with the classes it is passed to.
+// bullmq.d.ts never imports bullmq-otel; the real class fits the slot.
+createMigrationQueue({
+  bullmq: { Queue, Worker, QueueEvents, telemetry: new BullMQOtel({ tracerName: 'migrations' }) },
+  connection,
+  config,
+});
+expectError(createMigrationQueue({ bullmq: { Queue, telemetry: 'otel' }, connection }));
+// The worker alone can be given a different one.
+void mq.startWorker({ telemetry: new BullMQOtel({ tracerName: 'worker' }) });
 
 // Naming the instance types pins BullMQ's own defaults instead of the inferred widest ones.
 const typed = createMigrationQueue<Queue, Worker, QueueEvents>({

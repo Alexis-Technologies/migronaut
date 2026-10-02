@@ -89,6 +89,78 @@ describe('createMigrationQueue', () => {
     await mq.close();
   });
 
+  describe('bullmq.telemetry', () => {
+    // BullMQ's own telemetry object. The fake does nothing with it, which is
+    // all this needs: the adapter's job is to hand it over untouched.
+    const telemetry = { tracer: {}, contextManager: {} };
+
+    it('should hand it to the Queue and the Worker it constructs', async () => {
+      const connection = spiedConnection();
+      const { mq } = make({ connection, bullmq: { ...fakeBullmq(), telemetry } });
+      assert.deepStrictEqual(mq.queue.opts, { connection, telemetry });
+      assert.strictEqual(mq.queue.opts.telemetry, telemetry);
+      const worker = await mq.startWorker();
+      assert.strictEqual(worker.opts.telemetry, telemetry);
+      await mq.close();
+    });
+
+    it('should leave QueueEvents without it — BullMQ takes none there', async () => {
+      const kit = stubKit({
+        dryRun: mock.fn(async () => pendingRows('0001-a.js')),
+        nextBatch: mock.fn(async () => 2),
+      });
+      const { mq } = make({ kit, bullmq: { ...fakeBullmq(), telemetry } });
+      const group = await mq.enqueueUp();
+      await mq.startWorker();
+      // Waiting is what builds it.
+      await group.wait({ timeoutMs: 2000 });
+      assert.ok(mq.queueEvents instanceof FakeQueueEvents);
+      assert.ok(!('telemetry' in mq.queueEvents.opts));
+      await mq.close();
+    });
+
+    it('should let the worker options, then startWorker, override it for the worker', async () => {
+      const fromOptions = { name: 'workerOptions' };
+      const first = make({
+        bullmq: { ...fakeBullmq(), telemetry },
+        workerOptions: { telemetry: fromOptions },
+      });
+      assert.strictEqual((await first.mq.startWorker()).opts.telemetry, fromOptions);
+      assert.strictEqual(first.mq.queue.opts.telemetry, telemetry, 'the queue keeps its own');
+      await first.mq.close();
+
+      const fromCall = { name: 'startWorker' };
+      const second = make({
+        bullmq: { ...fakeBullmq(), telemetry },
+        workerOptions: { telemetry: fromOptions },
+      });
+      assert.strictEqual(
+        (await second.mq.startWorker({ telemetry: fromCall })).opts.telemetry,
+        fromCall,
+      );
+      await second.mq.close();
+    });
+
+    it('should reach only the worker when the Queue is an injected instance', async () => {
+      const connection = spiedConnection();
+      const { Worker } = fakeBullmq();
+      const queue = new FakeQueue('migronaut', { connection });
+      const mq = createMigrationQueue({
+        bullmq: { Queue: queue, Worker, telemetry },
+        connection,
+        kit: stubKit(),
+      });
+      assert.deepStrictEqual(
+        queue.opts,
+        { connection },
+        'an instance keeps what it was built with',
+      );
+      assert.strictEqual((await mq.startWorker()).opts.telemetry, telemetry);
+      await mq.close();
+      await queue.close();
+    });
+  });
+
   describe('option validation — before anything is constructed', () => {
     const connection = createFakeConnection();
     const { Queue, Worker, QueueEvents } = fakeBullmq();
@@ -116,6 +188,8 @@ describe('createMigrationQueue', () => {
         { bullmq: { Queue }, connection, jobOptions: { backoff: 100 } },
       ],
       ['workerOptions that is not an object', { bullmq: { Queue }, connection, workerOptions: 2 }],
+      ['a telemetry that is not an object', { bullmq: { Queue, telemetry: 'otel' }, connection }],
+      ['a null telemetry', { bullmq: { Queue, telemetry: null }, connection }],
       [
         'a worker concurrency above 1',
         { bullmq: { Queue }, connection, workerOptions: { concurrency: 4 } },
@@ -497,7 +571,11 @@ describe('createMigrationQueue', () => {
       assert.deepStrictEqual(schedulers[0], {
         id: 'migronaut-sync',
         repeat: { every: 60_000 },
-        template: { name: 'sync', data: { v: 1, kind: 'sync' }, opts: { attempts: 1 } },
+        template: {
+          name: 'sync',
+          data: { v: 1, kind: 'sync' },
+          opts: { attempts: 1, telemetry: { omitContext: true } },
+        },
         runs: 0,
       });
       assert.deepStrictEqual(schedulers[1].repeat, { pattern: '0 3 * * *', tz: 'UTC' });

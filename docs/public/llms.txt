@@ -14,6 +14,8 @@ Key facts:
 - Zero runtime dependencies; `mongodb` is a required peer, `mongoose` an optional one
 - Optional queue adapter at `@alexify/migronaut/bullmq`: migrations as BullMQ jobs (one migration
   per job). BullMQ is injected by the caller (`bullmq: { Queue, Worker }`) — never a dependency
+- Optional OpenTelemetry: `telemetry: { tracer, meter }` from the caller's own
+  `@opentelemetry/api` — injected, never a dependency or a peer
 - License: MIT
 - Repository: https://github.com/Alexis-Technologies/migronaut
 
@@ -30,6 +32,7 @@ Key facts:
 - [Lifecycle Hooks](https://migronaut.vercel.app/guide/hooks): beforeAll, afterAll, beforeEach, afterEach, onError
 - [Programmatic API](https://migronaut.vercel.app/guide/api): The MigratorKit class, methods, and result types
 - [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq): Run migrations as BullMQ jobs — a migration service with ordering, batches, scheduling, and enqueue-and-wait
+- [OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry): Traces and metrics through an injected tracer and meter — a span per run and per migration, with the MongoDB driver's spans nested under it
 - [CI/CD & Deployment](https://migronaut.vercel.app/guide/ci-cd): GitHub Actions, Docker, deploy gates, and JSON output
 - [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting): Common errors and how to fix them
 - [Migrating from migrate-mongo](https://migronaut.vercel.app/guide/migrate-mongo): Adopt an existing migrate-mongo changelog

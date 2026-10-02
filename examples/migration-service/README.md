@@ -14,6 +14,7 @@ POST /migrations/up ──► BullMQ queue "migrations" ──► worker ──�
 | --------------------------- | -------------------------------------------------------------------------------- |
 | [`mq.js`](mq.js)            | `createMigrationQueue(...)` — BullMQ is **injected**; migronaut never imports it |
 | [`server.js`](server.js)    | The HTTP routes, the worker, error → status mapping, graceful shutdown           |
+| [`tracing.js`](tracing.js)  | Optional OpenTelemetry: one trace from the HTTP request to the MongoDB commands  |
 | [`migrations/`](migrations) | Two idempotent migrations (safe to re-run after a crash)                         |
 
 ## Run it
@@ -66,6 +67,40 @@ Run as many of each as you like. Migrations still apply one at a time, in order:
 to a global concurrency of 1, and — whatever Redis says — every job re-checks the order against
 the MongoDB changelog and takes the MongoDB lock, so a `migronaut up` from the CLI at the same
 moment is safe too.
+
+## Tracing it
+
+Set one variable and every enqueue becomes a trace you can open in Jaeger
+(<http://127.0.0.1:16686>, started by `docker compose up -d`):
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 node server.js
+curl -s -X POST localhost:3000/migrations/up -H 'content-type: application/json' -d '{"wait":true}'
+```
+
+```
+POST /migrations/up                 HTTP instrumentation
+└─ addBulk migrations               BullMQ (producer)          ── the API process
+   └─ process migrations            BullMQ (consumer)          ── the worker process
+      └─ migronaut.run              migronaut: lock held, run id, what was applied
+         └─ migronaut.migration     migronaut: one per migration, with its name and batch
+            ├─ createIndexes users  MongoDB instrumentation: the migration's own commands
+            └─ update _migronaut_migrations                    … and its changelog record
+```
+
+Three things make that one trace, and all three are in this folder:
+
+- [`tracing.js`](tracing.js) starts the SDK **before** `node:http` and the MongoDB driver are
+  loaded — the instrumentations patch those modules on load.
+- [`mq.js`](mq.js) passes `bullmq.telemetry` (BullMQ's own, from `bullmq-otel`), which carries the
+  trace across Redis from the process that enqueues to the one that applies.
+- [`mq.js`](mq.js) passes `config.telemetry` (a tracer from `@opentelemetry/api`), which makes each
+  migration a span that is _active_ while it runs — so the driver's command spans land under it.
+
+Run the roles separately (`ROLE=api`, `ROLE=worker`) and the trace still joins up: the two halves
+show as two services in Jaeger. With no endpoint set, nothing is loaded and nothing is traced.
+
+Guide: <https://migronaut.vercel.app/guide/opentelemetry>
 
 ## Before you deploy something like this
 

@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { describe, it, mock } = require('node:test');
 const {
   RETRYABLE_CODES,
@@ -265,6 +266,33 @@ describe('createMigrationProcessor', () => {
       await Promise.all([processor(upJob()), processor(upJob()), processor(upJob())]);
       assert.strictEqual(peak, 1);
       assert.strictEqual(kit.up.mock.callCount(), 3);
+    });
+
+    it('should run each job in the async context it was called from', async () => {
+      // BullMQ calls the processor inside the consumer span's context, and the
+      // kit's spans take their parent from whatever is active. Jobs queue up on
+      // one promise chain here — a job that ran in the context of the job
+      // ahead of it would hang its migration under the wrong trace.
+      const store = new AsyncLocalStorage();
+      const seen = [];
+      const kit = stubKit({
+        up: mock.fn(async (name) => {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          seen.push([name, store.getStore()]);
+          return [{ file: name, status: 'applied' }];
+        }),
+      });
+      const processor = createMigrationProcessor({ kit });
+      await Promise.all([
+        store.run('trace-a', () => processor(upJob({ migration: '0001-a.js' }))),
+        store.run('trace-b', () => processor(upJob({ migration: '0002-b.js' }))),
+        store.run('trace-c', () => processor(upJob({ migration: '0003-c.js' }))),
+      ]);
+      assert.deepStrictEqual(seen, [
+        ['0001-a.js', 'trace-a'],
+        ['0002-b.js', 'trace-b'],
+        ['0003-c.js', 'trace-c'],
+      ]);
     });
 
     it('should keep serving jobs after one fails', async () => {

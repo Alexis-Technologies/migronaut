@@ -163,8 +163,8 @@ export type IdGenerator = () => string;
  * with a {@link ConfigInvalidError} naming the variable — never coerced.
  *
  * `fileExtensions`, `clientOptions`, `generateId` and the live handles (`client`,
- * `mongoose`, `hooks`, `logger`) are config-file/API only: a single environment
- * string cannot express them.
+ * `mongoose`, `hooks`, `logger`, `telemetry`) are config-file/API only: a single
+ * environment string cannot express them.
  */
 export interface MigronautConfig {
   /** MongoDB connection URI. Not required when `client` is supplied */
@@ -282,6 +282,14 @@ export interface MigronautConfig {
    * hold the lock at once.
    */
   generateId?: IdGenerator;
+  /**
+   * OpenTelemetry, from your own `@opentelemetry/api`: a tracer, a meter, or
+   * both. Every run and every migration becomes a span — the migration's span
+   * is the active one while its `up`/`down` runs, so an instrumented MongoDB
+   * driver nests its command spans under it — and their durations are
+   * recorded as histograms. Absent, `null` or empty turns it off.
+   */
+  telemetry?: MigronautTelemetry | null;
 }
 
 /**
@@ -324,6 +332,83 @@ export interface MigronautLogger {
  * remains valid: the extra argument is simply ignored.
  */
 export type LogMethod = (msg: string, fields?: Record<string, unknown>) => void;
+
+// ─── Telemetry ────────────────────────────────────────────────────────────────
+
+/** A span or metric attribute value — the scalar subset migronaut sets */
+export type MigronautAttributes = Record<string, string | number | boolean>;
+
+/**
+ * The slice of an OpenTelemetry `Span` migronaut calls. Declared structurally —
+ * `@opentelemetry/api` is deliberately not imported, so the package's types
+ * resolve for users who never installed it. A real `Span` satisfies it.
+ */
+export interface MigronautSpan {
+  setAttribute(key: string, value: string | number | boolean): unknown;
+  /** `code` is OpenTelemetry's `SpanStatusCode` — migronaut only ever sets ERROR (2) */
+  setStatus(status: { code: number; message?: string }): unknown;
+  end(): void;
+}
+
+/**
+ * The slice of an OpenTelemetry `Tracer` migronaut calls — what
+ * `trace.getTracer('@alexify/migronaut')` returns. Only `startActiveSpan` is
+ * used: it is what makes a span the active context for the migration's own
+ * code, and so for any instrumentation running underneath it.
+ */
+export interface MigronautTracer {
+  startActiveSpan<T>(
+    name: string,
+    options: { attributes?: MigronautAttributes },
+    fn: (span: MigronautSpan) => T,
+  ): T;
+}
+
+/** An OpenTelemetry `Histogram`, as far as migronaut uses one */
+export interface MigronautHistogram {
+  record(value: number, attributes?: MigronautAttributes): void;
+}
+
+/** An OpenTelemetry `Counter`, as far as migronaut uses one */
+export interface MigronautCounter {
+  add(value: number, attributes?: MigronautAttributes): void;
+}
+
+/** Options migronaut passes when it creates an instrument */
+export interface MigronautMetricOptions {
+  description?: string;
+  unit?: string;
+  /** Histogram bucket boundaries, in the instrument's unit (seconds) */
+  advice?: { explicitBucketBoundaries?: number[] };
+}
+
+/**
+ * The slice of an OpenTelemetry `Meter` migronaut calls — what
+ * `metrics.getMeter('@alexify/migronaut')` returns.
+ */
+export interface MigronautMeter {
+  createHistogram(name: string, options?: MigronautMetricOptions): MigronautHistogram;
+  createCounter(name: string, options?: MigronautMetricOptions): MigronautCounter;
+}
+
+/**
+ * The `telemetry` config option. Both parts are optional and independent:
+ * a tracer alone gives spans, a meter alone gives metrics.
+ *
+ * Spans: `migronaut.run` (one per run that held the lock) and
+ * `migronaut.migration` (one per migration executed, a child of the run).
+ * Metrics: `migronaut.run.duration`, `migronaut.migration.duration` and
+ * `migronaut.lock.acquire.duration` (histograms, seconds), plus the counters
+ * `migronaut.lock.refused` and `migronaut.lock.lost`. A failure sets the span's
+ * status to ERROR with a redacted message, and `error.type` to the
+ * {@link MigronautErrorCode} on the span and the metric point.
+ *
+ * A tracer or meter that throws never fails a run.
+ */
+export interface MigronautTelemetry {
+  tracer?: MigronautTracer | null;
+  meter?: MigronautMeter | null;
+}
 
 // ─── Progress Reporter ─────────────────────────────────────────────────────────
 

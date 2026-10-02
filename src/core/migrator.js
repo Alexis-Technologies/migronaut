@@ -10,6 +10,7 @@ const {
   ConnectionFailedError,
   HookFailedError,
   IrreversibleMigrationError,
+  LockAlreadyHeldError,
   MigrationBlockedError,
   MigrationFileNotFoundError,
   MigrationInvalidNameError,
@@ -25,6 +26,7 @@ const { createIdGenerator } = require('../utils/id.js');
 const { loadMigrationFile } = require('../utils/loader.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { isBareFilename } = require('../utils/migration-name.js');
+const { ATTRIBUTES, SPANS, createTelemetry } = require('../utils/telemetry.js');
 const {
   createConfigFile,
   createMigrationFile,
@@ -71,6 +73,8 @@ class MigratorKit extends EventEmitter {
   #runId;
   /** Mints an id in the configured format (`generateId`, else a UUID); set with the config */
   #newId;
+  /** Spans and metrics through the injected `telemetry` (a no-op without one); set with the config */
+  #telemetry;
   /** Whether changelog indexes have already been ensured on this instance */
   #indexesEnsured = false;
   /** Memoized resolved logger — resolveLogger allocates on every call otherwise */
@@ -173,6 +177,7 @@ class MigratorKit extends EventEmitter {
         ...(this.#fallbackLogger !== undefined ? { fallbackLogger: this.#fallbackLogger } : {}),
       });
       this.#newId = createIdGenerator(this.#config.generateId);
+      this.#telemetry = createTelemetry(this.#config.telemetry);
     }
     return this.#config;
   }
@@ -380,6 +385,13 @@ class MigratorKit extends EventEmitter {
     }
     const startedAt = Date.now();
     this.#emit('run:start', { ...info });
+    const telemetry = this.#telemetry;
+    // The run's span exists only once the lock is held: a caller polling for a
+    // busy lock retries the whole run every few hundred milliseconds, and a
+    // span per refusal would bury the one run that did the work.
+    let span;
+    let acquired;
+    let lostReason;
     let failure;
     let result;
     try {
@@ -392,12 +404,40 @@ class MigratorKit extends EventEmitter {
           logger: this.#lockLogger(),
           onLockLost: this.#config.onLockLost,
           owner: this.#runId,
-          onLockAcquired: (extra) => this.#emit('lock:acquired', { owner: this.#runId, ...extra }),
+          onLockAcquired: (extra) => {
+            acquired = extra;
+            if (typeof extra?.acquireMs === 'number') telemetry.lockAcquired(extra.acquireMs);
+            this.#emit('lock:acquired', { owner: this.#runId, ...extra });
+          },
           onLockReleased: (extra) => this.#emit('lock:released', { owner: this.#runId, ...extra }),
-          onLockLostEvent: (reason) => this.#emit('lock:lost', { owner: this.#runId, reason }),
+          onLockLostEvent: (reason) => {
+            // The heartbeat and the TTL deadline can each report the same
+            // loss: the first reason is the cause, and it is one lost lock.
+            if (lostReason === undefined) {
+              lostReason = reason;
+              telemetry.lockLost();
+            }
+            this.#emit('lock:lost', { owner: this.#runId, reason });
+          },
           ...(options.noLock ? { noLock: true } : {}),
         },
-        (lockSignal) => fn(AbortSignal.any([lockSignal, stopper.signal])),
+        (lockSignal) =>
+          // Active around the unit of work only, and ended in the `finally`
+          // below — after the release, so the span's outcome is the run's.
+          telemetry.open(
+            SPANS.RUN,
+            {
+              [ATTRIBUTES.RUN_ID]: this.#runId,
+              [ATTRIBUTES.RUN_COMMAND]: info.command,
+              [ATTRIBUTES.RUN_DIRECTION]: info.direction,
+              [ATTRIBUTES.LOCK_ACQUIRE_MS]: acquired?.acquireMs,
+              [ATTRIBUTES.LOCK_SKIPPED]: acquired?.skipped,
+            },
+            (opened) => {
+              span = opened;
+              return fn(AbortSignal.any([lockSignal, stopper.signal]));
+            },
+          ),
       );
       return result;
     } catch (error) {
@@ -415,16 +455,37 @@ class MigratorKit extends EventEmitter {
           ? failure.context.results
           : null;
       let summary = {};
+      let skipped;
       if (rows) {
         let applied = 0;
         let reverted = 0;
+        skipped = 0;
         for (const row of rows) {
           if (row.status === 'applied') applied += 1;
           else if (row.status === 'reverted') reverted += 1;
+          else if (row.status === 'skipped') skipped += 1;
         }
         summary = { applied, reverted, total: rows.length };
       }
       const durationMs = Date.now() - startedAt;
+      if (span) {
+        span.finish(
+          {
+            [ATTRIBUTES.RUN_APPLIED]: summary.applied,
+            [ATTRIBUTES.RUN_REVERTED]: summary.reverted,
+            [ATTRIBUTES.RUN_SKIPPED]: skipped,
+            [ATTRIBUTES.RUN_TOTAL]: summary.total,
+            [ATTRIBUTES.LOCK_LOST_REASON]: lostReason,
+          },
+          failure,
+        );
+        telemetry.runEnded({ ...info, durationMs, error: failure });
+      } else if (failure instanceof LockAlreadyHeldError) {
+        // Never held the lock, so there is no run to time — only a refusal to
+        // count. Any other failure this early (an unreachable database) is the
+        // caller's to report; it is not contention.
+        telemetry.lockRefused();
+      }
       this.#emit('run:end', {
         ...info,
         success: failure === undefined,
@@ -860,12 +921,56 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
+   * Execute one migration under its own span, and time it for the meter.
+   *
+   * The span is the *active* one for everything the migration does — hooks,
+   * the file's own `up`/`down`, the changelog write — which is what lets an
+   * instrumented driver hang its command spans under the migration that issued
+   * them. A listener on `migration:start` could open a span but never make it
+   * active, so this is the one thing telemetry needs from inside the kit.
+   */
+  async #executeMigration(step) {
+    const { name, direction, index, total, batch } = step;
+    const telemetry = this.#telemetry;
+    const startedAt = Date.now();
+    try {
+      const duration = await telemetry.wrap(
+        SPANS.MIGRATION,
+        {
+          [ATTRIBUTES.MIGRATION_NAME]: name,
+          [ATTRIBUTES.MIGRATION_DIRECTION]: direction,
+          [ATTRIBUTES.MIGRATION_BATCH]: batch,
+          [ATTRIBUTES.MIGRATION_INDEX]: index,
+          [ATTRIBUTES.MIGRATION_TOTAL]: total,
+          [ATTRIBUTES.RUN_ID]: this.#runId,
+        },
+        (span) => this.#executeMigrationSteps(step, span),
+      );
+      telemetry.migrationEnded({ direction, durationMs: duration });
+      return duration;
+    } catch (error) {
+      // The runner's own measurement when it got as far as the body; the
+      // elapsed time here otherwise (a failing beforeEach, a file that does
+      // not load) — a failure deserves a data point as much as a success.
+      const durationMs =
+        error instanceof MigronautError && typeof error.context?.durationMs === 'number'
+          ? error.context.durationMs
+          : Date.now() - startedAt;
+      telemetry.migrationEnded({ direction, durationMs, error });
+      throw error;
+    }
+  }
+
+  /**
    * Execute one migration end to end: beforeEach → load → run (with the
    * changelog write inside the transaction via `onSuccess`) → events, logs,
    * result row, afterEach — and the mirrored error path. Shared verbatim by
    * `up` and `down`, so a fix to one direction cannot silently miss the other.
    */
-  async #executeMigration({ name, direction, context, index, total, results, batch, onSuccess }) {
+  async #executeMigrationSteps(
+    { name, direction, context, index, total, results, batch, onSuccess },
+    span,
+  ) {
     const config = this.#config;
     const logger = this.#logger;
     const batchField = batch !== undefined ? { batch } : {};
@@ -879,6 +984,7 @@ class MigratorKit extends EventEmitter {
       reload: config.reloadMigrations,
     });
     const useTransaction = migration.useTransaction ?? config.useTransaction;
+    span.set({ [ATTRIBUTES.MIGRATION_TRANSACTION]: useTransaction });
 
     this.#progress?.onStart(name, direction);
     this.#emit('migration:start', { migration: name, direction, ...batchField });

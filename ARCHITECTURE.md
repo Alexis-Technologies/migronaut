@@ -102,6 +102,7 @@ src/
 │   ├── id.js                # The one place an id is minted — randomUUID, or the user's generateId
 │   ├── loader.js            # Dynamic-import a migration file (.ts/.js, ESM/CJS)
 │   ├── migration-name.js    # isBareFilename() — the one rule for a safe migration name
+│   ├── telemetry.js         # OpenTelemetry through the injected tracer/meter — guarded spans + instruments
 │   ├── template.js          # Generate migration files & config files
 │   ├── user.js              # safeUsername() — MIGRONAUT_USER, else the OS user
 │   └── date.js              # Dependency-free timestamp formatting
@@ -253,6 +254,11 @@ Each entry: **responsibility · key exports · nuances you must know.**
   - `generateId` is code-only like those, but it has exactly one valid shape, so `validateConfig`
     checks it (`must be a function`) outside the `CONFIG_KEYS` table — the table is pinned against
     the JSON schema and the env table, and a function belongs in neither.
+  - `telemetry` is checked the same way (`telemetryIssues`): an object whose `tracer`, if present,
+    has `startActiveSpan`, and whose `meter` has `createHistogram` and `createCounter`. Absent,
+    `null` and `{}` all mean "off", so a config that builds it conditionally needs no special
+    case. A stray key inside it (the whole `@opentelemetry/api` module is the usual one) is
+    mentioned at debug level, like a stray top-level key.
 
 ### `src/core/lock.js` — distributed lock (the subtlest module)
 - **Responsibility:** ensure only one migration run executes at a time, cluster-wide.
@@ -350,6 +356,17 @@ Each entry: **responsibility · key exports · nuances you must know.**
   `generateId` option (`createIdGenerator`, [utils/id.js](src/utils/id.js)); `#withLock` mints the
   run id with it as its first act after the reentrancy guard, and the public `generateId()` hands
   the same source to layers above the kit.
+- **Telemetry:** `#ensureConfig` also builds `#telemetry` from the `telemetry` option
+  (`createTelemetry`, [utils/telemetry.js](src/utils/telemetry.js)) — a no-op object when nothing
+  was injected. There are exactly two wrap sites, both here, so the mechanism modules stay ignorant
+  of it:
+  - `#withLock` opens the `migronaut.run` span around the callback it hands to `runWithLock` — i.e.
+    *after* the lock is held — and ends it in its `finally`, after the release, from the same
+    summary `run:end` is built from. A refused acquisition therefore opens no span; it increments
+    `migronaut.lock.refused` instead.
+  - `#executeMigration` wraps `#executeMigrationSteps` (hooks, load, body, changelog write) in the
+    `migronaut.migration` span, which makes it the *active* span for everything the migration
+    does, and records the duration histogram on both the success and the failure path.
 
 ### `src/core/audit.js` — read-only health check
 - **Responsibility:** the `migronaut audit` checks (config, connectivity, transactions, indexes,
@@ -428,6 +445,16 @@ the design.
   string of at most `MAX_ID_LENGTH` = 128 characters — the same limit a queue worker enforces on a
   job's group id). A throw, a promise or a non-id becomes a `ConfigInvalidError`. A unit test greps
   `src/` so no second minting site can appear.
+- **telemetry.js** — `createTelemetry({ tracer, meter })` turns the injected OpenTelemetry objects
+  into what the kit reports through: `open(name, attributes, fn)` (run `fn` with a new span active;
+  the caller ends it), `wrap(...)` (the same, ended when `fn` settles), and one method per metric
+  (`runEnded`, `migrationEnded`, `lockAcquired`, `lockRefused`, `lockLost`). Every call into the
+  SDK goes through one `safe()`, and `open` runs the work exactly once whatever the tracer does —
+  throws before calling back, throws after, calls back twice or late. A failure becomes
+  `setStatus({ code: 2, message })` with the message through `errorText` (plus the redacted
+  `context.cause`) and `error.type`; `recordException` and span events are not used. The span and
+  metric names, the attribute keys, the histogram buckets (seconds) and the `SPAN_STATUS_ERROR = 2`
+  constant all live here — nothing else in `src/` knows an OpenTelemetry name.
 - **loader.js** — `loadMigrationFile(filepath)`: dynamic `import()`, `mod.default ?? mod` for CJS,
   validates `up`/`down` are functions. Translates the `.ts`-can't-load failure into a clear error —
   see the [loader deep dive](#64-the-loader-and-the-ts-runtime-caveat).
@@ -700,7 +727,10 @@ has no rule for either) — catch these in review.
 - **Injected, never required:** third-party integrations come in through options. `src/` never
   requires `bullmq` (a unit test greps for it), and no `.d.ts` imports an optional package. An id
   format is the same kind of thing: migronaut ships no ULID/CUID implementation, it takes the
-  user's `generateId`.
+  user's `generateId`. So is OpenTelemetry: the tracer and the meter come in through `telemetry`,
+  BullMQ's telemetry object through `bullmq.telemetry`, and nothing under `src/` or `bin/` — nor
+  either `.d.ts` — imports `@opentelemetry/*` or `bullmq-otel` (a unit test greps for it; the
+  structural `MigronautTracer` / `MigronautMeter` types stand in).
 - **One place mints ids:** [src/utils/id.js](src/utils/id.js). Calling `randomUUID` anywhere else
   creates an id `generateId` cannot reach (a unit test greps for that too).
 
@@ -762,6 +792,25 @@ The high-impact ones for code changes:
   token of its own. Do not "simplify" the readback, `renew` or `release` back to `owner` alone.
 - **An empty enqueue plan still mints a group id** (the handle always has one), so an up-to-date
   `enqueueUp()` costs one generator call.
+- **A run that never got the lock emits no span.** The run span is opened inside `runWithLock`'s
+  callback, not around it: `runMigrations` and the queue processor poll for a busy lock by
+  retrying the whole run every ~500ms, and a span per refusal would bury the run that did the
+  work. Refusals are counted (`migronaut.lock.refused`). The lock's own driver commands and the
+  heartbeat therefore sit outside the run span — under whatever span was active around the call.
+- **The span status code is the literal `2`, and no exception is recorded.** `SpanStatusCode`
+  lives in a package migronaut never imports; and `span.recordException(error)` would ship the
+  raw message and stack past `errorText` — the status message is the redacted record.
+- **A span's status is never set to OK.** OpenTelemetry leaves that to the application; a library
+  that succeeds leaves it unset.
+- **`telemetry.open` takes its result from the callback, not from the tracer**, and remembers
+  whether the callback ran. It looks like belt and braces; it is what stops a broken tracer from
+  skipping a migration, or running one twice.
+- **The scheduled `sync` job's template carries `telemetry: { omitContext: true }`.** BullMQ builds
+  each scheduler iteration from the previous job's options, so a stored trace context would chain
+  every tick into one endless trace (confirmed against the real library; the Redis suite pins it).
+- **`createMigrationQueue` takes BullMQ's telemetry as `bullmq.telemetry`, not a top-level
+  option** — `telemetry` at the top would read as the kit's own (`config.telemetry`), which is a
+  different object with a different job.
 
 ---
 
@@ -810,6 +859,17 @@ The high-impact ones for code changes:
   never imports bullmq. `esm-interop.test.js` additionally compiles a `nodenext` consumer, the only
   check that `exports["./bullmq"].types` resolves for modern TypeScript (tsd and `check:dts` use
   classic resolution, which ignores the exports map).
+  `index.test-d.ts` does the same for OpenTelemetry — part by part (the real `Span` against
+  `MigronautSpan`, the options type against the real `SpanOptions`, the meter and its instruments),
+  because `expectAssignable<MigronautTracer>(realTracer)` alone proves little: a real tracer's
+  two-argument overload matches almost any shape.
+- **Telemetry tests** use the real SDK with in-memory exporters ([tests/helpers/otel.js](tests/helpers/otel.js)).
+  `startTracing()` registers the global context manager — without one nothing can be made active
+  and no span gets a parent — which is safe because `node:test` runs each file in its own process.
+  `telemetry-mongodb.test.js` additionally loads the real `@opentelemetry/instrumentation-mongodb`,
+  and must do so *before* anything requires the driver: it is the one test of the claim that
+  driver spans nest under a migration. The trace across a queue is BullMQ's doing, so it is
+  asserted only in the real-Redis suite.
 - **Concurrency note:** the lock-heartbeat integration tests use real timers; running the *full*
   integration suite in parallel (many concurrent `mongodb-memory-server` replica sets) can make
   timing-sensitive tests flaky under heavy CPU contention. They're stable in isolation — not a
@@ -817,7 +877,7 @@ The high-impact ones for code changes:
 
 Useful commands:
 ```bash
-pnpm test                                  # unit + integration (~1110 tests)
+pnpm test                                  # unit + integration (~1200 tests)
 node --test tests/integration/up.test.js   # one file (boots its own replica set)
 pnpm run test:coverage                     # full suite under c8, gated at 90/90/90
 pnpm run test:types                        # tsd — index.d.ts + bullmq.d.ts vs tests/types/*.test-d.ts
@@ -920,7 +980,11 @@ it *looks* or *exits* → the CLI layer.
   UUID, or whatever `generateId` returns). Paired with a lock-minted `nonce`, which is what
   actually proves which process holds it.
 - **Run id** — one id per locked run, stamped on its changelog records, events and log lines and
-  stored as the lock's owner token.
+  stored as the lock's owner token. Also the `migronaut.run.id` span attribute.
+- **Run span / migration span** — `migronaut.run` and `migronaut.migration`, emitted through an
+  injected OpenTelemetry tracer. The migration span is the active context while a migration runs.
+- **Telemetry** — the `telemetry: { tracer, meter }` config option: the user's own OpenTelemetry
+  objects. Not to be confused with `bullmq.telemetry`, BullMQ's own telemetry object.
 - **Progress reporter** — the CLI-injected callback that drives the spinner without core ever
   importing one.
 - **Step** — Laravel-style per-file batching (`up --step`) / per-file rollback (`down --steps N`).

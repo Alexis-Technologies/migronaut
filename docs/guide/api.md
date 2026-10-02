@@ -106,7 +106,9 @@ This is exactly what the [BullMQ adapter](/guide/bullmq) does for every job.
 ::: tip `MigratorKit` is an `EventEmitter`
 Subscribe to `run:start`, `run:end`, `migration:start`, `migration:success`, `migration:skipped`,
 `migration:error`, `lock:acquired`, `lock:released` and `lock:lost` to feed metrics or alerting
-without parsing log lines. See [Lifecycle Hooks → Events](/guide/hooks#events) for the payloads.
+without parsing log lines. See [Lifecycle Hooks → Events](/guide/hooks#events) for the payloads. For traces — spans that the
+MongoDB driver's own spans nest under — and ready-made OpenTelemetry metrics, pass
+[`telemetry`](/guide/opentelemetry) in the config instead.
 :::
 
 ## Common patterns

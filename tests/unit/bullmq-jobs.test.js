@@ -120,9 +120,16 @@ describe('buildMigrationJob / migrationJobOptions', () => {
     assert.deepStrictEqual(buildSyncJobTemplate(), {
       name: 'sync',
       data: { v: 1, kind: 'sync' },
-      opts: { attempts: 1 },
+      opts: { attempts: 1, telemetry: { omitContext: true } },
     });
     assert.strictEqual(buildSyncJobTemplate({ to: '0005-x.js' }).data.to, '0005-x.js');
+  });
+
+  it('should keep a scheduled tick out of the trace that registered the schedule', () => {
+    // BullMQ builds every iteration from the previous job's options: a trace
+    // context left there would chain all ticks into one endless trace.
+    assert.strictEqual(buildSyncJobTemplate().opts.telemetry.omitContext, true);
+    assert.ok(!('metadata' in buildSyncJobTemplate().opts.telemetry));
   });
 });
 

@@ -488,6 +488,18 @@ export interface CreateMigrationQueueOptions<
     Worker?: BullMQWorkerClass<W>;
     /** The `QueueEvents` class, or an instance. Needed by `wait()` */
     QueueEvents?: BullMQQueueEventsClass<E> | E;
+    /**
+     * BullMQ's own telemetry object — `new BullMQOtel({ tracerName })` from
+     * `bullmq-otel` — passed untouched to the Queue and the Worker this object
+     * constructs. It is what joins the trace of the process that enqueues to
+     * the one that applies. An injected Queue *instance* keeps whatever
+     * telemetry it was built with; `workerOptions.telemetry` and
+     * `startWorker({ telemetry })` override it for the worker.
+     *
+     * Not to be confused with the kit's own `config.telemetry` (a tracer and a
+     * meter for migronaut's spans and metrics).
+     */
+    telemetry?: object;
   };
   /**
    * BullMQ `connection` — connection options or your Redis client, passed

@@ -111,6 +111,21 @@ queue's group id. [src/utils/id.js](src/utils/id.js) is the **only** module allo
 `kit.generateId()`. The user's function is called bare (no arguments, no `this`) and must be
 synchronous; every returned id is checked (non-empty string, ≤ 128 chars).
 
+**OpenTelemetry is injected the same way.** The `telemetry` config option (`{ tracer, meter }`,
+code-only like `logger`) takes the user's own `@opentelemetry/api` objects; migronaut asks them for
+spans and instruments and never looks at the SDK behind them. [src/utils/telemetry.js](src/utils/telemetry.js)
+is the only module that knows an OpenTelemetry name or calls the tracer/meter — every call goes
+through its one `safe()` guard (telemetry must never break a run), failures are reported as a
+redacted status message plus `error.type`, and there are exactly two wrap sites, both in
+`core/migrator.js`: the `migronaut.run` span (opened once the lock is held) and the
+`migronaut.migration` span (the *active* span while a migration runs — the one thing lifecycle
+events cannot provide). Nothing under `src/` or `bin/` may `require` an `@opentelemetry/*` package or
+`bullmq-otel`, and neither `.d.ts` may import one (a unit test greps for it); the types are
+structural (`MigronautTracer`, `MigronautMeter`, …). BullMQ's own telemetry object rides in with the
+classes — `bullmq: { Queue, Worker, telemetry }` — and is passed through untouched.
+`@opentelemetry/api`, `@opentelemetry/sdk-trace-node`, `@opentelemetry/sdk-metrics`,
+`@opentelemetry/instrumentation-mongodb` and `bullmq-otel` are devDependencies only, for the tests.
+
 ## Repository layout
 
 ```
@@ -123,13 +138,13 @@ src/
 ├── index.js                # Public API barrel — re-exported at the package root
 ├── errors/index.js          # MigronautError base + one subclass per error code
 ├── core/                     # The engine (config, lock, lock-wait, changelog, runner, context, import, migrator, run)
-├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id — pure-ish helpers
+├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id, telemetry — pure-ish helpers
 ├── cli/                        # own arg parser (args.js) + spinner + table + one file per command
 └── bullmq/                      # Queue adapter: jobs (contract), producer, processor, wait, service (facade)
 tests/
 ├── unit/                # mocked DB, pure logic — node:test
 ├── integration/          # real in-memory MongoDB via mongodb-memory-server (replica set) — node:test
-├── helpers/              # incl. fake-bullmq.js (in-memory BullMQ double) + bullmq-scenarios.js
+├── helpers/              # incl. fake-bullmq.js (in-memory BullMQ double) + bullmq-scenarios.js + otel.js (real SDK, in-memory)
 └── types/                 # tsd type-tests against index.d.ts and bullmq.d.ts
 examples/               # Runnable example apps (migration-service) — own package.json, never published
 docs/                   # VitePress user-facing site — never published to npm
@@ -168,7 +183,7 @@ When adding new code, follow the right-hand column — there should be no more `
 pnpm run lint              # oxlint src bin scripts tests bench examples
 pnpm run format              # oxfmt src bin scripts tests bench examples
 pnpm run format:check          # oxfmt --check src bin scripts tests bench examples
-pnpm test                        # test:unit then test:integration (~1110 tests)
+pnpm test                        # test:unit then test:integration (~1200 tests)
 pnpm run test:unit                 # unit only — fast, no MongoDB
 pnpm run test:integration            # integration only, serial (--test-concurrency=1)
 node --test tests/integration/up.test.js   # single file
@@ -200,6 +215,9 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
   without the other.
 - Never `require('bullmq')` (or `ioredis`) under `src/`, and never import it in a `.d.ts` — the
   adapter works on what the caller injects.
+- Never `require('@opentelemetry/…')` (or `bullmq-otel`) under `src/` or `bin/`, and never import
+  one in a `.d.ts` — the tracer and meter are injected. Never call a tracer, span or instrument
+  outside `src/utils/telemetry.js`, and never `recordException` a raw error (it skips redaction).
 - Never call `randomUUID` (or mint an id any other way) outside `src/utils/id.js` — an id minted
   elsewhere is one the user's `generateId` cannot reach.
 - Single quotes, semicolons, 100-col lines, no unused vars/imports (oxlint/oxfmt-enforced).
@@ -227,7 +245,15 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
 - Type coverage of the public surface lives in `tests/types/*.test-d.ts`, checked by `tsd`
   (`pnpm run test:types`) — update these when `index.d.ts` or `bullmq.d.ts` changes.
   `bullmq.test-d.ts` is also where the real BullMQ classes are checked against the structural
-  `BullMQ*Like` types.
+  `BullMQ*Like` types, and `index.test-d.ts` where the real `@opentelemetry/api` types are checked
+  against `MigronautTracer` / `MigronautMeter` — part by part (span, options, instruments), since a
+  whole-tracer assignability check alone passes for almost any shape.
+- Telemetry is tested against the real OpenTelemetry SDK with in-memory exporters
+  (`tests/helpers/otel.js`). `startTracing()` registers the global context manager — without it no
+  span can be made active — which is safe only because `node:test` runs one process per file; stop
+  it in `after`. `tests/integration/telemetry-mongodb.test.js` loads the real driver
+  instrumentation and must do so **before** anything requires `mongodb` (its first lines). The
+  cross-process trace is BullMQ's doing, so it is asserted only in the opt-in real-Redis file.
 
 ## Things that look like bugs but aren't
 
@@ -243,4 +269,13 @@ as `skipped`; and non-retryable errors are renamed `UnrecoverableError` only whe
 `generateId` is called with **no** arguments on purpose (a "purpose" argument would be read by
 `ulid`/`nanoid` as their own first parameter), and the lock document carries a migronaut-minted
 `nonce` next to `owner` — the owner is the user-shaped run id, so mutual exclusion must not depend
-on it. Don't "fix" these without checking the doc first.
+on it. For telemetry: a run that never got the lock emits **no span** (lock-wait polling retries
+the whole run every ~500ms — the refusals are counted in `migronaut.lock.refused` instead), so the
+run span opens inside `runWithLock`'s callback
+and the lock's own driver commands sit outside it; the span status code is the literal `2` and
+`recordException` is never called (the enum lives in a package migronaut does not import, and a raw
+exception would skip redaction); status is never set to OK; `telemetry.open` takes its result from
+the callback rather than the tracer and tracks whether it ran, which is what stops a broken tracer
+from skipping or double-running a migration; and the scheduled `sync` job template carries
+`telemetry: { omitContext: true }`, without which every scheduler tick joins one endless trace.
+Don't "fix" these without checking the doc first.

@@ -44,7 +44,8 @@ change before it touches your database.
 ## Reasons to choose it
 
 - **Zero dependencies** — no runtime dependencies at all; only the `mongodb` driver as a peer
-  (Mongoose and BullMQ are optional integrations you inject — never installed for you).
+  (Mongoose, BullMQ and OpenTelemetry are optional integrations you inject — never installed for
+  you).
   Instant installs, nothing extra in your lockfile, no supply-chain surface.
 - **Run a single migration** — `migronaut up <file>`, not just "all pending".
 - **Roll back anything** — a batch (`--batch 3`), the last N (`--steps 2`), one file, or `redo`.
@@ -65,6 +66,9 @@ change before it touches your database.
 - **Your id format** — run ids and queue group ids are random UUIDs by default; pass
   `generateId: ulid` (or cuid2, nanoid, UUIDv7 — any `() => string`) and every id migronaut mints
   comes from your generator.
+- **OpenTelemetry (optional)** — pass a tracer and a meter from your own `@opentelemetry/api`: a
+  span per run and per migration, active while the migration runs, so an instrumented MongoDB
+  driver nests its command spans under the migration that issued them — plus duration metrics.
 - **Migrations as a queue (optional)** — `@alexify/migronaut/bullmq` runs each migration as its own
   BullMQ job, in order, so migronaut can be a migration service: trigger it over HTTP, on a
   schedule, or from a deploy hook that waits for the result.
@@ -169,7 +173,7 @@ Full docs, guides, and the API reference live at
 - [Core Concepts](https://migronaut.vercel.app/guide/concepts) — migrations, batches, the changelog, locking
 - [Getting Started](https://migronaut.vercel.app/guide/getting-started) & [Tutorial](https://migronaut.vercel.app/guide/tutorial)
 - [Configuration](https://migronaut.vercel.app/guide/configuration) · [Writing Migrations](https://migronaut.vercel.app/guide/writing-migrations) · [Transactions](https://migronaut.vercel.app/guide/transactions) · [Hooks](https://migronaut.vercel.app/guide/hooks)
-- [Programmatic API](https://migronaut.vercel.app/guide/api) · [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq) · [CI/CD](https://migronaut.vercel.app/guide/ci-cd) · [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting)
+- [Programmatic API](https://migronaut.vercel.app/guide/api) · [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq) · [OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry) · [CI/CD](https://migronaut.vercel.app/guide/ci-cd) · [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting)
 - Reference: [CLI Cheatsheet](https://migronaut.vercel.app/reference/cli) · [Error Codes](https://migronaut.vercel.app/reference/error-codes)
 
 ---
@@ -693,6 +697,7 @@ export default {
   // mongoose: myMongooseInstance, // pass if your migrations use Mongoose models
   // logger: null,                 // null silences all output; a pino instance works directly
   // generateId: ulid,             // your id format for run ids — any sync `() => string`
+  // telemetry: { tracer, meter }, // OpenTelemetry, from your own @opentelemetry/api
 };
 ```
 
@@ -720,6 +725,52 @@ It is called with no arguments and must synchronously return a non-empty string 
 characters; anything else fails the run with `CONFIG_INVALID` before a migration starts. Ids are
 for correlation only — the lock carries a token of its own, so a generator that repeats a value
 can never let two runs hold the lock at once.
+
+</details>
+
+<details>
+<summary><b>OpenTelemetry</b> — a span per run and per migration, and their durations as metrics</summary>
+
+<br>
+
+Pass a tracer and/or a meter from your own `@opentelemetry/api` — migronaut never imports it:
+
+```js
+const { metrics, trace } = require('@opentelemetry/api');
+const { runMigrations } = require('@alexify/migronaut');
+
+await runMigrations({
+  uri: process.env.MIGRONAUT_URI,
+  dbName: 'my_app',
+  telemetry: {
+    tracer: trace.getTracer('@alexify/migronaut'),
+    meter: metrics.getMeter('@alexify/migronaut'),
+  },
+});
+```
+
+```
+migronaut.run                          one per run, once it holds the lock
+└─ migronaut.migration                 one per migration — the ACTIVE span while it runs
+   ├─ insert users                     ← your instrumented MongoDB driver nests here
+   └─ update _migronaut_migrations
+```
+
+That nesting is the point. An instrumented driver only records a command that has a parent span,
+and a migration run at application startup has none — so without this, the driver's spans for your
+migrations are simply missing. A [lifecycle event](#advanced-features) can tell you a migration
+started; only a span opened inside the kit can be the parent of what it does next.
+
+The meter gets `migronaut.run.duration`, `migronaut.migration.duration` and
+`migronaut.lock.acquire.duration` (histograms, seconds), plus the counters `migronaut.lock.refused`
+and `migronaut.lock.lost`. A failure sets the span's status to `ERROR` — with the message redacted
+like every log line — and `error.type` to the typed error code. A tracer or meter that throws never
+fails a run.
+
+Through the [BullMQ adapter](https://migronaut.vercel.app/guide/bullmq), add
+`bullmq: { Queue, Worker, telemetry: new BullMQOtel({ tracerName }) }` and one trace runs from the
+request that enqueued to the MongoDB commands in the worker. Full guide:
+[OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry).
 
 </details>
 
@@ -774,8 +825,8 @@ optional rather than merely discouraged:
 | `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` | `false` |
 | `MIGRONAUT_ENV_FILE` | `envFile` | `.env` |
 
-`fileExtensions`, `clientOptions`, `client`, `mongoose`, `hooks`, `logger` and `generateId` are
-config-file/API only — they aren't scalars, so no environment variable can express them.
+`fileExtensions`, `clientOptions`, `client`, `mongoose`, `hooks`, `logger`, `generateId` and
+`telemetry` are config-file/API only — they aren't scalars, so no environment variable can express them.
 
 A value that doesn't parse is **rejected, never coerced**: `MIGRONAUT_STRICT=on` or
 `MIGRONAUT_LOCK_TTL=abc` fails with an error naming the variable, rather than quietly turning a

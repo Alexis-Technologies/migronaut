@@ -20,9 +20,11 @@ There is no build step, ever. What you edit in `src/` and `bin/` is what ships.
 stays that way. `.env` parsing, colors, the spinner, the argument parser, the
 table renderer and config validation are all hand-rolled in `src/utils` and
 `src/cli` for exactly this reason. Third-party integrations are *injected* by
-the user instead — a pino instance passes straight into `config.logger`, and the
-BullMQ classes into `createMigrationQueue({ bullmq })`. Nothing under `src/` may
-`require('bullmq')`; a unit test greps for it. devDependencies are fine.
+the user instead — a pino instance passes straight into `config.logger`, the
+BullMQ classes into `createMigrationQueue({ bullmq })`, and an OpenTelemetry
+tracer and meter into `config.telemetry`. Nothing under `src/` may
+`require('bullmq')` or an `@opentelemetry/*` package; unit tests grep for both.
+devDependencies are fine.
 
 **2. Plain CommonJS in `src/` and `bin/`.** `require`/`module.exports`, no
 `import`/`export`, no TypeScript syntax. JSDoc is documentation for the reader,

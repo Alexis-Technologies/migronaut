@@ -59,6 +59,7 @@ class MigrationQueue {
   #prefix;
   #jobOptions;
   #workerOptions;
+  #telemetry;
   #globalConcurrency;
   #closing;
 
@@ -85,7 +86,16 @@ class MigrationQueue {
         'bullmq is required — pass { Queue, Worker, QueueEvents } from your own bullmq install',
       );
     }
-    const { Queue, Worker, QueueEvents } = bullmq;
+    const { Queue, Worker, QueueEvents, telemetry } = bullmq;
+    // BullMQ's own telemetry object (`new BullMQOtel(…)`), handed to the Queue
+    // and the Worker untouched — it is what carries a trace from the process
+    // that enqueues to the one that applies. Nothing here looks inside it.
+    if (telemetry !== undefined && (typeof telemetry !== 'object' || telemetry === null)) {
+      throw new ConfigInvalidError(
+        'bullmq.telemetry must be a BullMQ telemetry object — e.g. new BullMQOtel(…)',
+        { telemetry: typeof telemetry },
+      );
+    }
     const queueIsInstance = isPlainObject(Queue) && typeof Queue.addBulk === 'function';
     if (!isClass(Queue) && !queueIsInstance) {
       throw new ConfigInvalidError('bullmq.Queue must be the Queue class or a Queue instance');
@@ -125,6 +135,7 @@ class MigrationQueue {
     this.#prefix = prefix;
     this.#jobOptions = jobOptions;
     this.#workerOptions = workerOptions;
+    this.#telemetry = telemetry;
     this.#globalConcurrency = globalConcurrency;
     this.#WorkerClass = Worker;
     this.#queueEventsSource = QueueEvents;
@@ -144,7 +155,11 @@ class MigrationQueue {
     this.#ownsQueue = !queueIsInstance;
     this.#queue = queueIsInstance
       ? Queue
-      : new Queue(resolvedName, { connection, ...(prefix !== undefined ? { prefix } : {}) });
+      : new Queue(resolvedName, {
+          connection,
+          ...(prefix !== undefined ? { prefix } : {}),
+          ...(telemetry !== undefined ? { telemetry } : {}),
+        });
     this.#listen(this.#queue, 'error', (error) =>
       this.#kit.logger.error(`✖ Migration queue error: ${errorText(error)}`, {
         queue: resolvedName,
@@ -315,6 +330,9 @@ class MigrationQueue {
       ...(this.#prefix !== undefined ? { prefix: this.#prefix } : {}),
       lockDuration: DEFAULT_LOCK_DURATION_MS,
       maxStalledCount: DEFAULT_MAX_STALLED_COUNT,
+      // Before the worker options, so a `telemetry` given there (or to this
+      // call) still wins for the worker alone.
+      ...(this.#telemetry !== undefined ? { telemetry: this.#telemetry } : {}),
       ...this.#workerOptions,
       ...overrides,
       concurrency: 1,

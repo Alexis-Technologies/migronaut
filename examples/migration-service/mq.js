@@ -1,5 +1,7 @@
 const path = require('node:path');
+const { metrics, trace } = require('@opentelemetry/api');
 const { Queue, QueueEvents, Worker } = require('bullmq');
+const { BullMQOtel } = require('bullmq-otel');
 const IORedis = require('ioredis');
 const { createMigrationQueue } = require('@alexify/migronaut/bullmq');
 
@@ -19,9 +21,26 @@ const connection = new IORedis(process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
 
 const mq = createMigrationQueue({
   // The connection string and database come from MIGRONAUT_URI / MIGRONAUT_DB.
-  config: { migrationsDir: path.join(__dirname, 'migrations') },
+  config: {
+    migrationsDir: path.join(__dirname, 'migrations'),
+    // OpenTelemetry is injected like everything else: a tracer and a meter from
+    // this app's own @opentelemetry/api. Until tracing.js starts an SDK both
+    // are no-ops, so this costs nothing when tracing is off. (The meter stays a
+    // no-op here even with tracing on — the example SDK has no metric reader.)
+    telemetry: {
+      tracer: trace.getTracer('@alexify/migronaut'),
+      meter: metrics.getMeter('@alexify/migronaut'),
+    },
+  },
   // BullMQ is injected: migronaut never imports it, so this app decides the version.
-  bullmq: { Queue, Worker, QueueEvents },
+  // `telemetry` is BullMQ's own — it is what carries a trace from the process
+  // that enqueues to the worker that applies, and it goes to both.
+  bullmq: {
+    Queue,
+    Worker,
+    QueueEvents,
+    telemetry: new BullMQOtel({ tracerName: 'migration-service' }),
+  },
   connection,
   // One queue per database. A second database is a second createMigrationQueue
   // with its own queueName.

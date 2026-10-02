@@ -413,6 +413,64 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
   });
 
+  it('should trace a run through the telemetry from the config file', async () => {
+    // Like generateId, a tracer cannot come from a flag or an env var. The
+    // double here writes each finished span to a file, and a `beforeExit`
+    // marker proves the CLI lets the event loop drain — which is what gives a
+    // real SDK its chance to flush before the process ends.
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const cwdDir = path.join(project.dir, 'app');
+    mkdirSync(cwdDir);
+    const out = path.join(cwdDir, 'spans.log');
+    writeFileSync(
+      path.join(cwdDir, 'migronaut.config.js'),
+      [
+        "import { appendFileSync } from 'node:fs';",
+        `const out = ${JSON.stringify(out)};`,
+        "process.on('beforeExit', () => appendFileSync(out, 'beforeExit\\n'));",
+        'const tracer = {',
+        '  startActiveSpan: (name, options, fn) =>',
+        '    fn({',
+        '      setAttribute() {},',
+        '      setStatus() {},',
+        "      end: () => appendFileSync(out, name + ' ' + (options.attributes['migronaut.migration.name'] ?? '') + '\\n'),",
+        '    }),',
+        '};',
+        'export default {',
+        `  uri: ${JSON.stringify(mongo.uri)},`,
+        `  dbName: ${JSON.stringify(DB)},`,
+        `  migrationsDir: ${JSON.stringify(project.dir)},`,
+        '  telemetry: { tracer },',
+        '};',
+        '',
+      ].join('\n'),
+    );
+    const up = await runCli(['up'], {}, cwdDir);
+    assert.strictEqual(up.code, 0);
+    assert.deepStrictEqual(readFileSync(out, 'utf8').trim().split('\n'), [
+      'migronaut.migration 0001-a.ts',
+      'migronaut.run ',
+      'beforeExit',
+    ]);
+  });
+
+  it('should reject a telemetry that is not an object as CONFIG_INVALID', async () => {
+    // All a JSON config can say — and a tracer is not something JSON can hold.
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    writeFileSync(
+      path.join(project.dir, 'migronaut.config.json'),
+      JSON.stringify({ telemetry: 'otel' }),
+    );
+    const result = await runCli(baseArgs(['up', '--json']), {}, project.dir);
+    assert.strictEqual(result.code, 6);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.error.code, 'CONFIG_INVALID');
+    assert.deepStrictEqual(parsed.error.context.issues, [
+      { path: 'telemetry', message: 'must be an object' },
+    ]);
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+  });
+
   it('should render a status table', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await runCli(baseArgs(['up']));

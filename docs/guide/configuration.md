@@ -104,6 +104,7 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `hooks` | `MigrationHooks` | — | [Lifecycle hooks](/guide/hooks) |
 | `logger` | `MigronautLogger \| null` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` silences all output |
 | `generateId` | `() => string` | `crypto.randomUUID()` | Your own id format (ULID, CUID, UUIDv7, …) for every id migronaut mints — see [Custom id format](#custom-id-format) |
+| `telemetry` | `{ tracer?, meter? }` | — | An OpenTelemetry tracer and/or meter from your own `@opentelemetry/api`: a span per run and per migration, and their durations as metrics — see [OpenTelemetry](/guide/opentelemetry) |
 
 Log methods receive an optional second argument with structured fields —
 `{ runId, migration, direction, batch, durationMs }` — so a machine-readable
@@ -202,8 +203,8 @@ config file is never required" literally true, not just a slogan. These
 | `MIGRONAUT_ENV_FILE` | `envFile` |
 
 The remaining options — `fileExtensions`, `clientOptions`, `generateId`, and the
-live instances `client`, `mongoose`, `hooks`, `logger` — are config-file/API
-only. They hold arrays, objects, functions or live handles, which a single
+live instances `client`, `mongoose`, `hooks`, `logger`, `telemetry` — are
+config-file/API only. They hold arrays, objects, functions or live handles, which a single
 environment string cannot express.
 
 ::: warning Values are rejected, never coerced

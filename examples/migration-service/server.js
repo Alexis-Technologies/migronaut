@@ -1,3 +1,5 @@
+// First, before `node:http` and the MongoDB driver are loaded — see tracing.js.
+const { shutdownTracing } = require('./tracing.js');
 const http = require('node:http');
 const { MigronautError } = require('@alexify/migronaut');
 const { connection, mq } = require('./mq.js');
@@ -170,6 +172,9 @@ async function shutdown(signal) {
   if (server.listening) await new Promise((resolve) => server.close(resolve));
   await mq.close();
   await connection.quit();
+  // Last: the spans of the migration that just finished are still in the
+  // exporter's batch, and process.exit() below would drop them.
+  await shutdownTracing();
 }
 
 for (const signal of ['SIGTERM', 'SIGINT']) {

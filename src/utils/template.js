@@ -355,7 +355,15 @@ function configBody(values, createExtension) {
   // Run ids are random UUIDs. Pass a generator for another format (ULID,
   // CUID, …): called with no arguments, it must return a unique string
   // synchronously — so \`generateId: ulid\` works as is.
-  // generateId: () => crypto.randomUUID(),`;
+  // generateId: () => crypto.randomUUID(),
+
+  // ── OpenTelemetry (code only — not available in JSON config) ──
+  // Pass a tracer and/or a meter from your own @opentelemetry/api: every run
+  // and every migration becomes a span, and their durations become metrics.
+  // telemetry: {
+  //   tracer: trace.getTracer('@alexify/migronaut'),
+  //   meter: metrics.getMeter('@alexify/migronaut'),
+  // },`;
 }
 
 /** The built-in TypeScript config template */
@@ -394,8 +402,8 @@ ${exportStatement(esm, 'config')}
 
 /**
  * The built-in JSON config template. JSON cannot hold comments or functions, so
- * the `hooks`, `mongoose`, `logger` and `generateId` options are unavailable
- * here — use a `.ts`/`.js` config if you need them.
+ * the `hooks`, `mongoose`, `logger`, `generateId` and `telemetry` options are
+ * unavailable here — use a `.ts`/`.js` config if you need them.
  */
 function defaultConfigJson(values = {}) {
   const { uri, dbName, migrationsDir } = configFields(values);

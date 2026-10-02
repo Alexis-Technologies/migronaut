@@ -142,5 +142,155 @@ describe(
         project.cleanup();
       }
     });
+
+    // ─── Tracing, end to end ─────────────────────────────────────────────────
+    // The fake models none of this — it is BullMQ's own telemetry doing the
+    // propagation, so only the real library can say whether the trace joins up.
+
+    describe('with OpenTelemetry', () => {
+      let tracing;
+      let telemetry;
+      let parentIdOf;
+
+      before(() => {
+        // `register()` installs the propagator as well as the context manager:
+        // without it BullMQ has nothing to write into the job, and the worker's
+        // span starts a trace of its own.
+        const otel = require('../helpers/otel.js');
+        parentIdOf = otel.parentIdOf;
+        tracing = otel.startTracing();
+        const { BullMQOtel } = require('bullmq-otel');
+        telemetry = new BullMQOtel({ tracerName: 'migronaut-test' });
+      });
+
+      after(async () => {
+        await tracing?.stop();
+      });
+
+      const idOf = (span) => span.spanContext().spanId;
+      const traceOf = (span) => span.spanContext().traceId;
+
+      it('should carry one trace from the enqueue to the migration', async () => {
+        const project = makeProject();
+        const prefix = harness.prefix();
+        project.write('0001-a.js', insertMigration('things', 'a'));
+        await mongo.db.dropDatabase();
+        tracing.reset();
+        const mq = createMigrationQueue({
+          config: {
+            uri: mongo.uri,
+            dbName: DB,
+            migrationsDir: project.dir,
+            logger: null,
+            telemetry: { tracer: tracing.tracer },
+          },
+          bullmq: { ...harness.bullmq(), telemetry },
+          connection,
+          prefix,
+        });
+        try {
+          // Outside any span, as the guide says: a worker started inside one
+          // would hang its background work under it.
+          await mq.startWorker();
+          const group = await tracing.tracer.startActiveSpan(
+            'POST /migrations/up',
+            async (span) => {
+              try {
+                return await mq.enqueueUp();
+              } finally {
+                span.end();
+              }
+            },
+          );
+          const { results } = await group.wait({ timeoutMs: 15_000 });
+          assert.strictEqual(results[0].status, 'applied');
+        } finally {
+          // BullMQ ends the `process` span after the job is moved to completed,
+          // which can be after wait() resolves — closing the worker settles it.
+          await mq.queue.obliterate({ force: true });
+          await mq.close();
+          project.cleanup();
+        }
+
+        const [request] = tracing.named('POST /migrations/up');
+        const [produced] = tracing.spans().filter((span) => span.name.startsWith('addBulk '));
+        const [consumed] = tracing.spans().filter((span) => span.name.startsWith('process '));
+        const [run] = tracing.named('migronaut.run');
+        const [migration] = tracing.named('migronaut.migration');
+        for (const [name, span] of Object.entries({
+          request,
+          produced,
+          consumed,
+          run,
+          migration,
+        })) {
+          assert.ok(span, `expected a ${name} span`);
+          assert.strictEqual(traceOf(span), traceOf(request), `${name} is in the request's trace`);
+        }
+        assert.strictEqual(parentIdOf(produced), idOf(request));
+        assert.strictEqual(parentIdOf(consumed), idOf(produced));
+        assert.strictEqual(parentIdOf(run), idOf(consumed));
+        assert.strictEqual(parentIdOf(migration), idOf(run));
+        assert.strictEqual(migration.attributes['migronaut.migration.name'], '0001-a.js');
+      });
+
+      it('should start a trace per scheduler tick, with its migrations under it', async () => {
+        const project = makeProject();
+        const prefix = harness.prefix();
+        project.write('0001-a.js', insertMigration('things', 'a'));
+        await mongo.db.dropDatabase();
+        tracing.reset();
+        const mq = createMigrationQueue({
+          config: {
+            uri: mongo.uri,
+            dbName: DB,
+            migrationsDir: project.dir,
+            logger: null,
+            telemetry: { tracer: tracing.tracer },
+          },
+          bullmq: { ...harness.bullmq(), telemetry },
+          connection,
+          prefix,
+        });
+        const syncs = [];
+        try {
+          const worker = await mq.startWorker();
+          const twoTicks = new Promise((resolve) => {
+            worker.on('completed', (job) => {
+              if (job.name === 'sync' && syncs.push(job.id) === 2) resolve();
+            });
+          });
+          // Registered inside a span — the trace every tick would otherwise join.
+          await tracing.tracer.startActiveSpan('deploy', async (span) => {
+            try {
+              await mq.schedule({ every: 400 });
+            } finally {
+              span.end();
+            }
+          });
+          await twoTicks;
+          await mq.unschedule();
+        } finally {
+          await mq.queue.obliterate({ force: true });
+          await mq.close();
+          project.cleanup();
+        }
+
+        const [deploy] = tracing.named('deploy');
+        const processed = tracing.spans().filter((span) => span.name.startsWith('process '));
+        const ticks = processed.filter((span) => span.attributes['bullmq.job.name'] === 'sync');
+        assert.ok(ticks.length >= 2, `expected two ticks, saw ${ticks.length}`);
+        const traces = new Set(ticks.map(traceOf));
+        assert.strictEqual(traces.size, ticks.length, 'every tick is a trace of its own');
+        assert.ok(!traces.has(traceOf(deploy)), 'and none of them is the trace that scheduled it');
+        for (const tick of ticks) assert.strictEqual(parentIdOf(tick), undefined);
+
+        // The first tick found a pending migration and enqueued it: that job,
+        // and the migration it ran, belong to the tick's trace.
+        const [migration] = tracing.named('migronaut.migration');
+        assert.ok(migration, 'the scheduled sync applied the pending migration');
+        assert.ok(traces.has(traceOf(migration)));
+      });
+    });
   },
 );
