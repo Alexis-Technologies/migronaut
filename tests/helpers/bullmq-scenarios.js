@@ -662,12 +662,17 @@ function defineBullMQScenarios(harness) {
     const [view] = await settled(mq, [sync.id]);
     assert.strictEqual(view.returnvalue.groupId, 'sync_1');
 
+    // Wait for the changelog record itself, not the migration's marker: the
+    // body writes the marker first and the record after, so the marker being
+    // there says nothing yet about the record.
     const deadline = Date.now() + 10_000;
-    while ((await markers()).length < 1 && Date.now() < deadline) {
+    let written = await records();
+    while (written.length < 1 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 15));
+      written = await records();
     }
     assert.deepStrictEqual(
-      (await records()).map((record) => record.runId),
+      written.map((record) => record.runId),
       ['sync_2'],
     );
   });
