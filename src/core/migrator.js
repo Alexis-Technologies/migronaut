@@ -1,4 +1,3 @@
-const { randomUUID } = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -22,6 +21,7 @@ const {
 const { computeChecksum } = require('../utils/checksum.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
+const { createIdGenerator } = require('../utils/id.js');
 const { loadMigrationFile } = require('../utils/loader.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { isBareFilename } = require('../utils/migration-name.js');
@@ -69,6 +69,8 @@ class MigratorKit extends EventEmitter {
   #runSetupDepth = 0;
   /** Correlation id for the run in flight — ties logs, lock and changelog together */
   #runId;
+  /** Mints an id in the configured format (`generateId`, else a UUID); set with the config */
+  #newId;
   /** Whether changelog indexes have already been ensured on this instance */
   #indexesEnsured = false;
   /** Memoized resolved logger — resolveLogger allocates on every call otherwise */
@@ -170,6 +172,7 @@ class MigratorKit extends EventEmitter {
         ...(this.#cwd ? { cwd: this.#cwd } : {}),
         ...(this.#fallbackLogger !== undefined ? { fallbackLogger: this.#fallbackLogger } : {}),
       });
+      this.#newId = createIdGenerator(this.#config.generateId);
     }
     return this.#config;
   }
@@ -357,8 +360,10 @@ class MigratorKit extends EventEmitter {
     }
     // One id per run, reused as the lock's owner token and stamped on every
     // changelog record and log line, so the three can be correlated after the
-    // fact ("which run left this lock?", "what did run X apply?").
-    this.#runId = randomUUID();
+    // fact ("which run left this lock?", "what did run X apply?"). Minted
+    // before any other run state exists: a `generateId` that throws or returns
+    // a non-id rejects here, leaving nothing to unwind and no event emitted.
+    this.#runId = this.#newId();
     // A second controller layered over the lock's own signal, so stop() and a
     // lost lock abort through the same path the run loops already watch.
     const stopper = new AbortController();
@@ -502,6 +507,17 @@ class MigratorKit extends EventEmitter {
     await this.#ensureConfig();
     await this.connect();
     return this.#nextBatch();
+  }
+
+  /**
+   * A new id in the format this kit is configured with — the `generateId`
+   * option, else a random UUID. It is what every run id comes from; exposed so
+   * a layer above the kit (the queue adapter's group ids) mints its own ids in
+   * the same format without being configured a second time. Does not connect.
+   */
+  async generateId() {
+    await this.#ensureConfig();
+    return this.#newId();
   }
 
   /** Internal accessors that assume a successful connect() */

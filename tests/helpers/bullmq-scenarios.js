@@ -208,6 +208,48 @@ function defineBullMQScenarios(harness) {
     );
   });
 
+  it('should mint group ids and run ids in the configured id format', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    write('0002-b.js', insertMigration('things', 'b'));
+    let count = 0;
+    const mq = createQueue({ config: { generateId: () => `mq_${++count}` } });
+
+    // One generator for the whole deployment: the enqueue call asks the kit…
+    const group = await mq.enqueueUp();
+    assert.strictEqual(group.groupId, 'mq_1');
+    const queued = await mq.getJob(group.jobs[1].id);
+    assert.strictEqual(queued.data.groupId, 'mq_1');
+
+    await mq.startWorker();
+    const waited = await group.wait({ timeoutMs: 10_000 });
+    assert.strictEqual(waited.groupId, 'mq_1');
+    // …and so does every job, each being a run of its own.
+    assert.deepStrictEqual(
+      waited.results.map((result) => result.runId),
+      ['mq_2', 'mq_3'],
+    );
+    assert.deepStrictEqual(
+      (await records()).map((record) => record.runId),
+      ['mq_2', 'mq_3'],
+    );
+  });
+
+  it('should refuse to enqueue when the configured generator returns no usable id', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue({ config: { generateId: () => '' } });
+    await assert.rejects(mq.enqueueUp(), (error) => {
+      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      assert.match(error.message, /non-empty string/);
+      return true;
+    });
+    // Refused as a whole — not a group of jobs a worker would reject one by one.
+    assert.deepStrictEqual(
+      (await mq.pending()).map((row) => row.file),
+      ['0001-a.js'],
+    );
+    assert.deepStrictEqual(await records(), []);
+  });
+
   it('should apply only up to `to`, and one named file on request', async () => {
     three();
     const mq = createQueue();
@@ -608,6 +650,26 @@ function defineBullMQScenarios(harness) {
     const [second] = await settled(mq, [again.id]);
     assert.strictEqual(second.returnvalue.upToDate, true);
     assert.strictEqual(second.returnvalue.enqueued, 0);
+  });
+
+  it('should mint the group of a sync job in the configured id format', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    let count = 0;
+    const mq = createQueue({ config: { generateId: () => `sync_${++count}` } });
+    await mq.startWorker();
+    // The group is planned inside the worker, so its id comes from the worker's kit.
+    const sync = await mq.queue.add('sync', { v: 1, kind: 'sync' }, { attempts: 1 });
+    const [view] = await settled(mq, [sync.id]);
+    assert.strictEqual(view.returnvalue.groupId, 'sync_1');
+
+    const deadline = Date.now() + 10_000;
+    while ((await markers()).length < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    assert.deepStrictEqual(
+      (await records()).map((record) => record.runId),
+      ['sync_2'],
+    );
   });
 
   it('should register and remove a schedule', async () => {

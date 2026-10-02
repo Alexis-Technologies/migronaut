@@ -62,6 +62,9 @@ change before it touches your database.
 - **Zero config files required** — drive everything from env vars if you prefer.
 - **Pino-friendly logging** — the `logger` option is pino-compatible; pass a pino instance directly
   and migronaut logs through it (with a `component: 'migronaut'` child binding).
+- **Your id format** — run ids and queue group ids are random UUIDs by default; pass
+  `generateId: ulid` (or cuid2, nanoid, UUIDv7 — any `() => string`) and every id migronaut mints
+  comes from your generator.
 - **Migrations as a queue (optional)** — `@alexify/migronaut/bullmq` runs each migration as its own
   BullMQ job, in order, so migronaut can be a migration service: trigger it over HTTP, on a
   schedule, or from a deploy hook that waits for the result.
@@ -689,8 +692,36 @@ export default {
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
   // mongoose: myMongooseInstance, // pass if your migrations use Mongoose models
   // logger: null,                 // null silences all output; a pino instance works directly
+  // generateId: ulid,             // your id format for run ids — any sync `() => string`
 };
 ```
+
+<details>
+<summary><b>Custom id format</b> — ULID, CUID, UUIDv7 or anything else instead of UUIDs</summary>
+
+<br>
+
+Every run gets a `runId` — stamped on its changelog records, events and log lines, and stored as
+the lock's owner token — and every queue enqueue gets a `groupId`. Both are `crypto.randomUUID()`
+by default. Pass `generateId` to mint them with the generator the rest of your system uses:
+
+```js
+const { ulid } = require('ulid');
+const { runMigrations } = require('@alexify/migronaut');
+
+await runMigrations({
+  uri: process.env.MIGRONAUT_URI,
+  dbName: 'my_app',
+  generateId: ulid, // createId (cuid2), nanoid, uuidv7 … pass straight through
+});
+```
+
+It is called with no arguments and must synchronously return a non-empty string of at most 128
+characters; anything else fails the run with `CONFIG_INVALID` before a migration starts. Ids are
+for correlation only — the lock carries a token of its own, so a generator that repeats a value
+can never let two runs hold the lock at once.
+
+</details>
 
 <details>
 <summary><b>Structured logging with pino</b> — the logger option is pino-compatible</summary>
@@ -743,8 +774,8 @@ optional rather than merely discouraged:
 | `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` | `false` |
 | `MIGRONAUT_ENV_FILE` | `envFile` | `.env` |
 
-`fileExtensions`, `clientOptions`, `client`, `mongoose`, `hooks` and `logger` are config-file/API
-only — they aren't scalars, so no environment variable can express them.
+`fileExtensions`, `clientOptions`, `client`, `mongoose`, `hooks`, `logger` and `generateId` are
+config-file/API only — they aren't scalars, so no environment variable can express them.
 
 A value that doesn't parse is **rejected, never coerced**: `MIGRONAUT_STRICT=on` or
 `MIGRONAUT_LOCK_TTL=abc` fails with an error naming the variable, rather than quietly turning a

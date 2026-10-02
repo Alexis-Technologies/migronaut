@@ -349,7 +349,13 @@ function configBody(values, createExtension) {
   //   beforeEach: async (name, ctx, info) => {},    // info: { direction, index, total }
   //   afterEach: async (name, duration, ctx, info) => {},
   //   onError: async (name, error, ctx) => {},
-  // },`;
+  // },
+
+  // ── Identifiers (code only — not available in JSON config) ──
+  // Run ids are random UUIDs. Pass a generator for another format (ULID,
+  // CUID, …): called with no arguments, it must return a unique string
+  // synchronously — so \`generateId: ulid\` works as is.
+  // generateId: () => crypto.randomUUID(),`;
 }
 
 /** The built-in TypeScript config template */
@@ -388,8 +394,8 @@ ${exportStatement(esm, 'config')}
 
 /**
  * The built-in JSON config template. JSON cannot hold comments or functions, so
- * the `hooks`, `mongoose`, and `logger` options are unavailable here — use a
- * `.ts`/`.js` config if you need them.
+ * the `hooks`, `mongoose`, `logger` and `generateId` options are unavailable
+ * here — use a `.ts`/`.js` config if you need them.
  */
 function defaultConfigJson(values = {}) {
   const { uri, dbName, migrationsDir } = configFields(values);

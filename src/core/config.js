@@ -62,8 +62,12 @@ function isStringList(value) {
 /**
  * Validation spec for every checked config key: predicate + failure message.
  * `mongoose`, `hooks`, `logger` and `client` are deliberately unchecked —
- * they hold live instances the validator has nothing to say about. Unknown
- * keys are allowed, matching the previous zod (non-strict object) behavior.
+ * they hold live instances the validator has nothing to say about.
+ * `generateId` is code-only too, but it has exactly one valid shape, so
+ * validateConfig checks it on its own rather than through this table (which a
+ * test pins against the JSON schema — and a function has no place there).
+ * Unknown keys are allowed, matching the previous zod (non-strict object)
+ * behavior.
  */
 const CONFIG_KEYS = [
   { path: 'uri', check: isNonEmptyString, message: 'uri is required' },
@@ -137,11 +141,11 @@ const CONFIG_KEYS = [
 
 /**
  * Every key the merged config legitimately carries: the validated ones plus
- * the deliberately-unchecked live instances. Used only to *mention* typos
- * (`migrationsDirectory`, `useTransactions`) at debug level — unknown keys
- * stay allowed, matching the documented non-strict contract.
+ * the code-only ones (the live instances and `generateId`). Used only to
+ * *mention* typos (`migrationsDirectory`, `useTransactions`) at debug level —
+ * unknown keys stay allowed, matching the documented non-strict contract.
  */
-const KNOWN_CONFIG_KEYS = new Set(['logger', 'hooks', 'mongoose', 'client']);
+const KNOWN_CONFIG_KEYS = new Set(['logger', 'hooks', 'mongoose', 'client', 'generateId']);
 for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
 
 /**
@@ -164,6 +168,12 @@ function validateConfig(config, options = {}) {
       continue;
     }
     if (!spec.check(value)) issues.push({ path: spec.path, message: spec.message });
+  }
+  // What it returns is checked on every call (utils/id.js); that it is callable
+  // at all is a config mistake — a JSON config's `"generateId": "ulid"` — and
+  // belongs with the others, before a run is started.
+  if (config.generateId !== undefined && typeof config.generateId !== 'function') {
+    issues.push({ path: 'generateId', message: 'must be a function' });
   }
   return issues;
 }
@@ -243,7 +253,8 @@ const parseString = (value) => value;
  * Every *scalar* config option has an entry here, which is what makes the
  * documented "a config file is never required" promise literally true. Options
  * holding non-scalars — `fileExtensions`, `clientOptions`, `client`, `mongoose`,
- * `hooks`, `logger` — are config-file/API only; an env var cannot express them.
+ * `hooks`, `logger`, `generateId` — are config-file/API only; an env var cannot
+ * express them.
  *
  * MIGRONAUT_ENV_FILE is deliberately absent: it selects which .env file to load,
  * so it has to be read before this table can run (see loadConfig).
@@ -470,10 +481,11 @@ async function loadConfig(options = {}) {
   }
 
   // "Which config did it actually pick up?" — the merged result, once, at
-  // debug level. Live instances (client, mongoose, hooks, logger) are elided:
-  // they are not serializable and redactDeep rightly refuses to clone them.
+  // debug level. Live instances (client, mongoose, hooks, logger) and the
+  // generateId function are elided: they are not serializable and redactDeep
+  // rightly refuses to clone them.
   {
-    const { client, mongoose, hooks, logger, ...rest } = config;
+    const { client, mongoose, hooks, logger, generateId, ...rest } = config;
     effectiveLogger(config.logger).debug(
       `Resolved config (source: ${configFilePath ? path.basename(configFilePath) : 'env/flags/defaults'})`,
       redactDeep({
@@ -482,6 +494,7 @@ async function loadConfig(options = {}) {
         ...(mongoose ? { mongoose: '[injected]' } : {}),
         ...(hooks ? { hooks: Object.keys(hooks) } : {}),
         ...(logger !== undefined ? { logger: logger === null ? null : '[injected]' } : {}),
+        ...(generateId ? { generateId: '[injected]' } : {}),
       }),
     );
   }

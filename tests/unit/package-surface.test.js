@@ -1,4 +1,4 @@
-const { readFileSync } = require('node:fs');
+const { readFileSync, readdirSync } = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
@@ -6,6 +6,21 @@ const { describe, it } = require('node:test');
 const repoRoot = path.join(__dirname, '..', '..');
 const readRepoFile = (relative) => readFileSync(path.join(repoRoot, relative), 'utf8');
 const packageJson = JSON.parse(readRepoFile('package.json'));
+
+/** Source text with comments removed — the docs legitimately quote what the code must not do */
+const stripComments = (source) =>
+  source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+/** Every `.js` file under `dir`, repo-relative — the tree the "nothing in src may…" rules walk */
+function sourceFiles(dir) {
+  const files = [];
+  for (const entry of readdirSync(path.join(repoRoot, dir), { withFileTypes: true })) {
+    const relative = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) files.push(...sourceFiles(relative));
+    else if (entry.name.endsWith('.js')) files.push(relative);
+  }
+  return files;
+}
 
 describe('package entry point', () => {
   it('should expose the public surface through the package root', () => {
@@ -111,11 +126,6 @@ describe('declaration file', () => {
 });
 
 describe('bullmq subpath', () => {
-  const { readdirSync } = require('node:fs');
-  /** Source text with comments removed — the docs legitimately quote what the code must not do */
-  const stripComments = (source) =>
-    source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-
   it('should expose the adapter through its own entry point', () => {
     const adapter = require(path.join(repoRoot, 'bullmq.js'));
     assert.strictEqual(typeof adapter.createMigrationQueue, 'function');
@@ -156,22 +166,10 @@ describe('bullmq subpath', () => {
     // The rule that keeps the package zero-dependency, made executable: one
     // `require('bullmq')` would make the adapter crash for anyone who relies on
     // injection alone, and would pin a BullMQ version for everyone else.
-    const offenders = [];
-    const walk = (dir) => {
-      for (const entry of readdirSync(path.join(repoRoot, dir), { withFileTypes: true })) {
-        const relative = `${dir}/${entry.name}`;
-        if (entry.isDirectory()) walk(relative);
-        else if (entry.name.endsWith('.js')) {
-          const code = stripComments(readRepoFile(relative));
-          if (
-            /require\(\s*['"]bullmq['"]\s*\)|from\s+['"]bullmq['"]|import\(\s*['"]bullmq/.test(code)
-          ) {
-            offenders.push(relative);
-          }
-        }
-      }
-    };
-    walk('src');
+    const pattern = /require\(\s*['"]bullmq['"]\s*\)|from\s+['"]bullmq['"]|import\(\s*['"]bullmq/;
+    const offenders = sourceFiles('src').filter((file) =>
+      pattern.test(stripComments(readRepoFile(file))),
+    );
     assert.deepStrictEqual(offenders, []);
   });
 
@@ -205,6 +203,18 @@ describe('bullmq subpath', () => {
       assert.strictEqual(packageJson.peerDependenciesMeta?.[name], undefined);
       assert.strictEqual(typeof packageJson.devDependencies[name], 'string');
     }
+  });
+});
+
+describe('identifier minting', () => {
+  it('should mint ids in one module only — the one `generateId` replaces', () => {
+    // A stray `randomUUID()` anywhere else would be an id the `generateId`
+    // option cannot reach: a deployment that asked for ULIDs would still find
+    // a UUID in its changelog or its queue.
+    const minters = sourceFiles('src').filter((file) =>
+      /randomUUID|randomBytes|getRandomValues/.test(stripComments(readRepoFile(file))),
+    );
+    assert.deepStrictEqual(minters, ['src/utils/id.js']);
   });
 });
 

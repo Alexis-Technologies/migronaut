@@ -76,7 +76,8 @@ describe('planUpJobs', () => {
     assert.strictEqual(plan.direction, 'up');
     assert.strictEqual(plan.batch, 7);
     assert.deepStrictEqual(plan.migrations, ['0001-a.js', '0002-b.js']);
-    assert.match(plan.groupId, /^[0-9a-f-]{36}$/);
+    assert.strictEqual(plan.groupId, 'id-1');
+    assert.strictEqual(kit.generateId.mock.callCount(), 1);
     assert.deepStrictEqual(plan.jobs[1], {
       name: 'up',
       data: {
@@ -90,6 +91,53 @@ describe('planUpJobs', () => {
       },
       opts: { removeOnComplete: 10, attempts: 1, deduplication: { id: 'up-0002-b.js' } },
     });
+  });
+
+  it('should mint a new group id for every plan, through the kit', async () => {
+    const kit = stubKit({ dryRun: mock.fn(async () => [pendingRow('0001-a.js')]) });
+    const first = await planUpJobs(kit);
+    const second = await planUpJobs(kit);
+    assert.deepStrictEqual([first.groupId, second.groupId], ['id-1', 'id-2']);
+    // Asked with no arguments: the kit decides the format, the adapter none of it.
+    assert.deepStrictEqual(kit.generateId.mock.calls[0].arguments, []);
+  });
+
+  it('should fall back to a random UUID for a kit that cannot mint ids', async () => {
+    // A duck-typed kit predating `generateId` — the adapter still needs an id.
+    const kit = stubKit({
+      dryRun: mock.fn(async () => [pendingRow('0001-a.js')]),
+      generateId: undefined,
+    });
+    const plan = await planUpJobs(kit);
+    assert.match(plan.groupId, /^[0-9a-f-]{36}$/);
+  });
+
+  // A worker refuses a job whose group id is not a short string, so an id like
+  // these has to fail the enqueue call rather than every job it would add.
+  for (const [label, value] of [
+    ['an empty string', ''],
+    ['a string over the limit', 'g'.repeat(129)],
+    ['a non-string', 42],
+  ]) {
+    it(`should refuse ${label} as a group id before planning any job`, async () => {
+      const kit = stubKit({
+        dryRun: mock.fn(async () => [pendingRow('0001-a.js')]),
+        generateId: mock.fn(async () => value),
+      });
+      await assert.rejects(planUpJobs(kit), ConfigInvalidError);
+      assert.strictEqual(kit.nextBatch.mock.callCount(), 0);
+    });
+  }
+
+  it('should let a failing id generator through as the enqueue error', async () => {
+    const failure = new ConfigInvalidError('generateId threw');
+    const kit = stubKit({
+      dryRun: mock.fn(async () => [pendingRow('0001-a.js')]),
+      generateId: mock.fn(async () => {
+        throw failure;
+      }),
+    });
+    await assert.rejects(planUpJobs(kit), (error) => error === failure);
   });
 
   it('should pass `to` and a filename through to the same selection a real run makes', async () => {
@@ -206,6 +254,31 @@ describe('planDownJobs', () => {
     assert.strictEqual(kit.list.mock.callCount(), 0);
   });
 
+  it('should take the group id from the kit, and put it on every job', async () => {
+    const rows = [appliedRow('0001-a.js', 1000), appliedRow('0002-b.js', 2000)];
+    const kit = stubKit({
+      dryRun: mock.fn(async () => [...rows]),
+      list: mock.fn(async () => [...rows]),
+    });
+    const plan = await planDownJobs(kit);
+    assert.strictEqual(plan.groupId, 'id-1');
+    assert.deepStrictEqual(
+      plan.jobs.map((job) => job.data.groupId),
+      ['id-1', 'id-1'],
+    );
+  });
+
+  it('should refuse an unusable group id, and fall back for a kit that mints none', async () => {
+    const rows = [appliedRow('0001-a.js', 1000)];
+    const selection = { dryRun: mock.fn(async () => [...rows]), list: mock.fn(async () => rows) };
+    await assert.rejects(
+      planDownJobs(stubKit({ ...selection, generateId: mock.fn(async () => '') })),
+      ConfigInvalidError,
+    );
+    const plan = await planDownJobs(stubKit({ ...selection, generateId: undefined }));
+    assert.match(plan.groupId, /^[0-9a-f-]{36}$/);
+  });
+
   it('should refuse a rollback that is not the top of the applied stack', async () => {
     const kit = stubKit({
       dryRun: mock.fn(async () => [appliedRow('0001-a.js', 1000)]),
@@ -254,10 +327,11 @@ describe('planDownJobs', () => {
 });
 
 describe('enqueueUp / enqueueDown on a queue you own', () => {
-  const pendingKit = (files = ['0001-a.js', '0002-b.js']) =>
+  const pendingKit = (files = ['0001-a.js', '0002-b.js'], overrides = {}) =>
     stubKit({
       dryRun: mock.fn(async () => files.map(pendingRow)),
       nextBatch: mock.fn(async () => 3),
+      ...overrides,
     });
 
   it('should add the whole group and hand back its handle', async () => {
@@ -283,7 +357,12 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
     const connection = createFakeConnection();
     const queue = new FakeQueue('m', { connection });
     const first = await enqueueUp(queue, pendingKit());
-    const second = await enqueueUp(queue, pendingKit(['0001-a.js', '0002-b.js', '0003-c.js']));
+    // A peer is another process, and its group id is its own: telling "we
+    // added this job" from "it was already there" is a comparison of the two.
+    const peer = pendingKit(['0001-a.js', '0002-b.js', '0003-c.js'], {
+      generateId: mock.fn(async () => 'peer-enqueue'),
+    });
+    const second = await enqueueUp(queue, peer);
 
     assert.deepStrictEqual(second.deduplicated, ['0001-a.js', '0002-b.js']);
     assert.deepStrictEqual(

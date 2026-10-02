@@ -532,6 +532,71 @@ describe('validateConfig', () => {
     assert.deepStrictEqual(validateConfig(config), []);
   });
 
+  it('should accept a generateId function and refuse anything else under that key', () => {
+    assert.deepStrictEqual(validateConfig(validConfig({ generateId: () => 'id' })), []);
+    // What a JSON config can hold — a name, not a generator.
+    for (const value of ['ulid', null, 7, {}, true]) {
+      assert.deepStrictEqual(validateConfig(validConfig({ generateId: value })), [
+        { path: 'generateId', message: 'must be a function' },
+      ]);
+    }
+  });
+
+  it('should keep generateId out of the scalar key table — it is code-only', () => {
+    // CONFIG_KEYS is pinned against the JSON schema and the env table, neither
+    // of which can express a function.
+    assert.ok(!CONFIG_KEYS.some((spec) => spec.path === 'generateId'));
+    assert.ok(!ENV_KEYS.some((spec) => spec.path === 'generateId'));
+  });
+
+  it('should carry generateId through, known and elided from the debug dump', async () => {
+    const lines = [];
+    const logger = {
+      debug: (msg, fields) => lines.push({ msg, fields }),
+      info() {},
+      warn() {},
+      error() {},
+    };
+    const generateId = () => 'id';
+    const config = await loadConfig({
+      cwd: tmp,
+      flags: { uri: 'mongodb://x:27017', dbName: 'x', logger, generateId },
+    });
+    assert.strictEqual(config.generateId, generateId);
+    assert.ok(!lines.some((line) => line.msg.startsWith('Unrecognized config key')));
+    const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+    assert.strictEqual(dump.fields.generateId, '[injected]');
+  });
+
+  it('should leave generateId out of the debug dump when none is configured', async () => {
+    const lines = [];
+    const logger = {
+      debug: (msg, fields) => lines.push({ msg, fields }),
+      info() {},
+      warn() {},
+      error() {},
+    };
+    await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x', logger } });
+    const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+    assert.ok(!('generateId' in dump.fields));
+  });
+
+  it('should reject a non-function generateId through loadConfig', async () => {
+    await assert.rejects(
+      loadConfig({
+        cwd: tmp,
+        flags: { uri: 'mongodb://x:27017', dbName: 'x', generateId: 'ulid' },
+      }),
+      (error) => {
+        assert.ok(error instanceof ConfigInvalidError);
+        assert.deepStrictEqual(error.context.issues, [
+          { path: 'generateId', message: 'must be a function' },
+        ]);
+        return true;
+      },
+    );
+  });
+
   it('should surface issues through loadConfig as ConfigInvalidError context', async () => {
     try {
       await loadConfig({

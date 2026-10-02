@@ -144,6 +144,16 @@ export interface MigrationHooks {
 export type MigrationExtension = 'ts' | 'js';
 
 /**
+ * Mints one identifier. Called with **no arguments** and no `this`, so a
+ * third-party generator passes straight through (`generateId: ulid`,
+ * `generateId: createId`, `generateId: nanoid`). It must be **synchronous** and
+ * return a non-empty string of at most 128 characters, different on every
+ * call; anything else — a throw and a returned promise included — fails the
+ * run with a {@link ConfigInvalidError}.
+ */
+export type IdGenerator = () => string;
+
+/**
  * Every **scalar** option below is also settable from the environment as
  * `MIGRONAUT_<SCREAMING_SNAKE>` (`migrationsDir` → `MIGRONAUT_MIGRATIONS_DIR`,
  * with `dbName` → `MIGRONAUT_DB`, `migrationsCollection` → `MIGRONAUT_COLLECTION`
@@ -152,9 +162,9 @@ export type MigrationExtension = 'ts' | 'js';
  * file and are outranked by CLI flags. A value that does not parse is rejected
  * with a {@link ConfigInvalidError} naming the variable — never coerced.
  *
- * `fileExtensions`, `clientOptions` and the live handles (`client`, `mongoose`,
- * `hooks`, `logger`) are config-file/API only: a single environment string
- * cannot express them.
+ * `fileExtensions`, `clientOptions`, `generateId` and the live handles (`client`,
+ * `mongoose`, `hooks`, `logger`) are config-file/API only: a single environment
+ * string cannot express them.
  */
 export interface MigronautConfig {
   /** MongoDB connection URI. Not required when `client` is supplied */
@@ -260,6 +270,18 @@ export interface MigronautConfig {
   hooks?: MigrationHooks;
   /** Custom logger — set to null to silence all output (useful in tests) */
   logger?: MigronautLogger | null;
+  /**
+   * Your own identifier format (ULID, CUID, UUIDv7, …) for every id migronaut
+   * mints: the run id — stamped on changelog records, events and log lines,
+   * and stored as the lock's owner token — and, through
+   * `@alexify/migronaut/bullmq`, the group id of an enqueue call.
+   * Default: `crypto.randomUUID()`.
+   *
+   * Ids are for correlation. The lock adds a token of its own, so a generator
+   * that repeats a value blurs which run wrote what but never lets two runs
+   * hold the lock at once.
+   */
+  generateId?: IdGenerator;
 }
 
 /**
@@ -752,6 +774,12 @@ export class MigratorKit extends EventEmitter {
    * Connects if needed.
    */
   nextBatch(): Promise<number>;
+  /**
+   * A new id in this kit's configured format — the `generateId` option, else a
+   * random UUID. The same source every run id comes from, for code that wants
+   * its own ids to match. Resolves the config; does not connect.
+   */
+  generateId(): Promise<string>;
   /** Run all pending migrations, or a specific named file */
   up(filename?: string, options?: UpOptions): Promise<RunResult[]>;
   /** Rollback the last batch, a specific batch, a specific file, or the last N steps */

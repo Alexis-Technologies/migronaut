@@ -103,6 +103,7 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `mongoose` | `Mongoose` | — | Mongoose instance, if your migrations use it |
 | `hooks` | `MigrationHooks` | — | [Lifecycle hooks](/guide/hooks) |
 | `logger` | `MigronautLogger \| null` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` silences all output |
+| `generateId` | `() => string` | `crypto.randomUUID()` | Your own id format (ULID, CUID, UUIDv7, …) for every id migronaut mints — see [Custom id format](#custom-id-format) |
 
 Log methods receive an optional second argument with structured fields —
 `{ runId, migration, direction, batch, durationMs }` — so a machine-readable
@@ -112,7 +113,48 @@ one-argument logger keeps working unchanged.
 
 `runId` is a per-run correlation id: it is also the lock's owner token and is
 stored on every changelog record that run writes, so a leftover lock can be
-traced to the exact migrations it was holding.
+traced to the exact migrations it was holding. It is a random UUID unless you
+supply a [`generateId`](#custom-id-format).
+
+### Custom id format
+
+Migronaut mints two kinds of id: the `runId` of every run and, in the
+[queue adapter](/guide/bullmq), the `groupId` of every enqueue call. Both are
+random UUIDs by default. Set `generateId` to get them in the format the rest of
+your system uses — it is the single source of both:
+
+```js
+// migronaut.config.js
+import { ulid } from 'ulid';
+
+export default {
+  uri: process.env.MONGO_URI,
+  dbName: 'myapp',
+  generateId: ulid, // or createId from @paralleldrive/cuid2, nanoid, uuidv7, …
+};
+```
+
+Migronaut ships no generator of its own beyond the default — you pass a function
+from the library you already use, the same way a `logger` is passed.
+
+The contract is small, and checked on every call:
+
+- It is called with **no arguments** — which is why `ulid`, `createId` and
+  `nanoid` can be passed as they are (their first parameter is a seed time or a
+  size, and migronaut never supplies one).
+- It must be **synchronous** and return a **non-empty string of at most 128
+  characters**.
+- A generator that throws, returns a promise or returns anything else fails the
+  run with `CONFIG_INVALID` before any migration starts.
+
+It should return a different value on every call. Ids are how a lock, a set of
+changelog records and a stretch of log lines are tied to one run, so a repeated
+id blurs that — but it is never a safety problem: the lock carries a token of
+its own next to the owner id, so two runs handed the same id still cannot hold
+it at once.
+
+Changing the format later is safe. Ids are opaque strings to migronaut, so UUIDs
+written by earlier runs and the new format sit side by side in the changelog.
 
 `onOutOfOrder` is about files merged late from a parallel branch: on a bulk
 `up`, a pending migration that sorts *before* the newest applied one would
@@ -159,10 +201,10 @@ config file is never required" literally true, not just a slogan. These
 | `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` |
 | `MIGRONAUT_ENV_FILE` | `envFile` |
 
-The remaining options — `fileExtensions`, `clientOptions`, and the live
-instances `client`, `mongoose`, `hooks`, `logger` — are config-file/API only.
-They hold arrays, objects or live handles, which a single environment string
-cannot express.
+The remaining options — `fileExtensions`, `clientOptions`, `generateId`, and the
+live instances `client`, `mongoose`, `hooks`, `logger` — are config-file/API
+only. They hold arrays, objects, functions or live handles, which a single
+environment string cannot express.
 
 ::: warning Values are rejected, never coerced
 A value that doesn't parse fails the run with a `CONFIG_INVALID` error naming

@@ -99,6 +99,7 @@ src/
 │   ├── redact.js            # Mask credentials (userinfo + query secrets) leaving the process
 │   ├── sanitize.js          # Strip terminal control chars (C0 + full C1) from untrusted text
 │   ├── error.js             # errorText() — stringify caught errors, redaction built in
+│   ├── id.js                # The one place an id is minted — randomUUID, or the user's generateId
 │   ├── loader.js            # Dynamic-import a migration file (.ts/.js, ESM/CJS)
 │   ├── migration-name.js    # isBareFilename() — the one rule for a safe migration name
 │   ├── template.js          # Generate migration files & config files
@@ -249,6 +250,9 @@ Each entry: **responsibility · key exports · nuances you must know.**
   - Validation is the built-in table-driven `validateConfig` over the `CONFIG_KEYS` spec (no zod);
     failures throw `ConfigInvalidError` with per-issue `path`+`message`. Unknown keys are allowed;
     `mongoose`/`hooks`/`logger` are deliberately unchecked (live instances).
+  - `generateId` is code-only like those, but it has exactly one valid shape, so `validateConfig`
+    checks it (`must be a function`) outside the `CONFIG_KEYS` table — the table is pinned against
+    the JSON schema and the env table, and a function belongs in neither.
 
 ### `src/core/lock.js` — distributed lock (the subtlest module)
 - **Responsibility:** ensure only one migration run executes at a time, cluster-wide.
@@ -342,6 +346,10 @@ Each entry: **responsibility · key exports · nuances you must know.**
   `MigrationBlockedError` while an earlier file is pending (`#assertUpNotBlocked`), checked inside
   the lock and before `beforeAll`. For `down` it refuses while a migration applied *later* (by
   `appliedAt`) is still applied (`#assertDownNotBlocked`).
+- **Ids:** the kit never calls `randomUUID` itself. `#ensureConfig` builds `#newId` from the
+  `generateId` option (`createIdGenerator`, [utils/id.js](src/utils/id.js)); `#withLock` mints the
+  run id with it as its first act after the reentrancy guard, and the public `generateId()` hands
+  the same source to layers above the kit.
 
 ### `src/core/audit.js` — read-only health check
 - **Responsibility:** the `migronaut audit` checks (config, connectivity, transactions, indexes,
@@ -386,7 +394,7 @@ the design.
   versioned data shape, `parseJobData` (validation of *untrusted* payloads), `dedupId`.
 - **`producer.js`** — `planUpJobs`/`planDownJobs` (the plan *is* `kit.dryRun`, so it can never
   disagree with a run) and `enqueueUp`/`enqueueDown` (one atomic `addBulk`, returns the group
-  handle).
+  handle). The group id comes from `kit.generateId()`, so it follows the kit's id format.
 - **`processor.js`** — `createMigrationProcessor()`: the function a Worker runs. Validate →
   connect → `withLockWait(kit.up|down)` → map the result; classify failures; forward kit events to
   the job as log rows and progress.
@@ -414,6 +422,12 @@ the design.
 - **redact.js / error.js** — `redactUris`/`redactDeep` mask `user:password@` in any string leaving
   the process; `errorText(error)` is the single chokepoint for stringifying caught errors, with
   redaction built in. Use it instead of `error.message` everywhere.
+- **id.js** — the only module that mints an identifier. `randomId()` is the default
+  (`crypto.randomUUID()`); `createIdGenerator(generateId)` wraps the user's function so that every
+  call is bare (no arguments, no receiver), synchronous, and checked by `assertId` (a non-empty
+  string of at most `MAX_ID_LENGTH` = 128 characters — the same limit a queue worker enforces on a
+  job's group id). A throw, a promise or a non-id becomes a `ConfigInvalidError`. A unit test greps
+  `src/` so no second minting site can appear.
 - **loader.js** — `loadMigrationFile(filepath)`: dynamic `import()`, `mod.default ?? mod` for CJS,
   validates `up`/`down` are functions. Translates the `.ts`-can't-load failure into a clear error —
   see the [loader deep dive](#64-the-loader-and-the-ts-runtime-caveat).
@@ -497,13 +511,27 @@ lock, and one running slow never reclaims a dead one. String fields in the holde
   uncontended path (release deletes the document after every clean run) takes one round trip and
   skips the read-back below.
 
-**(b) Owner-token readback (closes the reclaim race)** — for the non-insert outcomes, `acquire()`
-reads the doc back and checks `owner === ourToken`. If two processes both reclaim the same stale
-lock, both pipeline updates succeed but only the last writer's `owner` survives; the loser sees a
-different token and throws instead of running concurrently.
+**(b) Owner readback (closes the reclaim race)** — for the non-insert outcomes, `acquire()` reads
+the doc back and checks that it is the one it wrote: `owner === ourToken` **and**
+`nonce === ourNonce`. If two processes both reclaim the same stale lock, both pipeline updates
+succeed but only the last writer's document survives; the loser sees a different one and throws
+instead of running concurrently.
+
+The two fields do different jobs. `owner` is the **run id** — the kit passes it in, so the lock
+document, the changelog records and the log lines of one run carry one value. Its format, and
+therefore its uniqueness, belongs to the user's `generateId`. `nonce` is minted by `acquire()`
+itself (`randomId()`, never the user's generator) and exists for exactly that reason: with
+`owner` alone, a generator that hands two runs the same id — `() => process.env.DEPLOY_ID`, or a
+counter that starts at 1 in every process — would let the second run pass the readback and migrate
+alongside the first, then delete the first run's lock on its way out. Correlation is the user's to
+shape; mutual exclusion is not. Neither field is ever exposed (`toLockInfo` strips both).
+
+Mixed versions contend safely: a release that predates the nonce compares `owner` only and writes
+no nonce, and each side checks just the fields it knows — a nonce-less document can never match a
+newer process's readback, and `$replaceWith` drops a stale nonce when an older process reclaims.
 
 **(c) Heartbeat (makes long migrations safe)** — `runWithLock` starts a `setInterval` that calls
-`renew()` every `ttlMs/2`. `renew()` is scoped to `{_id, owner}` so it only refreshes *our* lock and
+`renew()` every `ttlMs/2`. `renew()` is scoped to `{_id, owner, nonce}` so it only refreshes *our* lock and
 returns `false` if we've lost it. The interval is `.unref()`-ed so it never keeps the process alive,
 and is `clearInterval`-ed in `finally`; the last in-flight renewal is awaited there too, so no stray
 query outlives the call and lands after the client is closed.
@@ -520,7 +548,7 @@ and the next has not started. Set `onLockLost: 'warn'` to keep the old warn-and-
 `MigratorKit.stop()` (and the CLI's SIGINT/SIGTERM handler) aborts through the same path with a
 `RunAbortedError` carrying the partial results.
 
-**Release** — `deleteOne({_id, owner})`, owner-scoped so we never delete a lock since reclaimed by
+**Release** — `deleteOne({_id, owner, nonce})`, scoped so we never delete a lock since reclaimed by
 someone else. `forceRelease()` (for `migronaut unlock`) deletes unconditionally by `_id`.
 
 > **Why TTL + heartbeat instead of just TTL?** TTL alone means a migration longer than `lockTTLSeconds`
@@ -603,6 +631,11 @@ Every design choice below follows from refusing to trust the queue's memory:
   (or a CLI run) racing between peek and first apply share the number and merge into one batch —
   accepted, because the alternative is a counter document on a read path, and dedup + the guard
   already rule out double or out-of-order application.
+- **One id format.** The group id of an enqueue call is minted by `kit.generateId()` — the public
+  face of the same generator that mints run ids — so a deployment that configured `generateId`
+  sees its format in the queue too, and the adapter needs no option of its own. The producer
+  re-checks the id (`assertId`) so an unusable one fails the enqueue call rather than every job;
+  a duck-typed kit without the method gets a random UUID.
 - **Rollbacks are ordered by `appliedAt`, not by name.** An ordered rollback must be the top of the
   applied stack; the producer checks it up front (one synchronous `MigrationBlockedError` instead
   of a group failing halfway) and each job re-checks it under the lock. Name order would deadlock a
@@ -665,7 +698,11 @@ has no rule for either) — catch these in review.
   [bullmq.d.ts](bullmq.d.ts) for the subpath. Each pair is maintained by hand in lockstep. If it's
   not in both, it's private — and the `exports` map makes that literal: nothing else is reachable.
 - **Injected, never required:** third-party integrations come in through options. `src/` never
-  requires `bullmq` (a unit test greps for it), and no `.d.ts` imports an optional package.
+  requires `bullmq` (a unit test greps for it), and no `.d.ts` imports an optional package. An id
+  format is the same kind of thing: migronaut ships no ULID/CUID implementation, it takes the
+  user's `generateId`.
+- **One place mints ids:** [src/utils/id.js](src/utils/id.js). Calling `randomUUID` anywhere else
+  creates an id `generateId` cannot reach (a unit test greps for that too).
 
 ---
 
@@ -716,6 +753,15 @@ The high-impact ones for code changes:
   `attempts > 1`.** The adapter cannot import BullMQ's class; BullMQ matches the name. With the
   adapter's own single-attempt jobs there is nothing to prevent, so the typed name stays.
 - **`beforeAll`/`afterAll` fire once per queue job**, because each job is its own run.
+- **`generateId` is called with no arguments, and must be synchronous.** No "purpose" argument
+  (`'run'`/`'group'`) is passed on purpose: `ulid(seedTime)` and `nanoid(size)` would read it as
+  their own first parameter, and passing third-party generators as they are is the point. Async is
+  refused because the run id is minted in the same tick as the reentrancy guard that checks it.
+- **The lock document carries a `nonce` next to `owner`.** It looks redundant — the owner token
+  was already a random UUID — but the owner is now the user-shaped run id, so the lock keeps a
+  token of its own. Do not "simplify" the readback, `renew` or `release` back to `owner` alone.
+- **An empty enqueue plan still mints a group id** (the handle always has one), so an up-to-date
+  `enqueueUp()` costs one generator call.
 
 ---
 
@@ -771,7 +817,7 @@ The high-impact ones for code changes:
 
 Useful commands:
 ```bash
-pnpm test                                  # unit + integration (~1060 tests)
+pnpm test                                  # unit + integration (~1110 tests)
 node --test tests/integration/up.test.js   # one file (boots its own replica set)
 pnpm run test:coverage                     # full suite under c8, gated at 90/90/90
 pnpm run test:types                        # tsd — index.d.ts + bullmq.d.ts vs tests/types/*.test-d.ts
@@ -870,7 +916,11 @@ it *looks* or *exits* → the CLI layer.
   migrations.
 - **Migrator** — `MigratorKit`, the orchestrator class.
 - **Origin** — `'migrate-mongo'` marks an imported, forward-only record (cannot be reverted).
-- **Owner token** — the random UUID proving which process currently holds the lock.
+- **Owner token** — the lock document's `owner`: the run id of the run holding the lock (a random
+  UUID, or whatever `generateId` returns). Paired with a lock-minted `nonce`, which is what
+  actually proves which process holds it.
+- **Run id** — one id per locked run, stamped on its changelog records, events and log lines and
+  stored as the lock's owner token.
 - **Progress reporter** — the CLI-injected callback that drives the spinner without core ever
   importing one.
 - **Step** — Laravel-style per-file batching (`up --step`) / per-file rollback (`down --steps N`).

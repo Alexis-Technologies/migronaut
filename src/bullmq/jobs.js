@@ -1,4 +1,5 @@
 const { QueueJobInvalidError } = require('../errors/index.js');
+const { MAX_ID_LENGTH } = require('../utils/id.js');
 const { isBareFilename } = require('../utils/migration-name.js');
 
 /**
@@ -38,7 +39,8 @@ const FORBIDDEN_JOB_OPTIONS = Object.freeze([
 ]);
 
 const MAX_MIGRATION_NAME_LENGTH = 255;
-const MAX_GROUP_ID_LENGTH = 128;
+/** The limit every migronaut id is minted under — a producer's own check and this one agree */
+const MAX_GROUP_ID_LENGTH = MAX_ID_LENGTH;
 
 const isPlainObject = (value) =>
   value !== null && typeof value === 'object' && !Array.isArray(value);

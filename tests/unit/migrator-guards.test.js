@@ -143,3 +143,50 @@ describe('MigratorKit sequenced-run option guards', () => {
     });
   });
 });
+
+describe('MigratorKit.generateId', () => {
+  const kitWith = (config) =>
+    new MigratorKit({
+      uri: 'mongodb://127.0.0.1:1/never?serverSelectionTimeoutMS=100',
+      dbName: 'nope',
+      logger: null,
+      ...config,
+    });
+
+  it('should mint a random UUID by default, without connecting', async () => {
+    // The host is unreachable: a connection attempt would reject, not resolve.
+    const kit = kitWith({});
+    const id = await kit.generateId();
+    assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    assert.notStrictEqual(await kit.generateId(), id);
+  });
+
+  it('should mint through the configured generator', async () => {
+    let count = 0;
+    const kit = kitWith({ generateId: () => `run_${++count}` });
+    assert.deepStrictEqual([await kit.generateId(), await kit.generateId()], ['run_1', 'run_2']);
+  });
+
+  it('should reject a generator that is not a function as a config issue', async () => {
+    await assert.rejects(kitWith({ generateId: 'ulid' }).generateId(), (error) => {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.deepStrictEqual(error.context.issues, [
+        { path: 'generateId', message: 'must be a function' },
+      ]);
+      return true;
+    });
+  });
+
+  it('should reject what an unusable generator returns, every time it is asked', async () => {
+    const kit = kitWith({ generateId: () => '' });
+    await assert.rejects(kit.generateId(), ConfigInvalidError);
+    await assert.rejects(kit.generateId(), /non-empty string/);
+  });
+
+  it('should reject an async generator', async () => {
+    await assert.rejects(
+      kitWith({ generateId: async () => 'late' }).generateId(),
+      /must be synchronous/,
+    );
+  });
+});

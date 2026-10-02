@@ -108,8 +108,8 @@ Mongoose is an optional peer dependency — you only need it if your migrations 
 
 Yes. Every scalar option has an `MIGRONAUT_*` environment variable, so exporting `MIGRONAUT_URI` and
 `MIGRONAUT_DB` is enough to run — no config file required. Only the non-scalar options
-(`fileExtensions`, `clientOptions`, and live handles like `client`, `mongoose`, `hooks` and
-`logger`) need a config file or the programmatic API. See [Configuration](/guide/configuration).
+(`fileExtensions`, `clientOptions`, `generateId`, and live handles like `client`, `mongoose`,
+`hooks` and `logger`) need a config file or the programmatic API. See [Configuration](/guide/configuration).
 
 ## How does it prevent two deploys running migrations at once?
 

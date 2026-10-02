@@ -103,6 +103,14 @@ because the logger-adapter tests exercise the real thing; `@vercel/analytics` an
 describes it structurally (`BullMQQueueLike`, …), as `MongooseLike` does for mongoose. `bullmq`
 and `ioredis` are devDependencies only: for the type tests and the opt-in real-Redis suite.
 
+**Id formats are injected the same way.** Migronaut ships no ULID/CUID implementation: the
+`generateId` config option (`() => string`, code-only like `logger`) replaces the default
+`crypto.randomUUID()` for every id it mints — the run id (also the lock's owner token) and the
+queue's group id. [src/utils/id.js](src/utils/id.js) is the **only** module allowed to mint an id
+(a unit test greps `src/` for `randomUUID`); everything else goes through `createIdGenerator` /
+`kit.generateId()`. The user's function is called bare (no arguments, no `this`) and must be
+synchronous; every returned id is checked (non-empty string, ≤ 128 chars).
+
 ## Repository layout
 
 ```
@@ -115,7 +123,7 @@ src/
 ├── index.js                # Public API barrel — re-exported at the package root
 ├── errors/index.js          # MigronautError base + one subclass per error code
 ├── core/                     # The engine (config, lock, lock-wait, changelog, runner, context, import, migrator, run)
-├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name — pure-ish helpers
+├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id — pure-ish helpers
 ├── cli/                        # own arg parser (args.js) + spinner + table + one file per command
 └── bullmq/                      # Queue adapter: jobs (contract), producer, processor, wait, service (facade)
 tests/
@@ -160,7 +168,7 @@ When adding new code, follow the right-hand column — there should be no more `
 pnpm run lint              # oxlint src bin scripts tests bench examples
 pnpm run format              # oxfmt src bin scripts tests bench examples
 pnpm run format:check          # oxfmt --check src bin scripts tests bench examples
-pnpm test                        # test:unit then test:integration (~1060 tests)
+pnpm test                        # test:unit then test:integration (~1110 tests)
 pnpm run test:unit                 # unit only — fast, no MongoDB
 pnpm run test:integration            # integration only, serial (--test-concurrency=1)
 node --test tests/integration/up.test.js   # single file
@@ -192,6 +200,8 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
   without the other.
 - Never `require('bullmq')` (or `ioredis`) under `src/`, and never import it in a `.d.ts` — the
   adapter works on what the caller injects.
+- Never call `randomUUID` (or mint an id any other way) outside `src/utils/id.js` — an id minted
+  elsewhere is one the user's `generateId` cannot reach.
 - Single quotes, semicolons, 100-col lines, no unused vars/imports (oxlint/oxfmt-enforced).
 - Conventional Commits (`feat(scope):`, `fix(scope):`, `test:`, …).
 
@@ -229,5 +239,8 @@ generates `migronaut.config.json`, and a stray `init --json` is rejected with a 
 re-queues behind the waiting jobs and would break the order); a job behind a failed migration
 fails as `MIGRATION_BLOCKED` instead of waiting; an already-applied migration's job *completes*
 as `skipped`; and non-retryable errors are renamed `UnrecoverableError` only when a job has
-`attempts > 1` (BullMQ matches that name — the adapter cannot import the class). Don't "fix"
-these without checking the doc first.
+`attempts > 1` (BullMQ matches that name — the adapter cannot import the class). For ids:
+`generateId` is called with **no** arguments on purpose (a "purpose" argument would be read by
+`ulid`/`nanoid` as their own first parameter), and the lock document carries a migronaut-minted
+`nonce` next to `owner` — the owner is the user-shaped run id, so mutual exclusion must not depend
+on it. Don't "fix" these without checking the doc first.

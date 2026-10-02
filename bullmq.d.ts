@@ -109,7 +109,7 @@ export interface MigrationJobData {
   direction: 'up' | 'down';
   /** Bare migration filename */
   migration: string;
-  /** The enqueue call this job belongs to */
+  /** The enqueue call this job belongs to — minted by the kit's `generateId`, a UUID by default */
   groupId: string;
   /** Position within the group, and the group's size */
   index: number;
@@ -207,6 +207,7 @@ export interface MigrationJobSpec {
 
 /** A planned, not yet enqueued, group */
 export interface MigrationPlan {
+  /** Id of this enqueue call, in the kit's `generateId` format (a UUID by default) */
   groupId: string;
   direction: 'up' | 'down';
   /** Shared batch of an `up` group; null for `down` and for an empty plan */
@@ -311,6 +312,7 @@ export interface GroupWaitResult {
 
 /** Handle returned by `enqueueUp`/`enqueueDown` */
 export interface MigrationGroup {
+  /** Id of this enqueue call, in the kit's `generateId` format (a UUID by default) */
   groupId: string;
   direction: 'up' | 'down';
   /** The batch every job of an `up` group will stamp; null for `down` or when nothing was enqueued */

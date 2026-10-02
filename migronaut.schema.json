@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://migronaut.vercel.app/migronaut.schema.json",
   "title": "migronaut configuration",
-  "description": "Configuration for migronaut.config.json. Options that hold live instances (hooks, logger, mongoose, client) are only available in a .ts/.js config.",
+  "description": "Configuration for migronaut.config.json. Options that hold live instances or functions (hooks, logger, mongoose, client, generateId) are only available in a .ts/.js config.",
   "type": "object",
   "properties": {
     "$schema": {

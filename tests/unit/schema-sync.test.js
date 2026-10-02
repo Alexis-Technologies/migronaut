@@ -17,8 +17,9 @@ describe('config schema sync', () => {
 
   // The JSON-expressible config keys: everything validateConfig checks, minus
   // nothing (all CONFIG_KEYS values are JSON-expressible), plus $schema
-  // itself. Live instances (hooks, logger, mongoose, client) are .ts/.js-only
-  // and deliberately absent; clientOptions IS a plain object, so it stays.
+  // itself. Live instances (hooks, logger, mongoose, client) and the
+  // generateId function are .ts/.js-only and deliberately absent;
+  // clientOptions IS a plain object, so it stays.
   it('should describe every validated config key, and nothing else', () => {
     // Through the exported table, not a regex over the source: config.js
     // exports CONFIG_KEYS for exactly this kind of pin (config.test.js already

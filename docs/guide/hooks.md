@@ -113,4 +113,6 @@ await kit.up();
 
 `runId` is the same value on every event of a run, on the lock document, and on
 each changelog record that run writes — so logs, metrics and the database can be
-correlated after the fact.
+correlated after the fact. It is a random UUID by default; the
+[`generateId`](/guide/configuration#custom-id-format) option puts it in your own
+format.

@@ -5,30 +5,31 @@ const { LockAlreadyHeldError, LockReleaseFailedError } = require('../../src/erro
 const { silentLogger } = require('../../src/utils/logger.js');
 const { keepEventLoopAlive } = require('../helpers/event-loop.js');
 
-// The owner token an acquire() or renew() update would store, or undefined.
-// acquire() sends a $replaceWith/$cond pipeline (server-time `$$NOW` stamping)
-// whose taken-branch document carries the `$literal`-wrapped owner.
-function ownerFromUpdate(update) {
+// The ownership fields an acquire() update would store, or undefined for any
+// other update (a renew() only re-stamps lockedAt). acquire() sends a
+// $replaceWith/$cond pipeline (server-time `$$NOW` stamping) whose taken-branch
+// document carries the `$literal`-wrapped owner token and nonce.
+function heldFromUpdate(update) {
   const stage = Array.isArray(update) ? update[0] : update;
-  const raw = stage?.$replaceWith?.$cond?.[1]?.owner ?? stage?.$set?.owner;
-  return raw && typeof raw === 'object' ? raw.$literal : raw;
+  const doc = stage?.$replaceWith?.$cond?.[1];
+  return doc ? { owner: doc.owner.$literal, nonce: doc.nonce.$literal } : undefined;
 }
 
 function makeDb() {
-  // acquire() upserts with a random `owner` token, then reads it back to confirm
-  // ownership. The mock captures the token from the update and echoes it from
-  // findOne so a successful acquire resolves.
-  let storedOwner;
+  // acquire() upserts with an `owner` token and a nonce, then reads them back
+  // to confirm ownership. The mock captures both from the update and echoes
+  // them from findOne so a successful acquire resolves.
+  let held;
   const collection = {
     updateOne: mock.fn((_filter, update) => {
-      const owner = ownerFromUpdate(update);
-      if (owner) {
-        storedOwner = owner;
+      const taken = heldFromUpdate(update);
+      if (taken) {
+        held = taken;
       }
       return Promise.resolve({ matchedCount: 1 });
     }),
     findOne: mock.fn(() =>
-      Promise.resolve(storedOwner ? { _id: LOCK_ID, owner: storedOwner, pid: process.pid } : null),
+      Promise.resolve(held ? { _id: LOCK_ID, ...held, pid: process.pid } : null),
     ),
     deleteOne: mock.fn(() => Promise.resolve({})),
   };
@@ -124,15 +125,66 @@ describe('MigrationLock.acquire', () => {
     const lock = new MigrationLock(db, '_migronaut_locks', 60);
     await assert.rejects(lock.acquire(), LockAlreadyHeldError);
   });
+
+  it('should store the supplied token as the owner', async () => {
+    const { db, collection } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await lock.acquire('run-1');
+    assert.strictEqual(
+      heldFromUpdate(collection.updateOne.mock.calls[0].arguments[1]).owner,
+      'run-1',
+    );
+    assert.strictEqual(lock.owner, 'run-1');
+  });
+
+  it('should throw when the holder carries the same owner token under another nonce', async () => {
+    const { db, collection } = makeDb();
+    // The owner token is the run id, and a user's `generateId` decides whether
+    // two runs can share one. The lock must not: the read-back matching on the
+    // token alone would let both run at once.
+    collection.findOne.mock.mockImplementationOnce(() =>
+      Promise.resolve({ _id: LOCK_ID, owner: 'run-1', nonce: 'the-other-holder', pid: 7 }),
+    );
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await assert.rejects(lock.acquire('run-1'), (error) => {
+      assert.ok(error instanceof LockAlreadyHeldError);
+      assert.ok(!JSON.stringify(error.context).includes('the-other-holder'));
+      return true;
+    });
+    assert.strictEqual(lock.owner, undefined);
+  });
+
+  it('should throw when the holder is a document written without a nonce', async () => {
+    const { db, collection } = makeDb();
+    // What a pre-nonce release leaves in the collection — a peer, never us.
+    collection.findOne.mock.mockImplementationOnce(() =>
+      Promise.resolve({ _id: LOCK_ID, owner: 'run-1' }),
+    );
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await assert.rejects(lock.acquire('run-1'), LockAlreadyHeldError);
+  });
+
+  it('should mint a new nonce for every acquire, whatever the token', async () => {
+    const first = makeDb();
+    const second = makeDb();
+    await new MigrationLock(first.db, '_migronaut_locks', 60).acquire('run-1');
+    await new MigrationLock(second.db, '_migronaut_locks', 60).acquire('run-1');
+    const nonces = [first, second].map(
+      ({ collection }) => heldFromUpdate(collection.updateOne.mock.calls[0].arguments[1]).nonce,
+    );
+    assert.ok(nonces.every((nonce) => typeof nonce === 'string' && nonce.length > 0));
+    assert.notStrictEqual(nonces[0], nonces[1]);
+  });
 });
 
 describe('toLockInfo', () => {
-  it('should strip the owner token and _id from a lock document', () => {
+  it('should strip the owner token, the nonce and _id from a lock document', () => {
     const lockedAt = new Date();
     assert.deepStrictEqual(
       toLockInfo({
         _id: LOCK_ID,
         owner: 'secret-owner-token',
+        nonce: 'secret-nonce',
         lockedAt,
         pid: 42,
         host: 'box',
@@ -196,6 +248,19 @@ describe('MigrationLock.renew', () => {
     collection.updateOne.mock.mockImplementationOnce(() => Promise.resolve({ matchedCount: 0 }));
     assert.strictEqual(await lock.renew(), false);
   });
+
+  it('should scope the renewal to the held owner token and nonce', async () => {
+    const { db, collection } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await lock.acquire('run-1');
+    const held = heldFromUpdate(collection.updateOne.mock.calls[0].arguments[1]);
+    await lock.renew();
+    assert.deepStrictEqual(collection.updateOne.mock.calls[1].arguments[0], {
+      _id: LOCK_ID,
+      owner: 'run-1',
+      nonce: held.nonce,
+    });
+  });
 });
 
 describe('MigrationLock.release', () => {
@@ -208,6 +273,17 @@ describe('MigrationLock.release', () => {
     assert.strictEqual(filter._id, LOCK_ID);
     assert.strictEqual(filter.owner, lock.owner ?? filter.owner);
     assert.ok(typeof filter.owner === 'string' && filter.owner.length > 0);
+  });
+
+  it('should scope the delete to the nonce as well, so a same-token peer is never released', async () => {
+    const { db, collection } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await lock.acquire('run-1');
+    const held = heldFromUpdate(collection.updateOne.mock.calls[0].arguments[1]);
+    await lock.release();
+    assert.deepStrictEqual(collection.deleteOne.mock.calls[0].arguments, [
+      { _id: LOCK_ID, owner: 'run-1', nonce: held.nonce },
+    ]);
   });
 
   it('should be a no-op when no owner token is held', async () => {
@@ -286,17 +362,17 @@ describe('runWithLock', () => {
     // fails; the deadline is the sole escalation and must fire strictly
     // before the lock becomes stale-reclaimable at 1×TTL.
     const lock = new MigrationLock(db, '_migronaut_locks', 0.2);
-    let owner;
+    let held;
     collection.updateOne.mock.mockImplementation((_filter, update) => {
       // acquire() carries the owner token; renew() only re-stamps lockedAt.
-      const raw = ownerFromUpdate(update);
-      if (raw) {
-        owner = raw;
+      const taken = heldFromUpdate(update);
+      if (taken) {
+        held = taken;
         return Promise.resolve({ matchedCount: 1 });
       }
       return Promise.reject(new Error('network blip'));
     });
-    collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, owner }));
+    collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, ...held }));
     const started = Date.now();
     // The mocked driver does no I/O, so the unref'ed deadline timer is the only
     // pending handle — see tests/helpers/event-loop.js.
@@ -344,13 +420,13 @@ describe('runWithLock', () => {
     // let it; without the re-entrancy guard, every later tick would overwrite
     // `inFlight` and fire its own overlapping renewal.
     const lock = new MigrationLock(db, '_migronaut_locks', 0.2);
-    let owner;
+    let held;
     let renewCalls = 0;
     let releaseRenewal;
     collection.updateOne.mock.mockImplementation((_filter, update) => {
-      const raw = ownerFromUpdate(update);
-      if (raw) {
-        owner = raw;
+      const taken = heldFromUpdate(update);
+      if (taken) {
+        held = taken;
         return Promise.resolve({ matchedCount: 1 });
       }
       renewCalls += 1;
@@ -360,7 +436,7 @@ describe('runWithLock', () => {
         releaseRenewal = () => resolve({ matchedCount: 1 });
       });
     });
-    collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, owner }));
+    collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, ...held }));
     await runWithLock(
       lock,
       { logger: silentLogger },

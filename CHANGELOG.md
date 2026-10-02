@@ -5,8 +5,8 @@ Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
 ## v2.1.0 — 2026-10-01
 
-Migrations as a queue. Additive: nothing changes for anyone who does not use the
-new entry point, with the two narrow exceptions listed under **Changed**.
+Migrations as a queue, and ids in your own format. Additive: nothing changes for anyone who
+uses neither, with the narrow exceptions listed under **Changed**.
 
 ### Added
 
@@ -43,6 +43,21 @@ new entry point, with the two narrow exceptions listed under **Changed**.
   `QueueJobFailedError` exported from the package root.
 - **Runnable example** — `examples/migration-service`: a queue, a worker and a plain `node:http`
   API (not published to npm).
+- **`generateId` config option** — your own identifier format (ULID, CUID, nanoid, UUIDv7, …)
+  everywhere migronaut used to call `crypto.randomUUID()`: the `runId` of every run — on changelog
+  records, events, log lines and the lock's owner token — and the `groupId` of every queue
+  enqueue. One option covers the kit, the CLI (through `migronaut.config.js`/`.ts`),
+  `runMigrations` and the queue adapter.
+  - **Injected, like the logger** — migronaut ships no generator but the default. It is called
+    with no arguments, so third-party functions pass straight through: `generateId: ulid`.
+  - **Checked on every call** — it must synchronously return a non-empty string of at most 128
+    characters. A throw, a promise or anything else fails the run with `CONFIG_INVALID` before a
+    migration starts (and an enqueue before a job is added).
+  - Code-only: no environment variable and no place in a JSON config, like `logger` and `hooks`.
+- **`MigratorKit.generateId()`** — a new id in the kit's configured format, for code that wants its
+  own ids to match (it is how the queue adapter mints group ids). Resolves the config; does not
+  connect.
+- **`IdGenerator` type** — `() => string`, exported from the package root.
 
 ### Changed
 
@@ -57,6 +72,14 @@ new entry point, with the two narrow exceptions listed under **Changed**.
   for a long-lived kit serving several callers.
 - The lock-wait loop of `runMigrations` moved to `src/core/lock-wait.js`, shared with the queue
   processor; `runMigrations` behaves exactly as before.
+- **The lock document gained a `nonce` field**, minted by migronaut on every acquire and matched
+  alongside `owner` when the lock is confirmed, renewed and released. The owner token is the run
+  id, whose format `generateId` now decides; the nonce keeps mutual exclusion independent of it,
+  so a generator that repeats an id can blur correlation but never let two runs hold the lock.
+  Older releases ignore the field and can share a database with this one. Like `owner`, it is
+  never exposed by `lock`, `lockInfo()` or error context.
+- **A `generateId` config key that is not a function is now rejected** (`CONFIG_INVALID`). The key
+  was previously unknown and ignored, like any stray key.
 
 ### Fixed
 
@@ -64,6 +87,8 @@ new entry point, with the two narrow exceptions listed under **Changed**.
 
 ### Tooling
 
+- A unit test pins `src/utils/id.js` as the only module that mints an identifier, so no id can
+  bypass `generateId`.
 - An in-tree fake BullMQ carries the adapter's unit and integration tests; the same scenarios run
   against the real `bullmq` package when `MIGRONAUT_TEST_REDIS_URL` is set, which CI now does
   (a Redis service on the `test` job). `bullmq` and `ioredis` are devDependencies for that only.

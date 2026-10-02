@@ -12,6 +12,9 @@ const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
  */
 function stubKit(overrides = {}) {
   const kit = new EventEmitter();
+  // `id-1`, `id-2`, … — a format no default could produce, so a test can tell
+  // an id minted through the kit from one the adapter made up itself.
+  let ids = 0;
   const run = (direction, status) =>
     mock.fn(async (name, options = {}) => {
       kit.emit('run:start', { runId: 'run-1', command: direction });
@@ -38,6 +41,7 @@ function stubKit(overrides = {}) {
     lockInfo: mock.fn(async () => null),
     dryRun: mock.fn(async () => []),
     nextBatch: mock.fn(async () => 1),
+    generateId: mock.fn(async () => `id-${++ids}`),
     up: run('up', 'applied'),
     down: run('down', 'reverted'),
     ...overrides,

@@ -1,5 +1,5 @@
-const { randomUUID } = require('node:crypto');
 const { ConfigInvalidError, MigrationBlockedError } = require('../errors/index.js');
+const { assertId, randomId } = require('../utils/id.js');
 const { assertMigrationName } = require('../utils/migration-name.js');
 const {
   FORBIDDEN_JOB_OPTIONS,
@@ -38,6 +38,17 @@ function assertBoolean(value, name) {
   }
 }
 
+/**
+ * The id of one enqueue call, in the kit's configured format (`generateId`) so
+ * a deployment sees one id format across the changelog and the queue. A
+ * duck-typed kit without the method gets the default. Checked again here
+ * either way: a worker refuses a job whose group id is not a short string, and
+ * that has to be this call's error, not a job failing later in the queue.
+ */
+async function newGroupId(kit) {
+  return assertId(typeof kit.generateId === 'function' ? await kit.generateId() : randomId());
+}
+
 /** Newest applied first — `appliedAt`, name-desc tiebreak: the order rollbacks must follow */
 function newestFirst(a, b) {
   const delta = (b.appliedAt?.getTime?.() ?? 0) - (a.appliedAt?.getTime?.() ?? 0);
@@ -71,7 +82,7 @@ async function planUpJobs(kit, options = {}) {
   for (const row of rows) {
     if (row.status !== 'applied' || force) migrations.push(row.file);
   }
-  const groupId = randomUUID();
+  const groupId = await newGroupId(kit);
   if (migrations.length === 0) {
     return { groupId, direction: JOB_NAMES.UP, batch: null, migrations, jobs: [] };
   }
@@ -143,7 +154,7 @@ async function planDownJobs(kit, options = {}) {
 
   const migrations = [];
   for (const row of rows) migrations.push(row.file);
-  const groupId = randomUUID();
+  const groupId = await newGroupId(kit);
   if (migrations.length === 0) {
     return { groupId, direction: JOB_NAMES.DOWN, batch: null, migrations, jobs: [] };
   }

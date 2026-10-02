@@ -366,6 +366,53 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
   });
 
+  it('should mint run ids through a generateId from the config file', async () => {
+    // A function cannot come from a flag or an env var — the config file is
+    // the CLI's only way to a custom id format, so it has to reach the run.
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const cwdDir = path.join(project.dir, 'app');
+    mkdirSync(cwdDir);
+    writeFileSync(
+      path.join(cwdDir, 'migronaut.config.js'),
+      [
+        'let count = 0;',
+        'export default {',
+        `  uri: ${JSON.stringify(mongo.uri)},`,
+        `  dbName: ${JSON.stringify(DB)},`,
+        `  migrationsDir: ${JSON.stringify(project.dir)},`,
+        "  generateId: () => 'cli_' + process.pid + '_' + ++count,",
+        '};',
+        '',
+      ].join('\n'),
+    );
+    const up = await runCli(['up'], {}, cwdDir);
+    assert.strictEqual(up.code, 0);
+
+    const status = await runCli(['status', '--json'], {}, cwdDir);
+    assert.strictEqual(status.code, 0);
+    const [row] = JSON.parse(status.stdout);
+    assert.match(row.runId, /^cli_\d+_1$/);
+    const record = await mongo.db.collection('_migronaut_migrations').findOne({});
+    assert.strictEqual(record.runId, row.runId);
+  });
+
+  it('should reject a generateId that is not a function as CONFIG_INVALID', async () => {
+    // All a JSON config can say — the name of a format, which is not a generator.
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    writeFileSync(
+      path.join(project.dir, 'migronaut.config.json'),
+      JSON.stringify({ generateId: 'ulid' }),
+    );
+    const result = await runCli(baseArgs(['up', '--json']), {}, project.dir);
+    assert.strictEqual(result.code, 6);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.error.code, 'CONFIG_INVALID');
+    assert.deepStrictEqual(parsed.error.context.issues, [
+      { path: 'generateId', message: 'must be a function' },
+    ]);
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+  });
+
   it('should render a status table', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await runCli(baseArgs(['up']));

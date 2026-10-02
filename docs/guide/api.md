@@ -68,6 +68,7 @@ up, even from a different project's env file.
 | `import(options?)` | `Promise<ImportResult>` | Adopt a migrate-mongo changelog. |
 | `baseline(options?)` | `Promise<BaselineSummary>` | Mark files applied without executing them — the [`migronaut baseline`](/commands/baseline) command's engine. |
 | `nextBatch()` | `Promise<number>` | The batch number the next `up` would use — a peek, not a reservation. |
+| `generateId()` | `Promise<string>` | A new id in the kit's configured format — the [`generateId`](/guide/configuration#custom-id-format) option, else a random UUID. Does not connect. |
 | `lockInfo()` | `Promise<LockInfo \| null>` | Inspect the current lock holder, if any. |
 | `forceUnlock()` | `Promise<LockInfo \| null>` | Force-release the lock; returns who held it. |
 | `stop(reason?)` | `void` | Ask an in-flight run to stop cleanly after the current migration. |

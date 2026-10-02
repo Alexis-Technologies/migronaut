@@ -70,7 +70,7 @@ Three rules explain every behaviour on this page:
 |---|---|---|
 | `bullmq` | **required** | `{ Queue, Worker?, QueueEvents? }` — classes from your `bullmq`, or instances you already have. `Worker` is needed by `startWorker()`, `QueueEvents` by `wait()` |
 | `connection` | required with classes | BullMQ's `connection` (options or your Redis client). Passed through untouched, **never closed** |
-| `config` | | Migronaut config for the kit the queue creates. Omit to resolve from `migronaut.config.*` / `MIGRONAUT_*` |
+| `config` | | Migronaut config for the kit the queue creates. Omit to resolve from `migronaut.config.*` / `MIGRONAUT_*`. Its [`generateId`](/guide/configuration#custom-id-format), if set, is also what mints group ids |
 | `kit` | | A `MigratorKit` you own, instead of `config` — never disconnected by `close()` |
 | `kitOptions` | | `MigratorKit` options (`cwd`, `configPath`, …) |
 | `queueName` | `'migronaut'` | **One queue per database** |
@@ -98,7 +98,7 @@ Three rules explain every behaviour on this page:
 
 ```js
 {
-  groupId: '3f0c…',          // this enqueue call
+  groupId: '3f0c…',          // this enqueue call — a UUID, or your `generateId` format
   direction: 'up',
   batch: 7,                  // the batch every job of the group will stamp
   upToDate: false,           // true → nothing to do, no job added

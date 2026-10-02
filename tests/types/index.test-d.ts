@@ -6,6 +6,7 @@ import {
   ChecksumMismatchError,
   EXIT_CODES,
   HookFailedError,
+  type IdGenerator,
   type ImportResult,
   type LockInfo,
   LockLostError,
@@ -247,3 +248,26 @@ expectAssignable<MigronautErrorCode>('QUEUE_JOB_FAILED');
 expectType<number>(EXIT_CODES.MIGRATION_BLOCKED);
 expectType<number>(EXIT_CODES.QUEUE_JOB_INVALID);
 expectType<number>(EXIT_CODES.QUEUE_JOB_FAILED);
+
+// ─── Custom id format ────────────────────────────────────────────────────────
+
+// Third-party generators are assignable as they are: their optional first
+// parameter (a size, a seed time) is never supplied, so it does not matter.
+declare function nanoidLike(size?: number): string;
+declare function ulidLike(seedTime?: number): string;
+declare function cuidLike(): string;
+expectAssignable<IdGenerator>(nanoidLike);
+expectAssignable<IdGenerator>(ulidLike);
+expectAssignable<IdGenerator>(cuidLike);
+expectAssignable<Partial<MigronautConfig>>({ generateId: ulidLike });
+expectAssignable<Partial<MigronautConfig>>({ generateId: () => `run_${Date.now()}` });
+new MigratorKit({ generateId: cuidLike });
+void runMigrations({ generateId: nanoidLike });
+// It must be synchronous, a function, and return a string.
+expectError<Partial<MigronautConfig>>({ generateId: async () => 'late' });
+expectError<Partial<MigronautConfig>>({ generateId: 'ulid' });
+expectError<Partial<MigronautConfig>>({ generateId: () => 42 });
+// A generator that needs an argument cannot be called bare.
+expectError<Partial<MigronautConfig>>({ generateId: (prefix: string) => prefix });
+// The kit mints in the same format for code above it (the queue adapter's group ids).
+expectType<Promise<string>>(kit.generateId());
