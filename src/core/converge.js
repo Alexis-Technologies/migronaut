@@ -9,12 +9,14 @@ const { inPlaceCapabilities } = require('./index-spec.js');
  * Converge: bring the declared collections' indexes and validators to their
  * declared state. Stateless — every run reads `listCollections` and
  * `listIndexes`, plans against what it finds (converge-plan.js), and carries
- * the plan out one operation at a time. Nothing is recorded: the declaration
- * is the only source of truth, and the database is checked against it afresh
- * each time.
+ * the plan out one operation at a time. The declaration is the only source of
+ * truth, and the database is checked against it afresh each time: the history
+ * a run appends (converge-log.js) is for people, and nothing reads it back to
+ * decide what to do.
  *
  * Pure orchestration over capabilities the MigratorKit injects (`deps`):
- * `{db, logger, fields, emit, assertNotAborted}`.
+ * `{db, logger, fields, emit, assertNotAborted}`, and optionally `audit` +
+ * `record` (the history entry) and `shardKeyOf` (behind a mongos).
  */
 
 /**
@@ -483,6 +485,21 @@ async function recordHistory(deps, options, result, { startedAt, error }) {
   }
 }
 
+/**
+ * Undeclared indexes left in place because prune was off — not the ones that
+ * back a shard key, which stay under prune too: "converge with prune to drop
+ * them" would be wrong advice for those.
+ */
+function undeclaredKept(result) {
+  let kept = 0;
+  for (const collection of result.collections) {
+    for (const action of collection.actions) {
+      if (action.action === 'keep' && action.reason === 'not declared') kept += 1;
+    }
+  }
+  return kept;
+}
+
 function counts(result) {
   const out = {};
   for (const collection of result.collections) {
@@ -749,7 +766,7 @@ async function runConverge(deps, options, signal) {
     settleRest(result);
     finalize(result);
     const durationMs = Date.now() - startedAt;
-    const kept = counts(result).keep ?? 0;
+    const kept = undeclaredKept(result);
     if (result.changed > 0) {
       logger.info(
         `✔ Converged ${result.changed} change(s) in ${touched(result)} of ${plans.length} ` +

@@ -2171,7 +2171,8 @@ class MigratorKit extends EventEmitter {
    * Bring the declared collections (`collections`, `collectionsDir`) to their
    * declared indexes and validators — see {@link runConverge} in converge.js
    * for the mechanics. Stateless: the live database is read and compared on
-   * every call, and nothing is recorded.
+   * every call. What a run changed is appended to the converge history
+   * (`convergeHistory()`), which no run reads back.
    *
    * `dryRun` plans without writing — no lock, no events. A real run holds the
    * migration lock, like every other mutation. `prune` drops undeclared

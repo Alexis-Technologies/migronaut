@@ -779,7 +779,7 @@ describe('runConverge — sharded clusters', () => {
       { c: { indexes: [{ v: 2, key: { tenant: 1, at: 1 }, name: 'tenant_1_at_1' }] } },
       { server: { version: [7, 0], mongos: true } },
     );
-    const { deps } = makeDeps(db);
+    const { deps, lines } = makeDeps(db);
     deps.shardKeyOf = async () => ({ tenant: 1 });
     const result = await runConverge(
       deps,
@@ -791,6 +791,8 @@ describe('runConverge — sharded clusters', () => {
       result.collections[0].actions.map((a) => [a.name, a.action, a.reason]),
       [['tenant_1_at_1', 'keep', 'backs the shard key']],
     );
+    // Kept under prune — "converge with prune to drop them" would be wrong advice.
+    assert.ok(!lines.some((line) => /prune to drop/.test(line.message)));
   });
 
   it('should keep it, with a warning, when the server refuses the drop', async () => {
@@ -814,6 +816,7 @@ describe('runConverge — sharded clusters', () => {
     const [row] = result.collections[0].actions;
     assert.deepStrictEqual([row.action, row.status], ['keep', 'skipped']);
     assert.ok(lines.some((line) => line.level === 'warn' && /shard key/.test(line.message)));
+    assert.ok(!lines.some((line) => /prune to drop/.test(line.message)));
     assert.strictEqual(result.unstable, undefined, 'kept on purpose, not unstable');
   });
 });

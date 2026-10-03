@@ -814,8 +814,8 @@ Files: [collections.js](src/core/collections.js), [index-spec.js](src/core/index
 [converge-plan.js](src/core/converge-plan.js), [converge.js](src/core/converge.js).
 
 **What it is.** Indexes and validators declared as an end state (`collections`, `collectionsDir`)
-and brought there by `kit.converge()` — stateless: nothing is recorded, every run reads
-`listCollections` + `listIndexes` and plans afresh. Migrations keep everything with an order and a
+and brought there by `kit.converge()` — stateless: every run reads `listCollections` +
+`listIndexes` and plans afresh, and the history it appends is never read back to decide anything. Migrations keep everything with an order and a
 history; this is for what only has a current value.
 
 **Pure planner, thin executor.** All decisions live in `converge-plan.js` / `index-spec.js`

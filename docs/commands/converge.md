@@ -12,7 +12,8 @@ migronaut converge [options]
 An index or a validator has a current value, not a history. Rather than a migration file per
 change, declare the end state in `collections` (or one file per collection in `collectionsDir`)
 and let converge compare it with the live database and make the difference. It is stateless:
-nothing is recorded, and every run reads the database afresh.
+every run reads the database afresh, and the [history](/guide/collections#history) it keeps is for
+you — no run reads it back.
 
 ## Usage
 

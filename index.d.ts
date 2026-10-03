@@ -1314,9 +1314,10 @@ export class MigratorKit extends EventEmitter {
   /**
    * Bring the declared collections (`collections`, `collectionsDir`) to their
    * declared indexes and validators. Stateless: the live database is read and
-   * compared on every call, and nothing is recorded. A real run holds the
-   * migration lock; a plan with a conflict is refused before any write, and a
-   * failed step throws {@link ConvergeFailedError}. Experimental.
+   * compared on every call; what a run changed is appended to the converge
+   * history ({@link MigratorKit.convergeHistory}), which no run reads back. A
+   * real run holds the migration lock; a plan with a conflict is refused before
+   * any write, and a failed step throws {@link ConvergeFailedError}. Experimental.
    */
   converge(options?: ConvergeOptions): Promise<ConvergeResult>;
   /**
