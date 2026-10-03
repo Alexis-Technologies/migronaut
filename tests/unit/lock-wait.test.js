@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { describe, it } = require('node:test');
+const { describe, it, mock } = require('node:test');
 const {
   DEFAULT_LOCK_POLL_INTERVAL_MS,
   DEFAULT_LOCK_WAIT_TIMEOUT_MS,
@@ -33,6 +33,24 @@ function refusedThenFree(refusals, makeError = () => held()) {
 
 const fast = { onLockHeld: 'wait', lockPollIntervalMs: 2, lockWaitTimeoutMs: 1000 };
 
+/**
+ * Date.now() under the test's control: it moves only by `advance(ms)`. The
+ * sleeps between attempts still run on real timers — which fire up to a
+ * millisecond early or late by the wall clock — so a measured wait asserted
+ * against the real clock is a flake waiting to happen.
+ */
+async function withManualClock(fn) {
+  let now = 1_000_000;
+  const dateNow = mock.method(Date, 'now', () => now);
+  try {
+    return await fn((ms) => {
+      now += ms;
+    });
+  } finally {
+    dateNow.mock.restore();
+  }
+}
+
 describe('withLockWait', () => {
   it('should return the first attempt untouched when the lock is free', async () => {
     const outcome = await withLockWait(async () => 'done', fast);
@@ -49,11 +67,18 @@ describe('withLockWait', () => {
   });
 
   it('should poll again while the lock is held, then report how long it waited', async () => {
-    const outcome = await withLockWait(refusedThenFree(2), fast);
-    assert.strictEqual(outcome.result, 'done');
-    assert.strictEqual(outcome.waited, true);
-    assert.strictEqual(outcome.attempts, 3);
-    assert.ok(outcome.waitedMs >= 2, 'two sleeps of at least 1ms each were planned');
+    await withManualClock(async (advance) => {
+      const attempt = refusedThenFree(2);
+      const outcome = await withLockWait(async () => {
+        advance(3);
+        return attempt();
+      }, fast);
+      assert.strictEqual(outcome.result, 'done');
+      assert.strictEqual(outcome.waited, true);
+      assert.strictEqual(outcome.attempts, 3);
+      // From the first refusal (t+3) to the attempt that got the lock (t+9).
+      assert.strictEqual(outcome.waitedMs, 6);
+    });
   });
 
   it("should rethrow the refusal at once under onLockHeld: 'throw' (the default)", async () => {
@@ -131,15 +156,21 @@ describe('withLockWait', () => {
   it('should report each wait through onWait, holder included', async () => {
     const waits = [];
     const lockedAt = new Date(5);
-    await withLockWait(
-      refusedThenFree(2, () => held(lockedAt)),
-      { ...fast, onWait: (info) => waits.push(info) },
-    );
+    await withManualClock(async (advance) => {
+      const attempt = refusedThenFree(2, () => held(lockedAt));
+      await withLockWait(
+        async () => {
+          advance(4);
+          return attempt();
+        },
+        { ...fast, onWait: (info) => waits.push(info) },
+      );
+    });
     assert.strictEqual(waits.length, 2);
     assert.strictEqual(waits[0].attempts, 1);
     assert.strictEqual(waits[0].waitedMs, 0);
     assert.strictEqual(waits[0].holder.lockedAt, lockedAt);
-    assert.ok(waits[1].waitedMs > 0);
+    assert.strictEqual(waits[1].waitedMs, 4);
   });
 
   it('should stamp a timed-out refusal with what the wait did', async () => {
@@ -162,14 +193,16 @@ describe('withLockWait', () => {
   });
 
   it('should measure the wait by the clock, from the first refusal', async () => {
-    let calls = 0;
-    const outcome = await withLockWait(async () => {
-      calls += 1;
-      if (calls === 1) throw held();
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      return 'done';
-    }, fast);
-    assert.ok(outcome.waitedMs >= 20, `the slow last attempt counts: ${outcome.waitedMs}`);
+    await withManualClock(async (advance) => {
+      let calls = 0;
+      const outcome = await withLockWait(async () => {
+        calls += 1;
+        if (calls === 1) throw held();
+        advance(20); // a slow last attempt
+        return 'done';
+      }, fast);
+      assert.strictEqual(outcome.waitedMs, 20, 'the slow last attempt counts');
+    });
   });
 
   it('should keep waiting when an onWait callback throws', async () => {
