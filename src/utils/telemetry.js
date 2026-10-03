@@ -1,5 +1,5 @@
 const { MigronautError } = require('../errors/index.js');
-const { errorText } = require('./error.js');
+const { errorWithCause } = require('./error.js');
 const { redactOutbound } = require('./redact.js');
 
 /**
@@ -121,13 +121,8 @@ function errorType(error) {
  * migration and not why.
  */
 function failureText(error) {
-  const message = errorText(error);
-  const cause =
-    error instanceof MigronautError && typeof error.context?.cause === 'string'
-      ? errorText(error.context.cause)
-      : undefined;
   // A span goes to a third-party backend: no data values, and a bounded size.
-  const text = redactOutbound(cause ? `${message} — ${cause}` : message);
+  const text = redactOutbound(errorWithCause(error));
   return text.length > MAX_STATUS_MESSAGE_LENGTH
     ? `${text.slice(0, MAX_STATUS_MESSAGE_LENGTH - 1)}…`
     : text;

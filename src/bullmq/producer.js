@@ -246,27 +246,35 @@ async function planDownJobs(kit, options = {}) {
 }
 
 /**
- * Which of the group's files were already queued by someone else. A
- * deduplicated add hands back the *existing* job's id, so the stored job's
- * group differs from ours — and waiting on that id simply joins the job that
- * will do the work.
+ * For each id, whether the job stored under it was queued by another enqueue
+ * call. A deduplicated add hands back the *existing* job's id, so the stored
+ * job's group differs from ours — and waiting on that id simply joins the job
+ * that will do the work. All false on a queue that cannot read jobs back.
  */
-async function findDeduplicated(queue, jobs, groupId) {
-  if (typeof queue.getJob !== 'function') return [];
+async function foreignJobs(queue, ids, groupId) {
+  if (typeof queue.getJob !== 'function') return ids.map(() => false);
   // A first deploy can enqueue hundreds of jobs: read them back a few at a time.
-  const stored = await mapLimit(jobs, LOOKUP_CONCURRENCY, (job) => queue.getJob(job.id));
-  const deduplicated = [];
-  for (const [index, job] of stored.entries()) {
-    if (job && job.data?.groupId !== groupId) deduplicated.push(jobs[index].migration);
-  }
-  return deduplicated;
+  const stored = await mapLimit(ids, LOOKUP_CONCURRENCY, (id) => queue.getJob(id));
+  return stored.map((job) => Boolean(job && job.data?.groupId !== groupId));
 }
 
-/** Whether the job stored under `id` belongs to another enqueue call (a deduplicated add) */
-async function isForeign(queue, id, groupId) {
-  if (typeof queue.getJob !== 'function') return false;
-  const stored = await queue.getJob(id);
-  return Boolean(stored && stored.data?.groupId !== groupId);
+/**
+ * The `wait()` of an enqueue handle. It waits through the caller's
+ * QueueEvents, else the one the facade lends (`getQueueEvents`) — never
+ * opened for a group that has nothing to wait for.
+ */
+function makeWait(queue, group, { queueEvents, getQueueEvents } = {}) {
+  const waitsForSomething = group.jobs.length > 0 || group.converge !== undefined;
+  return (waitOptions = {}) =>
+    waitForGroup({
+      queue,
+      queueEvents:
+        waitOptions.queueEvents ??
+        queueEvents ??
+        (waitsForSomething ? getQueueEvents?.() : undefined),
+      ...group,
+      timeoutMs: waitOptions.timeoutMs,
+    });
 }
 
 function assertQueue(queue) {
@@ -280,7 +288,7 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
   assertQueue(queue);
   const { groupId, direction, batch } = plan;
   let jobs = [];
-  let deduplicated = [];
+  const deduplicated = [];
   let converge = null;
 
   const specs = plan.converge ? [...plan.jobs, plan.converge] : plan.jobs;
@@ -296,10 +304,16 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
       migration,
       index,
     }));
-    deduplicated = await findDeduplicated(queue, jobs, groupId);
+    const foreign = await foreignJobs(
+      queue,
+      added.map((job) => String(job.id)),
+      groupId,
+    );
+    for (const job of jobs) {
+      if (foreign[job.index]) deduplicated.push(job.migration);
+    }
     if (plan.converge) {
-      const id = String(added[specs.length - 1].id);
-      converge = { id, deduplicated: await isForeign(queue, id, groupId) };
+      converge = { id: String(added[specs.length - 1].id), deduplicated: foreign.at(-1) };
     }
     const what =
       jobs.length > 0
@@ -327,21 +341,11 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
     jobs,
     deduplicated,
     converge,
-    wait: (waitOptions = {}) =>
-      waitForGroup({
-        queue,
-        // An empty group waits for nothing: no QueueEvents connection for it.
-        queueEvents:
-          waitOptions.queueEvents ??
-          queueEvents ??
-          (jobs.length > 0 || converge ? getQueueEvents?.() : undefined),
-        groupId,
-        direction,
-        batch,
-        jobs,
-        ...(converge ? { converge } : {}),
-        timeoutMs: waitOptions.timeoutMs,
-      }),
+    wait: makeWait(
+      queue,
+      { groupId, direction, batch, jobs, ...(converge ? { converge } : {}) },
+      { queueEvents, getQueueEvents },
+    ),
   };
 }
 
@@ -366,7 +370,12 @@ async function enqueueConverge(queue, kit, options = {}, internals = {}) {
   ]);
   if (!added) throw new ConfigInvalidError('queue.addBulk did not return the converge job');
   const jobId = String(added.id);
-  const deduplicated = await isForeign(queue, jobId, groupId);
+  const [deduplicated] = await foreignJobs(queue, [jobId], groupId);
+  const wait = makeWait(
+    queue,
+    { groupId, direction: 'converge', batch: null, jobs: [], converge: { id: jobId } },
+    { queueEvents, getQueueEvents: internals.getQueueEvents },
+  );
   kit.logger.info(`⇢ Enqueued a converge job${deduplicated ? ' (already queued)' : ''}`, {
     groupId,
     jobId,
@@ -377,16 +386,7 @@ async function enqueueConverge(queue, kit, options = {}, internals = {}) {
     jobId,
     deduplicated,
     wait: async (waitOptions = {}) => {
-      const { converge } = await waitForGroup({
-        queue,
-        queueEvents: waitOptions.queueEvents ?? queueEvents ?? internals.getQueueEvents?.(),
-        groupId,
-        direction: 'converge',
-        batch: null,
-        jobs: [],
-        converge: { id: jobId },
-        timeoutMs: waitOptions.timeoutMs,
-      });
+      const { converge } = await wait(waitOptions);
       return converge;
     },
   };

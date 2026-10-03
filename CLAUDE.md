@@ -138,9 +138,10 @@ src/
 ├── index.js                # Public API barrel — re-exported at the package root
 ├── errors/index.js          # MigronautError base + one subclass per error code
 ├── core/                     # The engine (config, lock, lock-wait, changelog, runner, context, import, migrator, run,
-│                             #   and declared collections: collections, index-spec, converge-plan, converge)
+│                             #   options, sequence, run-recorder, and declared collections: collections,
+│                             #   index-spec, converge-plan, converge, converge-log)
 ├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id, telemetry,
-│                             #   canonical, collection-name — pure-ish helpers
+│                             #   canonical, collection-name, actor, error, redact — pure-ish helpers
 ├── cli/                        # own arg parser (args.js) + spinner + table + one file per command
 └── bullmq/                      # Queue adapter: jobs (contract), producer, processor, wait, service (facade)
 tests/
@@ -155,9 +156,9 @@ migrations/             # Example/dev migration files used while developing this
 ```
 
 **Layering rule:** Presentation (`cli/`, `bin/`) never touches the DB or contains migration
-logic. Orchestration (`core/migrator.js`, `core/run.js`) sequences steps and owns the
-connection lifecycle. Mechanism modules (`core/{lock,changelog,runner,context,import,config}.js`,
-`utils/`) do one job each and know nothing about the CLI — no `console.*`, no spinner or table
+logic. Orchestration (`core/migrator.js` with its `run-recorder.js`, `core/run.js`) sequences
+steps and owns the connection lifecycle. Mechanism modules
+(`core/{lock,changelog,runner,context,import,config,options,sequence}.js`, `utils/`) do one job each and know nothing about the CLI — no `console.*`, no spinner or table
 imports. The CLI injects a `ProgressReporter` callback into core instead. The queue adapter
 (`bullmq/`) is a second orchestration layer *above* the kit: it may require `core/migrator.js`,
 `core/lock-wait.js`, `utils/` and `errors/`, but never a mechanism module (`lock`, `changelog`,

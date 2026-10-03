@@ -79,6 +79,9 @@ src/
 ├── errors/index.js          # MigronautError base + one subclass per error code
 ├── core/                    # The engine
 │   ├── migrator.js          # MigratorKit — orchestrates everything (the heart)
+│   ├── options.js           # PURE: validation of each run method's options (the preambles)
+│   ├── sequence.js          # The files on disk vs the applied names: pending, late, blocked, revert order
+│   ├── run-recorder.js      # RunRecorder — run:start/run:end, lock events, run metrics, the Done line
 │   ├── config.js            # Config loader + built-in validation + precedence
 │   ├── lock.js              # MongoDB distributed lock + heartbeat + runWithLock()
 │   ├── lock-wait.js         # withLockWait() — the one wait-for-the-lock loop (run.js + queue jobs)
@@ -91,6 +94,7 @@ src/
 │   ├── index-spec.js        # PURE: one declared index vs one live index (names, keys, options)
 │   ├── converge-plan.js     # PURE: plan one collection — result rows + executable steps
 │   ├── converge.js          # runConverge() — read live state, plan, carry the plan out
+│   ├── converge-log.js      # ConvergeLog — the append-only converge history (_migronaut_converge)
 │   ├── import.js            # PURE migrate-mongo → MigrationRecord mapping
 │   ├── import-runner.js     # runImport() — the impure import flow (read/map/write)
 │   └── run.js               # Programmatic helpers: runMigrations(), pendingMigrations()
@@ -102,7 +106,8 @@ src/
 │   ├── checksum.js          # SHA-256 file hashing
 │   ├── redact.js            # Mask credentials (userinfo + query secrets) leaving the process
 │   ├── sanitize.js          # Strip terminal control chars (C0 + full C1) from untrusted text
-│   ├── error.js             # errorText() — stringify caught errors, redaction built in
+│   ├── error.js             # errorText()/errorWithCause() — stringify caught errors, redaction built in
+│   ├── actor.js             # requestedBy/reason — limits, validation, changelog fields
 │   ├── canonical.js         # canonical()/deepEqual()/toWire() — declared vs. stored value comparison
 │   ├── collection-name.js   # isCollectionName() — the one rule for a usable collection name
 │   ├── id.js                # The one place an id is minted — randomUUID, or the user's generateId
@@ -146,8 +151,8 @@ There are three layers. Keep logic in the lowest layer it belongs to.
 | Layer | Files | Responsibility | Must NOT |
 |---|---|---|---|
 | **Presentation** | `cli/`, `bin/` | Parse args, render tables/JSON, spinner, prompts, exit codes | Contain migration logic; touch the DB directly |
-| **Orchestration** | `core/migrator.js`, `core/run.js` | Sequence the steps of each command; own the connection lifecycle | Import the spinner or table renderer; render tables |
-| **Mechanism** | `core/{lock,changelog,runner,context,import,config}.js`, `utils/` | One job each, pure-ish, unit-testable | Know about the CLI; call `console.*` |
+| **Orchestration** | `core/migrator.js` (+ `run-recorder.js`), `core/run.js` | Sequence the steps of each command; own the connection lifecycle | Import the spinner or table renderer; render tables |
+| **Mechanism** | `core/{lock,changelog,runner,context,import,config,options,sequence}.js`, `utils/` | One job each, pure-ish, unit-testable | Know about the CLI; call `console.*` |
 | **Integration adapter** | `bullmq.js`, `src/bullmq/` | Drive the kit's *public* API from queue jobs; own the Queue/Worker lifecycle | Require a mechanism module (`lock`, `changelog`, `runner`) or touch the DB; `require('bullmq')`; call `console.*` |
 
 **Why this matters for you:** the CLI's spinner lives *entirely* in the CLI layer
@@ -345,10 +350,16 @@ Each entry: **responsibility · key exports · nuances you must know.**
   place. `up` and `down` share the same execution skeleton (`#runSequence` for
   beforeAll/loop/afterAll, `#executeMigration` for one migration end to end), so a fix to one
   direction cannot silently miss the other.
+- **What it delegates:** each public method's option checks are one call into
+  [options.js](src/core/options.js) (`assertUpOptions`, `assertDownOptions`, …), made before the
+  config loads; "which files, in which order, and what blocks them" is
+  [sequence.js](src/core/sequence.js); and the bookkeeping of a locked run — events, metrics, the
+  span's end, the closing line — is a [`RunRecorder`](src/core/run-recorder.js). What stays here is
+  the flow and the state only the kit has (config, connection, run id, abort wiring).
 - **Nuances:** `#filepath(name)` centralizes **path-traversal defense** — every user-supplied name
-  flows through it. Batch numbers come from `nextBatch()` (monotonic max+1). `down --steps` and its
-  dry-run share `selectLastApplied` + `assertStepsValid`. `assertReversible` preflights
-  migrate-mongo records before any write. `connect()` is safe under overlapping calls (they share
+  flows through it (`assertMigrationName`, then a containment check). Batch numbers come from
+  `nextBatch()` (monotonic max+1). `down --steps` and its dry-run share `#selectDownTargets` and the
+  same `--steps` validation. `assertReversible` preflights migrate-mongo records before any write. `connect()` is safe under overlapping calls (they share
   one in-flight connection) — a long-lived kit in a service is called from several places at once.
 - **Sequenced single-file runs:** `up(file, { batch, ordered })`, `down(file, { ordered })` and the
   public `nextBatch()` exist so something *outside* the kit can split one logical run into
@@ -367,12 +378,33 @@ Each entry: **responsibility · key exports · nuances you must know.**
   was injected. There are exactly two wrap sites, both here, so the mechanism modules stay ignorant
   of it:
   - `#withLock` opens the `migronaut.run` span around the callback it hands to `runWithLock` — i.e.
-    *after* the lock is held — and ends it in its `finally`, after the release, from the same
-    summary `run:end` is built from. A refused acquisition therefore opens no span; it increments
-    `migronaut.lock.refused` instead.
+    *after* the lock is held — and hands it to its `RunRecorder`, which ends it in the `finally`,
+    after the release, from the same summary `run:end` is built from. A refused acquisition
+    therefore opens no span; it increments `migronaut.lock.refused` instead.
   - `#executeMigration` wraps `#executeMigrationSteps` (hooks, load, body, changelog write) in the
     `migronaut.migration` span, which makes it the *active* span for everything the migration
     does, and records the duration histogram on both the success and the failure path.
+
+### `src/core/options.js` — run-method option validation (pure)
+- **Responsibility:** one `assert*Options` per run method (`up`, `down`, `redo`, `dryRun`,
+  `converge`, `list`, `import`, plus `assertHistoryLimit` and `assertFilename`), each the whole
+  preamble of that method with its checks in the order that decides which error a caller sees.
+  No config, no database, no file system — so a caller mistake costs neither a round trip nor the
+  lock.
+
+### `src/core/sequence.js` — the migration sequence
+- **Responsibility:** the migration files on disk (`listMigrationFiles` — dotfiles, directories and
+  `.d.ts` files skipped), measured against the applied names: `pendingIn` (a failed trace counts
+  as pending), `truncateAtTarget` (`--to`), `lateArrivals` (the out-of-order check's input),
+  `revertOrder`, and `blockedError` — the one wording of an ordered step's refusal. Pure apart from
+  the directory read; refusing, warning or waiting is the kit's call.
+
+### `src/core/run-recorder.js` — the record of a locked run
+- **Responsibility:** `RunRecorder` — `run:start`, the `lock:*` events, the lock metrics, the run
+  span's attributes and end, `run:end` with the row counts (taken from the error's
+  `context.results` on the failure path), and the closing "✔ Done" line. Built per run by
+  `#withLock` from the kit's guarded emitter, telemetry and logger, so nothing it does can fail a
+  run. The span is still *opened* in `migrator.js` — one of the kit's two wrap sites.
 
 ### `src/core/audit.js` — read-only health check
 - **Responsibility:** the `migronaut audit` checks (config, connectivity, transactions, indexes,
@@ -418,12 +450,19 @@ Each entry: **responsibility · key exports · nuances you must know.**
   `summarize`, `isDestructive`, the validator helpers.
 
 ### `src/core/converge.js` — the converge flow
-- **Responsibility:** `runConverge(deps, options, signal)` — read each declared collection's live
-  state (`readLiveState`, primary reads with forced BSON promotion), plan it, refuse a plan with a
-  conflict, run the steps one by one with an abort check between them, re-plan what changed (the
-  fixed-point check), emit `converge:*` events, and build the result.
-- **Key exports:** `runConverge`, `readLiveState`, `READ_OPTIONS`. Same `runX(deps)` injection
-  pattern as audit, import and baseline.
+- **Responsibility:** `runConverge(deps, options, signal)`, in phases that are functions of their
+  own: *read and plan* (`readAndPlan` — every live state in one `listCollections` plus bounded
+  `listIndexes`, primary reads with forced BSON promotion; shard keys behind a mongos), *guard*
+  (`refuseConflicts`), then per collection *re-plan* (`replan`), *apply* (`applyCollection` — the
+  steps one by one, an abort check between them) and *verify* (`verifyFixedPoint`), and finally
+  *report* (`reportSuccess` / `reportFailure` — closing lines, the history entry, `converge:end`).
+- **Key exports:** `runConverge`, `readLiveState`, `readLiveStates`, `READ_OPTIONS`. Same
+  `runX(deps)` injection pattern as audit, import and baseline.
+
+### `src/core/converge-log.js` — the converge history
+- **Responsibility:** `ConvergeLog` — `append(db, entry)` (creates the `startedAt` index on first
+  use) and `list(db, limit)`, newest first, over `convergeLogCollection`. Written best-effort by
+  converge.js; read only by `kit.convergeHistory()` / `converge --history`, never by a run.
 
 ### `src/core/run.js` — programmatic entry points
 - **Responsibility:** the "blessed" lifecycle-safe helpers for app startup / serverless / tests.
@@ -489,7 +528,13 @@ the design.
 - **checksum.js** — `computeChecksum` (SHA-256 hex of file contents, BOM/CRLF-normalized).
 - **redact.js / error.js** — `redactUris`/`redactDeep` mask `user:password@` in any string leaving
   the process; `errorText(error)` is the single chokepoint for stringifying caught errors, with
-  redaction built in. Use it instead of `error.message` everywhere.
+  redaction built in. Use it instead of `error.message` everywhere. `errorWithCause(error)` adds the
+  wrapped `context.cause` (which migration *and* why) — the changelog's failure trace and a failed
+  span's status message.
+- **actor.js** — `requestedBy` / `reason`: their limits (`ACTOR_LIMITS`), `actorIssue`,
+  `pickActor`, and `actorFields` (the changelog field names, `revert`-prefixed for a rollback).
+  Shared by the kit's options and the queue's job contract, so a producer cannot send what its
+  worker refuses.
 - **id.js** — the only module that mints an identifier. `randomId()` is the default
   (`crypto.randomUUID()`); `createIdGenerator(generateId)` wraps the user's function so that every
   call is bare (no arguments, no receiver), synchronous, and checked by `assertId` (a non-empty

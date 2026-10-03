@@ -1,3 +1,5 @@
+const { actorFields } = require('../utils/actor.js');
+
 /**
  * Reads and writes migration records in the changelog collection
  * (`_migronaut_migrations` by default).
@@ -304,8 +306,7 @@ class Changelog {
     const update = {
       $set: {
         status: 'reverted',
-        ...(actor.requestedBy !== undefined ? { revertRequestedBy: actor.requestedBy } : {}),
-        ...(actor.reason !== undefined ? { revertReason: actor.reason } : {}),
+        ...actorFields(actor, 'revert'),
       },
       // Server time, like markApplied's appliedAt — one clock for the whole trail.
       $currentDate: { revertedAt: true },

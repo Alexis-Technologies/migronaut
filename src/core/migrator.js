@@ -12,7 +12,6 @@ const {
   HookFailedError,
   IrreversibleMigrationError,
   LockAlreadyHeldError,
-  MigrationBlockedError,
   MigrationFileNotFoundError,
   MigrationInvalidNameError,
   MigronautError,
@@ -20,14 +19,14 @@ const {
   OutOfOrderMigrationError,
   RunAbortedError,
 } = require('../errors/index.js');
-const { actorIssue, pickActor } = require('../utils/actor.js');
+const { actorFields, pickActor } = require('../utils/actor.js');
 const { computeChecksum } = require('../utils/checksum.js');
 const { mapLimit } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
+const { errorText, errorWithCause } = require('../utils/error.js');
 const { createIdGenerator } = require('../utils/id.js');
 const { loadMigrationFile } = require('../utils/loader.js');
 const { resolveLogger } = require('../utils/logger.js');
-const { isBareFilename } = require('../utils/migration-name.js');
+const { assertMigrationName } = require('../utils/migration-name.js');
 const { ATTRIBUTES, SPANS, createTelemetry } = require('../utils/telemetry.js');
 const {
   createConfigFile,
@@ -40,12 +39,33 @@ const { runBaseline } = require('./baseline.js');
 const { Changelog } = require('./changelog.js');
 const { ConvergeLog } = require('./converge-log.js');
 const { resolveDefinitions } = require('./collections.js');
-const { isCollectionName, loadConfig } = require('./config.js');
+const { loadConfig } = require('./config.js');
 const { buildContext } = require('./context.js');
 const { runConverge } = require('./converge.js');
 const { runImport } = require('./import-runner.js');
 const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
+const {
+  assertConvergeOptions,
+  assertDownOptions,
+  assertDryRunOptions,
+  assertFilename,
+  assertHistoryLimit,
+  assertImportOptions,
+  assertListOptions,
+  assertRedoOptions,
+  assertUpOptions,
+} = require('./options.js');
+const { RunRecorder } = require('./run-recorder.js');
 const { runMigration } = require('./runner.js');
+const {
+  blockedError,
+  lateArrivals,
+  listMigrationFiles,
+  newestOf,
+  pendingIn,
+  revertOrder,
+  truncateAtTarget,
+} = require('./sequence.js');
 
 /** Simultaneous file reads — keeps a large migrations dir clear of EMFILE */
 const FS_CONCURRENCY = 16;
@@ -422,15 +442,15 @@ class MigratorKit extends EventEmitter {
       this.#stopRequested = undefined;
       this.#abort(pending);
     }
-    const startedAt = Date.now();
-    this.#emit('run:start', { ...info });
-    const telemetry = this.#telemetry;
-    // The run's span exists only once the lock is held: a caller polling for a
-    // busy lock retries the whole run every few hundred milliseconds, and a
-    // span per refusal would bury the one run that did the work.
-    let span;
-    let acquired;
-    let lostReason;
+    const recorder = new RunRecorder({
+      info,
+      runId: this.#runId,
+      telemetry: this.#telemetry,
+      emit: (event, payload) => this.#emit(event, payload),
+      logger: this.#logger,
+      fields: (extra) => this.#fields(extra),
+    });
+    recorder.start();
     let failure;
     let result;
     try {
@@ -443,111 +463,28 @@ class MigratorKit extends EventEmitter {
           logger: this.#lockLogger(),
           onLockLost: this.#config.onLockLost,
           owner: this.#runId,
-          onLockAcquired: (extra) => {
-            acquired = extra;
-            if (typeof extra?.acquireMs === 'number') telemetry.lockAcquired(extra.acquireMs);
-            this.#emit('lock:acquired', { owner: this.#runId, ...extra });
-          },
-          onLockReleased: (extra) => this.#emit('lock:released', { owner: this.#runId, ...extra }),
-          onLockLostEvent: (reason) => {
-            // The heartbeat and the TTL deadline can each report the same
-            // loss: the first reason is the cause, and it is one lost lock.
-            if (lostReason === undefined) {
-              lostReason = reason;
-              telemetry.lockLost();
-            }
-            this.#emit('lock:lost', { owner: this.#runId, reason });
-          },
+          onLockAcquired: (extra) => recorder.lockAcquired(extra),
+          onLockReleased: (extra) => recorder.lockReleased(extra),
+          onLockLostEvent: (reason) => recorder.lockLost(reason),
           ...(options.noLock ? { noLock: true } : {}),
         },
         (lockSignal) =>
-          // Active around the unit of work only, and ended in the `finally`
-          // below — after the release, so the span's outcome is the run's.
-          telemetry.open(
-            SPANS.RUN,
-            {
-              [ATTRIBUTES.RUN_ID]: this.#runId,
-              [ATTRIBUTES.RUN_COMMAND]: info.command,
-              [ATTRIBUTES.RUN_DIRECTION]: info.direction,
-              [ATTRIBUTES.LOCK_ACQUIRE_MS]: acquired?.acquireMs,
-              [ATTRIBUTES.LOCK_SKIPPED]: acquired?.skipped,
-            },
-            (opened) => {
-              span = opened;
-              return fn(AbortSignal.any([lockSignal, stopper.signal]));
-            },
-          ),
+          // The run's span exists only once the lock is held: a caller polling
+          // for a busy lock retries the whole run every few hundred
+          // milliseconds, and a span per refusal would bury the one run that
+          // did the work. Active around the unit of work only, and ended by the
+          // recorder after the release, so the span's outcome is the run's.
+          this.#telemetry.open(SPANS.RUN, recorder.spanAttributes(), (span) => {
+            recorder.spanOpened(span);
+            return fn(AbortSignal.any([lockSignal, stopper.signal]));
+          }),
       );
       return result;
     } catch (error) {
       failure = error;
       throw error;
     } finally {
-      // Result counts, so a metrics subscriber gets "3 applied in 812ms"
-      // without reconstructing it from per-migration events. On the failure
-      // path the partial rows live on the error's context — exactly the case
-      // where "how far did it get?" is the question, so they count too. One
-      // pass fills both counters.
-      const rows = Array.isArray(result)
-        ? result
-        : failure instanceof MigronautError && Array.isArray(failure.context?.results)
-          ? failure.context.results
-          : null;
-      let summary = {};
-      let skipped;
-      if (rows) {
-        let applied = 0;
-        let reverted = 0;
-        skipped = 0;
-        for (const row of rows) {
-          if (row.status === 'applied') applied += 1;
-          else if (row.status === 'reverted') reverted += 1;
-          else if (row.status === 'skipped') skipped += 1;
-        }
-        summary = { applied, reverted, total: rows.length };
-      }
-      const durationMs = Date.now() - startedAt;
-      if (span) {
-        span.finish(
-          {
-            [ATTRIBUTES.RUN_APPLIED]: summary.applied,
-            [ATTRIBUTES.RUN_REVERTED]: summary.reverted,
-            [ATTRIBUTES.RUN_SKIPPED]: skipped,
-            [ATTRIBUTES.RUN_TOTAL]: summary.total,
-            [ATTRIBUTES.LOCK_LOST_REASON]: lostReason,
-          },
-          failure,
-        );
-        telemetry.runEnded({ ...info, durationMs, error: failure });
-      } else if (failure instanceof LockAlreadyHeldError) {
-        // Never held the lock, so there is no run to time — only a refusal to
-        // count. Any other failure this early (an unreachable database) is the
-        // caller's to report; it is not contention.
-        telemetry.lockRefused();
-      }
-      this.#emit('run:end', {
-        ...info,
-        success: failure === undefined,
-        durationMs,
-        ...summary,
-        // A raw Error here would hand subscribers an unredacted driver message
-        // (which can echo the credentialed URI) — errorText is the same
-        // chokepoint every log line and result row already goes through.
-        ...(failure ? { error: errorText(failure) } : {}),
-      });
-      // One human rollup after the per-migration lines: total wall-clock time
-      // (lock wait and hooks included) is otherwise unobtainable from the
-      // output — per-file durations exclude all overhead. Success path only;
-      // a failure already ends with its own error line.
-      if (failure === undefined && (summary.applied || summary.reverted)) {
-        const parts = [];
-        if (summary.applied) parts.push(`${summary.applied} applied`);
-        if (summary.reverted) parts.push(`${summary.reverted} reverted`);
-        this.#logger.info(
-          `✔ Done     ${parts.join(', ')} in ${durationMs}ms`,
-          this.#fields({ ...info, ...summary, durationMs }),
-        );
-      }
+      recorder.finish(result, failure);
       this.#abort = undefined;
       this.#runId = undefined;
     }
@@ -642,19 +579,6 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * Reject non-string filenames before they reach a changelog query or a path
-   * join. A programmatic caller passing e.g. `{ $ne: null }` would otherwise
-   * become a query-operator injection in `findOne({ name })`.
-   */
-  #assertFilename(filename) {
-    if (filename !== undefined && typeof filename !== 'string') {
-      throw new MigrationInvalidNameError('Migration name must be a string', {
-        name: filename,
-      });
-    }
-  }
-
-  /**
    * Resolve a migration name to an absolute path inside the migrations dir.
    *
    * The name must be a bare filename: a name containing a path separator, a
@@ -665,12 +589,7 @@ class MigratorKit extends EventEmitter {
    */
   #filepath(name) {
     const dir = this.#migrationsPath();
-    if (!isBareFilename(name)) {
-      throw new MigrationInvalidNameError(
-        'Invalid migration name — must be a bare filename with no path segments',
-        { name },
-      );
-    }
+    assertMigrationName(name);
     const resolved = path.join(dir, name);
     const relative = path.relative(dir, resolved);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -683,181 +602,13 @@ class MigratorKit extends EventEmitter {
 
   /** List migration files on disk, sorted ascending */
   async #listMigrationFiles() {
-    const dir = this.#migrationsPath();
     // No value fallback — DEFAULT_CONFIG always supplies fileExtensions.
-    const extensions = this.#config.fileExtensions;
-    let entries;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch (error) {
-      if (error.code === 'ENOENT') return [];
-      throw error;
-    }
-    const matches = [];
-    for (const entry of entries) {
-      // A directory named `foo.js`, a dotfile, or a `types.d.ts` sitting next
-      // to the migrations is not a migration — including it would hard-fail
-      // the whole run with MigrationInvalidExportError.
-      if (!entry.isFile()) continue;
-      const file = entry.name;
-      if (file.startsWith('.')) continue;
-      if (file.endsWith('.d.ts') || file.endsWith('.d.mts') || file.endsWith('.d.cts')) continue;
-      for (const ext of extensions) {
-        if (file.endsWith(ext)) {
-          matches.push(file);
-          break;
-        }
-      }
-    }
-    return matches.sort();
+    return listMigrationFiles(this.#migrationsPath(), this.#config.fileExtensions);
   }
 
   /** Compute the next batch number (monotonic across the full history) */
   async #nextBatch() {
     return (await this.#requireChangelog().getMaxBatch(this.#requireDb())) + 1;
-  }
-
-  /**
-   * Validate the `--steps` option for `down`/`dry-run down`: a positive integer,
-   * mutually exclusive with a filename and `--batch`. No-op when steps is unset.
-   */
-  #assertStepsValid(steps, filename, batch) {
-    if (steps === undefined) {
-      return;
-    }
-    if (filename) {
-      throw new ConfigInvalidError('Cannot combine a filename with --steps', { filename });
-    }
-    if (batch !== undefined) {
-      throw new ConfigInvalidError('Cannot combine --batch with --steps', { batch, steps });
-    }
-    if (!Number.isInteger(steps) || steps < 1) {
-      throw new ConfigInvalidError('--steps must be a positive integer', { steps });
-    }
-  }
-
-  /**
-   * Keep only the pending migrations up to and including `to`.
-   *
-   * `to` must name a migration that exists; it may already be applied (then
-   * nothing before it is pending either, and the result is empty), which is
-   * what makes `up --to X` idempotent — running it twice is a no-op rather
-   * than an error.
-   */
-  #truncateAtTarget(pending, allFiles, to) {
-    if (!allFiles.includes(to)) {
-      throw new MigrationFileNotFoundError('Migration file not found', { to });
-    }
-    const kept = [];
-    for (const file of pending) {
-      if (file > to) break;
-      kept.push(file);
-    }
-    return kept;
-  }
-
-  /**
-   * `--to` names a point in the sequence, so it cannot be combined with the
-   * other ways of choosing targets.
-   */
-  #assertToValid(to, filename, options = {}) {
-    if (to === undefined) return;
-    this.#assertFilename(to);
-    if (filename) {
-      throw new ConfigInvalidError('Cannot combine a filename with --to', { filename, to });
-    }
-    if (options.steps !== undefined) {
-      throw new ConfigInvalidError('Cannot combine --steps with --to', {
-        steps: options.steps,
-        to,
-      });
-    }
-    if (options.batch !== undefined) {
-      throw new ConfigInvalidError('Cannot combine --batch with --to', {
-        batch: options.batch,
-        to,
-      });
-    }
-  }
-
-  /**
-   * Validate `--batch`. Without this a typo (`--batch abc` → NaN) matches no
-   * records, so the run prints "Nothing to rollback" and exits 0 — the worst
-   * possible answer to a mistyped rollback.
-   */
-  #assertBatchValid(batch) {
-    if (batch === undefined) return;
-    if (!Number.isInteger(batch) || batch < 1) {
-      throw new ConfigInvalidError('--batch must be a positive integer', { batch });
-    }
-  }
-
-  /**
-   * Validate `requestedBy` / `reason`: who asked for a run, and why — stamped
-   * on what it writes to the changelog (and on a converge's history entry).
-   * The OS user that ran it is `executedBy` already; on a queue worker that is
-   * the container's, which is why the requester has a field of its own.
-   */
-  static #assertActorValid(options) {
-    for (const key of ['requestedBy', 'reason']) {
-      const issue = actorIssue(key, options?.[key]);
-      if (issue) {
-        throw new ConfigInvalidError(issue, {
-          [key]:
-            typeof options[key] === 'string'
-              ? `${options[key].length} characters`
-              : typeof options[key],
-        });
-      }
-    }
-  }
-
-  /** Just the `requestedBy` / `reason` of `options` */
-  static #actorOptions(options) {
-    return pickActor(options);
-  }
-
-  /** The `requestedBy` / `reason` of `options`, as changelog fields */
-  static #actorFields(options, prefix) {
-    const fields = {};
-    if (options?.requestedBy !== undefined) {
-      fields[prefix ? `${prefix}RequestedBy` : 'requestedBy'] = options.requestedBy;
-    }
-    if (options?.reason !== undefined) {
-      fields[prefix ? `${prefix}Reason` : 'reason'] = options.reason;
-    }
-    return fields;
-  }
-
-  /**
-   * Validate `checksum`: the SHA-256 the caller expects the named file to have
-   * — how a queue job says which version of the file it was planned with.
-   */
-  #assertChecksumOptionValid(checksum, filename) {
-    if (checksum === undefined) return;
-    if (typeof checksum !== 'string' || !/^[0-9a-f]{64}$/.test(checksum)) {
-      throw new ConfigInvalidError('checksum must be a SHA-256 hex digest', {
-        checksum: typeof checksum,
-      });
-    }
-    if (!filename) {
-      throw new ConfigInvalidError('checksum requires a filename', {});
-    }
-  }
-
-  /**
-   * Validate `ordered`: a boolean, and only meaningful for a named file — a
-   * bulk run is in order by construction, so asking for it there is a caller
-   * mistake worth naming rather than silently ignoring.
-   */
-  #assertOrderedValid(ordered, filename) {
-    if (ordered === undefined) return;
-    if (typeof ordered !== 'boolean') {
-      throw new ConfigInvalidError('ordered must be a boolean', { ordered });
-    }
-    if (ordered && !filename) {
-      throw new ConfigInvalidError('ordered requires a filename', { ordered });
-    }
   }
 
   /**
@@ -868,17 +619,15 @@ class MigratorKit extends EventEmitter {
    * blocked run fires no hooks and consumes no batch number.
    */
   async #assertUpNotBlocked(name, appliedNames, sequence) {
-    const blockedBy = [];
-    for (const file of sequence ?? (await this.#listMigrationFiles())) {
-      if (file >= name) break;
-      if (!appliedNames.has(file)) blockedBy.push(file);
-    }
+    const files = sequence ?? (await this.#listMigrationFiles());
+    const blockedBy = pendingIn(files, appliedNames, name);
     if (blockedBy.length === 0) return;
-    throw new MigrationBlockedError(
-      `${name} is blocked: ${blockedBy.length} earlier migration(s) still pending: ` +
-        blockedBy.join(', '),
-      { name, direction: 'up', blockedBy, failed: await this.#failedAmong(blockedBy) },
-    );
+    throw blockedError(name, 'earlier migration(s) still pending', {
+      name,
+      direction: 'up',
+      blockedBy,
+      failed: await this.#failedAmong(blockedBy),
+    });
   }
 
   /**
@@ -902,12 +651,13 @@ class MigratorKit extends EventEmitter {
     if (newer.length === 0) return;
     const blockedBy = [];
     for (const later of newer) blockedBy.push(later.name);
-    throw new MigrationBlockedError(
-      `${record.name} is blocked: ${blockedBy.length} later migration(s) still applied: ` +
-        blockedBy.join(', '),
+    throw blockedError(record.name, 'later migration(s) still applied', {
+      name: record.name,
+      direction: 'down',
+      blockedBy,
       // A rollback has no failed trace to tell a stopped line apart.
-      { name: record.name, direction: 'down', blockedBy, failed: [] },
-    );
+      failed: [],
+    });
   }
 
   /**
@@ -928,11 +678,8 @@ class MigratorKit extends EventEmitter {
       return [filename];
     }
     const files = await this.#listMigrationFiles();
-    const targets = [];
-    for (const file of files) {
-      if (!appliedNames.has(file)) targets.push(file);
-    }
-    return options.to !== undefined ? this.#truncateAtTarget(targets, files, options.to) : targets;
+    const targets = pendingIn(files, appliedNames);
+    return options.to !== undefined ? truncateAtTarget(targets, files, options.to) : targets;
   }
 
   /**
@@ -948,16 +695,10 @@ class MigratorKit extends EventEmitter {
    */
   #assertOrderIntact(targets, appliedNames) {
     const policy = this.#config?.onOutOfOrder ?? 'warn';
-    if (policy === 'allow' || targets.length === 0 || appliedNames.size === 0) return;
-    let newestApplied = '';
-    for (const name of appliedNames) {
-      if (name > newestApplied) newestApplied = name;
-    }
-    const late = [];
-    for (const target of targets) {
-      if (!appliedNames.has(target) && target < newestApplied) late.push(target);
-    }
-    if (late.length === 0) return;
+    if (policy === 'allow') return;
+    const arrivals = lateArrivals(targets, appliedNames);
+    if (arrivals === null) return;
+    const { late, newestApplied } = arrivals;
     if (policy === 'error') {
       throw new OutOfOrderMigrationError(
         `${late.length} pending migration(s) sort before the newest applied one ` +
@@ -1171,17 +912,11 @@ class MigratorKit extends EventEmitter {
       // Swallowed on its own failure: the changelog may be the thing that is
       // down, and this trace must never mask the migration's real error.
       if (direction === 'up') {
-        // The wrapper says WHICH migration failed; the cause says WHY — the
-        // half forensics actually needs. Redacted like every string that
-        // leaves the process (the cause is the raw thrown message).
-        const cause =
-          error instanceof MigronautError && typeof error.context?.cause === 'string'
-            ? errorText(error.context.cause)
-            : undefined;
         try {
           await this.#requireChangelog().markFailed(this.#requireDb(), {
             name,
-            error: cause ? `${errorText(error)} — ${cause}` : errorText(error),
+            // Which migration failed, and why.
+            error: errorWithCause(error),
             environment: this.#environment(),
             executedBy: safeUsername(),
             ...batchField,
@@ -1203,20 +938,7 @@ class MigratorKit extends EventEmitter {
 
   /** Run all pending migrations, or a specific named file */
   async up(filename, options = {}) {
-    this.#assertFilename(filename);
-    // `to` is checked against a filename only: unlike `down`, an explicit
-    // `batch` here is a label for whatever gets applied, not a selector.
-    this.#assertToValid(options.to, filename);
-    this.#assertBatchValid(options.batch);
-    if (options.batch !== undefined && options.step) {
-      throw new ConfigInvalidError('Cannot combine --batch with --step', {
-        batch: options.batch,
-      });
-    }
-    this.#assertOrderedValid(options.ordered, filename);
-    this.#assertConvergeValid(options.converge, filename, options.to);
-    this.#assertChecksumOptionValid(options.checksum, filename);
-    MigratorKit.#assertActorValid(options);
+    assertUpOptions(filename, options);
     return this.#runWindow(async () => {
       const config = await this.#ensureConfig();
       // Converge only after a run that brings the database to the head: the
@@ -1272,26 +994,6 @@ class MigratorKit extends EventEmitter {
     } catch (error) {
       if (!(error instanceof LockAlreadyHeldError)) this.#upDefinitions = undefined;
       throw error;
-    }
-  }
-
-  /** `up`'s `converge` option: a boolean, and only for a bulk run that reaches the head */
-  #assertConvergeValid(converge, filename, to) {
-    if (converge === undefined) return;
-    if (typeof converge !== 'boolean') {
-      throw new ConfigInvalidError('converge must be a boolean', { converge });
-    }
-    if (converge && filename !== undefined) {
-      throw new ConfigInvalidError('converge cannot follow a single-file up', {
-        converge,
-        filename,
-      });
-    }
-    if (converge && to !== undefined) {
-      throw new ConfigInvalidError(
-        'converge cannot follow up --to: the declared state describes the newest migration',
-        { converge, to },
-      );
     }
   }
 
@@ -1454,14 +1156,14 @@ class MigratorKit extends EventEmitter {
                 duration: elapsed,
                 ...(this.#runId ? { runId: this.#runId } : {}),
                 ...(migration.description ? { description: migration.description } : {}),
-                ...MigratorKit.#actorFields(options),
+                ...actorFields(options),
               },
               session,
             ),
           // What a failed attempt's trace records besides the failure: the
           // version of the file that failed (a breaker compares it), and who
           // asked for the run.
-          failureFields: { checksum, ...MigratorKit.#actorFields(options) },
+          failureFields: { checksum, ...actorFields(options) },
         });
         appliedCount += 1;
         return 'done';
@@ -1522,12 +1224,7 @@ class MigratorKit extends EventEmitter {
 
   /** Rollback the last batch, a specific batch, a specific file, or the last N steps */
   async down(filename, options = {}) {
-    this.#assertFilename(filename);
-    this.#assertStepsValid(options.steps, filename, options.batch);
-    this.#assertBatchValid(options.batch);
-    this.#assertToValid(options.to, filename, options);
-    this.#assertOrderedValid(options.ordered, filename);
-    MigratorKit.#assertActorValid(options);
+    assertDownOptions(filename, options);
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();
@@ -1597,17 +1294,6 @@ class MigratorKit extends EventEmitter {
     return { records, preserveOrder };
   }
 
-  /** Order the selected records for execution (newest first unless pre-ordered) */
-  #downNames(records, preserveOrder) {
-    const names = [];
-    for (const record of records) names.push(record.name);
-    if (!preserveOrder) {
-      names.sort();
-      names.reverse();
-    }
-    return names;
-  }
-
   async #runDown(filename, options = {}, signal) {
     const config = this.#config;
     const db = this.#requireDb();
@@ -1622,7 +1308,7 @@ class MigratorKit extends EventEmitter {
     }
     if (filename && options.ordered === true) await this.#assertDownNotBlocked(toRevert[0]);
 
-    const names = this.#downNames(toRevert, preserveOrder);
+    const names = revertOrder(toRevert, preserveOrder);
 
     // The signal must reach the rollback context too: a long-running down()
     // under SIGTERM or a lost lock is exactly the case ctx.signal exists for.
@@ -1642,12 +1328,7 @@ class MigratorKit extends EventEmitter {
           total: names.length,
           results,
           onSuccess: async (_migration, _elapsed, session) => {
-            const result = await changelog.markReverted(
-              db,
-              name,
-              session,
-              MigratorKit.#actorOptions(options),
-            );
+            const result = await changelog.markReverted(db, name, session, pickActor(options));
             // Under --no-lock or onLockLost:'warn' a peer may have flipped the
             // record first: the down() body already ran against the data, but
             // the changelog still claims the migration is applied. Silence
@@ -1709,9 +1390,8 @@ class MigratorKit extends EventEmitter {
    * show for it.
    */
   async redo(filename, options = {}) {
-    this.#assertFilename(filename);
-    MigratorKit.#assertActorValid(options);
-    const actor = MigratorKit.#actorOptions(options);
+    assertRedoOptions(filename, options);
+    const actor = pickActor(options);
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();
@@ -1754,12 +1434,7 @@ class MigratorKit extends EventEmitter {
 
   /** Preview what would run — never writes to the database */
   async dryRun(direction, filename, options = {}) {
-    this.#assertFilename(filename);
-    // `batch`/`to` must be passed too, or a conflict that `down` rejects would
-    // be silently allowed in its own preview.
-    this.#assertStepsValid(options.steps, filename, options.batch);
-    this.#assertBatchValid(options.batch);
-    this.#assertToValid(options.to, filename, options);
+    assertDryRunOptions(filename, options);
     await this.#ensureConfig();
     await this.connect();
     const db = this.#requireDb();
@@ -1799,7 +1474,7 @@ class MigratorKit extends EventEmitter {
       for (const record of records) {
         recordByName.set(record.name, record);
       }
-      names = this.#downNames(records, preserveOrder);
+      names = revertOrder(records, preserveOrder);
     }
 
     const rows = await mapLimit(names, FS_CONCURRENCY, async (name) => {
@@ -1851,10 +1526,11 @@ class MigratorKit extends EventEmitter {
     // Mark late arrivals: a not-yet-applied row sorting before the newest
     // applied name will run after migrations authored later — the same signal
     // #assertOrderIntact acts on, surfaced here as data.
-    let newestApplied = '';
+    const applied = [];
     for (const row of rows) {
-      if (row.status === 'applied' && row.file > newestApplied) newestApplied = row.file;
+      if (row.status === 'applied') applied.push(row.file);
     }
+    const newestApplied = newestOf(applied);
     if (newestApplied !== '') {
       for (const row of rows) {
         if (row.status !== 'applied' && row.file < newestApplied) row.outOfOrder = true;
@@ -1883,14 +1559,7 @@ class MigratorKit extends EventEmitter {
    * dates, where a full re-hash of the history would be the whole cost.
    */
   async list(filter = 'all', options = {}) {
-    if (options.checksums !== undefined && typeof options.checksums !== 'boolean') {
-      throw new ConfigInvalidError('checksums must be a boolean', { checksums: options.checksums });
-    }
-    // An unknown filter silently returning [] reads as "nothing to report" —
-    // the worst possible answer to a typo.
-    if (filter !== 'all' && filter !== 'pending' && filter !== 'applied') {
-      throw new ConfigInvalidError("list filter must be 'all', 'pending' or 'applied'", { filter });
-    }
+    assertListOptions(filter, options);
     if (filter === 'pending') {
       return this.#listPending();
     }
@@ -1919,8 +1588,7 @@ class MigratorKit extends EventEmitter {
     await this.connect();
     const applied = new Set(await this.#requireChangelog().getAppliedNames(this.#requireDb()));
     const rows = [];
-    for (const file of await this.#listMigrationFiles()) {
-      if (applied.has(file)) continue;
+    for (const file of pendingIn(await this.#listMigrationFiles(), applied)) {
       rows.push({
         file,
         status: 'pending',
@@ -2101,7 +1769,7 @@ class MigratorKit extends EventEmitter {
    * baseline racing an `up`) must serialize like any other mutation.
    */
   async baseline(options = {}) {
-    this.#assertFilename(options.to);
+    assertFilename(options.to);
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();
@@ -2115,7 +1783,7 @@ class MigratorKit extends EventEmitter {
             filepath: (name) => this.#filepath(name),
             listMigrationFiles: () => this.#listMigrationFiles(),
             nextBatch: () => this.#nextBatch(),
-            truncateAtTarget: (pending, all, to) => this.#truncateAtTarget(pending, all, to),
+            truncateAtTarget,
             environment: () => this.#environment(),
             executedBy: () => safeUsername(),
             runId: () => this.#runId,
@@ -2136,14 +1804,7 @@ class MigratorKit extends EventEmitter {
    * file signatures, so `down`/`redo` on imported files is unsupported.
    */
   async import(options = {}) {
-    // Validate before connecting: a bad --from/--to must not cost a round trip
-    // or take the lock. Defaults come from the already-validated config.
-    if (options.from !== undefined && !isCollectionName(options.from)) {
-      throw new ConfigInvalidError('Invalid source collection name', { from: options.from });
-    }
-    if (options.to !== undefined && !isCollectionName(options.to)) {
-      throw new ConfigInvalidError('Invalid target collection name', { to: options.to });
-    }
+    assertImportOptions(options);
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();
@@ -2184,12 +1845,7 @@ class MigratorKit extends EventEmitter {
    * build ends), which is why the after-up hook and a queue job never pass it.
    */
   async converge(options = {}) {
-    for (const key of ['dryRun', 'prune', 'noLock', 'ordered', 'rebuildUnique']) {
-      if (options[key] !== undefined && typeof options[key] !== 'boolean') {
-        throw new ConfigInvalidError(`${key} must be a boolean`, { [key]: options[key] });
-      }
-    }
-    MigratorKit.#assertActorValid(options);
+    assertConvergeOptions(options);
     const actor = pickActor(options);
     const empty = (dryRun) => ({ dryRun, changed: 0, inSync: true, collections: [] });
     if (options.dryRun) {
@@ -2295,9 +1951,7 @@ class MigratorKit extends EventEmitter {
    */
   async convergeHistory(options = {}) {
     const { limit = 20 } = options;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
-      throw new ConfigInvalidError('limit must be an integer from 1 to 1000', { limit });
-    }
+    assertHistoryLimit(limit);
     await this.#ensureConfig();
     await this.connect();
     return this.#convergeLog().list(this.#requireDb(), limit);
@@ -2309,15 +1963,13 @@ class MigratorKit extends EventEmitter {
    */
   async #assertNothingPending() {
     const applied = new Set(await this.#requireChangelog().getAppliedNames(this.#requireDb()));
-    const blockedBy = [];
-    for (const file of await this.#listMigrationFiles()) {
-      if (!applied.has(file)) blockedBy.push(file);
-    }
+    const blockedBy = pendingIn(await this.#listMigrationFiles(), applied);
     if (blockedBy.length === 0) return;
-    throw new MigrationBlockedError(
-      `converge is blocked: ${blockedBy.length} migration(s) still pending: ${blockedBy.join(', ')}`,
-      { command: 'converge', blockedBy, failed: await this.#failedAmong(blockedBy) },
-    );
+    throw blockedError('converge', 'migration(s) still pending', {
+      command: 'converge',
+      blockedBy,
+      failed: await this.#failedAmong(blockedBy),
+    });
   }
 }
 

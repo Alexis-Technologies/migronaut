@@ -29,4 +29,20 @@ function pickActor(source) {
   return actor;
 }
 
-module.exports = { ACTOR_LIMITS, actorIssue, pickActor };
+/**
+ * The actor fields of `options` as changelog fields: `requestedBy` / `reason`
+ * for what a run applies, `<prefix>RequestedBy` / `<prefix>Reason` for what
+ * it reverts (`prefix: 'revert'`), so a revert never overwrites who applied.
+ */
+function actorFields(options, prefix) {
+  const fields = {};
+  if (options?.requestedBy !== undefined) {
+    fields[prefix ? `${prefix}RequestedBy` : 'requestedBy'] = options.requestedBy;
+  }
+  if (options?.reason !== undefined) {
+    fields[prefix ? `${prefix}Reason` : 'reason'] = options.reason;
+  }
+  return fields;
+}
+
+module.exports = { ACTOR_LIMITS, actorFields, actorIssue, pickActor };
