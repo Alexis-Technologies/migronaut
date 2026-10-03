@@ -176,7 +176,9 @@ await mq.unschedule();
 
 Each tick enqueues a `sync` job that plans whatever is pending and enqueues it — the queue keeps
 the database caught up with the migration files. Idempotent, so every instance can call it at
-boot.
+boot. Ticks carry the queue's `jobOptions`; when those set no retention, a tick keeps the last 100
+completed and 500 failed jobs (`removeOnComplete: { count: 100 }`, `removeOnFail: { count: 500 }`)
+— a schedule mints a job per tick forever, and BullMQ keeps every finished job by default.
 After a failure, each tick re-enqueues the failing migration (and the ones behind it) until a fix
 is deployed; the failures stay visible in the queue's `failed` set.
 
@@ -256,10 +258,16 @@ const { createMigrationProcessor } = require('@alexify/migronaut/bullmq');
 const processor = createMigrationProcessor({ config, queue }); // `queue` only for sync jobs
 const worker = new Worker('migronaut', processor, { connection, concurrency: 1 });
 
-// on shutdown
-await worker.close();
+// on shutdown — stop fetching first, then stop the processor, together:
+const closing = worker.close();
+processor.shutdown();
+await closing;
 await processor.close();
 ```
+
+Close the Worker first (or together with `shutdown()`, as above): a job that had not started its
+migration when the processor shut down is moved back to the head of the queue, and a Worker that
+is still fetching would take it straight back.
 
 In NestJS, call it from your `WorkerHost`:
 
@@ -286,8 +294,8 @@ on the lock. One is the honest setting.
 
 ## Observing
 
-- **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'completed' | 'failed', migration, direction, groupId, index, total, code? }` — `code` is the typed error code of a failed job. A `sync` or `converge` job reports `{ phase, kind }` instead of the migration fields.
-- **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step, and the failure line.
+- **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'completed' | 'failed', migration, direction, groupId, index, total, code?, runId? }` — `code` is the typed error code of a failed job (`'UNKNOWN'` for one that is not migronaut's), and `runId` the run's correlation id: the join key to the changelog record and the kit's log lines. A failed job has no return value, so its `runId` is found here and on the error's `context`. A `sync` or `converge` job reports `{ phase, kind }` instead of the migration fields.
+- **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step (as it starts, and as it ends), and the failure line with its run id.
 - **Kit events**: `mq.kit.on('migration:success', …)` — the same [lifecycle events](/guide/api) as everywhere else.
 - **Worker events**: `mq.worker.on('failed', …)`.
 - **Traces**: pass `bullmq.telemetry` and the kit's `telemetry` option, and one trace runs from the
@@ -305,7 +313,10 @@ process.on('SIGTERM', async () => {
 ```
 
 `close()` never interrupts a migration body — that is what leaves a database half-migrated. It
-waits. So:
+waits. A job that had **not started** its migration yet — waiting for the lock, or just fetched —
+is not failed: it is moved back to the **head** of the queue (BullMQ's `moveToWait`), so the
+next worker runs it and the jobs behind it are not blocked. Rolling deploys therefore no longer
+end the enqueue they interrupt. So:
 
 - **Kubernetes:** set `terminationGracePeriodSeconds` above your longest migration. A pod killed
   mid-migration leaves the job to BullMQ's stall recovery: after `lockDuration` it is handed to
@@ -319,10 +330,11 @@ waits. So:
 ## Security
 
 - **Job data is untrusted input.** It sat in Redis. The worker validates every job against the
-  contract before touching anything: unknown job names and data versions are rejected, and the
-  migration name must be a bare filename — a job can make the worker run a migration that
-  *exists in its migrations directory*, never an arbitrary path. Invalid jobs fail with
-  `QueueJobInvalidError`.
+  contract before touching anything: unknown job names, data versions it does not support and
+  fields outside the contract are rejected, and the migration name must be a bare filename that
+  belongs to the migration sequence — a job can make the worker run a migration that *exists in
+  its migrations directory*, never an arbitrary path, a dotfile or a helper module next to the
+  migrations. Invalid jobs fail with `QueueJobInvalidError`.
 - **No decisions in jobs.** A converge job cannot ask for `prune` — what may be dropped comes from
   the worker's own definitions.
 - **No secrets in jobs.** A job carries a filename, a group id and a batch number. The connection
@@ -330,6 +342,15 @@ waits. So:
 - **What the queue stores is redacted.** `failedReason`, stack traces, job logs and `getJob()`
   output pass through the same credential redaction as migronaut's logs.
 - **The API in front of it is yours to protect.** Whoever can enqueue can roll back.
+
+## Upgrading: the job contract
+
+Jobs are versioned (`data.v`). A worker accepts every version from `MIN_JOB_DATA_VERSION` up to
+its own, so jobs already in the queue survive an upgrade of the workers; it refuses a newer
+version, and any field it does not know, as `QueueJobInvalidError` — a meaning it cannot honour is
+never dropped silently. So: **roll the workers out before the producers** (the processes that
+enqueue). A migration file is part of the same rule — a worker that does not have the file yet
+fails its job with `MIGRATION_FILE_NOT_FOUND`.
 
 ## TypeScript
 

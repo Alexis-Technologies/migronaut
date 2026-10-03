@@ -777,9 +777,9 @@ class MigratorKit extends EventEmitter {
    * that never ran. Checked inside the lock and before `beforeAll`, so a
    * blocked run fires no hooks and consumes no batch number.
    */
-  async #assertUpNotBlocked(name, appliedNames) {
+  async #assertUpNotBlocked(name, appliedNames, sequence) {
     const blockedBy = [];
-    for (const file of await this.#listMigrationFiles()) {
+    for (const file of sequence ?? (await this.#listMigrationFiles())) {
       if (file >= name) break;
       if (!appliedNames.has(file)) blockedBy.push(file);
     }
@@ -1212,10 +1212,23 @@ class MigratorKit extends EventEmitter {
     // check below can never see an applied one. Verify them up front instead,
     // otherwise `up --strict` over a bulk run would police nothing.
     if (strictBulk) await this.#assertNoChecksumDrift(appliedRecords);
+    // An ordered run is a step of the sequence, so its target must be a file
+    // of the sequence: an existing dotfile, declaration file or helper module
+    // next to the migrations is never one — and importing it would run its
+    // top-level code. The name may come from a queue payload; a plain
+    // single-file `up` keeps accepting any file it is pointed at.
+    const sequence = ordered ? await this.#listMigrationFiles() : undefined;
+    if (ordered && !sequence.includes(filename)) {
+      throw new MigrationFileNotFoundError(
+        'Not a migration of the sequence — a dotfile, a declaration file or an extension ' +
+          'outside fileExtensions',
+        { filename },
+      );
+    }
     // An already-applied target is exempt (unless forced): a duplicate job
     // for it must report the usual "skipped", not a failure.
     if (ordered && (force || !appliedNames.has(filename))) {
-      await this.#assertUpNotBlocked(filename, appliedNames);
+      await this.#assertUpNotBlocked(filename, appliedNames, sequence);
     }
     this.#assertOrderIntact(targets, appliedNames);
 
@@ -1997,9 +2010,12 @@ class MigratorKit extends EventEmitter {
    * indexes in collections whose definition does not decide for itself.
    * `ordered` refuses while any migration is still pending — checked under
    * the lock, which is what lets a queue run it as the tail of a deploy.
+   * `rebuildUnique` lets a rebuild drop a unique index it builds back; without
+   * it such a rebuild is a conflict (the constraint would be gone until the
+   * build ends), which is why the after-up hook and a queue job never pass it.
    */
   async converge(options = {}) {
-    for (const key of ['dryRun', 'prune', 'noLock', 'ordered']) {
+    for (const key of ['dryRun', 'prune', 'noLock', 'ordered', 'rebuildUnique']) {
       if (options[key] !== undefined && typeof options[key] !== 'boolean') {
         throw new ConfigInvalidError(`${key} must be a boolean`, { [key]: options[key] });
       }
@@ -2012,7 +2028,7 @@ class MigratorKit extends EventEmitter {
       await this.connect();
       return runConverge(
         this.#convergeDeps(),
-        { definitions, prune: options.prune, dryRun: true },
+        { definitions, prune: options.prune, rebuildUnique: options.rebuildUnique, dryRun: true },
         undefined,
       );
     }
@@ -2031,7 +2047,11 @@ class MigratorKit extends EventEmitter {
       await this.connect();
       return this.#withLock(options, { command: 'converge' }, async (signal) => {
         if (options.ordered) await this.#assertNothingPending();
-        return runConverge(this.#convergeDeps(), { definitions, prune: options.prune }, signal);
+        return runConverge(
+          this.#convergeDeps(),
+          { definitions, prune: options.prune, rebuildUnique: options.rebuildUnique },
+          signal,
+        );
       });
     });
   }

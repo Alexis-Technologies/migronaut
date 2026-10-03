@@ -121,6 +121,52 @@ describe('converge (integration) — every kind of index reaches a fixed point',
     });
   }
 
+  it('should settle a bare locale whatever defaults that locale expands to', async () => {
+    // Locales whose ICU defaults differ (caseFirst, alternate, backwards,
+    // normalization) — only strength, caseLevel and numericOrdering are filled
+    // in, so none of them may compare as changed once built.
+    const locales = ['en', 'fr_CA', 'da', 'th', 'ja', 'vi', 'el'];
+    await convergeToFixedPoint([
+      {
+        name: 'locales',
+        indexes: locales.map((locale, position) => ({
+          key: { [`f${position}`]: 1 },
+          collation: { locale },
+        })),
+      },
+    ]);
+  });
+
+  it('should rebuild an index whose strength is not what a bare locale means', async () => {
+    await mongo.db
+      .collection('names')
+      .createIndex({ n: 1 }, { name: 'n_1', collation: { locale: 'en', strength: 2 } });
+    const collections = [
+      { name: 'names', indexes: [{ key: { n: 1 }, collation: { locale: 'en' } }] },
+    ];
+    const plan = await kitWith({ collections }).converge({ dryRun: true });
+    assert.deepStrictEqual(rows(plan), ['names/index:n_1:recreate']);
+    await convergeToFixedPoint(collections);
+    const [index] = await indexesOf('names');
+    assert.strictEqual(index.collation.strength, 3);
+  });
+
+  it('should settle a Map key whose integer-like field comes first', async () => {
+    await convergeToFixedPoint([
+      {
+        name: 'ordered',
+        indexes: [
+          {
+            key: new Map([
+              ['2', 1],
+              ['b', 1],
+            ]),
+          },
+        ],
+      },
+    ]);
+  });
+
   it('should name an index exactly as the driver would when left to choose', async () => {
     const keys = [{ q: 1, r: -1 }, { s: 'hashed' }, { 'm.$**': 1 }];
     for (const key of keys) await mongo.db.collection('driver').createIndex(key);
@@ -201,6 +247,24 @@ describe('converge (integration) — changes', () => {
     assert.strictEqual(restored.unique, undefined);
   });
 
+  it('should refuse to rebuild a unique index unasked, and rebuild it with rebuildUnique', async () => {
+    await mongo.db.collection('emails').createIndex({ e: 1 }, { unique: true });
+    const collections = [
+      { name: 'emails', indexes: [{ key: { e: 1 }, unique: true, sparse: true }] },
+    ];
+    await assert.rejects(kitWith({ collections }).converge(), (error) => {
+      assert.ok(error instanceof ConvergeFailedError);
+      assert.strictEqual(error.context.phase, 'plan');
+      assert.match(error.context.conflicts[0].reason, /rebuildUnique/);
+      return true;
+    });
+    // Nothing was touched: the unique index is still the old one.
+    assert.strictEqual((await indexesOf('emails'))[0].sparse, undefined);
+    await convergeToFixedPoint(collections, { rebuildUnique: true });
+    const [index] = await indexesOf('emails');
+    assert.deepStrictEqual([index.unique, index.sparse], [true, true]);
+  });
+
   it('should restore a text index from the form the server reports', async () => {
     await mongo.db.collection('docs').createIndex({ k: 1, body: 'text' }, { name: 'search' });
     // Valid to migronaut, refused by the server — after the old index is gone.
@@ -246,7 +310,13 @@ describe('converge (integration) — changes', () => {
     const kept = await convergeToFixedPoint(collections);
     assert.deepStrictEqual(rows(kept), ['c/index:email_1:unchanged']);
     assert.deepStrictEqual(await indexNames('c'), ['by_email']);
-    await convergeToFixedPoint(collections, { prune: true });
+    // A unique index renamed is a unique index rebuilt: asked for twice over.
+    await assert.rejects(
+      kitWith({ collections }).converge({ prune: true }),
+      (error) => error instanceof ConvergeFailedError && error.context.phase === 'plan',
+    );
+    assert.deepStrictEqual(await indexNames('c'), ['by_email']);
+    await convergeToFixedPoint(collections, { prune: true, rebuildUnique: true });
     assert.deepStrictEqual(await indexNames('c'), ['email_1']);
   });
 

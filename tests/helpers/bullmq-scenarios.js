@@ -886,9 +886,11 @@ function defineBullMQScenarios(harness) {
       { v: 1, kind: 'converge', prune: true, ordered: false },
       { attempts: 1 },
     );
+    // Refused outright — not run with the prune quietly ignored.
     const [view] = await settled(mq, [job.id]);
-    assert.strictEqual(view.state, 'completed');
-    assert.deepStrictEqual((await indexNames()).sort(), ['marker_1', 'stray_1']);
+    assert.strictEqual(view.state, 'failed');
+    assert.match(view.failedReason, /prune is not accepted from a job/);
+    assert.deepStrictEqual(await indexNames(), ['stray_1']);
   });
 
   it('should converge from a sync tick when nothing is pending but the database differs', async () => {
@@ -1015,6 +1017,36 @@ function defineBullMQScenarios(harness) {
     assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
     const batches = new Set((await records()).map((record) => record.batch));
     assert.strictEqual(batches.size, 1, 'the group kept its batch across the restart');
+  });
+
+  it('should put a job that a shutdown stops before it starts back in line', async () => {
+    three();
+    await holdLock();
+    const mq = createQueue();
+    await mq.startWorker();
+    const group = await mq.enqueueUp();
+    const first = group.jobs[0].id;
+    const deadline = Date.now() + 10_000;
+    while ((await mq.getJob(first))?.progress?.phase !== 'lock-wait') {
+      if (Date.now() > deadline) throw new Error('the first job never waited for the lock');
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    await mq.close();
+
+    // Not failed — so the jobs behind it are not blocked for good.
+    const next = createQueue();
+    assert.strictEqual((await next.getJob(first)).state, 'waiting');
+    await releaseLock();
+    await next.startWorker();
+    const views = await settled(
+      next,
+      group.jobs.map((job) => job.id),
+    );
+    assert.deepStrictEqual(
+      views.map((view) => view.state),
+      ['completed', 'completed', 'completed'],
+    );
+    assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
   });
 
   it('should read status and the lock straight from MongoDB', async () => {

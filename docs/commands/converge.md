@@ -22,6 +22,7 @@ migronaut converge --check     # exit 28 if anything would change — a CI gate
 migronaut converge             # plan, ask before any drop or rebuild, then apply
 migronaut converge --prune     # also drop indexes a definition does not declare
 migronaut converge --yes       # no confirmation
+migronaut converge --rebuild-unique  # allow rebuilding a unique index (see below)
 ```
 
 Without `--yes`, converge plans first. A plan that only creates or modifies is applied straight
@@ -52,10 +53,21 @@ Rows that need nothing are folded into the summary; `--verbose` lists them too.
 | `--check` | Like `--dry-run`, then exit `28` (`COLLECTIONS_DRIFT`) if anything would change or conflict. An undeclared index kept with prune off is not drift. |
 | `--prune` | Drop indexes a definition does not declare — in collections whose definition does not set `prune` itself. |
 | `-y, --yes` | Apply drops and rebuilds without asking. **Required** for them with `--json`. |
+| `--rebuild-unique` | Allow a rebuild that drops a unique index and builds a unique one back. Without it such a rebuild is a `conflict`. |
 | `--no-lock` | Skip the concurrency lock. **Dev only.** |
 | `--json` | Print the converge result as JSON. |
 
 Plus the [global flags](/guide/configuration#global-cli-flags).
+
+### Rebuilding a unique index
+
+A rebuild drops the index before it builds the new one. For a unique index that means **no
+constraint at all** until the build ends — and a duplicate written in that window makes both the
+new index and the old one unbuildable, leaving the collection with neither. So a plan that would
+rebuild a unique index (and keep it unique) is a `conflict` that refuses the run, unless you pass
+`--rebuild-unique` (`converge({ rebuildUnique: true })` in code). The safe path needs no flag:
+declare the changed index under a **new name**, converge, then remove the old declaration and
+converge with `--prune`. A converge after `up` and a queue job never pass the flag.
 
 `--json` without `--yes` applies a plan that only creates or modifies; a plan that would drop or
 rebuild an index is refused with `CONFIG_INVALID` (exit `6`), listing those actions in

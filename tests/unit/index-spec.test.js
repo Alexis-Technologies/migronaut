@@ -9,6 +9,7 @@ const {
   normalizeDeclaredIndex,
   normalizeLiveIndex,
   restoreSpec,
+  sameDeclaredSignature,
   sameSignature,
 } = require('../../src/core/index-spec.js');
 
@@ -77,7 +78,15 @@ describe('indexIssues', () => {
       { key: { n: 1 }, collation: { locale: 'en', strength: 2 } },
       { key: { a: 'text' }, weights: { a: 2 }, default_language: 'none', textIndexVersion: 3 },
       { key: { language_override: 'text' }, language_override: 'lang' },
-      { key: { 'a.$**': 1 }, wildcardProjection: { secret: 0 } },
+      { key: { 'a.$**': 1 } },
+      { key: { '$**': 1 }, wildcardProjection: { secret: 0 } },
+      {
+        key: new Map([
+          ['$**', 1],
+          ['b', 1],
+        ]),
+        wildcardProjection: { b: 0 },
+      },
       { key: { loc: '2d' }, bits: 26, min: -180, max: 180 },
       { key: { loc: '2dsphere' }, '2dsphereIndexVersion': 3 },
       { key: { a: 1 }, storageEngine: {}, background: true },
@@ -110,17 +119,30 @@ describe('indexIssues', () => {
     const [issue] = issues({ key: { b: 1, 2: 1 } });
     assert.strictEqual(issue.path, 'idx.key');
     assert.match(issue.message, /Map/);
-    // One field has no order to lose, and a Map keeps it.
+    // One field has no order to lose.
     assert.deepStrictEqual(issues({ key: { 2: 1 } }), []);
+  });
+
+  it('should accept a Map key only in the order the driver reads it back', () => {
+    // listIndexes comes back as a plain object, where integer-like fields
+    // move to the front — any other order would rebuild on every run.
     assert.deepStrictEqual(
       issues({
         key: new Map([
-          ['b', 1],
           ['2', 1],
+          ['b', 1],
         ]),
       }),
       [],
     );
+    const [issue] = issues({
+      key: new Map([
+        ['b', 1],
+        ['2', 1],
+      ]),
+    });
+    assert.strictEqual(issue.path, 'idx.key');
+    assert.match(issue.message, /migration/);
   });
 
   it('should refuse the _id index itself', () => {
@@ -161,6 +183,10 @@ describe('indexIssues', () => {
   it('should refuse options that do not apply to the index type', () => {
     assert.deepStrictEqual(paths({ key: { a: 1 }, weights: { a: 1 } }), ['idx.weights']);
     assert.deepStrictEqual(paths({ key: { a: 1 }, wildcardProjection: { a: 0 } }), [
+      'idx.wildcardProjection',
+    ]);
+    // The server takes a projection only on an all-fields wildcard.
+    assert.deepStrictEqual(paths({ key: { 'a.$**': 1 }, wildcardProjection: { b: 0 } }), [
       'idx.wildcardProjection',
     ]);
   });
@@ -371,6 +397,31 @@ describe('compareIndex — collation', () => {
     );
   });
 
+  it('should read an omitted strength, caseLevel or numericOrdering as its default', () => {
+    // Every locale defaults these alike, so leaving one out asks for the
+    // default — a live strength-2 index is not what { locale: 'en' } means.
+    const en2 = { key: { n: 1 }, name: 'n_1', collation: EN2_COLLATION };
+    assert.deepStrictEqual(compare({ key: { n: 1 }, collation: { locale: 'en' } }, en2).diffs, [
+      'collation',
+    ]);
+    const fr = { key: { n: 1 }, name: 'n_1', collation: FR_COLLATION };
+    assert.deepStrictEqual(compare({ key: { n: 1 }, collation: { locale: 'fr' } }, fr).diffs, []);
+    const numeric = { ...fr, collation: { ...FR_COLLATION, numericOrdering: true } };
+    assert.deepStrictEqual(compare({ key: { n: 1 }, collation: { locale: 'fr' } }, numeric).diffs, [
+      'collation',
+    ]);
+    // A server that leaves a universal field out reports its default.
+    const { caseLevel, ...withoutCaseLevel } = FR_COLLATION;
+    assert.strictEqual(caseLevel, false);
+    assert.deepStrictEqual(
+      compare(
+        { key: { n: 1 }, collation: { locale: 'fr' } },
+        { ...fr, collation: withoutCaseLevel },
+      ).diffs,
+      [],
+    );
+  });
+
   it("should accept an undeclared collation that is the collection's default", () => {
     const raw = { key: { z: 1 }, name: 'z_1', collation: FR_COLLATION };
     assert.deepStrictEqual(compare({ key: { z: 1 } }, raw, FR_COLLATION).diffs, []);
@@ -426,11 +477,46 @@ describe('sameSignature', () => {
   });
 });
 
+describe('sameDeclaredSignature', () => {
+  it('should treat two declarations of one server index as the same', () => {
+    const a = declared({ key: { a: 1 }, name: 'one' });
+    assert.ok(sameDeclaredSignature(a, declared({ key: { a: 1 }, name: 'two', unique: true })));
+    assert.ok(!sameDeclaredSignature(a, declared({ key: { a: -1 } })));
+    const en = declared({ key: { a: 1 }, collation: { locale: 'en' } });
+    assert.ok(
+      sameDeclaredSignature(
+        en,
+        declared({ key: { a: 1 }, collation: { locale: 'en', strength: 3 } }),
+      ),
+    );
+    assert.ok(
+      !sameDeclaredSignature(
+        en,
+        declared({ key: { a: 1 }, collation: { locale: 'en', strength: 2 } }),
+      ),
+    );
+    // Apart on a collection with a default collation — a definition cannot know.
+    assert.ok(
+      !sameDeclaredSignature(a, declared({ key: { a: 1 }, collation: { locale: 'simple' } })),
+    );
+  });
+});
+
 describe('normalizeLiveIndex / restoreSpec', () => {
   it('should mark text indexes and drop false booleans', () => {
     const index = live({ key: { _fts: 'text', _ftsx: 1 }, name: 't', sparse: false });
     assert.ok(index.isText);
     assert.deepStrictEqual(index.options, {});
+  });
+
+  it('should read a flag stored as 1 as true', () => {
+    assert.deepStrictEqual(live({ key: { a: 1 }, name: 'a_1', unique: 1 }).options, {
+      unique: true,
+    });
+    assert.deepStrictEqual(
+      compare({ key: { a: 1 }, unique: true }, { key: { a: 1 }, name: 'a_1', unique: 1 }).diffs,
+      [],
+    );
   });
 
   it('should strip the server-managed fields for a restore', () => {

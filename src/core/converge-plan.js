@@ -15,6 +15,8 @@ const { compareIndex, normalizeLiveIndex, restoreSpec, sameSignature } = require
  *   index unless `prune` is on — an identical one is accepted as is, a
  *   different one is a conflict that refuses the run;
  * - undeclared indexes are kept (and reported) unless `prune` is on;
+ * - a rebuild that drops a unique index to build a unique one back is a
+ *   conflict unless `rebuildUnique` is on — see UNIQUE_REBUILD_REASON;
  * - `_id_` and a clustered index are the collection's own and never listed.
  */
 
@@ -81,7 +83,24 @@ function planValidator(name, desired, current, row, steps) {
   steps.push({ op: 'collMod', command: { ...desired }, actions: [action] });
 }
 
-function planIndexes(declaredIndexes, live, prune, row, steps) {
+/**
+ * The reason a rebuild is refused: it drops a unique index and builds a
+ * unique one back, so the constraint is gone until the build ends. A write in
+ * between can add a duplicate — and then neither the new index nor the old
+ * one can be built again, leaving the collection with no unique index at all.
+ */
+const UNIQUE_REBUILD_REASON =
+  'rebuilding drops the unique constraint until the new index is built — a duplicate written ' +
+  'in between leaves neither index buildable; declare it under a new name (converge, then ' +
+  'remove the old declaration and converge with prune), or converge with rebuildUnique ' +
+  '(CLI: --rebuild-unique)';
+
+/** Whether a rebuild would open a window without a uniqueness the declaration keeps */
+function dropsUniqueConstraint(declared, drops) {
+  return declared.options.unique === true && drops.some((index) => index.options.unique === true);
+}
+
+function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps) {
   const defaultCollation = live.options?.collation;
   const liveIndexes = [];
   for (const raw of live.indexes) {
@@ -183,6 +202,11 @@ function planIndexes(declaredIndexes, live, prune, row, steps) {
 
     if (drops.length === 0) {
       creates.push({ declared, action });
+    } else if (!rebuildUnique && dropsUniqueConstraint(declared, drops)) {
+      // Not done unasked: the CLI asks with --rebuild-unique, while the paths
+      // nobody watches (after up, a queue job) never get this far on their own.
+      action.action = 'conflict';
+      action.reason = [action.reason, UNIQUE_REBUILD_REASON].filter(Boolean).join('; ');
     } else {
       rebuilds.push({ declared, action, drops });
     }
@@ -254,7 +278,7 @@ function planIndexes(declaredIndexes, live, prune, row, steps) {
  * result rows (status `'planned'`), `steps` the operations that carry them
  * out, in execution order, each pointing at the rows it settles.
  */
-function planCollection(definition, live, { prune = false } = {}) {
+function planCollection(definition, live, { prune = false, rebuildUnique = false } = {}) {
   const name = definition.name;
   const actions = [];
   const steps = [];
@@ -295,7 +319,7 @@ function planCollection(definition, live, { prune = false } = {}) {
     planValidator(name, desired, liveValidator(live.options), row, steps);
   }
   if (declaredIndexes !== undefined) {
-    planIndexes(declaredIndexes, live, prune, row, steps);
+    planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps);
   }
   return { name, actions, steps };
 }
@@ -320,6 +344,7 @@ function summarize(collections) {
 
 module.exports = {
   CHANGE_ACTIONS,
+  UNIQUE_REBUILD_REASON,
   VALIDATOR_DEFAULTS,
   desiredValidator,
   isDestructive,

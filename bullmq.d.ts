@@ -72,7 +72,10 @@ export interface BullMQWorkerLike {
 
 /** See {@link BullMQJobLike} for why this is structural */
 export interface BullMQQueueEventsLike {
+  /** Present on every QueueEvents — how an injected instance is told apart from the class */
+  on(event: string, listener: (...args: any[]) => void): unknown;
   close(): Promise<void>;
+  waitUntilReady?(): Promise<unknown>;
 }
 
 /** The `Queue` class: `new Queue(name, { connection, prefix })` */
@@ -104,8 +107,14 @@ export type MigrationJobName = 'up' | 'down' | 'sync' | 'converge';
  * declared state.
  */
 export const JOB_NAMES: Readonly<{ UP: 'up'; DOWN: 'down'; SYNC: 'sync'; CONVERGE: 'converge' }>;
-/** Version stamped on every job's data as `v` — a worker rejects versions it does not know */
+/**
+ * Version stamped on every job's data as `v`. A worker accepts every version
+ * from {@link MIN_JOB_DATA_VERSION} up to its own and refuses a newer one —
+ * roll workers out before the producers that write a new version.
+ */
 export const JOB_DATA_VERSION: 1;
+/** The oldest job data version a worker still accepts — moves only in a major release */
+export const MIN_JOB_DATA_VERSION: 1;
 export const DEFAULT_QUEUE_NAME: 'migronaut';
 export const DEFAULT_SCHEDULER_ID: 'migronaut-sync';
 /** Default id of a `schedule({ job: 'converge' })` schedule */
@@ -129,8 +138,13 @@ export interface MigrationJobData {
   batch?: number;
   /** Re-run an already-applied migration (`up` only) */
   force?: true;
-  /** `false` skips the order guard for this job. Default: guarded */
+  /**
+   * `false` skips the order guard for this job. Always written by the
+   * producer; a job without it (hand-added) gets the worker's default.
+   */
   ordered?: boolean;
+  /** SHA-256 of the migration file when the job was planned */
+  checksum?: string;
 }
 
 /** Data of a `sync` job — what a schedule tick enqueues */
@@ -150,7 +164,10 @@ export interface ConvergeJobData {
   kind: 'converge';
   /** The enqueue call it belongs to — the `up` group it ends, or its own */
   groupId?: string;
-  /** `false` lets it run while migrations are pending. Default: refuse */
+  /**
+   * `false` lets it run while migrations are pending. Always written by the
+   * producer; a job without it gets the worker's default (refuse).
+   */
   ordered?: boolean;
 }
 
@@ -207,8 +224,17 @@ export interface MigrationJobProgress {
   /** `lock-wait` only */
   attempts?: number;
   waitedMs?: number;
-  /** `failed` only — the typed error code, so nobody has to parse `failedReason` */
+  /**
+   * `failed` only — the typed error code, so nobody has to parse
+   * `failedReason`; `'UNKNOWN'` for an error that is not migronaut's.
+   */
   code?: MigronautErrorCode | 'UNKNOWN';
+  /**
+   * `completed` and `failed` — the run's correlation id, matching the changelog
+   * record and the kit's events. A failed job has no return value, so this is
+   * where its run id is found.
+   */
+  runId?: string;
 }
 
 /**
@@ -453,8 +479,14 @@ export interface StartWorkerOptions {
 export interface MigrationJobView {
   id: string;
   name: string;
-  data: MigrationJobData | SyncJobData | ConvergeJobData;
+  /**
+   * The job's data as stored in Redis — redacted, but not validated: anything
+   * with write access to Redis can have put it there. A job the adapter
+   * enqueued has one of the contract's shapes; check before relying on it.
+   */
+  data: unknown;
   state: string;
+  /** As stored — see {@link MigrationJobProgress} for what the adapter writes */
   progress: MigrationJobProgress | number;
   returnvalue?: MigrationJobResult | SyncJobResult | ConvergeJobResult;
   failedReason?: string;
@@ -496,7 +528,15 @@ export interface MigrationProcessor {
   ): Promise<MigrationJobResult | SyncJobResult | ConvergeJobResult>;
   /** The kit running the jobs — subscribe to its events for metrics */
   readonly kit: MigratorKit;
-  /** Stop taking the lock: a job waiting for it fails with `RunAbortedError`. Irreversible */
+  /**
+   * Stop taking the lock. Irreversible. A job that has not started its
+   * migration (or converge) yet — waiting for the lock, or fetched after the
+   * shutdown — is moved back to the head of the queue (`job.moveToWait`) and
+   * rejects with an error named `WaitingError`, which BullMQ records as
+   * neither failed nor completed; without a token (outside a Worker) it fails
+   * with `RunAbortedError`. Close your Worker first, or together with this: a
+   * job put back must not be fetched again by the same worker.
+   */
   shutdown(reason?: string): void;
   /** `shutdown()`, let the job in flight settle, disconnect a kit the processor created */
   close(): Promise<void>;
@@ -616,9 +656,12 @@ export interface CreateMigrationQueueOptions<
   kitOptions?: MigratorKitOptions;
   /** A kit you own instead of `config` — never disconnected by `close()` */
   kit?: MigratorKit;
-  /** One queue per database. Default `'migronaut'` (or the injected queue's name) */
+  /**
+   * One queue per database. Default `'migronaut'` (or the injected queue's
+   * name — a different one is rejected)
+   */
   queueName?: string;
-  /** BullMQ key prefix */
+  /** BullMQ key prefix. Default: the injected queue's own (a different one is rejected) */
   prefix?: string;
   jobOptions?: MigrationJobOptions;
   /** Defaults for `startWorker()` */
@@ -685,7 +728,8 @@ export class MigrationQueue<
   /**
    * Start the worker (concurrency 1). Needs `bullmq.Worker`. Connects to
    * MongoDB first, so an unreachable database fails here rather than on the
-   * first job. Calling it again resolves the same worker.
+   * first job. Calling it again resolves the same worker — or, after a start
+   * that failed, tries again.
    */
   startWorker(options?: StartWorkerOptions): Promise<W>;
   /** Stop workers from picking up new jobs; the job in flight finishes */
@@ -708,9 +752,13 @@ export class MigrationQueue<
   unschedule(id?: string): Promise<boolean>;
 
   /**
-   * Stop taking the lock, let the worker finish its job (`force` skips that
-   * wait), then close everything this object created. Injected instances, the
-   * Redis connection and an injected kit are left open. Idempotent.
+   * Stop fetching, stop taking the lock, let the worker finish its job, then
+   * close everything this object created. A job that had not started its
+   * migration is put back at the head of the queue for the next worker.
+   * `force` skips waiting for the job in flight — whose migration body, if
+   * running, keeps its connection: a kit this object created is disconnected
+   * once it settles. Injected instances, the Redis connection and an injected
+   * kit are left open. Idempotent.
    */
   close(options?: { force?: boolean }): Promise<void>;
 }

@@ -89,6 +89,7 @@ describe('planUpJobs', () => {
         index: 1,
         total: 2,
         batch: 7,
+        ordered: true,
       },
       opts: { removeOnComplete: 10, attempts: 1, deduplication: { id: 'up-0002-b.js' } },
     });
@@ -636,7 +637,7 @@ describe('converge jobs from the producer', () => {
     const plan = await planUpJobs(kit, { jobOptions: { removeOnComplete: 5 } });
     assert.deepStrictEqual(plan.converge, {
       name: 'converge',
-      data: { v: 1, kind: 'converge', groupId: plan.groupId },
+      data: { v: 1, kind: 'converge', groupId: plan.groupId, ordered: true },
       opts: {
         removeOnComplete: 5,
         attempts: 1,
@@ -710,7 +711,12 @@ describe('converge jobs from the producer', () => {
     const first = await enqueueConverge(queue, kit, { jobOptions: { removeOnFail: 3 } });
     assert.strictEqual(first.deduplicated, false);
     const stored = await queue.getJob(first.jobId);
-    assert.deepStrictEqual(stored.data, { v: 1, kind: 'converge', groupId: first.groupId });
+    assert.deepStrictEqual(stored.data, {
+      v: 1,
+      kind: 'converge',
+      groupId: first.groupId,
+      ordered: true,
+    });
     assert.strictEqual(stored.opts.removeOnFail, 3);
     const second = await enqueueConverge(queue, kit, { queueEvents });
     assert.strictEqual(second.deduplicated, true);

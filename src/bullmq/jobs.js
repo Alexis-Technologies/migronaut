@@ -5,10 +5,21 @@ const { isBareFilename } = require('../utils/migration-name.js');
 /**
  * The job contract between whoever enqueues migrations and the worker that
  * runs them. Versioned (`v`), because the two can be different deploys of the
- * same service: a worker that meets a payload from a newer producer must fail
- * that job cleanly instead of guessing at fields it does not know.
+ * same service.
+ *
+ * The rules (ARCHITECTURE §6.6):
+ * - a producer writes `JOB_DATA_VERSION`; a worker accepts every version from
+ *   `MIN_JOB_DATA_VERSION` up to its own, so jobs already queued survive an
+ *   upgrade of the workers;
+ * - a field the worker does not know is refused, never ignored — a meaning it
+ *   cannot honour must not be dropped silently. So any new field that changes
+ *   what a job does bumps `JOB_DATA_VERSION`, and workers are rolled out
+ *   before the producers that write it (an older worker fails a newer job as
+ *   QUEUE_JOB_INVALID rather than guessing);
+ * - `MIN_JOB_DATA_VERSION` only moves in a major release.
  */
 const JOB_DATA_VERSION = 1;
+const MIN_JOB_DATA_VERSION = 1;
 
 /**
  * One job name per kind of work — `up`/`down` carry one migration each, `sync`
@@ -44,6 +55,26 @@ const FORBIDDEN_JOB_OPTIONS = Object.freeze([
 ]);
 
 const MAX_MIGRATION_NAME_LENGTH = 255;
+/** A file checksum as migronaut computes it: a SHA-256 hex digest */
+const CHECKSUM_PATTERN = /^[0-9a-f]{64}$/;
+
+/** Every field a job of each kind may carry — anything else is refused */
+const JOB_FIELDS = Object.freeze({
+  migration: new Set([
+    'v',
+    'direction',
+    'migration',
+    'groupId',
+    'index',
+    'total',
+    'batch',
+    'force',
+    'ordered',
+    'checksum',
+  ]),
+  sync: new Set(['v', 'kind', 'to']),
+  converge: new Set(['v', 'kind', 'groupId', 'ordered']),
+});
 /** The limit every migronaut id is minted under — a producer's own check and this one agree */
 const MAX_GROUP_ID_LENGTH = MAX_ID_LENGTH;
 
@@ -51,15 +82,15 @@ const isPlainObject = (value) =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 const isPositiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
 
+/** A migration name as a custom-id fragment — BullMQ rejects `:` (and more) in ids */
+const idFragment = (migration) => migration.replace(/[^A-Za-z0-9._-]/g, '_');
+
 /**
  * Deduplication id for one migration in one direction. BullMQ holds the key
  * only while that job is waiting or active, so a second enqueue of the same
  * pending file is absorbed, yet a later down → up cycle is never blocked —
  * which a custom `jobId` would do for as long as the finished job is retained.
  */
-/** A migration name as a custom-id fragment — BullMQ rejects `:` (and more) in ids */
-const idFragment = (migration) => migration.replace(/[^A-Za-z0-9._-]/g, '_');
-
 function dedupId(direction, migration) {
   return `${direction}-${idFragment(migration)}`;
 }
@@ -104,7 +135,27 @@ function parseJobData(job) {
     throw invalid(job, 'unknown job name');
   }
   if (!isPlainObject(data)) throw invalid(job, 'data is not an object');
-  if (data.v !== JOB_DATA_VERSION) throw invalid(job, 'unsupported job data version');
+  if (!Number.isSafeInteger(data.v) || data.v < MIN_JOB_DATA_VERSION) {
+    throw invalid(job, 'unsupported job data version');
+  }
+  if (data.v > JOB_DATA_VERSION) {
+    throw invalid(
+      job,
+      `job data version ${data.v} is newer than this worker supports (${JOB_DATA_VERSION}) — ` +
+        'roll the workers out before the producers',
+    );
+  }
+  const kind = name === JOB_NAMES.SYNC || name === JOB_NAMES.CONVERGE ? name : 'migration';
+  for (const key of Object.keys(data)) {
+    if (!JOB_FIELDS[kind].has(key)) {
+      throw invalid(
+        job,
+        key === 'prune'
+          ? "prune is not accepted from a job — the worker's own definitions decide"
+          : `unknown field "${key}"`,
+      );
+    }
+  }
 
   if (name === JOB_NAMES.SYNC) {
     if (data.to !== undefined && !isBareFilename(data.to)) {
@@ -156,6 +207,12 @@ function parseJobData(job) {
   if (data.ordered !== undefined && typeof data.ordered !== 'boolean') {
     throw invalid(job, 'ordered is not a boolean');
   }
+  if (
+    data.checksum !== undefined &&
+    !(typeof data.checksum === 'string' && CHECKSUM_PATTERN.test(data.checksum))
+  ) {
+    throw invalid(job, 'checksum is not a SHA-256 hex digest');
+  }
 
   return {
     kind: 'migration',
@@ -167,11 +224,26 @@ function parseJobData(job) {
     ...(data.batch != null ? { batch: data.batch } : {}),
     ...(data.force ? { force: true } : {}),
     ...(data.ordered !== undefined ? { ordered: data.ordered } : {}),
+    ...(data.checksum !== undefined ? { checksum: data.checksum } : {}),
   };
 }
 
-/** Build one `up`/`down` job spec, ready for `queue.addBulk` */
-function buildMigrationJob({ direction, migration, groupId, index, total, batch, force, ordered }) {
+/**
+ * Build one `up`/`down` job spec, ready for `queue.addBulk`. `ordered` is
+ * always written: a job must say how it is to run, not leave it to whatever
+ * default the worker that picks it up was configured with.
+ */
+function buildMigrationJob({
+  direction,
+  migration,
+  groupId,
+  index,
+  total,
+  batch,
+  force,
+  ordered = true,
+  checksum,
+}) {
   return {
     name: direction,
     data: {
@@ -183,7 +255,8 @@ function buildMigrationJob({ direction, migration, groupId, index, total, batch,
       total,
       ...(batch != null ? { batch } : {}),
       ...(force ? { force: true } : {}),
-      ...(ordered === false ? { ordered: false } : {}),
+      ordered: ordered !== false,
+      ...(checksum !== undefined ? { checksum } : {}),
     },
   };
 }
@@ -200,7 +273,8 @@ function migrationJobOptions(jobOptions, direction, migration) {
 /**
  * A converge job spec, ready for `queue.addBulk`: the tail of an `up` group
  * (`after` = its last migration), or a converge of its own. `ordered: false`
- * skips the "nothing may be pending" guard.
+ * skips the "nothing may be pending" guard; like a migration job's, it is
+ * always written.
  */
 function buildConvergeJob({ groupId, ordered, after, jobOptions } = {}) {
   return {
@@ -209,7 +283,7 @@ function buildConvergeJob({ groupId, ordered, after, jobOptions } = {}) {
       v: JOB_DATA_VERSION,
       kind: 'converge',
       ...(groupId !== undefined ? { groupId } : {}),
-      ...(ordered === false ? { ordered: false } : {}),
+      ordered: ordered !== false,
     },
     opts: {
       ...jobOptions,
@@ -220,32 +294,51 @@ function buildConvergeJob({ groupId, ordered, after, jobOptions } = {}) {
 }
 
 /**
- * The job a scheduler tick produces: plan what is pending, enqueue it.
- *
- * `omitContext` keeps the tick out of whatever trace registered the schedule:
- * BullMQ builds each iteration from the previous job's options, so a trace
- * context stored there would be inherited by every tick after it, and one
- * trace would grow for as long as the schedule lives. Each tick starts its own
- * instead; the migrations it enqueues still hang under it. A no-op for a queue
- * without telemetry.
+ * How many finished scheduler ticks are kept when the caller's `jobOptions`
+ * say nothing. BullMQ keeps every finished job by default, and a schedule
+ * mints one per tick forever — `every: 60_000` alone is 1,440 jobs a day, in
+ * a Redis that usually runs with `noeviction`.
  */
-function buildSyncJobTemplate({ to } = {}) {
+const TICK_RETENTION = Object.freeze({
+  removeOnComplete: Object.freeze({ count: 100 }),
+  removeOnFail: Object.freeze({ count: 500 }),
+});
+
+/**
+ * The options every scheduler tick carries: the caller's `jobOptions`
+ * (retention, logging), a bounded retention where they set none, the
+ * contract's own options, and `omitContext` — which keeps the tick out of
+ * whatever trace registered the schedule: BullMQ builds each iteration from
+ * the previous job's options, so a trace context stored there would be
+ * inherited by every tick after it, and one trace would grow for as long as
+ * the schedule lives. Each tick starts its own instead; the migrations it
+ * enqueues still hang under it. A no-op for a queue without telemetry.
+ */
+function tickJobOptions(jobOptions = {}) {
   return {
-    name: JOB_NAMES.SYNC,
-    data: { v: JOB_DATA_VERSION, kind: 'sync', ...(to !== undefined ? { to } : {}) },
-    opts: { ...MIGRATION_JOB_OPTIONS, telemetry: { omitContext: true } },
+    removeOnComplete: TICK_RETENTION.removeOnComplete,
+    removeOnFail: TICK_RETENTION.removeOnFail,
+    ...jobOptions,
+    ...MIGRATION_JOB_OPTIONS,
+    telemetry: { ...jobOptions.telemetry, omitContext: true },
   };
 }
 
-/**
- * The job a converge schedule produces. Its own trace per tick, for the same
- * reason as the `sync` template above.
- */
-function buildConvergeJobTemplate() {
+/** The job a scheduler tick produces: plan what is pending, enqueue it */
+function buildSyncJobTemplate({ to, jobOptions } = {}) {
+  return {
+    name: JOB_NAMES.SYNC,
+    data: { v: JOB_DATA_VERSION, kind: 'sync', ...(to !== undefined ? { to } : {}) },
+    opts: tickJobOptions(jobOptions),
+  };
+}
+
+/** The job a converge schedule produces — a tick like the `sync` one */
+function buildConvergeJobTemplate({ jobOptions } = {}) {
   return {
     name: JOB_NAMES.CONVERGE,
     data: { v: JOB_DATA_VERSION, kind: 'converge' },
-    opts: { ...MIGRATION_JOB_OPTIONS, telemetry: { omitContext: true } },
+    opts: tickJobOptions(jobOptions),
   };
 }
 
@@ -255,8 +348,11 @@ module.exports = {
   DEFAULT_SCHEDULER_ID,
   FORBIDDEN_JOB_OPTIONS,
   JOB_DATA_VERSION,
+  JOB_FIELDS,
   JOB_NAMES,
+  MIN_JOB_DATA_VERSION,
   MIGRATION_JOB_OPTIONS,
+  TICK_RETENTION,
   buildConvergeJob,
   buildConvergeJobTemplate,
   buildMigrationJob,

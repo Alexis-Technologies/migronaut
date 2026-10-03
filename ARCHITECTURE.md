@@ -758,9 +758,28 @@ lock. The payload carries no `prune`: what may be dropped is the worker's defini
 
 **Untrusted input.** Job data comes back from Redis. `parseJobData` checks it against the contract
 before the kit is touched (version, names, positions, and the migration name with the same
-`isBareFilename` rule `#filepath` uses); the kit then re-validates. Everything BullMQ stores about
-a failure — message, stack, log rows — goes through the redaction chokepoint first, and the cause
-is folded into the message because `failedReason` is all a dashboard shows.
+`isBareFilename` rule `#filepath` uses); the kit then re-validates — and an `ordered` single-file
+`up` (every queue job) refuses a target that is not a file of the migration sequence, so a payload
+can never make the worker import a dotfile, a declaration file or a helper module. Everything
+BullMQ stores about a failure — message, stack, log rows — goes through the redaction chokepoint
+first, and the cause is folded into the message because `failedReason` is all a dashboard shows.
+
+**The contract evolves by rule.** A producer writes `JOB_DATA_VERSION`; a worker accepts every
+version from `MIN_JOB_DATA_VERSION` up to its own (jobs already queued survive a worker upgrade),
+refuses a newer one, and refuses any field outside its per-kind allow-list (`JOB_FIELDS`) — a
+meaning it cannot honour must not be dropped silently. Hence: a new field that changes what a job
+does bumps the version; workers are rolled out before producers; `MIN_JOB_DATA_VERSION` moves only
+in a major. A job always writes `ordered`, so it never inherits a worker's default by accident.
+Golden v1 payloads in `tests/unit/bullmq-jobs.test.js` pin what a worker must keep accepting.
+
+**Shutdown puts unstarted work back.** Failing a job is for good (one attempt) and cascades through
+its group as `MIGRATION_BLOCKED` — exactly what a rolling deploy would do to every enqueue it
+interrupts. So a job the processor's shutdown stops before `migration:start` / `converge:start`
+(waiting for the lock, or fetched after the shutdown) is moved back to the head of the wait list
+with `job.moveToWait(token)`, and rejects with an error *named* `WaitingError`, which BullMQ
+records as neither failed nor completed (matched by name, like `UnrecoverableError`). A job whose
+work had begun is never put back. `close()` starts closing the Worker before shutting the
+processor down, so a job put back is not fetched again by the same worker.
 
 ### 6.7 Declared collections (converge)
 Files: [collections.js](src/core/collections.js), [index-spec.js](src/core/index-spec.js),
@@ -781,9 +800,13 @@ declared exists.
 **The comparison invariant.** Whatever the server stores for a declaration must compare as
 unchanged against that declaration, or the index is rebuilt on every run. Hence: `false` booleans
 are not sent (`sparse: false` is stored verbatim); text indexes compare in their `_fts`/`_ftsx` +
-`weights` form; a collation is a *subset* match (the server expands `{ locale }` into a full,
-locale-specific spec — guessing defaults would loop), an undeclared one must equal the collection
-default, `{ locale: 'simple' }` means none; key directions compare by sign, TTLs by `Number()`;
+`weights` form; a collation is a *subset* match for its locale-specific fields (the server expands
+`{ locale }` into a full, locale-specific spec — guessing those defaults would loop), while
+`strength`, `caseLevel` and `numericOrdering`, whose defaults are the same for every locale, are
+filled in (`3`, `false`, `false`) so a live strength-2 index never passes for `{ locale: 'en' }`;
+an undeclared one must equal the collection default, `{ locale: 'simple' }` means none; a compound
+`Map` key may hold an integer-like field only first (the driver reads keys back as plain
+objects, which move such fields to the front); key directions compare by sign, TTLs by `Number()`;
 validators via `canonical` (verbatim storage, any key order). Reads force primary and BSON
 promotion, so an injected client's settings cannot make everything look changed. And because one
 server version is what CI proves, a runtime **fixed-point check** re-plans each collection after
@@ -890,6 +913,14 @@ The high-impact ones for code changes:
   `attempts > 1`.** The adapter cannot import BullMQ's class; BullMQ matches the name. With the
   adapter's own single-attempt jobs there is nothing to prevent, so the typed name stays.
 - **`beforeAll`/`afterAll` fire once per queue job**, because each job is its own run.
+- **A job stopped by a shutdown before its migration starts is put back, not failed.** It rejects
+  with an error named `WaitingError` after `job.moveToWait(token)` — see
+  [§6.6](#66-the-queue-adapter-bullmq). Without a token (a processor driven outside a Worker) it
+  fails as `RUN_ABORTED`, as before.
+- **A queue job refuses a field it does not know**, even an "optional" one — never ignores it.
+  New fields bump `JOB_DATA_VERSION`; workers roll out first.
+- **Scheduler ticks get a retention unless `jobOptions` sets one** (100 completed, 500 failed):
+  a schedule mints a job per tick forever.
 - **`generateId` is called with no arguments, and must be synchronous.** No "purpose" argument
   (`'run'`/`'group'`) is passed on purpose: `ulid(seedTime)` and `nanoid(size)` would read it as
   their own first parameter, and passing third-party generators as they are is the point. Async is
@@ -918,6 +949,10 @@ The high-impact ones for code changes:
 - **`createMigrationQueue` takes BullMQ's telemetry as `bullmq.telemetry`, not a top-level
   option** — `telemetry` at the top would read as the kit's own (`config.telemetry`), which is a
   different object with a different job.
+- **A unique index is never rebuilt unasked.** A rebuild that drops a unique index and builds a
+  unique one back plans as a `conflict` unless `converge({ rebuildUnique: true })`
+  (`--rebuild-unique`): the constraint is gone until the build ends, and a duplicate written in
+  between leaves neither index buildable. The after-up hook and queue jobs never pass it.
 - **Converge never drops an undeclared index without prune — not even to "rename" one.** An
   identical index under another name is accepted as is; a rename is a full rebuild and, for a
   unique index, a window without the constraint. Do not make the rename automatic.

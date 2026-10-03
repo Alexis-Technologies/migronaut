@@ -49,7 +49,7 @@ An index is declared in the driver's own `createIndexes` shape — `key` plus op
 
 | Field | Meaning |
 |---|---|
-| `key` | Field → direction (`1`, `-1`, `'text'`, `'hashed'`, `'2d'`, `'2dsphere'`), in index order. A `Map` keeps the order of integer-like field names, which a plain object does not |
+| `key` | Field → direction (`1`, `-1`, `'text'`, `'hashed'`, `'2d'`, `'2dsphere'`), in index order. A compound key with an integer-like field name (`'2'`) must be a `Map` — a plain object reorders such names — and that field must come first: the driver reads the live key back as a plain object, so any other order could never compare as unchanged (manage such an index in a migration) |
 | `name` | Defaults to the name MongoDB generates — `email_1`, `a_1_b_-1` |
 | `unique`, `sparse`, `hidden` | Booleans |
 | `expireAfterSeconds` | A TTL, in seconds |
@@ -142,7 +142,10 @@ Would make 3 change(s) in 1 of 2 collection(s) · 1 drop/rebuild · 1 undeclared
 
 Comparisons are made the way the server stores things, so what converge creates compares as
 unchanged on the next run: a text index is matched in its `_fts`/`_ftsx` form, a collation is
-compared as a subset of the full spec the server expands it to, an index that carries the
+compared field by field against the full spec the server expands it to — `strength`, `caseLevel`
+and `numericOrdering` default to `3`, `false` and `false` when left out (the same for every
+locale, so `{ locale: 'en' }` does not match a live strength-2 index), every other field only when
+declared — an index that carries the
 collection's default collation is not mistaken for a changed one, and `{ locale: 'simple' }` means
 *no collation*. As a last guard, every collection that was changed is read again afterwards:
 anything that still differs is reported under `unstable` (and logged) instead of being rebuilt on
@@ -229,7 +232,10 @@ Use a migration when the change needs **ordering against data**:
   and `hidden` changes — needs `dbAdmin`. A missing privilege fails with a hint.
 - **No zero-gap rebuild.** A `recreate` drops before it creates. To change an index with no
   window, declare the new one under a **new name**, converge, then remove the old declaration
-  and converge with `prune`.
+  and converge with `prune`. For a **unique** index the window is a real risk — a duplicate
+  written during the build leaves neither index buildable — so such a rebuild is a `conflict`
+  unless you converge with `rebuildUnique` (`--rebuild-unique`); after `up` and in a queue job it
+  never happens.
 - **A changed definition reaches each worker on redeploy.** A worker still running old code
   converges to the old declaration — with `prune`, it can drop an index the new one added. Roll
   the workers before relying on a new declaration.

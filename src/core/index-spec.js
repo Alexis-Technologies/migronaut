@@ -71,7 +71,10 @@ const TEXT_DEFAULTS = { default_language: 'english', language_override: 'languag
 /** Field names a plain object moves to the front, whatever order they were written in */
 const INTEGER_LIKE = /^(?:0|[1-9]\d*)$/;
 
-const isWildcardField = (field) => field === '$**' || field.endsWith('.$**');
+/** Whether `entries` name their fields in exactly the order of `fields` */
+function sameFieldOrder(entries, fields) {
+  return entries.every(([field], position) => fields[position] === field);
+}
 
 /** `[field, direction]` pairs, in the order the index uses them */
 function keyEntries(key) {
@@ -104,16 +107,24 @@ function keyIssues(key, report) {
       usable = false;
     }
   }
-  if (!(key instanceof Map) && entries.length > 1) {
-    for (const [field] of entries) {
-      if (INTEGER_LIKE.test(field)) {
-        report(
-          `field "${field}" is integer-like — JavaScript reorders such keys, so declare this key ` +
-            'as a Map to keep the field order',
-        );
-        usable = false;
-        break;
-      }
+  if (usable && entries.length > 1 && entries.some(([field]) => INTEGER_LIKE.test(field))) {
+    if (!(key instanceof Map)) {
+      report(
+        'has an integer-like field name — JavaScript reorders such keys, so declare this key ' +
+          'as a Map to keep the field order',
+      );
+      usable = false;
+    } else if (!sameFieldOrder(entries, Object.keys(Object.fromEntries(entries)))) {
+      // The server keeps the order, but the driver reads `listIndexes` back
+      // into a plain object, where integer-like fields move to the front: the
+      // live key could never compare as the declared one, and the index would
+      // be rebuilt on every run.
+      report(
+        'puts an integer-like field after another field — the server reports such a key ' +
+          'reordered, so converge could never see it as unchanged; manage this index in a ' +
+          'migration',
+      );
+      usable = false;
     }
   }
   if (entries.length === 1 && entries[0][0] === '_id' && entries[0][1] === 1) {
@@ -135,7 +146,9 @@ function indexIssues(index, path) {
   }
   const entries = keyIssues(index.key, report('key'));
   const isText = entries?.some(([, direction]) => direction === TEXT) ?? false;
-  const isWildcard = entries?.some(([field]) => isWildcardField(field)) ?? false;
+  // `wildcardProjection` belongs to an all-fields wildcard (`$**`, compound or
+  // not) — the server refuses it on a path wildcard such as `a.$**`.
+  const isAllFieldsWildcard = entries?.some(([field]) => field === '$**') ?? false;
 
   if (index.name !== undefined) {
     if (typeof index.name !== 'string' || index.name.length === 0) {
@@ -186,8 +199,8 @@ function indexIssues(index, path) {
     for (const option of TEXT_ONLY_OPTIONS) {
       if (index[option] !== undefined && !isText) report(option)('only applies to a text index');
     }
-    if (index.wildcardProjection !== undefined && !isWildcard) {
-      report('wildcardProjection')('only applies to a wildcard ($**) index');
+    if (index.wildcardProjection !== undefined && !isAllFieldsWildcard) {
+      report('wildcardProjection')('only applies to an all-fields wildcard ($**) index');
     }
   }
   return issues;
@@ -259,7 +272,11 @@ function normalizeLiveIndex(raw) {
   for (const option of [...SEMANTIC_OPTIONS, ...DECLARED_ONLY_OPTIONS]) {
     const value = raw[option];
     if (value === undefined) continue;
-    if (BOOLEAN_OPTIONS.has(option) && value !== true) continue;
+    if (BOOLEAN_OPTIONS.has(option)) {
+      // `1` is how some older tools (and shells) stored a flag.
+      if (value === true || value === 1) options[option] = true;
+      continue;
+    }
     options[option] = value;
   }
   return {
@@ -288,16 +305,41 @@ function sameKey(declared, live) {
 }
 
 /**
+ * Collation fields whose default is the same for every locale. A declaration
+ * that leaves one out means this value — so a live index built with another
+ * (`strength: 2`) is a difference, not a match. Every other field (`caseFirst`,
+ * `alternate`, `backwards`, `normalization`, …) has locale-specific defaults
+ * and is compared only when declared.
+ */
+const UNIVERSAL_COLLATION_DEFAULTS = Object.freeze({
+  strength: 3,
+  caseLevel: false,
+  numericOrdering: false,
+});
+
+/** A declared collation with the universal defaults filled in */
+function withCollationDefaults(collation) {
+  if (collation === undefined || collation.locale === 'simple') return collation;
+  const filled = { ...UNIVERSAL_COLLATION_DEFAULTS };
+  for (const [field, value] of Object.entries(collation)) {
+    if (value !== undefined) filled[field] = value;
+  }
+  return filled;
+}
+
+/**
  * Whether the live index's collation is what the declaration asks for.
  *
  * - none declared: the index inherits the collection's default collation —
  *   which the server then writes onto the index, so the live value must be
  *   exactly that default (or absent when the collection has none);
  * - `{ locale: 'simple' }`: binary comparison, stored as no collation at all;
- * - anything else: every declared field must match. Compared as a subset
- *   because the server expands `{ locale: 'fr' }` into a full ICU spec with
- *   locale-specific defaults — filling those in here would rebuild forever on
- *   the first locale whose defaults differ from a guess.
+ * - anything else: every declared field must match, and every field with a
+ *   locale-independent default ({@link UNIVERSAL_COLLATION_DEFAULTS}) must
+ *   hold that default when not declared. The rest is a subset match because
+ *   the server expands `{ locale: 'fr' }` into a full ICU spec with
+ *   locale-specific defaults — guessing those here would rebuild forever on
+ *   the first locale whose defaults differ from the guess.
  */
 function collationMatches(declared, liveCollation, defaultCollation) {
   if (declared === undefined) {
@@ -306,9 +348,10 @@ function collationMatches(declared, liveCollation, defaultCollation) {
   }
   if (declared.locale === 'simple') return liveCollation === undefined;
   if (liveCollation === undefined) return false;
-  for (const [field, value] of Object.entries(declared)) {
-    if (value === undefined) continue;
-    if (!deepEqual(value, liveCollation[field])) return false;
+  for (const [field, value] of Object.entries(withCollationDefaults(declared))) {
+    // A server that omits a universal field reports its default.
+    const stored = liveCollation[field] ?? UNIVERSAL_COLLATION_DEFAULTS[field];
+    if (!deepEqual(value, stored)) return false;
   }
   return true;
 }
@@ -323,6 +366,25 @@ function sameSignature(declared, live, defaultCollation) {
     sameKey(declared, live) &&
     deepEqual(declared.options.partialFilterExpression, live.options.partialFilterExpression) &&
     collationMatches(declared.options.collation, live.options.collation, defaultCollation)
+  );
+}
+
+/**
+ * Whether two valid declarations describe one index to the server — the
+ * check that refuses a definition declaring the same index twice. Collations
+ * compare with their universal defaults filled in (`{ locale: 'en' }` and
+ * `{ locale: 'en', strength: 3 }` are one index); `{ locale: 'simple' }` and
+ * no collation stay apart, since they differ on a collection with a default
+ * collation, which a definition cannot know.
+ */
+function sameDeclaredSignature(a, b) {
+  return (
+    sameKey(a, b) &&
+    deepEqual(a.options.partialFilterExpression, b.options.partialFilterExpression) &&
+    deepEqual(
+      withCollationDefaults(a.options.collation),
+      withCollationDefaults(b.options.collation),
+    )
   );
 }
 
@@ -395,5 +457,6 @@ module.exports = {
   normalizeDeclaredIndex,
   normalizeLiveIndex,
   restoreSpec,
+  sameDeclaredSignature,
   sameSignature,
 };

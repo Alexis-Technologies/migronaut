@@ -4,6 +4,7 @@ const {
   DEFAULT_SCHEDULER_ID,
   JOB_DATA_VERSION,
   JOB_NAMES,
+  MIN_JOB_DATA_VERSION,
   dedupId,
   parseJobData,
 } = require('./jobs.js');
@@ -43,6 +44,7 @@ module.exports = {
   // The job contract
   JOB_NAMES,
   JOB_DATA_VERSION,
+  MIN_JOB_DATA_VERSION,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
   DEFAULT_CONVERGE_SCHEDULER_ID,

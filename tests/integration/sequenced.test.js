@@ -4,6 +4,7 @@ const { MongoClient } = require('mongodb');
 const {
   ChecksumMismatchError,
   MigrationBlockedError,
+  MigrationFileNotFoundError,
   NotAppliedError,
   OutOfOrderMigrationError,
 } = require('../../src/errors/index.js');
@@ -212,6 +213,34 @@ describe('sequenced single-file runs (integration)', () => {
         MigrationBlockedError,
       );
       assert.deepStrictEqual(await markers(), ['b']);
+    });
+
+    it('should refuse a target outside the sequence before importing it', async () => {
+      setup();
+      three();
+      // Files that sit next to the migrations without being any: importing
+      // one would run its top-level code.
+      const sideEffect = (marker) =>
+        `require('node:fs').writeFileSync(${JSON.stringify(`${project.dir}/ran-`)} + ${JSON.stringify(marker)}, '');\n` +
+        'module.exports = { up() {}, down() {} };\n';
+      project.write('.hidden.js', sideEffect('hidden'));
+      project.write('helpers.cjs', sideEffect('helpers'));
+      project.write('types.d.ts', 'export {};\n');
+      for (const name of ['.hidden.js', 'helpers.cjs', 'types.d.ts']) {
+        await assert.rejects(migrator.up(name, { ordered: true }), (error) => {
+          assert.ok(error instanceof MigrationFileNotFoundError, name);
+          assert.match(error.message, /Not a migration of the sequence/);
+          return true;
+        });
+      }
+      assert.deepStrictEqual(
+        require('node:fs')
+          .readdirSync(project.dir)
+          .filter((file) => file.startsWith('ran-')),
+        [],
+        'nothing outside the sequence was imported',
+      );
+      assert.deepStrictEqual(await batches(), []);
     });
 
     it('should leave an unordered single-file run exactly as it was', async () => {

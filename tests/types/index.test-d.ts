@@ -416,7 +416,7 @@ kit.on('converge:start', (event) => {
   expectType<number>(event.collections);
 });
 kit.on('converge:action', (event) => {
-  expectType<'applied' | 'failed'>(event.status);
+  expectType<'started' | 'applied' | 'failed'>(event.status);
 });
 kit.on('converge:end', (event) => {
   expectType<ConvergeResult>(event.result);

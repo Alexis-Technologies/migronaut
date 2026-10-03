@@ -321,9 +321,14 @@ describe('createMigrationProcessor', () => {
       assert.ok(job.logs.some((row) => /Invalid migration job/.test(row)));
     });
 
-    it('should never forward keys outside the contract to the kit', async () => {
+    it('should refuse keys outside the contract before the kit is touched', async () => {
       const kit = stubKit();
-      await createMigrationProcessor({ kit })(upJob({ noLock: true, to: 'x' }));
+      await assert.rejects(
+        createMigrationProcessor({ kit })(upJob({ noLock: true, to: 'x' })),
+        QueueJobInvalidError,
+      );
+      assert.strictEqual(kit.up.mock.callCount(), 0);
+      await createMigrationProcessor({ kit })(upJob());
       assert.deepStrictEqual(Object.keys(kit.up.mock.calls[0].arguments[1]), ['batch', 'ordered']);
     });
   });
@@ -520,6 +525,39 @@ describe('createMigrationProcessor', () => {
     });
   });
 
+  describe('correlation', () => {
+    it("should stamp a failed job's ids on its error, progress and log", async () => {
+      const kit = stubKit({
+        up: mock.fn(async () => {
+          kit.emit('run:start', { runId: 'run-3', command: 'up' });
+          throw new MigrationBlockedError('blocked', { blockedBy: ['0000-z.js'] });
+        }),
+      });
+      const job = upJob();
+      await assert.rejects(createMigrationProcessor({ kit })(job), (error) => {
+        assert.strictEqual(error.context.runId, 'run-3');
+        assert.strictEqual(error.context.jobId, '11');
+        assert.strictEqual(error.context.groupId, 'g');
+        assert.deepStrictEqual(error.context.blockedBy, ['0000-z.js']);
+        return true;
+      });
+      assert.deepStrictEqual(job.progressUpdates.at(-1).runId, 'run-3');
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'MIGRATION_BLOCKED');
+      assert.match(job.logs.at(-1), /\[run run-3\]$/);
+    });
+
+    it("should report 'UNKNOWN' for a code that is not migronaut's", async () => {
+      const kit = stubKit({
+        up: mock.fn(async () => {
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        }),
+      });
+      const job = upJob();
+      await assert.rejects(createMigrationProcessor({ kit })(job), /EACCES/);
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'UNKNOWN');
+    });
+  });
+
   describe('cancellation and shutdown', () => {
     it("should stop the kit's run when the job's signal aborts mid-run", async () => {
       const controller = new AbortController();
@@ -576,6 +614,70 @@ describe('createMigrationProcessor', () => {
         assert.strictEqual(error.context.reason, 'deploying');
         return true;
       });
+    });
+
+    it('should put a job a shutdown stopped before its migration back at the head of the queue', async () => {
+      const kit = stubKit({
+        up: mock.fn(async () => {
+          throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+        }),
+      });
+      const processor = createMigrationProcessor({
+        kit,
+        lockWait: { lockPollIntervalMs: 5000, lockWaitTimeoutMs: 60_000 },
+      });
+      const job = upJob();
+      job.moveToWait = mock.fn(async () => 0);
+      const pending = processor(job, 'token-11');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      processor.shutdown('deploying');
+      await assert.rejects(pending, (error) => {
+        // The name is what BullMQ checks: neither failed nor completed.
+        assert.strictEqual(error.name, 'WaitingError');
+        assert.ok(error instanceof RunAbortedError);
+        assert.strictEqual(error.context.requeued, true);
+        assert.strictEqual(error.context.jobId, '11');
+        return true;
+      });
+      assert.deepStrictEqual(job.moveToWait.mock.calls[0].arguments, ['token-11']);
+      assert.ok(job.logs.includes('↩ Returned to the queue: deploying'), job.logs.join(' | '));
+      assert.ok(!job.progressUpdates.some((update) => update.phase === 'failed'));
+    });
+
+    it('should fail as usual when the job cannot be moved back', async () => {
+      const kit = stubKit();
+      const processor = createMigrationProcessor({ kit });
+      processor.shutdown('deploying');
+      const job = upJob();
+      job.moveToWait = mock.fn(async () => {
+        throw new Error('Missing lock for job 11');
+      });
+      await assert.rejects(processor(job, 'token-11'), (error) => {
+        assert.ok(error instanceof RunAbortedError);
+        assert.notStrictEqual(error.name, 'WaitingError');
+        return true;
+      });
+      // No token, no move: a processor driven outside a Worker fails the same way.
+      const plain = upJob();
+      plain.moveToWait = mock.fn(async () => 0);
+      await assert.rejects(processor(plain), RunAbortedError);
+      assert.strictEqual(plain.moveToWait.mock.callCount(), 0);
+    });
+
+    it('should never put back a job whose migration had already started', async () => {
+      const kit = stubKit({
+        up: mock.fn(async () => {
+          kit.emit('migration:start', { migration: '0001-a.js', direction: 'up' });
+          processor.shutdown('deploying');
+          throw new RunAbortedError('Run stopped', { reason: 'deploying' });
+        }),
+      });
+      // Called by the stub only once the job runs — after this line.
+      const processor = createMigrationProcessor({ kit });
+      const job = upJob();
+      job.moveToWait = mock.fn(async () => 0);
+      await assert.rejects(processor(job, 'token-11'), (error) => error.name !== 'WaitingError');
+      assert.strictEqual(job.moveToWait.mock.callCount(), 0);
     });
 
     it('should refuse new jobs after shutdown, and shut down only once', async () => {
@@ -647,6 +749,13 @@ describe('createMigrationProcessor', () => {
             target: 'index',
             name: 'a_1',
             action: 'create',
+            status: 'started',
+          });
+          kit.emit('converge:action', {
+            collection: 'c',
+            target: 'index',
+            name: 'a_1',
+            action: 'create',
             status: 'applied',
             durationMs: 4,
           });
@@ -678,7 +787,12 @@ describe('createMigrationProcessor', () => {
         lockWaitMs: 0,
       });
       assert.deepStrictEqual(job.progressUpdates.at(0), { phase: 'running', kind: 'converge' });
-      assert.deepStrictEqual(job.progressUpdates.at(-1), { phase: 'completed', kind: 'converge' });
+      assert.deepStrictEqual(job.progressUpdates.at(-1), {
+        phase: 'completed',
+        kind: 'converge',
+        runId: 'run-9',
+      });
+      assert.ok(job.logs.includes('… create index a_1 on c'), job.logs.join(' | '));
       assert.ok(job.logs.includes('✔ create index a_1 on c [4ms]'), job.logs.join(' | '));
       assert.ok(job.logs.includes('✖ modify validator on c: failed'), job.logs.join(' | '));
       assert.ok(job.logs.includes('✔ Converged 2 change(s)'));

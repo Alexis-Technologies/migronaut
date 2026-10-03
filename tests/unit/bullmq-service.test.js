@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const { describe, it, mock } = require('node:test');
 const { MigrationQueue, createMigrationQueue } = require('../../src/bullmq/service.js');
 const { MigratorKit } = require('../../src/core/migrator.js');
-const { ConfigInvalidError } = require('../../src/errors/index.js');
+const { ConfigInvalidError, MigrationBlockedError } = require('../../src/errors/index.js');
 const {
   FakeQueue,
   FakeQueueEvents,
@@ -264,6 +264,50 @@ describe('createMigrationQueue', () => {
       assert.strictEqual(queueEvents.closed, false);
     });
 
+    it("should build its worker on an injected Queue's own prefix", async () => {
+      const connection = createFakeConnection();
+      const queue = new FakeQueue('tenant-a', { connection, prefix: 'acme' });
+      const { Worker, QueueEvents } = fakeBullmq();
+      const mq = createMigrationQueue({
+        bullmq: { Queue: queue, Worker, QueueEvents },
+        connection,
+        kit: stubKit({ dryRun: mock.fn(async () => pendingRows('0001-a.js')) }),
+      });
+      const worker = await mq.startWorker();
+      assert.strictEqual(worker.opts.prefix, 'acme');
+      const { results } = await (await mq.enqueueUp()).wait({ timeoutMs: 5000 });
+      assert.strictEqual(results[0].status, 'applied', 'the worker listened to the same keys');
+      await mq.close();
+    });
+
+    it('should refuse an injected Queue or QueueEvents on another name or prefix', () => {
+      const connection = createFakeConnection();
+      const queue = new FakeQueue('tenant-a', { connection, prefix: 'acme' });
+      const { Worker, QueueEvents } = fakeBullmq();
+      const build = (options) =>
+        createMigrationQueue({
+          bullmq: { Queue: queue, Worker },
+          connection,
+          kit: stubKit(),
+          ...options,
+        });
+      assert.throws(() => build({ queueName: 'tenant-b' }), /on queue "tenant-a", not "tenant-b"/);
+      assert.throws(() => build({ prefix: 'other' }), /uses prefix "acme", not "other"/);
+      assert.throws(
+        () =>
+          createMigrationQueue({
+            bullmq: {
+              Queue: queue,
+              Worker,
+              QueueEvents: new QueueEvents('tenant-b', { connection, prefix: 'acme' }),
+            },
+            connection,
+            kit: stubKit(),
+          }),
+        /QueueEvents is on queue "tenant-b"/,
+      );
+    });
+
     it('should work with a bare queue object that is not an emitter', async () => {
       const queue = { name: 'bare', addBulk: async () => [], getJob: async () => undefined };
       const mq = createMigrationQueue({ bullmq: { Queue: queue }, kit: stubKit() });
@@ -358,8 +402,8 @@ describe('createMigrationQueue', () => {
       worker.emit('error', new Error('redis: mongodb://u:secret@h/db unreachable'));
       worker.emit(
         'failed',
-        { id: 7 },
-        Object.assign(new Error('blocked'), { code: 'MIGRATION_BLOCKED' }),
+        { id: 7, data: { groupId: 'g-1', migration: '0002-b.js', direction: 'up' } },
+        new MigrationBlockedError('blocked', { runId: 'run-2' }),
       );
       worker.emit('failed', undefined, new Error('job vanished'));
       worker.emit('stalled', '7', 'active');
@@ -372,6 +416,10 @@ describe('createMigrationQueue', () => {
       assert.deepStrictEqual(lines[1].fields, {
         queue: 'migronaut',
         jobId: '7',
+        groupId: 'g-1',
+        migration: '0002-b.js',
+        direction: 'up',
+        runId: 'run-2',
         code: 'MIGRATION_BLOCKED',
         error: 'blocked',
       });
@@ -574,12 +622,28 @@ describe('createMigrationQueue', () => {
         template: {
           name: 'sync',
           data: { v: 1, kind: 'sync' },
-          opts: { attempts: 1, telemetry: { omitContext: true } },
+          opts: {
+            removeOnComplete: { count: 100 },
+            removeOnFail: { count: 500 },
+            attempts: 1,
+            telemetry: { omitContext: true },
+          },
         },
         runs: 0,
       });
       assert.deepStrictEqual(schedulers[1].repeat, { pattern: '0 3 * * *', tz: 'UTC' });
       assert.strictEqual(schedulers[1].template.data.to, '0005-x.js');
+      await mq.close();
+    });
+
+    it("should hand the queue's job options to every tick", async () => {
+      const { mq } = make({ jobOptions: { removeOnComplete: 10, removeOnFail: 20 } });
+      await mq.schedule({ every: 60_000 });
+      await mq.schedule({ job: 'converge', every: 60_000 });
+      for (const { template } of await mq.queue.getJobSchedulers()) {
+        assert.strictEqual(template.opts.removeOnComplete, 10);
+        assert.strictEqual(template.opts.removeOnFail, 20);
+      }
       await mq.close();
     });
 
@@ -672,6 +736,19 @@ describe('createMigrationQueue', () => {
       await assert.rejects(mq.enqueueDown(), /closed/);
       await assert.rejects(mq.startWorker(), /closed/);
       await assert.rejects(mq.schedule({ every: 1000 }), /closed/);
+      // Nothing reopens a connection that close() already let go of.
+      for (const call of [
+        () => mq.status(),
+        () => mq.pending(),
+        () => mq.audit(),
+        () => mq.lockInfo(),
+        () => mq.getJob('1'),
+        () => mq.pause(),
+        () => mq.resume(),
+        () => mq.unschedule(),
+      ]) {
+        await assert.rejects(call(), /closed/);
+      }
     });
 
     it('should pass force through to the worker', async () => {
@@ -680,6 +757,38 @@ describe('createMigrationQueue', () => {
       const closeWorker = mock.method(worker, 'close');
       await mq.close({ force: true });
       assert.deepStrictEqual(closeWorker.mock.calls[0].arguments, [true]);
+    });
+
+    it('should not wait on a forced close, yet disconnect its own kit only once the job ends', async () => {
+      const mq = createMigrationQueue({
+        bullmq: fakeBullmq(),
+        connection: spiedConnection(),
+        config: { uri: 'mongodb://127.0.0.1:1/never', dbName: 'never', logger: null },
+      });
+      let release;
+      let started;
+      const running = new Promise((resolve) => (started = resolve));
+      mock.method(mq.kit, 'connect', async () => {});
+      mock.method(mq.kit, 'dryRun', async () => pendingRows('0001-a.js'));
+      mock.method(mq.kit, 'nextBatch', async () => 1);
+      mock.method(
+        mq.kit,
+        'up',
+        (name) =>
+          new Promise((resolve) => {
+            release = () => resolve([{ file: name, status: 'applied' }]);
+            started();
+          }),
+      );
+      const disconnect = mock.method(mq.kit, 'disconnect', async () => {});
+      await mq.startWorker();
+      await mq.enqueueUp();
+      await running;
+      await mq.close({ force: true });
+      assert.strictEqual(disconnect.mock.callCount(), 0, 'the running migration keeps its client');
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.strictEqual(disconnect.mock.callCount(), 1);
     });
 
     it('should attempt every step and rethrow the first failure', async () => {
@@ -692,16 +801,30 @@ describe('createMigrationQueue', () => {
       assert.strictEqual(mq.queue.closed, true, 'the queue was still closed');
     });
 
-    it('should close a worker that was still starting', async () => {
+    it('should not build a worker once close has begun', async () => {
       const { mq } = make();
       const starting = mq.startWorker();
       await mq.close();
-      const worker = await starting;
-      assert.strictEqual(worker.closed, true);
+      await assert.rejects(starting, /closed/);
+      assert.strictEqual(mq.worker, undefined);
     });
 
-    it('should make a job waiting on the lock give up', async () => {
-      const { LockAlreadyHeldError, RunAbortedError } = require('../../src/errors/index.js');
+    it('should let a failed start be retried', async () => {
+      const kit = stubKit();
+      let attempts = 0;
+      kit.connect = mock.fn(async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('mongo briefly down');
+      });
+      const { mq } = make({ kit });
+      await assert.rejects(mq.startWorker(), /briefly down/);
+      const worker = await mq.startWorker();
+      assert.ok(worker);
+      await mq.close();
+    });
+
+    it('should put a job waiting on the lock back in the queue', async () => {
+      const { LockAlreadyHeldError } = require('../../src/errors/index.js');
       const kit = stubKit({
         dryRun: mock.fn(async () => pendingRows('0001-a.js')),
         up: mock.fn(async () => {
@@ -713,13 +836,16 @@ describe('createMigrationQueue', () => {
         lockWait: { lockPollIntervalMs: 5000, lockWaitTimeoutMs: 60_000 },
       });
       const worker = await mq.startWorker();
-      const failed = new Promise((resolve) =>
-        worker.once('failed', (_job, error) => resolve(error)),
-      );
-      await mq.enqueueUp();
+      let failed = false;
+      worker.on('failed', () => {
+        failed = true;
+      });
+      const group = await mq.enqueueUp();
       await new Promise((resolve) => setTimeout(resolve, 20));
       await mq.close();
-      assert.ok((await failed) instanceof RunAbortedError);
+      // Not failed for good — back at the head, for the next worker.
+      assert.strictEqual(failed, false);
+      assert.deepStrictEqual(mq.queue._state().wait, [group.jobs[0].id]);
     });
   });
 });

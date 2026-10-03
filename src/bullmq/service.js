@@ -1,5 +1,5 @@
 const { MigratorKit } = require('../core/migrator.js');
-const { ConfigInvalidError } = require('../errors/index.js');
+const { ConfigInvalidError, MigronautError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { isBareFilename } = require('../utils/migration-name.js');
 const { redactDeep, redactUris } = require('../utils/redact.js');
@@ -25,6 +25,26 @@ const DEFAULT_LOCK_DURATION_MS = 60_000;
 const DEFAULT_MAX_STALLED_COUNT = 1;
 
 const isClass = (value) => typeof value === 'function';
+
+/** A short string field of a job read back from Redis, or undefined — for log fields only */
+function shortString(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 255 ? value : undefined;
+}
+
+/** What a failed job's log line can say about it, from the job and from the error */
+function failedJobFields(job, error) {
+  const data = job?.data ?? {};
+  const fields = {
+    ...(job?.id !== undefined ? { jobId: String(job.id) } : {}),
+    groupId: shortString(data.groupId),
+    migration: shortString(data.migration),
+    direction: shortString(data.direction),
+    runId: shortString(error?.context?.runId),
+    ...(error instanceof MigronautError ? { code: error.code } : {}),
+  };
+  for (const key of Object.keys(fields)) if (fields[key] === undefined) delete fields[key];
+  return fields;
+}
 
 function assertName(value, name) {
   // BullMQ builds its Redis keys by joining with `:` and rejects it in names.
@@ -123,7 +143,17 @@ class MigrationQueue {
     const resolvedName =
       queueName ?? (queueIsInstance ? Queue.name : undefined) ?? DEFAULT_QUEUE_NAME;
     assertName(resolvedName, 'queueName');
-    if (prefix !== undefined) assertName(prefix, 'prefix');
+    // An injected Queue already says where its keys live. A Worker or
+    // QueueEvents built here on another name or prefix would listen to an
+    // empty queue: jobs that never run, a wait() that never returns.
+    const resolvedPrefix = prefix ?? (queueIsInstance ? Queue.opts?.prefix : undefined);
+    if (resolvedPrefix !== undefined) assertName(resolvedPrefix, 'prefix');
+    if (queueIsInstance) {
+      MigrationQueue.#assertSameQueue('Queue', Queue, resolvedName, resolvedPrefix);
+    }
+    if (eventsIsInstance) {
+      MigrationQueue.#assertSameQueue('QueueEvents', QueueEvents, resolvedName, resolvedPrefix);
+    }
     assertJobOptions(jobOptions);
     if (!isPlainObject(workerOptions)) {
       throw new ConfigInvalidError('workerOptions must be an object');
@@ -135,7 +165,7 @@ class MigrationQueue {
 
     this.#connection = connection;
     this.#queueName = resolvedName;
-    this.#prefix = prefix;
+    this.#prefix = resolvedPrefix;
     this.#jobOptions = jobOptions;
     this.#workerOptions = workerOptions;
     this.#telemetry = telemetry;
@@ -160,7 +190,7 @@ class MigrationQueue {
       ? Queue
       : new Queue(resolvedName, {
           connection,
-          ...(prefix !== undefined ? { prefix } : {}),
+          ...(resolvedPrefix !== undefined ? { prefix: resolvedPrefix } : {}),
           ...(telemetry !== undefined ? { telemetry } : {}),
         });
     this.#listen(this.#queue, 'error', (error) =>
@@ -177,6 +207,25 @@ class MigrationQueue {
       ...(lockWait !== undefined ? { lockWait } : {}),
       ...(jobOptions !== undefined ? { jobOptions } : {}),
     });
+  }
+
+  /** An injected instance must be on the queue this object is configured for */
+  static #assertSameQueue(label, instance, name, prefix) {
+    if (typeof instance.name === 'string' && instance.name !== name) {
+      throw new ConfigInvalidError(
+        `bullmq.${label} is on queue "${instance.name}", not "${name}"`,
+        {
+          queueName: name,
+        },
+      );
+    }
+    const instancePrefix = instance.opts?.prefix;
+    if (instancePrefix !== undefined && prefix !== undefined && instancePrefix !== prefix) {
+      throw new ConfigInvalidError(
+        `bullmq.${label} uses prefix "${instancePrefix}", not "${prefix}"`,
+        { prefix },
+      );
+    }
   }
 
   static #assertConcurrency(concurrency) {
@@ -228,6 +277,8 @@ class MigrationQueue {
 
   #ensureQueueEvents() {
     if (this.#queueEvents) return this.#queueEvents;
+    // A connection opened after close() would have nobody to close it.
+    this.#assertOpen();
     const QueueEvents = this.#queueEventsSource;
     if (!isClass(QueueEvents)) return undefined;
     this.#queueEvents = new QueueEvents(this.#queueName, {
@@ -294,20 +345,24 @@ class MigrationQueue {
 
   /** Full migration status — read straight from MongoDB, not from the queue */
   async status() {
+    this.#assertOpen();
     return this.#kit.status();
   }
 
   /** Migrations not applied yet */
   async pending() {
+    this.#assertOpen();
     return this.#kit.list('pending');
   }
 
   async audit() {
+    this.#assertOpen();
     return this.#kit.audit();
   }
 
   /** The current holder of the MongoDB migration lock, or null */
   async lockInfo() {
+    this.#assertOpen();
     return this.#kit.lockInfo();
   }
 
@@ -330,7 +385,12 @@ class MigrationQueue {
         'startWorker() needs the Worker class — pass bullmq: { Queue, Worker }',
       );
     }
-    this.#workerStarting ??= this.#startWorker(overrides);
+    // A failed start is not cached: a database or Redis that was briefly
+    // unreachable at boot must not leave this object unable to ever start.
+    this.#workerStarting ??= this.#startWorker(overrides).catch((error) => {
+      this.#workerStarting = undefined;
+      throw error;
+    });
     return this.#workerStarting;
   }
 
@@ -343,6 +403,9 @@ class MigrationQueue {
     if (this.#globalConcurrency && typeof queue.setGlobalConcurrency === 'function') {
       await queue.setGlobalConcurrency(1);
     }
+    // close() may have begun while this was connecting: a Worker built now
+    // would fetch a job after shutdown, with nobody left to close it.
+    this.#assertOpen();
     const Worker = this.#WorkerClass;
     const worker = new Worker(this.#queueName, this.#processor, {
       connection: this.#connection,
@@ -367,12 +430,7 @@ class MigrationQueue {
     this.#listen(worker, 'failed', (job, error) =>
       this.#kit.logger.warn(
         `✖ Migration job failed${job?.id !== undefined ? ` (${job.id})` : ''}: ${errorText(error)}`,
-        {
-          ...fields,
-          ...(job?.id !== undefined ? { jobId: String(job.id) } : {}),
-          ...(error?.code ? { code: error.code } : {}),
-          error: errorText(error),
-        },
+        { ...fields, ...failedJobFields(job, error), error: errorText(error) },
       ),
     );
     this.#listen(worker, 'stalled', (jobId) =>
@@ -387,10 +445,12 @@ class MigrationQueue {
 
   /** Stop workers from picking up new jobs. The job in flight finishes */
   async pause() {
+    this.#assertOpen();
     await this.#queue.pause();
   }
 
   async resume() {
+    this.#assertOpen();
     await this.#queue.resume();
   }
 
@@ -399,6 +459,7 @@ class MigrationQueue {
    * null. For the live BullMQ Job, use `queue.getJob(id)`.
    */
   async getJob(id) {
+    this.#assertOpen();
     if (typeof id !== 'string' || id.length === 0) {
       throw new ConfigInvalidError('Job id must be a non-empty string', { id });
     }
@@ -466,7 +527,9 @@ class MigrationQueue {
     await this.#queue.upsertJobScheduler(
       id,
       { ...(every !== undefined ? { every } : { pattern }), ...(tz !== undefined ? { tz } : {}) },
-      converge ? buildConvergeJobTemplate() : buildSyncJobTemplate({ to }),
+      converge
+        ? buildConvergeJobTemplate({ jobOptions: this.#jobOptions })
+        : buildSyncJobTemplate({ to, jobOptions: this.#jobOptions }),
     );
   }
 
@@ -476,6 +539,7 @@ class MigrationQueue {
    * whether one existed.
    */
   async unschedule(id = DEFAULT_SCHEDULER_ID) {
+    this.#assertOpen();
     assertName(id, 'id');
     if (typeof this.#queue.removeJobScheduler !== 'function') {
       throw new ConfigInvalidError(
@@ -505,14 +569,32 @@ class MigrationQueue {
         failures.push(error);
       }
     };
+    // The worker stops fetching first: a job the shutdown below puts back in
+    // the queue must go to the next worker, not straight back to this one.
+    const worker = this.#worker;
+    const workerClosed = worker ? attempt(() => worker.close(force)) : undefined;
     this.#processor.shutdown('Migration queue closing');
-    // A worker still starting must be closed too, not orphaned.
-    await attempt(() => this.#workerStarting);
-    if (this.#worker) await attempt(() => this.#worker.close(force));
+    await workerClosed;
+    // A worker still starting is closed too, not orphaned — and a start that
+    // failed is that call's failure, not this one's.
+    await this.#workerStarting?.catch(() => undefined);
+    if (this.#worker && this.#worker !== worker) {
+      await attempt(() => this.#worker.close(force));
+    }
     if (this.#queueEvents && this.#ownsQueueEvents) await attempt(() => this.#queueEvents.close());
     if (this.#ownsQueue) await attempt(() => this.#queue.close());
-    await attempt(() => this.#processor.close());
-    if (this.#ownsKit) await attempt(() => this.#kit.disconnect());
+    if (force) {
+      // The migration in flight is not waited for — but it keeps its
+      // connection until it ends: a kit this object created is disconnected
+      // only once the processor has settled.
+      this.#processor
+        .close()
+        .then(() => (this.#ownsKit ? this.#kit.disconnect() : undefined))
+        .catch(() => undefined);
+    } else {
+      await attempt(() => this.#processor.close());
+      if (this.#ownsKit) await attempt(() => this.#kit.disconnect());
+    }
     if (failures.length > 0) throw failures[0];
   }
 }

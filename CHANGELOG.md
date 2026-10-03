@@ -30,7 +30,25 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
     retry re-queues behind the waiting jobs — and a held lock is waited out inside the job.
   - **One batch per enqueue**, so `down` still rolls back a whole deploy; duplicate enqueues are
     deduplicated, and a job whose migration is already applied completes as `skipped`.
-  - Job payloads are validated as untrusted input; messages, stacks and job logs are redacted.
+  - Job payloads are validated as untrusted input; messages, stacks and job logs are redacted. A
+    queue job's target must be a file of the migration sequence — a payload can never make the
+    worker import a dotfile, a declaration file or a helper module next to the migrations.
+  - **Shutdown puts unstarted work back.** A job that a closing worker stops before its migration
+    starts (waiting for the lock, or fetched during shutdown) is moved back to the head of the
+    queue instead of failing — so a rolling deploy no longer fails the rest of the enqueue it
+    interrupts as `MIGRATION_BLOCKED`. A migration already running always finishes.
+  - **A versioned, strict job contract.** A worker accepts every job data version from
+    `MIN_JOB_DATA_VERSION` (exported) up to its own and refuses newer ones and unknown fields
+    rather than ignoring what they mean — roll workers out before producers. Jobs always state
+    `ordered`, and may carry the plan-time `checksum` of their file.
+  - **Scheduler ticks are bounded**: they carry the queue's `jobOptions`, and keep the last 100
+    completed / 500 failed jobs when those set no retention.
+  - **Correlation**: a job's `runId` is on its progress (`completed` and `failed`), its failure log
+    row and its error's `context` (with `jobId` and `groupId`) — a failed job has no return value;
+    the worker's failure log line names the group, migration and run.
+  - An injected `Queue` (or `QueueEvents`) on another name or prefix than the facade's is rejected,
+    and the facade takes an injected queue's prefix by default; `startWorker()` can be retried
+    after a failed start; a closed queue refuses every further call.
 - **`bullmq.d.ts`** — hand-written types for the entry point, with structural `BullMQ*Like`
   interfaces instead of an import of `bullmq`, generic over the classes you inject.
 - **`up(file, { batch })`** — stamp an explicit batch number instead of the next free one, and
@@ -83,8 +101,9 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
     `MigronautMetricOptions`, `MigronautAttributes` and `MigronautTelemetry`, exported from the
     package root.
   - **It can never fail a run.** Every call into the tracer, a span, the meter and an instrument
-    is guarded, and a tracer that throws before or after running the work — or runs it twice —
-    still gets each migration executed exactly once.
+    is guarded — a promise one of them returns included, so a rejecting SDK cannot surface as an
+    unhandled rejection — and a tracer that throws before or after running the work, or runs it
+    twice, still gets each migration executed exactly once.
   - Code-only, like `logger` and `generateId`. The span, attribute and metric names are new and
     should be treated as experimental.
 - **`bullmq.telemetry`** — `createMigrationQueue({ bullmq: { Queue, Worker, telemetry } })` hands
@@ -119,9 +138,16 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
     only with `prune` (per definition, or for the definitions that do not decide). An identical
     index under another name is accepted as is rather than rebuilt; a different one covering the
     same key is a conflict that refuses the run before the first write. A rebuild whose new index
-    fails to build puts the old one back.
+    fails to build puts the old one back — and says so, with the reason, when it cannot.
+  - **A unique index is never rebuilt unasked.** Dropping it opens a window with no constraint,
+    and a duplicate written in that window leaves neither index buildable. Such a rebuild is a
+    `conflict` unless `converge({ rebuildUnique: true })` / `--rebuild-unique`; a converge after
+    `up` and a queue job never pass it.
   - **Comparisons follow what the server stores** — text indexes in their `_fts` form, collations
-    as a subset of the expanded spec, the collection's default collation, `{ locale: 'simple' }`.
+    field by field against the expanded spec (`strength`, `caseLevel` and `numericOrdering` at
+    their universal defaults when left out), the collection's default collation,
+    `{ locale: 'simple' }`, a flag stored as `1`. A compound `Map` key may hold an integer-like
+    field only first — the driver reads keys back as plain objects.
     Anything applied that still compares as changed is reported under `unstable` instead of being
     rebuilt on every run.
   - **The CLI plans first** and asks before any drop or rebuild; `--json` refuses such a plan
@@ -132,8 +158,9 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
     `migronaut up --converge` / `--no-converge` decide per run. `up` still returns its migration
     rows; `runMigrations` adds `summary.converge`.
   - **`MigratorKit.convergesAfterUp()`** — whether a bulk `up` on the kit ends by converging.
-  - **Events**: `converge:start`, `converge:action` (per step) and `converge:end` (with the full
-    result), for real runs. The run itself is an ordinary `run:start`/`run:end` with
+  - **Events**: `converge:start`, `converge:action` (per step: `'started'` before it runs — an index
+    build can take hours — then `'applied'` or `'failed'`) and `converge:end` (with the full
+    result), for real runs. An index build also logs which index it is starting on. The run itself is an ordinary `run:start`/`run:end` with
     `command: 'converge'`, and an ordinary `migronaut.run` span.
   - **Types**: `CollectionDefinition`, `CollectionDefinitionFile`, `IndexDefinition`,
     `IndexKeyDirection`, `IndexCollation`, `ValidationLevel`, `ValidationAction`, `ConvergeOptions`,

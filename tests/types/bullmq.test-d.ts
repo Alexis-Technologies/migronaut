@@ -15,6 +15,7 @@ import {
   DEFAULT_SCHEDULER_ID,
   type GroupWaitResult,
   JOB_DATA_VERSION,
+  MIN_JOB_DATA_VERSION,
   JOB_NAMES,
   type MigrationGroup,
   type MigrationJobData,
@@ -217,6 +218,7 @@ expectType<'up'>(JOB_NAMES.UP);
 expectType<'down'>(JOB_NAMES.DOWN);
 expectType<'sync'>(JOB_NAMES.SYNC);
 expectType<1>(JOB_DATA_VERSION);
+expectType<1>(MIN_JOB_DATA_VERSION);
 expectType<'migronaut'>(DEFAULT_QUEUE_NAME);
 expectType<'migronaut-sync'>(DEFAULT_SCHEDULER_ID);
 expectType<readonly MigronautErrorCode[]>(RETRYABLE_CODES);
@@ -226,6 +228,7 @@ expectType<ParsedJobData>(parseJobData(realJob));
 declare const progress: MigrationJobProgress;
 expectType<'lock-wait' | 'running' | 'completed' | 'failed'>(progress.phase);
 expectType<MigronautErrorCode | 'UNKNOWN' | undefined>(progress.code);
+expectType<string | undefined>(progress.runId);
 
 // ─── Converge jobs ───────────────────────────────────────────────────────────
 

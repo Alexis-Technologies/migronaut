@@ -380,6 +380,29 @@ describe('wrap', () => {
     assert.strictEqual(tracer.spans[0].attributes['error.type'], 'MIGRATION_EXECUTION_FAILED');
   });
 
+  it('should not leave an unhandled rejection behind a tracer that wraps the work', async () => {
+    // A tracer that chains on the work returns a second promise, which rejects
+    // with it — nobody awaits that one, and an unhandled rejection ends Node.
+    const tracer = fakeTracer();
+    const inner = tracer.startActiveSpan.bind(tracer);
+    tracer.startActiveSpan = (...args) => inner(...args).finally(() => undefined);
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await assert.rejects(
+        createTelemetry({ tracer }).wrap(SPANS.MIGRATION, {}, async () => {
+          throw new Error('migration failed');
+        }),
+        /migration failed/,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    assert.deepStrictEqual(unhandled, []);
+  });
+
   it('should treat a synchronous throw like a rejection', async () => {
     const tracer = fakeTracer();
     await assert.rejects(
@@ -406,6 +429,28 @@ describe('errorType', () => {
     for (const value of ['a string', 42, null, undefined, {}, { name: '' }, { name: 7 }]) {
       assert.strictEqual(errorType(value), '_OTHER');
     }
+  });
+
+  it('should never throw — not even for a value whose name getter does', () => {
+    const hostile = {
+      get name() {
+        throw new Error('gotcha');
+      },
+    };
+    assert.strictEqual(errorType(hostile), '_OTHER');
+    assert.strictEqual(
+      errorType(
+        new Proxy(
+          {},
+          {
+            getPrototypeOf() {
+              throw new Error('trap');
+            },
+          },
+        ),
+      ),
+      '_OTHER',
+    );
   });
 });
 
@@ -533,6 +578,31 @@ describe('metrics', () => {
     telemetry.migrationEnded({ direction: 'up', durationMs: 5 });
     assert.ok(!(METRICS.RUN_DURATION in meter.instruments));
     assert.strictEqual(meter.instruments[METRICS.MIGRATION_DURATION].points.length, 1);
+  });
+
+  it('should swallow an instrument that rejects when recording', async () => {
+    const rejecting = {
+      record: async () => {
+        throw new Error('exporter down');
+      },
+      add: async () => {
+        throw new Error('exporter down');
+      },
+    };
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const telemetry = createTelemetry({
+        meter: { createHistogram: () => rejecting, createCounter: () => rejecting },
+      });
+      telemetry.runEnded({ command: 'up', durationMs: 5 });
+      telemetry.lockRefused();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    assert.deepStrictEqual(unhandled, []);
   });
 
   it('should swallow an instrument that throws when recording', () => {

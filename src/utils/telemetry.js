@@ -51,12 +51,30 @@ const METRICS = {
 const DURATION_BUCKETS_SECONDS = [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 900, 3600];
 
 /**
+ * Mark a promise an SDK handed back as handled. A tracer that wraps the work
+ * (`return fn(span).finally(…)`) or an instrument that is async returns a
+ * promise nobody here awaits — and when it rejects, an unhandled rejection
+ * ends the process. The caller's own handlers are unaffected.
+ */
+function quiet(value) {
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+    try {
+      if (typeof value.then === 'function') value.then(undefined, () => {});
+    } catch {
+      // A `then` getter that throws is one more SDK fault to ignore.
+    }
+  }
+  return value;
+}
+
+/**
  * The one guard every tracer, span and instrument call goes through: telemetry
- * must never break a migration run, so a throwing SDK is swallowed here.
+ * must never break a migration run, so a throwing SDK is swallowed here — and
+ * a rejecting one too, see {@link quiet}.
  */
 function safe(call) {
   try {
-    return call();
+    return quiet(call());
   } catch {
     return undefined;
   }
@@ -77,8 +95,14 @@ function defined(attributes) {
  * typed migronaut code when there is one, the error's class name otherwise.
  */
 function errorType(error) {
-  if (error instanceof MigronautError) return error.code;
-  if (typeof error?.name === 'string' && error.name.length > 0) return error.name;
+  // Never throws: it runs on the way out of a failed run, where a hostile
+  // `name` getter would otherwise replace the run's own error.
+  try {
+    if (error instanceof MigronautError) return error.code;
+    if (typeof error?.name === 'string' && error.name.length > 0) return error.name;
+  } catch {
+    // fall through
+  }
   return '_OTHER';
 }
 

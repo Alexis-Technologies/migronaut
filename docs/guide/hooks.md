@@ -111,8 +111,11 @@ await kit.up();
 | `lock:acquired` | `{ runId, owner, ttlMs, acquireMs }` — or `{ runId, owner, skipped: true }` under `--no-lock` |
 | `lock:released` | `{ runId, owner }` |
 | `lock:lost` | `{ runId, owner, reason }` |
+| `converge:start` | `{ runId, trigger, collections }` — a real [converge](/guide/collections) run |
+| `converge:action` | `{ runId, collection, target, name, action, status, durationMs?, reason?, error? }` — `status` is `'started'` before a step runs, then `'applied'` or `'failed'` |
+| `converge:end` | `{ runId, trigger, success, durationMs, changed, inSync, counts, result, error? }` |
 
-`command` is `'up'`, `'down'`, `'redo'`, `'baseline'` or `'import'`. The counts on `run:end` are
+`command` is `'up'`, `'down'`, `'redo'`, `'baseline'`, `'import'` or `'converge'`. The counts on `run:end` are
 present when the run produced a result list — on the failure path too, counted from what was
 applied before it failed. `error` is a message with URI credentials already redacted.
 

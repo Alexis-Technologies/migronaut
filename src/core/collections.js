@@ -1,12 +1,12 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { ConfigInvalidError } = require('../errors/index.js');
-const { deepEqual, isPlainObject, toWire } = require('../utils/canonical.js');
+const { isPlainObject, toWire } = require('../utils/canonical.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { importUserFile, tsLoadMessageOrNull } = require('../utils/loader.js');
-const { indexIssues, normalizeDeclaredIndex } = require('./index-spec.js');
+const { indexIssues, normalizeDeclaredIndex, sameDeclaredSignature } = require('./index-spec.js');
 
 /**
  * Declared collections: validating a definition, normalizing it for the
@@ -58,20 +58,6 @@ function unsendable(value, seen = new Set()) {
 }
 
 const isEmptyObject = (value) => isPlainObject(value) && Object.keys(value).length === 0;
-
-/** Whether two valid declarations describe one index to the server (same key, filter, collation) */
-function sameDeclaredSignature(a, b) {
-  if (a.serverKey.length !== b.serverKey.length) return false;
-  for (let i = 0; i < a.serverKey.length; i++) {
-    if (a.serverKey[i][0] !== b.serverKey[i][0] || a.serverKey[i][1] !== b.serverKey[i][1]) {
-      return false;
-    }
-  }
-  return (
-    deepEqual(a.options.partialFilterExpression, b.options.partialFilterExpression) &&
-    deepEqual(a.options.collation, b.options.collation)
-  );
-}
 
 function indexListIssues(indexes, base, issues) {
   if (!Array.isArray(indexes)) {

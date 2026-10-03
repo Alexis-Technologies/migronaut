@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { normalizeDefinition } = require('../../src/core/collections.js');
 const {
+  UNIQUE_REBUILD_REASON,
   desiredValidator,
   isDestructive,
   liveValidator,
@@ -200,6 +201,36 @@ describe('planCollection — indexes', () => {
       steps: ['rebuild [a_1] → [a_1]'],
     },
     {
+      label: 'a unique index rebuilt unasked — a conflict',
+      declared: [{ key: { a: 1 }, unique: true, sparse: true }],
+      live: [{ key: { a: 1 }, name: 'a_1', unique: true }],
+      rows: [`index:a_1:conflict:sparse; ${UNIQUE_REBUILD_REASON}`],
+      steps: [],
+    },
+    {
+      label: 'a unique index rebuilt with rebuildUnique',
+      declared: [{ key: { a: 1 }, unique: true, sparse: true }],
+      live: [{ key: { a: 1 }, name: 'a_1', unique: true }],
+      rebuildUnique: true,
+      rows: ['index:a_1:recreate:sparse'],
+      steps: ['rebuild [a_1] → [a_1]'],
+    },
+    {
+      label: 'a unique index made non-unique — the constraint is meant to go',
+      declared: [{ key: { a: 1 } }],
+      live: [{ key: { a: 1 }, name: 'a_1', unique: true }],
+      rows: ['index:a_1:recreate:unique'],
+      steps: ['rebuild [a_1] → [a_1]'],
+    },
+    {
+      label: 'a unique index renamed with prune — a conflict without rebuildUnique',
+      declared: [{ key: { a: 1 }, name: 'a_declared', unique: true }],
+      live: [{ key: { a: 1 }, name: 'a_live', unique: true }],
+      prune: true,
+      rows: [`index:a_declared:conflict:name; ${UNIQUE_REBUILD_REASON}@a_live`],
+      steps: [],
+    },
+    {
       label: 'an undeclared index kept with prune off',
       declared: [],
       live: [{ key: { x: 1 }, name: 'x_1' }],
@@ -329,6 +360,7 @@ describe('planCollection — indexes', () => {
         existing(testCase.live),
         {
           prune: testCase.prune ?? false,
+          rebuildUnique: testCase.rebuildUnique ?? false,
         },
       );
       assert.deepStrictEqual(rows(plan), testCase.rows);

@@ -1219,6 +1219,21 @@ describe('converge CLI (integration)', () => {
     assert.strictEqual((await mongo.db.collection('users').indexes())[1].unique, true);
   });
 
+  it('should rebuild a unique index only with --rebuild-unique', async () => {
+    await mongo.db.collection('users').createIndex({ email: 1 }, { unique: true });
+    declare([{ name: 'users', indexes: [{ key: { email: 1 }, unique: true, sparse: true }] }]);
+
+    const refused = await runCli(baseArgs(['converge', '--yes']));
+    assert.strictEqual(refused.code, 27);
+    assert.match(refused.stderr, /--rebuild-unique/);
+    assert.strictEqual((await mongo.db.collection('users').indexes())[1].sparse, undefined);
+
+    const rebuilt = await runCli(baseArgs(['converge', '--yes', '--rebuild-unique']));
+    assert.strictEqual(rebuilt.code, 0);
+    const [, index] = await mongo.db.collection('users').indexes();
+    assert.deepStrictEqual([index.unique, index.sparse], [true, true]);
+  });
+
   it('should apply a destructive plan with --json --yes and print the result', async () => {
     await mongo.db.collection('users').createIndex({ stray: 1 });
     declare([USERS]);

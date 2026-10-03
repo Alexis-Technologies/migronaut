@@ -262,7 +262,16 @@ describe('runConverge — a real run', () => {
     const names = events.map(([event]) => event);
     assert.strictEqual(names[0], 'converge:start');
     assert.strictEqual(names.at(-1), 'converge:end');
-    assert.strictEqual(names.filter((event) => event === 'converge:action').length, 7);
+    // Each step announced before it runs, then settled.
+    const actions = events.filter(([event]) => event === 'converge:action').map(([, e]) => e);
+    assert.deepStrictEqual(
+      actions.map((action) => action.status),
+      Array.from({ length: 7 }, () => ['started', 'applied']).flat(),
+    );
+    assert.deepStrictEqual(
+      [actions[0].action, actions[0].name, actions[0].durationMs],
+      ['modify', 'users', undefined],
+    );
     assert.deepStrictEqual(events[0][1], { trigger: 'converge', collections: 2 });
     const end = events.at(-1)[1];
     assert.strictEqual(end.success, true);
@@ -276,6 +285,11 @@ describe('runConverge — a real run', () => {
       ),
     );
     assert.ok(messages.some((message) => message.startsWith('✔ Modified validator users')));
+    // An index build says which one it is busy with before it starts.
+    assert.ok(messages.includes('… Rebuilding index r_1 on users'), messages.join(' | '));
+    assert.ok(messages.includes('… Creating index total_-1 on orders'));
+    const validatorLine = lines.find((line) => line.message === '… Modifying validator users');
+    assert.strictEqual(validatorLine.level, 'debug', 'not a build: debug only');
     assert.ok(
       messages.some((message) =>
         message.startsWith('✔ Converged 7 change(s) in 2 of 2 collection(s)'),
@@ -511,8 +525,33 @@ describe('runConverge — refusals and failures', () => {
         { definitions: definitions({ name: 'c', indexes: [{ key: { a: 1 }, unique: true }] }) },
         undefined,
       ),
-      (error) => error.context.restored === false && /dbAdmin/.test(error.context.hint),
+      (error) =>
+        error.context.restored === false &&
+        /dbAdmin/.test(error.context.hint) &&
+        error.context.restoreError === 'a_1: not authorized' &&
+        /could not be put back \(a_1: not authorized\)/.test(error.message),
     );
+  });
+
+  it('should refuse to rebuild a unique index unless rebuildUnique says so', async () => {
+    const live = { c: { indexes: [{ v: 2, key: { a: 1 }, name: 'a_1', unique: true }] } };
+    const declared = { name: 'c', indexes: [{ key: { a: 1 }, unique: true, sparse: true }] };
+    const refused = fakeDb(structuredClone(live));
+    await assert.rejects(
+      runConverge(makeDeps(refused).deps, { definitions: definitions(declared) }, undefined),
+      (error) =>
+        error.context.phase === 'plan' && /rebuildUnique/.test(error.context.conflicts[0].reason),
+    );
+    assert.deepStrictEqual(refused.ops, []);
+
+    const allowed = fakeDb(structuredClone(live));
+    const result = await runConverge(
+      makeDeps(allowed).deps,
+      { definitions: definitions(declared), rebuildUnique: true },
+      undefined,
+    );
+    assert.strictEqual(result.changed, 1);
+    assert.deepStrictEqual(allowed.ops, ['dropIndex c.a_1', 'createIndex c.a_1']);
   });
 
   it('should fail a rebuild whose drop fails, with nothing to restore', async () => {

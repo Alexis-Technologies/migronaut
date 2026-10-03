@@ -60,12 +60,15 @@ your own "application startup" span shows up as part of it.
 
 | Span | Emitted | Attributes |
 |---|---|---|
-| `migronaut.run` | Once per `up` / `down` / `redo` / `baseline` / `import` that acquired the lock | `migronaut.run.id`, `migronaut.run.command`, `migronaut.run.direction`, `migronaut.lock.acquire_ms` (or `migronaut.lock.skipped` under `--no-lock`); at the end `migronaut.run.applied`, `.reverted`, `.skipped`, `.total`, and `migronaut.lock.lost_reason` if the lock was lost |
+| `migronaut.run` | Once per `up` / `down` / `redo` / `baseline` / `import` / `converge` that acquired the lock | `migronaut.run.id`, `migronaut.run.command`, `migronaut.run.direction`, `migronaut.lock.acquire_ms` (or `migronaut.lock.skipped` under `--no-lock`); at the end `migronaut.run.applied`, `.reverted`, `.skipped`, `.total`, and `migronaut.lock.lost_reason` if the lock was lost |
 | `migronaut.migration` | Once per migration executed, as a child of the run | `migronaut.migration.name`, `.direction`, `.batch`, `.index`, `.total`, `.transaction`, and `migronaut.run.id` |
 
 A failure sets the span's status to `ERROR` with the failure message, and `error.type` to the
-[error code](/reference/error-codes) (`MIGRATION_EXECUTION_FAILED`, `LOCK_LOST`, …). A success
-leaves the status unset, as OpenTelemetry asks of libraries.
+[error code](/reference/error-codes) (`MIGRATION_EXECUTION_FAILED`, `LOCK_LOST`, …) — or, for an
+error that is not migronaut's (a `TypeError` thrown by a migration), to its class name, and
+`_OTHER` when it has none. A success leaves the status unset, as OpenTelemetry asks of libraries.
+A converge run is an ordinary `migronaut.run` with `migronaut.run.command = converge`; the
+driver's index commands nest under it.
 
 `migronaut.run.id` is the same `runId` found on log lines, lifecycle events and changelog records —
 the join key between a trace and the database.

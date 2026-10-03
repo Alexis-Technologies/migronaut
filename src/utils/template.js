@@ -375,6 +375,7 @@ function configBody(values, createExtension) {
   // ── OpenTelemetry (code only — not available in JSON config) ──
   // Pass a tracer and/or a meter from your own @opentelemetry/api: every run
   // and every migration becomes a span, and their durations become metrics.
+  // (\`trace\` and \`metrics\` come from '@opentelemetry/api' — import them at the top)
   // telemetry: {
   //   tracer: trace.getTracer('@alexify/migronaut'),
   //   meter: metrics.getMeter('@alexify/migronaut'),

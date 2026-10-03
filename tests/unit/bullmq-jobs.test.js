@@ -6,12 +6,15 @@ const {
   DEFAULT_SCHEDULER_ID,
   FORBIDDEN_JOB_OPTIONS,
   JOB_DATA_VERSION,
+  JOB_FIELDS,
   JOB_NAMES,
   MIGRATION_JOB_OPTIONS,
+  MIN_JOB_DATA_VERSION,
   buildConvergeJob,
   buildConvergeJobTemplate,
   buildMigrationJob,
   buildSyncJobTemplate,
+  TICK_RETENTION,
   convergeDedupId,
   dedupId,
   migrationJobOptions,
@@ -87,16 +90,21 @@ describe('buildMigrationJob / migrationJobOptions', () => {
         index: 1,
         total: 3,
         batch: 9,
+        ordered: true,
       },
     });
   });
 
-  it('should carry force and an opt-out of the order guard only when set', () => {
+  it('should carry force only when set, and always say whether the job is ordered', () => {
     const base = { direction: 'up', migration: 'a.js', groupId: 'g', index: 0, total: 1, batch: 1 };
     assert.strictEqual(buildMigrationJob({ ...base, force: true }).data.force, true);
     assert.strictEqual(buildMigrationJob({ ...base, force: false }).data.force, undefined);
     assert.strictEqual(buildMigrationJob({ ...base, ordered: false }).data.ordered, false);
-    assert.strictEqual(buildMigrationJob({ ...base, ordered: true }).data.ordered, undefined);
+    // Written even at its default: the job, not the worker's setting, decides.
+    assert.strictEqual(buildMigrationJob({ ...base, ordered: true }).data.ordered, true);
+    assert.strictEqual(buildMigrationJob(base).data.ordered, true);
+    const checksum = 'a'.repeat(64);
+    assert.strictEqual(buildMigrationJob({ ...base, checksum }).data.checksum, checksum);
   });
 
   it('should omit a missing batch (a down job for a record without one)', () => {
@@ -128,9 +136,37 @@ describe('buildMigrationJob / migrationJobOptions', () => {
     assert.deepStrictEqual(buildSyncJobTemplate(), {
       name: 'sync',
       data: { v: 1, kind: 'sync' },
-      opts: { attempts: 1, telemetry: { omitContext: true } },
+      opts: {
+        removeOnComplete: { count: 100 },
+        removeOnFail: { count: 500 },
+        attempts: 1,
+        telemetry: { omitContext: true },
+      },
     });
     assert.strictEqual(buildSyncJobTemplate({ to: '0005-x.js' }).data.to, '0005-x.js');
+  });
+
+  it("should give scheduled ticks the caller's job options, and a bounded retention", () => {
+    // A schedule mints a job per tick forever: without a retention they pile
+    // up in Redis, so one is set whenever the caller has none.
+    assert.deepStrictEqual(TICK_RETENTION, {
+      removeOnComplete: { count: 100 },
+      removeOnFail: { count: 500 },
+    });
+    const opts = buildSyncJobTemplate({
+      jobOptions: { removeOnComplete: true, keepLogs: 10, telemetry: { metadata: 'x' } },
+    }).opts;
+    assert.deepStrictEqual(opts, {
+      removeOnComplete: true,
+      removeOnFail: { count: 500 },
+      keepLogs: 10,
+      attempts: 1,
+      telemetry: { metadata: 'x', omitContext: true },
+    });
+    assert.strictEqual(
+      buildConvergeJobTemplate({ jobOptions: { removeOnFail: 5 } }).opts.removeOnFail,
+      5,
+    );
   });
 
   it('should keep a scheduled tick out of the trace that registered the schedule', () => {
@@ -168,11 +204,91 @@ describe('parseJobData', () => {
     assert.ok(!Object.hasOwn(parseJobData(job('down', { ...base, batch: null })), 'batch'));
   });
 
-  it('should drop keys outside the contract instead of passing them on', () => {
-    const parsed = parseJobData(job('up', upData({ noLock: true, uri: 'mongodb://evil' })));
-    assert.ok(!Object.hasOwn(parsed, 'noLock'));
-    assert.ok(!Object.hasOwn(parsed, 'uri'));
+  it('should refuse a field outside the contract rather than ignore what it means', () => {
+    assert.throws(
+      () => parseJobData(job('up', upData({ noLock: true }))),
+      (error) =>
+        error instanceof QueueJobInvalidError && /unknown field "noLock"/.test(error.message),
+    );
+    assert.throws(() => parseJobData(job('sync', { v: 1, kind: 'sync', force: true })), /force/);
+    for (const kind of ['migration', 'sync', 'converge']) assert.ok(JOB_FIELDS[kind].has('v'));
   });
+
+  it('should accept a plan-time checksum, and only a SHA-256 hex digest', () => {
+    const checksum = 'f'.repeat(64);
+    assert.strictEqual(parseJobData(job('up', upData({ checksum }))).checksum, checksum);
+    for (const bad of ['F'.repeat(64), 'f'.repeat(63), 64, '../x']) {
+      assert.throws(() => parseJobData(job('up', upData({ checksum: bad }))), /checksum/);
+    }
+  });
+
+  it('should accept every version from the oldest supported up to its own', () => {
+    assert.strictEqual(MIN_JOB_DATA_VERSION, 1);
+    assert.ok(MIN_JOB_DATA_VERSION <= JOB_DATA_VERSION);
+    assert.strictEqual(
+      parseJobData(job('up', upData({ v: MIN_JOB_DATA_VERSION }))).kind,
+      'migration',
+    );
+    assert.throws(() => parseJobData(job('up', upData({ v: 0 }))), /unsupported/);
+    assert.throws(() => parseJobData(job('up', upData({ v: 1.5 }))), /unsupported/);
+  });
+
+  // Payloads exactly as a 2.1.0 producer writes them. Every later worker must
+  // keep accepting them for as long as MIN_JOB_DATA_VERSION is 1: jobs already
+  // queued survive an upgrade of the workers.
+  const GOLDEN_V1 = [
+    [
+      'up',
+      {
+        v: 1,
+        direction: 'up',
+        migration: '20260101000000-add-index.js',
+        groupId: '0195f6a2-4c1b-7c3e-9a51-3b2d1e0f9a8b',
+        index: 0,
+        total: 2,
+        batch: 7,
+        ordered: true,
+      },
+    ],
+    [
+      'up',
+      {
+        v: 1,
+        direction: 'up',
+        migration: '20260101000000-add-index.js',
+        groupId: 'g',
+        index: 0,
+        total: 1,
+        batch: 8,
+        force: true,
+        ordered: false,
+        checksum: 'c'.repeat(64),
+      },
+    ],
+    [
+      'down',
+      {
+        v: 1,
+        direction: 'down',
+        migration: 'a.js',
+        groupId: 'g',
+        index: 1,
+        total: 2,
+        batch: 7,
+        ordered: true,
+      },
+    ],
+    ['down', { v: 1, direction: 'down', migration: 'a.js', groupId: 'g', index: 0, total: 1 }],
+    ['sync', { v: 1, kind: 'sync' }],
+    ['sync', { v: 1, kind: 'sync', to: '0003-c.js' }],
+    ['converge', { v: 1, kind: 'converge', groupId: 'g', ordered: true }],
+    ['converge', { v: 1, kind: 'converge' }],
+  ];
+  for (const [name, data] of GOLDEN_V1) {
+    it(`should keep accepting a v1 ${name} payload (${Object.keys(data).join(', ')})`, () => {
+      assert.doesNotThrow(() => parseJobData(job(name, data)));
+    });
+  }
 
   it('should accept a sync job, with an optional target', () => {
     assert.deepStrictEqual(parseJobData(job('sync', { v: 1, kind: 'sync' })), { kind: 'sync' });
@@ -188,7 +304,7 @@ describe('parseJobData', () => {
     ['an unknown job name', () => job('redo', upData()), /unknown job name/],
     ['data that is not an object', () => job('up', 'oops'), /data is not an object/],
     ['an array as data', () => job('up', []), /data is not an object/],
-    ['a newer data version', () => job('up', upData({ v: 2 })), /unsupported job data version/],
+    ['a newer data version', () => job('up', upData({ v: 2 })), /newer than this worker/],
     ['a missing version', () => job('up', upData({ v: undefined })), /unsupported/],
     ['a direction that disagrees with the job name', () => job('down', upData()), /direction/],
     [
@@ -263,7 +379,7 @@ describe('converge jobs', () => {
       buildConvergeJob({ groupId: 'g', after: '0002-b.js', jobOptions: { removeOnComplete: 10 } }),
       {
         name: 'converge',
-        data: { v: 1, kind: 'converge', groupId: 'g' },
+        data: { v: 1, kind: 'converge', groupId: 'g', ordered: true },
         opts: {
           removeOnComplete: 10,
           attempts: 1,
@@ -276,27 +392,34 @@ describe('converge jobs', () => {
       kind: 'converge',
       ordered: false,
     });
-    // `ordered: true` is the default, so it is not written.
-    assert.ok(!('ordered' in buildConvergeJob({ ordered: true }).data));
+    // Written even at its default, like a migration job's.
+    assert.strictEqual(buildConvergeJob({ ordered: true }).data.ordered, true);
   });
 
   it('should give a scheduled converge its own trace per tick', () => {
     assert.deepStrictEqual(buildConvergeJobTemplate(), {
       name: 'converge',
       data: { v: 1, kind: 'converge' },
-      opts: { attempts: 1, telemetry: { omitContext: true } },
+      opts: {
+        removeOnComplete: { count: 100 },
+        removeOnFail: { count: 500 },
+        attempts: 1,
+        telemetry: { omitContext: true },
+      },
     });
   });
 
-  it('should parse a converge job and pass nothing else on', () => {
+  it('should parse a converge job, and refuse a prune it may never carry', () => {
     assert.deepStrictEqual(parseJobData(job('converge', { v: 1, kind: 'converge' })), {
       kind: 'converge',
     });
     assert.deepStrictEqual(
-      parseJobData(
-        job('converge', { v: 1, kind: 'converge', groupId: 'g', ordered: false, prune: true }),
-      ),
+      parseJobData(job('converge', { v: 1, kind: 'converge', groupId: 'g', ordered: false })),
       { kind: 'converge', groupId: 'g', ordered: false },
+    );
+    assert.throws(
+      () => parseJobData(job('converge', { v: 1, kind: 'converge', prune: true })),
+      /prune is not accepted from a job/,
     );
   });
 

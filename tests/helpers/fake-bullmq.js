@@ -22,7 +22,10 @@ const { EventEmitter } = require('node:events');
  * - `waitUntilFinished` settles from state when the job already finished, and
  *   words its timeout the way BullMQ does;
  * - a stalled job is re-queued at the head and run again while the first
- *   attempt's outcome is discarded (`_simulateStall`).
+ *   attempt's outcome is discarded (`_simulateStall`);
+ * - `job.moveToWait(token)` puts an active job back at the HEAD of the wait
+ *   list (BullMQ RPUSHes it to the end consumers pop from), and a processor
+ *   error named `WaitingError` is then neither a failure nor a completion.
  *
  * Not reproduced: Lua atomicity, lock renewal, delayed/prioritized jobs,
  * backoff delays, flows, rate limiting, retention (`removeOnComplete`), Redis
@@ -106,6 +109,19 @@ class FakeJob {
   async log(row) {
     this.logs.push(row);
     return this.logs.length;
+  }
+
+  /** Back to the head of the wait list — only for the worker holding it (`token`) */
+  async moveToWait(token) {
+    const state = this.#state;
+    if (!state.active.has(this.id) || token !== `token-${this.id}`) {
+      throw new Error(`Missing lock for job ${this.id}. moveToWait`);
+    }
+    state.active.delete(this.id);
+    state.wait.unshift(this.id);
+    state.bus.emit('waiting', { jobId: this.id, prev: 'active' });
+    state.bus.emit('tick');
+    return 0;
   }
 
   async getState() {
@@ -434,6 +450,12 @@ class FakeWorker extends EventEmitter {
     // The lock was lost (stall): BullMQ refuses to move the job with
     // "Missing lock for job" — this attempt's outcome simply does not count.
     if (run.stalled) return;
+    // The processor already moved the job back to wait (it may even be
+    // active again on another worker): there is nothing to record.
+    if (error !== undefined && error.name === 'WaitingError') {
+      state.bus.emit('tick');
+      return;
+    }
     state.active.delete(job.id);
 
     if (error === undefined) {

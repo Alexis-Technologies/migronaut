@@ -32,6 +32,10 @@ function registerConverge(program) {
         `Exit with code ${EXIT_CODES.COLLECTIONS_DRIFT} if anything would change (CI gate; implies --dry-run)`,
       ],
       ['--prune', 'Drop undeclared indexes (in collections whose definition does not decide)'],
+      [
+        '--rebuild-unique',
+        'Allow rebuilding a unique index (drops the constraint until the new one is built)',
+      ],
       ['-y, --yes', 'Drop and rebuild indexes without asking (required for that with --json)'],
     ],
     lockable: true,
@@ -41,7 +45,10 @@ function registerConverge(program) {
     // ask only when the plan drops or rebuilds an index, then apply — the way
     // `unlock` reads the lock before asking.
     run: async (migrator, opts, _positionals, { logger, json, spinner, stopRequested }) => {
-      const prune = opts.prune ? { prune: true } : {};
+      const prune = {
+        ...(opts.prune ? { prune: true } : {}),
+        ...(opts.rebuildUnique ? { rebuildUnique: true } : {}),
+      };
       const planOnly = Boolean(opts.dryRun || opts.check);
       if (planOnly || !opts.yes) {
         spinner?.start('Comparing declared collections with the database…');
@@ -67,6 +74,15 @@ function registerConverge(program) {
             );
           }
           logger.info(renderConvergeTable(plan));
+          const uniqueRebuilds = destructive.filter(
+            (action) => action.action === 'recreate' && opts.rebuildUnique,
+          );
+          if (uniqueRebuilds.length > 0) {
+            logger.warn(
+              '⚠ --rebuild-unique: a rebuilt unique index enforces nothing until it is built ' +
+                'again — a duplicate written in between makes it unbuildable',
+            );
+          }
           const proceed = await confirm('Apply these changes? [y/N] ');
           if (!proceed) {
             logger.info('Aborted');

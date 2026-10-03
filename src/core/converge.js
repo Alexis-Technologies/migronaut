@@ -88,6 +88,15 @@ function describe(action) {
   return action.target === 'validator' ? 'the validator' : 'the collection';
 }
 
+/** What a failed rebuild left behind, when it could not put the dropped index back */
+function lostIndexes(extra) {
+  if (extra.restored !== false) return '';
+  return (
+    ` — the dropped index(es) ${extra.dropped.map((name) => `"${name}"`).join(', ')} could ` +
+    `not be put back (${extra.restoreError}); the collection is without them until fixed`
+  );
+}
+
 function wrapFailure(error, collection, action, result, extra = {}) {
   if (error instanceof MigronautError) return attachConverge(error, result);
   const mongoCode = typeof error?.code === 'number' ? error.code : undefined;
@@ -95,7 +104,7 @@ function wrapFailure(error, collection, action, result, extra = {}) {
   const cause = errorText(error);
   return new ConvergeFailedError(
     `Could not ${VERBS[action.action] ?? action.action} ${describe(action)} on ${collection}: ` +
-      `${cause}${hint ? ` — ${hint}` : ''}`,
+      `${cause}${hint ? ` — ${hint}` : ''}${lostIndexes(extra)}`,
     {
       phase: 'apply',
       collection,
@@ -143,16 +152,24 @@ async function runRebuild(db, collection, step, settle) {
     try {
       await db.collection(collection).createIndexes([spec]);
     } catch (error) {
-      let restored = true;
+      const restoreErrors = [];
       for (const drop of dropped) {
         if (created.has(drop.name)) continue;
         try {
           await db.collection(collection).createIndexes([drop.restore]);
-        } catch {
-          restored = false;
+        } catch (restoreError) {
+          restoreErrors.push(`${drop.name}: ${errorText(restoreError)}`);
         }
       }
-      return { error, action, extra: { restored, dropped: dropped.map((drop) => drop.name) } };
+      return {
+        error,
+        action,
+        extra: {
+          restored: restoreErrors.length === 0,
+          dropped: dropped.map((drop) => drop.name),
+          ...(restoreErrors.length > 0 ? { restoreError: restoreErrors.join('; ') } : {}),
+        },
+      };
     }
     created.add(spec.name);
     settle(action, Date.now() - startedAt);
@@ -224,6 +241,44 @@ function touched(result) {
   return count;
 }
 
+/** Steps that build an index — the ones that can take minutes or hours */
+const BUILD_STEPS = new Set(['createIndex', 'rebuild']);
+const STARTING = {
+  create: 'Creating',
+  modify: 'Modifying',
+  recreate: 'Rebuilding',
+  drop: 'Dropping',
+};
+
+/**
+ * Say a step is starting, before it runs: the `converge:action` event with
+ * status `'started'` for every step, and a log line for an index build — on a
+ * large collection it is the only sign of which index the run is busy with.
+ */
+function announce(deps, collection, step) {
+  for (const action of step.actions) {
+    deps.emit('converge:action', {
+      collection,
+      target: action.target,
+      name: action.name,
+      action: action.action,
+      status: 'started',
+      ...(action.reason !== undefined ? { reason: action.reason } : {}),
+    });
+    const what = action.target === 'index' ? `${action.name} on ${collection}` : collection;
+    const line = `… ${STARTING[action.action] ?? action.action} ${action.target} ${what}`;
+    const fields = deps.fields({
+      collection,
+      target: action.target,
+      name: action.name,
+      action: action.action,
+      status: 'started',
+    });
+    if (BUILD_STEPS.has(step.op)) deps.logger.info(line, fields);
+    else deps.logger.debug(line, fields);
+  }
+}
+
 function counts(result) {
   const out = {};
   for (const collection of result.collections) {
@@ -235,10 +290,11 @@ function counts(result) {
 /**
  * Plan every declared collection and, unless `dryRun`, carry the plans out.
  *
- * `options`: `{ definitions, prune?, dryRun?, trigger? }` — `definitions`
- * normalized (collections.js); `prune` the default for definitions that do
- * not set their own; `trigger` is `'converge'` or `'up'` (the after-up hook),
- * for events and logs.
+ * `options`: `{ definitions, prune?, rebuildUnique?, dryRun?, trigger? }` —
+ * `definitions` normalized (collections.js); `prune` the default for
+ * definitions that do not set their own; `rebuildUnique` lets a rebuild drop a
+ * unique index it builds back (a conflict otherwise); `trigger` is
+ * `'converge'` or `'up'` (the after-up hook), for events and logs.
  *
  * A plan with any conflict refuses the whole run before the first write. A
  * failed step stops the run (`ConvergeFailedError`); an abort between steps
@@ -250,13 +306,15 @@ async function runConverge(deps, options, signal) {
   const { definitions, dryRun = false, trigger = 'converge' } = options;
   const startedAt = Date.now();
   const pruneFor = (definition) => definition.prune ?? options.prune ?? false;
+  const planOptions = (definition) => ({
+    prune: pruneFor(definition),
+    rebuildUnique: options.rebuildUnique === true,
+  });
 
   const plans = [];
   for (const definition of definitions) {
     plans.push(
-      planCollection(definition, await readLiveState(db, definition.name), {
-        prune: pruneFor(definition),
-      }),
+      planCollection(definition, await readLiveState(db, definition.name), planOptions(definition)),
     );
   }
   const result = {
@@ -356,6 +414,7 @@ async function runConverge(deps, options, signal) {
           settleRest(result);
           throw attachConverge(error, result);
         }
+        announce(deps, plan.name, step);
         const failure = await runStep(db, plan.name, step, settle);
         if (failure) {
           const { error, action, extra } = failure;
@@ -378,9 +437,11 @@ async function runConverge(deps, options, signal) {
       // run — a comparison rule that disagrees with this server version — so
       // it is reported instead of silently rebuilt forever.
       const definition = definitions[position];
-      const after = planCollection(definition, await readLiveState(db, definition.name), {
-        prune: pruneFor(definition),
-      });
+      const after = planCollection(
+        definition,
+        await readLiveState(db, definition.name),
+        planOptions(definition),
+      );
       for (const action of after.actions) {
         if (!CHANGE_ACTIONS.has(action.action)) continue;
         (result.unstable ??= []).push({

@@ -352,8 +352,9 @@ export interface IndexCollation {
  */
 export interface IndexDefinition {
   /**
-   * Field → direction, in index order. A `Map` keeps the order of integer-like
-   * field names, which a plain object does not.
+   * Field → direction, in index order. A compound key with an integer-like
+   * field name must be a `Map` (a plain object reorders such names), with that
+   * field first — the live key is read back as a plain object.
    */
   key: Record<string, IndexKeyDirection> | Map<string, IndexKeyDirection>;
   /** Defaults to the name MongoDB generates: `email_1`, `a_1_b_-1` */
@@ -423,6 +424,14 @@ export interface ConvergeOptions {
    * as the tail of a deploy.
    */
   ordered?: boolean;
+  /**
+   * Allow a rebuild that drops a unique index and builds a unique one back.
+   * Without it such a rebuild plans as a `conflict`: the constraint is gone
+   * until the new index is built, and a duplicate written in between leaves
+   * neither index buildable. The after-up hook and queue jobs never set it.
+   * CLI: `--rebuild-unique`.
+   */
+  rebuildUnique?: boolean;
 }
 
 export type ConvergeTarget = 'collection' | 'validator' | 'index';
@@ -430,8 +439,9 @@ export type ConvergeTarget = 'collection' | 'validator' | 'index';
 /**
  * What converge does to one target. `keep` is an undeclared index left alone
  * (prune off); `conflict` refuses the run — an undeclared index covers the
- * declared one's key under another name, or the collection is a view or a
- * time-series collection.
+ * declared one's key under another name, a unique index would be rebuilt
+ * without {@link ConvergeOptions.rebuildUnique}, or the collection is a view
+ * or a time-series collection.
  */
 export type ConvergeActionKind =
   | 'create'
@@ -585,8 +595,9 @@ export interface MigronautMeter {
  * Metrics: `migronaut.run.duration`, `migronaut.migration.duration` and
  * `migronaut.lock.acquire.duration` (histograms, seconds), plus the counters
  * `migronaut.lock.refused` and `migronaut.lock.lost`. A failure sets the span's
- * status to ERROR with a redacted message, and `error.type` to the
- * {@link MigronautErrorCode} on the span and the metric point.
+ * status to ERROR with a redacted message, and `error.type` — on the span and
+ * the metric point — to the {@link MigronautErrorCode}, or for an error that is
+ * not migronaut's to its class name (`_OTHER` when it has none).
  *
  * A tracer or meter that throws never fails a run.
  */
@@ -904,7 +915,13 @@ export interface ConvergeActionEvent extends MigronautEventBase {
   target: ConvergeTarget;
   name: string;
   action: ConvergeActionKind;
-  status: 'applied' | 'failed';
+  /**
+   * `'started'` fires before the step runs — an index build can take hours,
+   * and this is how a subscriber sees which one is in progress; `'applied'`
+   * or `'failed'` follows when it ends.
+   */
+  status: 'started' | 'applied' | 'failed';
+  /** `'applied'` only */
   durationMs?: number;
   reason?: string;
   /** Redacted failure message (status `'failed'` only) */

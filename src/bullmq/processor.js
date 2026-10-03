@@ -35,6 +35,49 @@ function isRetryableError(error) {
 const UNRECOVERABLE_ERROR_NAME = 'UnrecoverableError';
 
 /**
+ * What BullMQ checks (by name) for a job the processor has moved back to the
+ * wait list itself: neither failed nor completed, nothing more to record.
+ */
+const WAITING_ERROR_NAME = 'WaitingError';
+
+/** The correlation ids of a job, for its error context and log lines */
+function jobIds(ctx) {
+  return {
+    ...(ctx.job?.id !== undefined ? { jobId: String(ctx.job.id) } : {}),
+    ...(ctx.data?.groupId !== undefined ? { groupId: ctx.data.groupId } : {}),
+    ...(ctx.runId ? { runId: ctx.runId } : {}),
+  };
+}
+
+/** A job in a few words, for log lines: `up 20260101-x.js (1/3)`, `converge`, `sync` */
+function describeJob(data) {
+  if (data.kind !== 'migration') return data.kind;
+  return `${data.direction} ${data.migration} (${data.index + 1}/${data.total})`;
+}
+
+/** The structured fields of a job's log lines */
+function jobFields(data) {
+  if (data.kind !== 'migration') return { kind: data.kind };
+  return {
+    migration: data.migration,
+    direction: data.direction,
+    index: data.index,
+    total: data.total,
+  };
+}
+
+/**
+ * Stamp the job's ids onto a typed error before it leaves for the queue — the
+ * one place a failed job's run id survives, since a failed job has no return
+ * value. Copy-on-write: the error may be a shared abort reason.
+ */
+function attachJobIds(error, ctx) {
+  if (!(error instanceof MigronautError)) return;
+  const ids = jobIds(ctx);
+  if (Object.keys(ids).length > 0) error.context = { ...error.context, ...ids };
+}
+
+/**
  * Prepare an error for the queue. BullMQ stores its message (as the job's
  * `failedReason`) and stack, so both leave the process and must be redacted.
  * The message is also all a dashboard shows: a wrapper says WHICH migration
@@ -164,6 +207,9 @@ function createMigrationProcessor(options = {}) {
     },
     'migration:start': (event) => {
       if (!current) return;
+      // From here on the job is doing its work: a shutdown lets it finish
+      // rather than putting it back in the queue.
+      current.started = true;
       progress(current, 'running');
       log(current, `▶ ${event.direction} ${event.migration}`);
     },
@@ -176,17 +222,17 @@ function createMigrationProcessor(options = {}) {
       if (current) log(current, `⏭ Skipped ${event.migration} (${event.reason ?? 'skipped'})`);
     },
     'converge:start': () => {
-      if (current) progress(current, 'running');
+      if (!current) return;
+      current.started = true;
+      progress(current, 'running');
     },
     'converge:action': (event) => {
       if (!current) return;
       const target = event.target === 'index' ? `index ${event.name}` : event.target;
-      log(
-        current,
-        event.status === 'applied'
-          ? `✔ ${event.action} ${target} on ${event.collection} [${event.durationMs ?? 0}ms]`
-          : `✖ ${event.action} ${target} on ${event.collection}: ${event.error ?? 'failed'}`,
-      );
+      const what = `${event.action} ${target} on ${event.collection}`;
+      if (event.status === 'started') log(current, `… ${what}`);
+      else if (event.status === 'applied') log(current, `✔ ${what} [${event.durationMs ?? 0}ms]`);
+      else log(current, `✖ ${what}: ${event.error ?? 'failed'}`);
     },
     'converge:end': (event) => {
       if (current && event.success) log(current, `✔ Converged ${event.changed} change(s)`);
@@ -330,30 +376,82 @@ function createMigrationProcessor(options = {}) {
     };
   }
 
-  async function handle(job, signal) {
-    const ctx = { job, data: undefined, runId: undefined, writes: new Set() };
+  /**
+   * Put a job that a shutdown stopped before it started its work back at the
+   * head of the queue, and return the error that tells BullMQ so — or
+   * undefined when the job is to fail as usual.
+   *
+   * Failing it would be for good (one attempt), and every job of its group
+   * behind it would then fail as blocked: a rolling deploy would end each
+   * enqueue it interrupts. Moved back, the job keeps its place in line and the
+   * next worker runs it. A job whose migration (or converge) had begun is
+   * never put back — it ran, and its outcome is what it is.
+   */
+  async function requeueOnShutdown(ctx, error, token) {
+    if (!(error instanceof RunAbortedError) || !shutdownController.signal.aborted) return undefined;
+    if (ctx.started || typeof ctx.job?.moveToWait !== 'function' || typeof token !== 'string') {
+      return undefined;
+    }
+    const reason = errorText(shutdownController.signal.reason ?? 'shutting down');
+    log(ctx, `↩ Returned to the queue: ${reason}`);
+    await flush(ctx);
+    try {
+      await ctx.job.moveToWait(token);
+    } catch {
+      // The lock is gone (a stall already moved it) or Redis is: fail as usual.
+      return undefined;
+    }
+    kit.logger.debug(`↩ Returned job ${ctx.job.id} to the queue: ${reason}`, {
+      ...jobIds(ctx),
+      reason,
+    });
+    const requeued = new RunAbortedError(`Returned to the queue: ${reason}`, {
+      reason,
+      requeued: true,
+      ...jobIds(ctx),
+    });
+    requeued.name = WAITING_ERROR_NAME;
+    return requeued;
+  }
+
+  async function handle(job, token, signal) {
+    const ctx = { job, data: undefined, runId: undefined, started: false, writes: new Set() };
+    const startedAt = Date.now();
     const signals = [shutdownController.signal];
     if (signal) signals.push(signal);
     const abort = AbortSignal.any(signals);
     // Reaches a run that is setting up or between migrations; one already
     // executing a migration body finishes it — interrupting a body mid-write
     // is what leaves a database half-migrated.
-    const onAbort = () => kit.stop('Queue job cancelled');
+    const onAbort = () => kit.stop(errorText(abort.reason ?? 'Queue job cancelled'));
     try {
       // Validated before anything connects: a payload that fails the contract
       // must not reach the kit, let alone the filesystem.
       ctx.data = parseJobData(job);
       current = ctx;
+      // A job fetched while this process shuts down goes straight back.
+      if (shutdownController.signal.aborted) throw shutdownController.signal.reason;
       abort.addEventListener('abort', onAbort, { once: true });
+      kit.logger.debug(`▶ Job ${job?.id} (${describeJob(ctx.data)})`, {
+        ...jobIds(ctx),
+        ...jobFields(ctx.data),
+      });
       await kit.connect();
       let result;
       if (ctx.data.kind === 'sync') result = await runSyncJob(ctx);
       else if (ctx.data.kind === 'converge') result = await runConvergeJob(ctx, abort);
       else result = await runMigrationJob(ctx, abort);
-      progress(ctx, 'completed');
+      progress(ctx, 'completed', ctx.runId ? { runId: ctx.runId } : {});
       await flush(ctx);
+      kit.logger.debug(`✔ Job ${job?.id} done`, {
+        ...jobIds(ctx),
+        ...jobFields(ctx.data),
+        durationMs: Date.now() - startedAt,
+      });
       return result;
     } catch (error) {
+      const requeued = await requeueOnShutdown(ctx, error, token);
+      if (requeued) throw requeued;
       // BullMQ only retries when the job was given more than one attempt — the
       // adapter's own jobs never are, so this matters for jobs enqueued some
       // other way. Renaming is how a library that never imports bullmq says
@@ -361,11 +459,17 @@ function createMigrationProcessor(options = {}) {
       if (!isRetryableError(error) && (job?.opts?.attempts ?? 1) > 1) {
         error.name = UNRECOVERABLE_ERROR_NAME;
       }
+      attachJobIds(error, ctx);
       prepareErrorForQueue(error);
       if (ctx.data) {
-        progress(ctx, 'failed', { code: error?.code ?? 'UNKNOWN' });
+        progress(ctx, 'failed', {
+          code: error instanceof MigronautError ? error.code : 'UNKNOWN',
+          ...(ctx.runId ? { runId: ctx.runId } : {}),
+        });
       }
-      write(ctx, (target) => target.log?.(`✖ ${errorText(error)}`));
+      write(ctx, (target) =>
+        target.log?.(`✖ ${errorText(error)}${ctx.runId ? ` [run ${ctx.runId}]` : ''}`),
+      );
       await flush(ctx);
       throw error;
     } finally {
@@ -376,7 +480,7 @@ function createMigrationProcessor(options = {}) {
 
   // Three declared parameters, on purpose — see the factory's doc comment.
   async function processor(job, token, signal) {
-    const run = chain.then(() => handle(job, signal));
+    const run = chain.then(() => handle(job, token, signal));
     chain = run.catch(() => undefined);
     return run;
   }
@@ -406,6 +510,7 @@ function createMigrationProcessor(options = {}) {
 
 module.exports = {
   RETRYABLE_CODES,
+  WAITING_ERROR_NAME,
   createMigrationProcessor,
   isRetryableError,
   resolveProcessorOptions,
