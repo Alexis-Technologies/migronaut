@@ -137,8 +137,10 @@ bin/migronaut.js          # CLI shebang entry (CJS, no build)
 src/
 ├── index.js                # Public API barrel — re-exported at the package root
 ├── errors/index.js          # MigronautError base + one subclass per error code
-├── core/                     # The engine (config, lock, lock-wait, changelog, runner, context, import, migrator, run)
-├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id, telemetry — pure-ish helpers
+├── core/                     # The engine (config, lock, lock-wait, changelog, runner, context, import, migrator, run,
+│                             #   and declared collections: collections, index-spec, converge-plan, converge)
+├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id, telemetry,
+│                             #   canonical, collection-name — pure-ish helpers
 ├── cli/                        # own arg parser (args.js) + spinner + table + one file per command
 └── bullmq/                      # Queue adapter: jobs (contract), producer, processor, wait, service (facade)
 tests/
@@ -278,4 +280,15 @@ exception would skip redaction); status is never set to OK; `telemetry.open` tak
 the callback rather than the tracer and tracks whether it ran, which is what stops a broken tracer
 from skipping or double-running a migration; and the scheduled `sync` job template carries
 `telemetry: { omitContext: true }`, without which every scheduler tick joins one endless trace.
+For declared collections (`converge`, ARCHITECTURE.md §6.7): without `prune` an undeclared index
+is never dropped — an identical one under another name is accepted as is, a different one is a
+`conflict` that refuses the whole run before any write; definition *files* load at converge time,
+not config time (a broken file must not block `down`); `up --json` stays the migration rows (the
+converge result travels as `converge:end`, `summary.converge` and `converge --json`); `dryRun('up')`
+never previews a converge; `ConvergeFailedError` keeps its progress in `context.converge`, never
+`context.results` (the kit and the CLI read `results` as migration rows); the CLI confirms *after*
+planning, inside `run`, like `unlock`; a converge job carries no `prune` and is ordered by default;
+and a converge run adds no third telemetry wrap site. Names already taken, so not to reuse for
+anything else: `sync` (the queue job), `ensureIndexes` and the audit check `indexes` (the
+changelog's own indexes), `schema` (`migronaut.schema.json`).
 Don't "fix" these without checking the doc first.

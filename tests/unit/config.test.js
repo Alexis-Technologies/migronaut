@@ -54,9 +54,9 @@ afterEach(() => {
 // against each other means adding a config key without an env var (or without a
 // deliberate exemption below) fails here rather than in a user's CI.
 describe('ENV_KEYS covers every scalar config option', () => {
-  // Not expressible as a single env string: two are structured values, and
+  // Not expressible as a single env string: three are structured values, and
   // envFile selects which .env to load, so it is read before the table runs.
-  const NON_SCALAR_KEYS = ['clientOptions', 'envFile', 'fileExtensions'];
+  const NON_SCALAR_KEYS = ['clientOptions', 'collections', 'envFile', 'fileExtensions'];
 
   it('should map every config key except the documented exemptions', () => {
     const envPaths = new Set(ENV_KEYS.map((spec) => spec.path));
@@ -257,6 +257,7 @@ describe('loadConfig', () => {
       'MIGRONAUT_SEQUENTIAL',
       'MIGRONAUT_ENSURE_INDEXES',
       'MIGRONAUT_RELOAD_MIGRATIONS',
+      'MIGRONAUT_CONVERGE_AFTER_UP',
     ]) {
       process.env[key] = 'maybe';
       await assert.rejects(
@@ -314,6 +315,8 @@ describe('loadConfig', () => {
     process.env.MIGRONAUT_ENSURE_INDEXES = 'false';
     process.env.MIGRONAUT_RELOAD_MIGRATIONS = 'true';
     process.env.MIGRONAUT_ENVIRONMENT = 'staging';
+    process.env.MIGRONAUT_COLLECTIONS_DIR = './db/collections';
+    process.env.MIGRONAUT_CONVERGE_AFTER_UP = 'yes';
     const config = await loadConfig({
       cwd: tmp,
       flags: { uri: 'mongodb://x:27017', dbName: 'x' },
@@ -324,6 +327,55 @@ describe('loadConfig', () => {
     assert.strictEqual(config.ensureIndexes, false);
     assert.strictEqual(config.reloadMigrations, true);
     assert.strictEqual(config.environment, 'staging');
+    assert.strictEqual(config.collectionsDir, './db/collections');
+    assert.strictEqual(config.convergeAfterUp, true);
+  });
+
+  it('should default convergeAfterUp to false and leave collections unset', async () => {
+    const config = await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } });
+    assert.strictEqual(config.convergeAfterUp, false);
+    assert.strictEqual(config.collections, undefined);
+    assert.strictEqual(config.collectionsDir, undefined);
+  });
+
+  it('should validate declared collections from a JSON config, with nested paths', async () => {
+    writeFileSync(
+      path.join(tmp, 'migronaut.config.json'),
+      JSON.stringify({
+        uri: 'mongodb://x:27017',
+        dbName: 'x',
+        collections: [{ name: 'users', indexes: [{ key: { email: 1 }, uniqe: true }] }],
+      }),
+    );
+    await assert.rejects(loadConfig({ cwd: tmp }), (error) => {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.deepStrictEqual(
+        error.context.issues.map((issue) => issue.path),
+        ['collections[0].indexes[0].uniqe'],
+      );
+      return true;
+    });
+  });
+
+  it('should show declared collections by name only in the debug dump', async () => {
+    const lines = [];
+    const logger = {
+      debug: (msg, fields) => lines.push({ msg, fields }),
+      info() {},
+      warn() {},
+      error() {},
+    };
+    await loadConfig({
+      cwd: tmp,
+      flags: {
+        uri: 'mongodb://x:27017',
+        dbName: 'x',
+        logger,
+        collections: [{ name: 'users', validator: { $jsonSchema: { required: ['a'] } } }],
+      },
+    });
+    const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+    assert.deepStrictEqual(dump.fields.collections, ['users']);
   });
 
   it('should not let a JSON config poison the prototype via __proto__', async () => {

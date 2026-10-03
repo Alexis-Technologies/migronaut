@@ -87,6 +87,10 @@ src/
 │   ├── context.js           # Build the MigrationContext passed to each migration
 │   ├── audit.js             # runAudit() — the read-only health-check flow
 │   ├── baseline.js          # runBaseline() — mark existing files applied without running them
+│   ├── collections.js       # Declared collections: validate, normalize, load collectionsDir
+│   ├── index-spec.js        # PURE: one declared index vs one live index (names, keys, options)
+│   ├── converge-plan.js     # PURE: plan one collection — result rows + executable steps
+│   ├── converge.js          # runConverge() — read live state, plan, carry the plan out
 │   ├── import.js            # PURE migrate-mongo → MigrationRecord mapping
 │   ├── import-runner.js     # runImport() — the impure import flow (read/map/write)
 │   └── run.js               # Programmatic helpers: runMigrations(), pendingMigrations()
@@ -99,8 +103,10 @@ src/
 │   ├── redact.js            # Mask credentials (userinfo + query secrets) leaving the process
 │   ├── sanitize.js          # Strip terminal control chars (C0 + full C1) from untrusted text
 │   ├── error.js             # errorText() — stringify caught errors, redaction built in
+│   ├── canonical.js         # canonical()/deepEqual()/toWire() — declared vs. stored value comparison
+│   ├── collection-name.js   # isCollectionName() — the one rule for a usable collection name
 │   ├── id.js                # The one place an id is minted — randomUUID, or the user's generateId
-│   ├── loader.js            # Dynamic-import a migration file (.ts/.js, ESM/CJS)
+│   ├── loader.js            # Dynamic-import user files (migrations, collection definitions)
 │   ├── migration-name.js    # isBareFilename() — the one rule for a safe migration name
 │   ├── telemetry.js         # OpenTelemetry through the injected tracer/meter — guarded spans + instruments
 │   ├── template.js          # Generate migration files & config files
@@ -111,12 +117,12 @@ src/
 │   ├── args.js              # Zero-dependency commander-compatible arg parser
 │   ├── shared.js            # withMigrator(), confirm(), emitJson(), partialFromOpts()
 │   ├── spinner.js           # Minimal TTY spinner — start/stop, no-op when piped
-│   ├── table.js             # Box-drawing table renderers (status/list/import)
+│   ├── table.js             # Box-drawing table renderers (status/list/import/converge)
 │   └── commands/*.js        # One file per command — thin wrappers over MigratorKit
 └── bullmq/                  # The queue adapter — never requires bullmq (it is injected)
     ├── index.js             # Public API barrel of the ./bullmq subpath
     ├── jobs.js              # The job contract: names, data version, validation, dedup ids
-    ├── producer.js          # planUpJobs/planDownJobs + enqueueUp/enqueueDown → group handle
+    ├── producer.js          # planUpJobs/planDownJobs + enqueueUp/enqueueDown/enqueueConverge
     ├── processor.js         # createMigrationProcessor() — runs ONE job (the Worker's function)
     ├── wait.js              # waitForGroup() — enqueue-and-wait over QueueEvents
     └── service.js           # MigrationQueue / createMigrationQueue() — the facade
@@ -387,6 +393,38 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **Key export:** `runBaseline(deps, options, signal)` — same `runX(deps)` injection pattern as
   audit and import.
 
+### `src/core/collections.js` — declared collections
+- **Responsibility:** everything about a collection definition that is not the database:
+  `definitionIssues` / `collectionsIssues` (strict validation — unknown keys and index options are
+  errors, with nested paths like `collections[2].indexes[0].key` or `users.ts: indexes[0]`),
+  `normalizeDefinition` (the planner's shape), `loadCollectionsDir` and `resolveDefinitions`
+  (inline definitions first, then one file per collection; a name declared twice is an issue).
+- **Nuances:** `config.js` requires it to validate inline `collections` with the rest of the
+  config; the *files* are loaded only by `resolveDefinitions`, at converge time. A function export
+  is refused rather than called (a Mongoose model is a function).
+
+### `src/core/index-spec.js` — declared index vs live index (pure)
+- **Responsibility:** `indexIssues` (the option whitelist), `normalizeDeclaredIndex` (effective
+  name, server-form key, the spec to send — key as a `Map`, `false` booleans dropped),
+  `normalizeLiveIndex`, `compareIndex` (`{ diffs, inPlace, rebuild }`), `sameSignature`,
+  `defaultIndexName` (the driver's rule), `restoreSpec`.
+- **The invariant:** what the server stores for a declaration must compare as unchanged against
+  that declaration — see [§6.7](#67-declared-collections-converge).
+
+### `src/core/converge-plan.js` — the converge planner (pure)
+- **Responsibility:** `planCollection(definition, live, { prune })` → `{ name, actions, steps }`:
+  result rows (`create`/`modify`/`recreate`/`drop`/`keep`/`unchanged`/`conflict`) and the steps
+  that carry them out, in execution order, each pointing at the rows it settles. Plus
+  `summarize`, `isDestructive`, the validator helpers.
+
+### `src/core/converge.js` — the converge flow
+- **Responsibility:** `runConverge(deps, options, signal)` — read each declared collection's live
+  state (`readLiveState`, primary reads with forced BSON promotion), plan it, refuse a plan with a
+  conflict, run the steps one by one with an abort check between them, re-plan what changed (the
+  fixed-point check), emit `converge:*` events, and build the result.
+- **Key exports:** `runConverge`, `readLiveState`, `READ_OPTIONS`. Same `runX(deps)` injection
+  pattern as audit, import and baseline.
+
 ### `src/core/run.js` — programmatic entry points
 - **Responsibility:** the "blessed" lifecycle-safe helpers for app startup / serverless / tests.
 - **Key exports:** `runMigrations(config, options)` → `MigrationSummary`; `pendingMigrations(config)`
@@ -407,15 +445,18 @@ Each entry: **responsibility · key exports · nuances you must know.**
 ### `src/bullmq/` — the queue adapter
 Five small modules behind the `./bullmq` subpath; see [§6.6](#66-the-queue-adapter-bullmq) for
 the design.
-- **`jobs.js`** — the contract shared by producer and worker: job names (`up`/`down`/`sync`), the
-  versioned data shape, `parseJobData` (validation of *untrusted* payloads), `dedupId`.
+- **`jobs.js`** — the contract shared by producer and worker: job names
+  (`up`/`down`/`sync`/`converge`), the versioned data shape, `parseJobData` (validation of
+  *untrusted* payloads), `dedupId` / `convergeDedupId`, the job and scheduler templates.
 - **`producer.js`** — `planUpJobs`/`planDownJobs` (the plan *is* `kit.dryRun`, so it can never
-  disagree with a run) and `enqueueUp`/`enqueueDown` (one atomic `addBulk`, returns the group
-  handle). The group id comes from `kit.generateId()`, so it follows the kit's id format.
+  disagree with a run), `enqueueUp`/`enqueueDown` (one atomic `addBulk`, returns the group
+  handle) and `enqueueConverge`. The group id comes from `kit.generateId()`, so it follows the
+  kit's id format. An `up` plan may carry a converge job as `plan.converge`, apart from `jobs`.
 - **`processor.js`** — `createMigrationProcessor()`: the function a Worker runs. Validate →
-  connect → `withLockWait(kit.up|down)` → map the result; classify failures; forward kit events to
-  the job as log rows and progress.
-- **`wait.js`** — `waitForGroup()`: sequential `job.waitUntilFinished` under one time budget.
+  connect → `withLockWait(kit.up|down|converge)` → map the result; classify failures; forward kit
+  events to the job as log rows and progress.
+- **`wait.js`** — `waitForGroup()`: sequential `job.waitUntilFinished` under one time budget, the
+  group's converge job last.
 - **`service.js`** — `MigrationQueue`: validates everything before constructing anything, owns
   what it constructs (and only that), closes in dependency order.
 
@@ -457,7 +498,15 @@ the design.
   constant all live here — nothing else in `src/` knows an OpenTelemetry name.
 - **loader.js** — `loadMigrationFile(filepath)`: dynamic `import()`, `mod.default ?? mod` for CJS,
   validates `up`/`down` are functions. Translates the `.ts`-can't-load failure into a clear error —
-  see the [loader deep dive](#64-the-loader-and-the-ts-runtime-caveat).
+  see the [loader deep dive](#64-the-loader-and-the-ts-runtime-caveat). `importUserFile` (the
+  `reload` cache-busting import) and `tsLoadMessageOrNull` are shared with the collection
+  definition loader.
+- **canonical.js** — `canonical(value)` maps a declared value and what the server returns onto one
+  key-sorted, JSON-safe shape (BSON number wrappers → numbers, `undefined` properties dropped,
+  arrays kept in order), so `deepEqual` is a string comparison; `toWire` strips `undefined` from
+  what converge sends, which a client with `ignoreUndefined: false` would otherwise store as `null`.
+- **collection-name.js** — `isCollectionName`, moved out of `config.js` so `core/collections.js`
+  can use it without a require cycle (`config.js` re-exports it).
 - **template.js** — generates migration files (`createMigrationFile`) and config files
   (`createConfigFile`), including the secret-provider template. Owns filename stamping (timestamp vs
   sequential) and the inline-commented config output.
@@ -467,7 +516,8 @@ the design.
 - **index.js** — builds the program (a `Command` from [args.js](src/cli/args.js)), registers global
   flags (`--uri/--db/--dir/--config`) and every command. `run(argv)` parses & dispatches.
 - **args.js** — the zero-dependency commander-compatible parser: one level of subcommands,
-  boolean/value/negatable (`--no-x` seeds `true`) options with camelCase keys and short aliases,
+  boolean/value/negatable (`--no-x` seeds `true` — unless `--x` is declared too, which makes the
+  pair tri-state, as in commander) options with camelCase keys and short aliases,
   required `<x>` / optional `[x]` positionals, `optsWithGlobals()`, generated `--help`/`--version`.
   Global options are recognized both before and after the command name; parse errors go to stderr
   with `process.exitCode = 1` — it never calls `process.exit()`. Deliberately unsupported (unused):
@@ -479,6 +529,9 @@ the design.
     and `after` for exit-code logic. Command files stay pure declaration because of it.
   - `withMigrator(opts, fn, {spinner, json})` — constructs `MigratorKit`, drives the spinner,
     routes output for `--json`, runs `fn`, **always disconnects**, maps errors to exit code 1.
+    `fn` gets `{ logger, json, opts, spinner, stopRequested }` — the last two for a command that
+    reads, asks, then acts (`converge`): a signal during the prompt makes `migrator.stop()` a
+    no-op, so the command checks `stopRequested()` itself.
   - `partialFromOpts` — flags → `Partial<MigronautConfig>`.
   - `emitJson` — one JSON doc to stdout.
   - `confirm` — `y/N` prompt via `node:readline/promises`.
@@ -692,11 +745,64 @@ Its constructor validates every option *before* constructing the Queue — a Que
 connection, and a constructor that throws afterwards would leak it. `close()` runs in dependency
 order: stop taking the lock → worker → QueueEvents → Queue → kit.
 
+**Converge jobs.** A `converge` job is one `kit.converge({ ordered: true })` under the same lock
+wait. With `convergeAfterUp`, `planUpJobs` ends a group that reaches the head with one (the kit's
+own after-up hook never fires here — every job is a single-file run), keyed for deduplication on
+the group's last migration: identical plans from N pods collapse into one job, while a later,
+longer plan gets its own at its own tail instead of being folded into a converge that sits in
+front of its new migrations. The pending check is the kit's, *inside* the lock (`ordered`), never
+a producer-side probe — a probe would race a peer still applying the last migration. With nothing
+pending, a dry-run probe decides whether a converge-only job is needed; an idle `sync` tick does
+the same, so a definitions-only deploy converges on the next tick without the idle tick taking the
+lock. The payload carries no `prune`: what may be dropped is the worker's definitions' decision.
+
 **Untrusted input.** Job data comes back from Redis. `parseJobData` checks it against the contract
 before the kit is touched (version, names, positions, and the migration name with the same
 `isBareFilename` rule `#filepath` uses); the kit then re-validates. Everything BullMQ stores about
 a failure — message, stack, log rows — goes through the redaction chokepoint first, and the cause
 is folded into the message because `failedReason` is all a dashboard shows.
+
+### 6.7 Declared collections (converge)
+Files: [collections.js](src/core/collections.js), [index-spec.js](src/core/index-spec.js),
+[converge-plan.js](src/core/converge-plan.js), [converge.js](src/core/converge.js).
+
+**What it is.** Indexes and validators declared as an end state (`collections`, `collectionsDir`)
+and brought there by `kit.converge()` — stateless: nothing is recorded, every run reads
+`listCollections` + `listIndexes` and plans afresh. Migrations keep everything with an order and a
+history; this is for what only has a current value.
+
+**Pure planner, thin executor.** All decisions live in `converge-plan.js` / `index-spec.js`
+(table-tested, no database); `converge.js` reads, executes the steps in order and reports. Steps
+per collection: create collection (with its validator) → validator `collMod` → index creates →
+in-place `collMod` (TTL when both sides have one, `hidden`) → rebuilds (drop + create, back to
+back, no abort check between) → pruned drops, last — an index is only removed once everything
+declared exists.
+
+**The comparison invariant.** Whatever the server stores for a declaration must compare as
+unchanged against that declaration, or the index is rebuilt on every run. Hence: `false` booleans
+are not sent (`sparse: false` is stored verbatim); text indexes compare in their `_fts`/`_ftsx` +
+`weights` form; a collation is a *subset* match (the server expands `{ locale }` into a full,
+locale-specific spec — guessing defaults would loop), an undeclared one must equal the collection
+default, `{ locale: 'simple' }` means none; key directions compare by sign, TTLs by `Number()`;
+validators via `canonical` (verbatim storage, any key order). Reads force primary and BSON
+promotion, so an injected client's settings cannot make everything look changed. And because one
+server version is what CI proves, a runtime **fixed-point check** re-plans each collection after
+its steps: anything still differing goes to `result.unstable` and a warning, never into a loop.
+
+**Matching.** Declared ↔ live by effective name; then for each index to create, *blockers* among
+undeclared live indexes — same key + partial filter + collation, or any text index for a text
+declaration (the server refuses either). Without prune, an identical blocker is accepted as is
+(`unchanged` + `liveName` + warning) and a different one is a `conflict`; with prune, the blocker
+is dropped right before the create. Rebuilds that need each other's drops (a key swap) run as one
+group: all drops, then all creates. A plan with any conflict refuses the whole run before the first
+write. A rebuild whose create fails re-creates what it dropped from `restoreSpec(raw)`, best-effort,
+and reports `restored`.
+
+**After `up`.** The hook lives in `up()`, not `#runUp` (which `redo` reuses): bulk only, no `to`,
+definitions resolved before the lock, converge inside the same `#withLock` callback even with zero
+pending; on failure the migration rows are attached as `context.results`, the converge result as
+`context.converge` — never the other way round, because `#withLock` and `reportError` read
+`results` as migration rows.
 
 ---
 
@@ -761,9 +867,10 @@ The high-impact ones for code changes:
   refuses the run, `'allow'` silences it. A single-file `up` is exempt — an explicit target is
   deliberate.
 - **`--json` is non-interactive, and destructive confirmation needs an explicit `--yes` there.**
-  `up <file> --force`, `unlock` and `baseline` all follow the same rule: in `--json` mode without
-  `--yes` they refuse with a typed `CONFIG_INVALID` instead of assuming consent or hanging on a
-  prompt no one can answer. New confirmation-bearing commands must copy this policy.
+  `up <file> --force`, `unlock`, `baseline` and `converge` (for a plan that drops or rebuilds an
+  index) all follow the same rule: in `--json` mode without `--yes` they refuse with a typed
+  `CONFIG_INVALID` instead of assuming consent or hanging on a prompt no one can answer. New
+  confirmation-bearing commands must copy this policy.
 - **Path traversal is blocked centrally in `#filepath()`** — every user-supplied migration name (even
   one read back from a tampered changelog) is validated there.
 - **`--json` is a global flag** (`migronaut --json status` and `migronaut status --json` both work).
@@ -811,6 +918,29 @@ The high-impact ones for code changes:
 - **`createMigrationQueue` takes BullMQ's telemetry as `bullmq.telemetry`, not a top-level
   option** — `telemetry` at the top would read as the kit's own (`config.telemetry`), which is a
   different object with a different job.
+- **Converge never drops an undeclared index without prune — not even to "rename" one.** An
+  identical index under another name is accepted as is; a rename is a full rebuild and, for a
+  unique index, a window without the constraint. Do not make the rename automatic.
+- **Converge confirms after reading state, not in `preflight`.** Whether a plan drops or rebuilds
+  is only known once the database has been read, so `converge` plans first and asks inside `run` —
+  the `unlock` pattern. `--json` without `--yes` refuses only a destructive plan; an additive one
+  applies. The plan the operator confirmed and the one applied are two reads apart; the apply
+  re-plans under the lock (an accepted race).
+- **`up --json` stays the migration rows** with `convergeAfterUp` — an array cannot carry the
+  converge result without breaking its consumers. The converge result travels as the
+  `converge:end` event, `summary.converge` from `runMigrations`, and `migronaut converge --json`.
+- **`dryRun('up')` does not preview a converge.** The plan only means something against the
+  database the migrations leave behind; previewing it beforehand would compare with the wrong
+  state. It logs a pointer instead.
+- **Definition files load at converge time, not config time.** `#ensureConfig` serves every
+  command; importing user modules there would let one broken file block an emergency `down`.
+  Inline `collections` are pure data and are validated with the rest of the config.
+- **A converge job carries no `prune`, and is ordered by default.** Pruning is a property of the
+  definitions the worker loaded, not of a payload in Redis; and the tail of a deploy must not
+  converge to a schema its own migrations have not reached.
+- **No third telemetry wrap site.** A converge run is an ordinary `migronaut.run` span with
+  `command: 'converge'`; there are no per-step spans (the driver's index commands nest under the
+  run span).
 
 ---
 
@@ -968,6 +1098,13 @@ it *looks* or *exits* → the CLI layer.
 - **Job contract** — the versioned shape of a queue job's data (`src/bullmq/jobs.js`), validated
   by the worker as untrusted input.
 - **Sync job** — the queue job a schedule tick adds: it plans what is pending and enqueues it.
+- **Converge job** — the queue job that runs `kit.converge()`: the tail of an `up` group (with
+  `convergeAfterUp`), a converge-only job, or a scheduled one.
+- **Declared collection** — a `collections` / `collectionsDir` entry: indexes and a validator as
+  an end state.
+- **Converge** — compare declared collections with the live database and apply the difference;
+  stateless. **Drift** is anything a converge would do; a kept undeclared index is not drift.
+- **Prune** — let converge drop indexes a definition does not declare.
 - **Changelog** — the `_migronaut_migrations` collection; the append-mostly audit trail of `MigrationRecord`s.
 - **Checksum** — SHA-256 of a migration file at apply time; re-checked later to detect tampering.
 - **Context** — the `{ db, client, mongoose?, session? }` object passed into every `up`/`down`.

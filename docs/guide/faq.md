@@ -92,6 +92,15 @@ Run `migronaut up` as a deploy step, and gate deploys with `migronaut status --c
 migrations are pending). Every data command supports `--json` for machine-readable output. There are
 GitHub Actions and Docker recipes in [CI/CD & Deployment](/guide/ci-cd).
 
+## Do I need a migration for every index change?
+
+No. Migrations are right for changes with an order and a history — backfills, renames, a dedupe
+before a unique index. For indexes and validators whose end state is all that matters, declare
+them in `collections` (or one file per collection in `collectionsDir`) and run
+`migronaut converge`: it compares the declaration with the live database and applies the
+difference, stateless, under the migration lock. Undeclared indexes are kept unless you opt into
+`prune`. See [Declared Collections](/guide/collections).
+
 ## Can I run migrations as background jobs, or as a service?
 
 Yes. `@alexify/migronaut/bullmq` enqueues each pending migration as its own BullMQ job and applies

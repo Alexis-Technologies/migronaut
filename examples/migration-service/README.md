@@ -10,12 +10,13 @@ POST /migrations/up ──► BullMQ queue "migrations" ──► worker ──�
                         (Redis: what was asked)      (lock + changelog: what is true)
 ```
 
-| File                        | What it shows                                                                    |
-| --------------------------- | -------------------------------------------------------------------------------- |
-| [`mq.js`](mq.js)            | `createMigrationQueue(...)` — BullMQ is **injected**; migronaut never imports it |
-| [`server.js`](server.js)    | The HTTP routes, the worker, error → status mapping, graceful shutdown           |
-| [`tracing.js`](tracing.js)  | Optional OpenTelemetry: one trace from the HTTP request to the MongoDB commands  |
-| [`migrations/`](migrations) | Two idempotent migrations (safe to re-run after a crash)                         |
+| File                          | What it shows                                                                    |
+| ----------------------------- | -------------------------------------------------------------------------------- |
+| [`mq.js`](mq.js)              | `createMigrationQueue(...)` — BullMQ is **injected**; migronaut never imports it |
+| [`server.js`](server.js)      | The HTTP routes, the worker, error → status mapping, graceful shutdown           |
+| [`tracing.js`](tracing.js)    | Optional OpenTelemetry: one trace from the HTTP request to the MongoDB commands  |
+| [`migrations/`](migrations)   | Two idempotent migrations (safe to re-run after a crash)                         |
+| [`collections/`](collections) | A declared collection: indexes and a validator, applied by `converge`            |
 
 ## Run it
 
@@ -50,6 +51,10 @@ curl -s localhost:3000/migrations/status
 
 # Roll back the last batch — i.e. everything the last enqueue applied
 curl -s -X POST localhost:3000/migrations/down -H 'content-type: application/json' -d '{"wait":true}'
+
+# Declared indexes and validators: every enqueue above already ends with a converge job
+# (convergeAfterUp), and this runs one on its own — "wait" returns its result
+curl -s -X POST localhost:3000/migrations/converge -H 'content-type: application/json' -d '{"wait":true}'
 
 # Keep the database migrated every 5 minutes
 curl -s -X PUT localhost:3000/migrations/schedule -H 'content-type: application/json' -d '{"every":300000}'

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { describe, it, mock } = require('node:test');
 const {
   assertJobOptions,
+  enqueueConverge,
   enqueueDown,
   enqueueUp,
   planDownJobs,
@@ -617,5 +618,133 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
         (error) => error.context.failedReason === 'plain string',
       );
     });
+  });
+});
+
+describe('converge jobs from the producer', () => {
+  const converging = (files, overrides = {}) =>
+    stubKit({
+      dryRun: mock.fn(async () => files.map(pendingRow)),
+      nextBatch: mock.fn(async () => 3),
+      convergesAfterUp: mock.fn(async () => true),
+      converge: mock.fn(async () => ({ dryRun: true, changed: 1, inSync: false, collections: [] })),
+      ...overrides,
+    });
+
+  it('should end a group with a converge job when the kit converges after up', async () => {
+    const kit = converging(['0001-a.js', '0002-b.js']);
+    const plan = await planUpJobs(kit, { jobOptions: { removeOnComplete: 5 } });
+    assert.deepStrictEqual(plan.converge, {
+      name: 'converge',
+      data: { v: 1, kind: 'converge', groupId: plan.groupId },
+      opts: {
+        removeOnComplete: 5,
+        attempts: 1,
+        deduplication: { id: 'converge-after-0002-b.js' },
+      },
+    });
+    assert.strictEqual(plan.jobs.length, 2, 'the migration jobs are untouched');
+    assert.strictEqual(kit.converge.mock.callCount(), 0, 'no probe when migrations are pending');
+    const unguarded = await planUpJobs(kit, { ordered: false });
+    assert.strictEqual(unguarded.converge.data.ordered, false);
+  });
+
+  it('should not converge after a filename, a `to`, a kit without the hook, or on request', async () => {
+    const kit = converging(['0001-a.js']);
+    assert.ok(!('converge' in (await planUpJobs(kit, { filename: '0001-a.js' }))));
+    assert.ok(!('converge' in (await planUpJobs(kit, { to: '0001-a.js' }))));
+    assert.ok(!('converge' in (await planUpJobs(kit, { converge: false }))));
+    const plain = stubKit({ dryRun: mock.fn(async () => [pendingRow('0001-a.js')]) });
+    assert.ok(!('converge' in (await planUpJobs(plain))));
+    // Explicitly on, without the kit's option.
+    const forced = await planUpJobs(plain, { converge: true });
+    assert.strictEqual(forced.converge.name, 'converge');
+  });
+
+  it('should refuse an explicit converge that cannot follow the group', async () => {
+    const kit = converging(['0001-a.js']);
+    await assert.rejects(planUpJobs(kit, { converge: true, to: '0001-a.js' }), ConfigInvalidError);
+    await assert.rejects(
+      planUpJobs(kit, { converge: true, filename: '0001-a.js' }),
+      ConfigInvalidError,
+    );
+    await assert.rejects(planUpJobs(kit, { converge: 'yes' }), ConfigInvalidError);
+  });
+
+  it('should plan a converge-only group when nothing is pending, only on drift', async () => {
+    const drifted = converging([]);
+    const plan = await planUpJobs(drifted);
+    assert.deepStrictEqual(plan.jobs, []);
+    assert.strictEqual(plan.converge.opts.deduplication.id, 'converge');
+    assert.deepStrictEqual(drifted.converge.mock.calls[0].arguments, [{ dryRun: true }]);
+
+    const inSync = converging([], {
+      converge: mock.fn(async () => ({ dryRun: true, changed: 0, inSync: true, collections: [] })),
+    });
+    assert.ok(!('converge' in (await planUpJobs(inSync))));
+  });
+
+  it('should add the converge job after the migrations and report it on the handle', async () => {
+    const lines = [];
+    const kit = converging(['0001-a.js']);
+    kit.logger = { ...kit.logger, info: (msg, fields) => lines.push({ msg, fields }) };
+    const queue = new FakeQueue('m', { connection: createFakeConnection() });
+    const group = await enqueueUp(queue, kit);
+    assert.deepStrictEqual(group.converge, { id: '2', deduplicated: false });
+    assert.deepStrictEqual(queue._state().wait, ['1', '2']);
+    assert.match(lines[0].msg, /Enqueued 1 migration\(s\) \+ converge/);
+    assert.strictEqual(lines[0].fields.converge, true);
+
+    const only = converging([]);
+    only.logger = kit.logger;
+    const tail = await enqueueUp(queue, only);
+    assert.strictEqual(tail.upToDate, true);
+    assert.match(lines[1].msg, /Enqueued a converge job/);
+  });
+
+  it('should enqueue a converge on its own, detect a duplicate, and wait for it', async () => {
+    const connection = createFakeConnection();
+    const queue = new FakeQueue('m', { connection });
+    const queueEvents = new FakeQueueEvents('m', { connection });
+    const kit = stubKit();
+    const first = await enqueueConverge(queue, kit, { jobOptions: { removeOnFail: 3 } });
+    assert.strictEqual(first.deduplicated, false);
+    const stored = await queue.getJob(first.jobId);
+    assert.deepStrictEqual(stored.data, { v: 1, kind: 'converge', groupId: first.groupId });
+    assert.strictEqual(stored.opts.removeOnFail, 3);
+    const second = await enqueueConverge(queue, kit, { queueEvents });
+    assert.strictEqual(second.deduplicated, true);
+    assert.strictEqual(second.jobId, first.jobId);
+
+    const worker = new FakeWorker(
+      'm',
+      async () => ({ kind: 'converge', changed: 0, inSync: true, collections: [], lockWaitMs: 0 }),
+      { connection },
+    );
+    try {
+      assert.strictEqual((await second.wait({ timeoutMs: 2000 })).inSync, true);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('should validate its options and the queue', async () => {
+    const kit = stubKit();
+    const queue = new FakeQueue('m', { connection: createFakeConnection() });
+    await assert.rejects(enqueueConverge(queue, kit, 'x'), ConfigInvalidError);
+    await assert.rejects(enqueueConverge(queue, kit, { ordered: 1 }), ConfigInvalidError);
+    await assert.rejects(
+      enqueueConverge(queue, kit, { jobOptions: { delay: 1 } }),
+      ConfigInvalidError,
+    );
+    await assert.rejects(enqueueConverge({}, kit), ConfigInvalidError);
+    await assert.rejects(
+      enqueueConverge({ addBulk: async () => [] }, kit),
+      /did not return the converge job/,
+    );
+    const blind = await enqueueConverge({ addBulk: async () => [{ id: 7 }] }, kit, {
+      ordered: false,
+    });
+    assert.deepStrictEqual([blind.jobId, blind.deduplicated], ['7', false]);
   });
 });

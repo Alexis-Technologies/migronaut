@@ -77,7 +77,7 @@ describe('package entry point', () => {
     }
     // The other direction: EXIT_CODES may add CLI-condition codes, but never
     // a typo'd error code.
-    const cliOnly = new Set(['PENDING_MIGRATIONS', 'AUDIT_FAILED']);
+    const cliOnly = new Set(['PENDING_MIGRATIONS', 'AUDIT_FAILED', 'COLLECTIONS_DRIFT']);
     for (const key of Object.keys(api.EXIT_CODES)) {
       assert.ok(codes.has(key) || cliOnly.has(key), `EXIT_CODES key ${key} matches no error code`);
     }

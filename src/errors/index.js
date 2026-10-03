@@ -241,6 +241,21 @@ class QueueJobFailedError extends MigronautError {
   }
 }
 
+/**
+ * Thrown by `converge` when the database cannot be brought to the declared
+ * state: the plan has a conflict (refused before any write — `context.phase`
+ * is `'plan'`), or a step failed (`'apply'`). `context.converge` is the
+ * converge result so far — which steps were applied, which failed, which were
+ * never reached — and `context.hint`, when present, says what usually fixes
+ * the server error behind it.
+ */
+class ConvergeFailedError extends MigronautError {
+  constructor(message, context, options) {
+    super('CONVERGE_FAILED', message, context, options);
+    this.name = 'ConvergeFailedError';
+  }
+}
+
 module.exports = {
   MigronautError,
   LockAlreadyHeldError,
@@ -266,4 +281,5 @@ module.exports = {
   MigrationBlockedError,
   QueueJobInvalidError,
   QueueJobFailedError,
+  ConvergeFailedError,
 };

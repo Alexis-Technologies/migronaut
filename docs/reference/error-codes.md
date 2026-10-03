@@ -29,7 +29,9 @@ In `--json` mode the CLI prints:
 ```
 
 `partial` lists what already succeeded before the failure, so a deploy pipeline
-can tell how far the run got. The exit code identifies the failure — see
+can tell how far the run got. A failed converge carries its own progress in
+`error.context.converge` instead — `partial` stays the migrations, so after an
+`up` that converges it still lists the ones that were applied. The exit code identifies the failure — see
 [Exit codes](/reference/cli#exit-codes).
 
 ## Reference
@@ -59,5 +61,6 @@ can tell how far the run got. The exit code identifies the failure — see
 | `MIGRATION_BLOCKED` | `MigrationBlockedError` | An `ordered` single-file run (every [queue job](/guide/bullmq) is one) would go out of sequence: an earlier migration is still pending (`up`), or one applied later is still applied (`down`) | `context.blockedBy` names what must go first — fix or apply those, then enqueue again |
 | `QUEUE_JOB_INVALID` | `QueueJobInvalidError` | A [queue job](/guide/bullmq)'s payload failed the contract check — unknown job name or data version, a migration name that is not a bare filename | Enqueue through `enqueueUp`/`enqueueDown`; `context.issue` says what was wrong |
 | `QUEUE_JOB_FAILED` | `QueueJobFailedError` | A queue group's `wait()` saw one of its jobs fail, or timed out | `context.failedReason` is the worker's message, `context.results` what finished before it |
+| `CONVERGE_FAILED` | `ConvergeFailedError` | [`converge`](/commands/converge) could not bring the declared collections to their declared state: the plan had a conflict (`context.phase: 'plan'` — nothing was written), or a step failed (`'apply'`) | `context.hint` says what usually fixes the server error (deduplicate before a unique index, grant `dbAdmin` for validators); `context.converge` is the result so far, `context.restored` whether a failed rebuild put the old index back |
 
 See [Troubleshooting](/guide/troubleshooting) for step-by-step fixes for the most common ones.

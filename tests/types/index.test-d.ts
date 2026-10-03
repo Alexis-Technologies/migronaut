@@ -12,6 +12,10 @@ import { expectAssignable, expectError, expectType } from 'tsd';
 import {
   type AuditReport,
   type BaselineSummary,
+  type CollectionDefinition,
+  type CollectionDefinitionFile,
+  ConvergeFailedError,
+  type ConvergeResult,
   ChecksumMismatchError,
   EXIT_CODES,
   HookFailedError,
@@ -63,6 +67,7 @@ expectType<
     waited: boolean;
     waitedMs: number;
     attempts: number;
+    converge?: ConvergeResult;
   }>
 >(runMigrations({ uri: 'mongodb://localhost:27017', dbName: 'test' }));
 expectType<Promise<StatusRow[]>>(
@@ -204,6 +209,7 @@ expectType<
     waited: boolean;
     waitedMs: number;
     attempts: number;
+    converge?: ConvergeResult;
   }>
 >(runMigrations({}, { onLockHeld: 'wait', lockWaitTimeoutMs: 90_000, lockPollIntervalMs: 250 }));
 expectError(runMigrations({}, { onLockHeld: 'retry' }));
@@ -356,3 +362,68 @@ expectError<Partial<MigronautConfig>>({ telemetry: { tracer: realMeter } });
 expectError<Partial<MigronautConfig>>({
   telemetry: { meter: { createHistogram: () => realHistogram } },
 });
+
+// ─── Declared collections (converge) ─────────────────────────────────────────
+
+const users: CollectionDefinition = {
+  name: 'users',
+  indexes: [
+    { key: { email: 1 }, unique: true },
+    { key: { createdAt: 1 }, name: 'ttl', expireAfterSeconds: 3600 },
+    {
+      key: new Map<string, 1 | -1>([
+        ['b', 1],
+        ['a', -1],
+      ]),
+    },
+    { key: { title: 'text', body: 'text' }, weights: { title: 5 } },
+    { key: { name: 1 }, collation: { locale: 'en', strength: 2 } },
+  ],
+  validator: { $jsonSchema: { bsonType: 'object', required: ['email'] } },
+  validationLevel: 'moderate',
+  validationAction: 'warn',
+  prune: true,
+};
+expectAssignable<Partial<MigronautConfig>>({
+  collections: [users, { name: 'logs', validator: null }],
+  collectionsDir: './collections',
+  convergeAfterUp: true,
+});
+// A file's definition may leave the name to the file name.
+expectAssignable<CollectionDefinitionFile>({ indexes: [{ key: { a: 1 } }] });
+// A key direction is one of MongoDB's, an option one the driver knows.
+expectError<CollectionDefinition>({ name: 'x', indexes: [{ key: { a: 'asc' } }] });
+expectError<CollectionDefinition>({ name: 'x', indexes: [{ key: { a: 1 }, uniqe: true }] });
+expectError<CollectionDefinition>({ name: 'x', validationLevel: 'loose' });
+
+expectType<Promise<ConvergeResult>>(kit.converge());
+expectType<Promise<ConvergeResult>>(kit.converge({ dryRun: true, prune: true }));
+expectType<Promise<ConvergeResult>>(kit.converge({ noLock: true, ordered: true }));
+expectError(kit.converge({ sync: true }));
+expectType<Promise<boolean>>(kit.convergesAfterUp());
+expectType<Promise<RunResult[]>>(kit.up(undefined, { converge: false }));
+
+declare const converged: ConvergeResult;
+expectType<boolean>(converged.inSync);
+expectType<number>(converged.changed);
+const firstAction = converged.collections[0].actions[0];
+expectType<'collection' | 'validator' | 'index'>(firstAction.target);
+expectType<'planned' | 'applied' | 'failed' | 'skipped'>(firstAction.status);
+expectType<string | undefined>(firstAction.liveName);
+
+kit.on('converge:start', (event) => {
+  expectType<'converge' | 'up'>(event.trigger);
+  expectType<number>(event.collections);
+});
+kit.on('converge:action', (event) => {
+  expectType<'applied' | 'failed'>(event.status);
+});
+kit.on('converge:end', (event) => {
+  expectType<ConvergeResult>(event.result);
+  expectType<boolean>(event.success);
+});
+
+expectAssignable<MigronautErrorCode>('CONVERGE_FAILED');
+expectType<MigronautError>(new ConvergeFailedError('refused', { phase: 'plan' }));
+expectType<number>(EXIT_CODES.CONVERGE_FAILED);
+expectType<number>(EXIT_CODES.COLLECTIONS_DRIFT);

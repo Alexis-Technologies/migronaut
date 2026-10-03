@@ -20,6 +20,7 @@ const STATUS_BY_CODE = {
   MIGRATION_OUT_OF_ORDER: 409,
   MIGRATION_IRREVERSIBLE: 409,
   CHECKSUM_MISMATCH: 409,
+  CONVERGE_FAILED: 409,
   CONNECTION_FAILED: 503,
 };
 
@@ -64,8 +65,8 @@ async function readJson(req) {
 async function respondWithGroup(res, group, wait) {
   const { wait: waitForGroup, ...handle } = group;
   if (!wait) return send(res, group.upToDate ? 200 : 202, handle);
-  const { results } = await waitForGroup({ timeoutMs: WAIT_TIMEOUT_MS });
-  return send(res, 200, { ...handle, results });
+  const { results, converge } = await waitForGroup({ timeoutMs: WAIT_TIMEOUT_MS });
+  return send(res, 200, { ...handle, results, ...(converge ? { converge } : {}) });
 }
 
 const routes = {
@@ -94,6 +95,16 @@ const routes = {
     if (batch !== undefined) options.batch = batch;
     if (to !== undefined) options.to = to;
     await respondWithGroup(res, await mq.enqueueDown(name, options), wait === true);
+  },
+
+  // { "ordered"?: boolean, "wait"?: boolean } — the declared collections, as a job of its own
+  'POST /migrations/converge': async (req, res) => {
+    const { ordered, wait } = await readJson(req);
+    const { wait: waitForJob, ...handle } = await mq.enqueueConverge(
+      ordered !== undefined ? { ordered } : {},
+    );
+    if (wait !== true) return send(res, 202, handle);
+    return send(res, 200, { ...handle, result: await waitForJob({ timeoutMs: WAIT_TIMEOUT_MS }) });
   },
 
   'POST /migrations/pause': async (_req, res) => {

@@ -5,8 +5,9 @@ Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
 ## v2.1.0 — 2026-10-01
 
-Migrations as a queue, ids in your own format, and OpenTelemetry. Additive: nothing changes for
-anyone who uses none of them, with the narrow exceptions listed under **Changed**.
+Migrations as a queue, ids in your own format, OpenTelemetry, and declared collections. Additive:
+nothing changes for anyone who uses none of them, with the narrow exceptions listed under
+**Changed**.
 
 ### Added
 
@@ -94,11 +95,74 @@ anyone who uses none of them, with the narrow exceptions listed under **Changed*
   `workerOptions.telemetry` and `startWorker({ telemetry })` override it for the worker alone.
 - **OpenTelemetry in the example** — `examples/migration-service` gains `tracing.js` and a Jaeger
   in its `docker-compose.yml`: set `OTEL_EXPORTER_OTLP_ENDPOINT` and every enqueue is one trace.
+- **Declared collections** — indexes and validators declared as an end state, and applied by
+  `migronaut converge`, with no migration file per change. For what only ever has a current value
+  (which indexes a collection has, which validator guards it); migrations stay the tool for
+  changes with an order and a history.
+  - **`collections` config option** — an array of definitions, `{ name, indexes?, validator?,
+    validationLevel?, validationAction?, prune? }`, each index in the driver's own flat
+    `createIndexes` shape. Works in `migronaut.config.{ts,js,json}` (and the JSON Schema) and in
+    `new MigratorKit({ collections })`.
+  - **`collectionsDir` config option** (`MIGRONAUT_COLLECTIONS_DIR`) — one definition file per
+    collection (`.ts`/`.js` default export, or `.json`; the name defaults to the file name).
+    Opt-in, combined with `collections`, and loaded only when a converge runs — a broken file never
+    blocks `status` or an emergency `down`. A collection declared twice is `CONFIG_INVALID`.
+  - **Validated strictly**: an unknown definition key or index option is an error with its path
+    (`collections[2].indexes[0].uniqe`) — the driver silently drops an option it does not know, so
+    a typo would otherwise build the wrong index and then look in sync forever.
+  - **`MigratorKit.converge({ dryRun?, prune?, noLock?, ordered? })`** and **`migronaut converge`**
+    (`--dry-run`, `--check`, `--prune`, `--yes`). Stateless: every run reads `listCollections` and
+    `listIndexes`, plans, and carries the plan out one step at a time under the migration lock —
+    create the collection, set the validator, create indexes, `collMod` a TTL or `hidden` in place,
+    rebuild what changed otherwise, drop last. Nothing is recorded.
+  - **Safe by default.** An index you did not declare is kept and reported (`keep`), and dropped
+    only with `prune` (per definition, or for the definitions that do not decide). An identical
+    index under another name is accepted as is rather than rebuilt; a different one covering the
+    same key is a conflict that refuses the run before the first write. A rebuild whose new index
+    fails to build puts the old one back.
+  - **Comparisons follow what the server stores** — text indexes in their `_fts` form, collations
+    as a subset of the expanded spec, the collection's default collation, `{ locale: 'simple' }`.
+    Anything applied that still compares as changed is reported under `unstable` instead of being
+    rebuilt on every run.
+  - **The CLI plans first** and asks before any drop or rebuild; `--json` refuses such a plan
+    without `--yes` (and applies a purely additive one). `--check` exits `28` on drift — a CI gate.
+  - **`convergeAfterUp` config option** (`MIGRONAUT_CONVERGE_AFTER_UP`) — a bulk `up` (no file, no
+    `to`; also `runMigrations`) ends by converging under the same lock, even when nothing was
+    pending, so a failed converge is retried by the next deploy. `up(undefined, { converge })` and
+    `migronaut up --converge` / `--no-converge` decide per run. `up` still returns its migration
+    rows; `runMigrations` adds `summary.converge`.
+  - **`MigratorKit.convergesAfterUp()`** — whether a bulk `up` on the kit ends by converging.
+  - **Events**: `converge:start`, `converge:action` (per step) and `converge:end` (with the full
+    result), for real runs. The run itself is an ordinary `run:start`/`run:end` with
+    `command: 'converge'`, and an ordinary `migronaut.run` span.
+  - **Types**: `CollectionDefinition`, `CollectionDefinitionFile`, `IndexDefinition`,
+    `IndexKeyDirection`, `IndexCollation`, `ValidationLevel`, `ValidationAction`, `ConvergeOptions`,
+    `ConvergeResult`, `CollectionConvergeResult`, `ConvergeAction`, `ConvergeActionKind`,
+    `ConvergeActionStatus`, `ConvergeTarget`, `ConvergeUnstable`, `ConvergeTrigger` and the three
+    event payloads, exported from the package root.
+  - The definition shape, the result shape and the queue contract below are new and should be
+    treated as experimental.
+- **Converge jobs in the queue adapter** — `JOB_NAMES.CONVERGE` (`'converge'`), `enqueueConverge()`
+  and `MigrationQueue.enqueueConverge()`, and `schedule({ job: 'converge' })` with its own default
+  id, `DEFAULT_CONVERGE_SCHEDULER_ID` (`'migronaut-converge'`). With `convergeAfterUp`,
+  `enqueueUp` ends a group that reaches the newest migration with a converge job (or adds a
+  converge-only job when nothing is pending but a dry run finds drift), and an idle `sync` tick does
+  the same. A converge job refuses as `MIGRATION_BLOCKED` while a migration is pending, is keyed for
+  deduplication on the migration it follows, and carries no `prune` — what may be dropped comes
+  from the worker's own definitions. New types: `ConvergeJobData`, `ConvergeJobResult`,
+  `ConvergeJobSpec`, `ConvergeHandle`, `EnqueueConvergeOptions`.
+- **Two exit codes**: `CONVERGE_FAILED` (27, with `ConvergeFailedError` exported from the package
+  root) and the CLI-only `COLLECTIONS_DRIFT` (28, from `converge --check`).
 
 ### Changed
 
-- **`MigronautErrorCode` gained three members** (above). TypeScript consumers with an exhaustive
+- **`MigronautErrorCode` gained four members** (above). TypeScript consumers with an exhaustive
   `switch` over the code union need a `default` branch or the new cases.
+- **`collections`, `collectionsDir` and `convergeAfterUp` config keys are now validated**
+  (`CONFIG_INVALID`). They were previously unknown and ignored, like any stray key.
+- **The CLI arg parser makes a `--x` / `--no-x` pair tri-state**, as commander does: when a command
+  declares both, neither given leaves the option unset instead of defaulting to `true`. Only
+  `up --converge` / `--no-converge` uses this.
 - **`dryRun('up')` now applies the out-of-order policy** of the run it previews: under
   `onOutOfOrder: 'error'` a bulk preview refuses with `MIGRATION_OUT_OF_ORDER` instead of listing
   rows the run would reject; under `'warn'` it logs the warning. A single-file preview is exempt,
@@ -140,6 +204,9 @@ anyone who uses none of them, with the narrow exceptions listed under **Changed*
   `@opentelemetry/*` package or `bullmq-otel`; they are devDependencies only. The structural types
   are checked part by part against the real `@opentelemetry/api`, and one integration test runs the
   real `@opentelemetry/instrumentation-mongodb` to prove the driver's spans nest under a migration.
+- Declared collections are pinned by a table-driven planner test, a fixed-point integration matrix
+  (every kind of index converges, then plans as unchanged on a real server), and the shared queue
+  scenarios on both the fake and the real BullMQ.
 - An in-tree fake BullMQ carries the adapter's unit and integration tests; the same scenarios run
   against the real `bullmq` package when `MIGRONAUT_TEST_REDIS_URL` is set, which CI now does
   (a Redis service on the `test` job). `bullmq` and `ioredis` are devDependencies for that only.

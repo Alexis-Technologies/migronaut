@@ -36,8 +36,10 @@ const { safeUsername } = require('../utils/user.js');
 const { runAudit } = require('./audit.js');
 const { runBaseline } = require('./baseline.js');
 const { Changelog } = require('./changelog.js');
+const { resolveDefinitions } = require('./collections.js');
 const { isCollectionName, loadConfig } = require('./config.js');
 const { buildContext } = require('./context.js');
+const { runConverge } = require('./converge.js');
 const { runImport } = require('./import-runner.js');
 const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
 const { runMigration } = require('./runner.js');
@@ -1111,13 +1113,63 @@ class MigratorKit extends EventEmitter {
       });
     }
     this.#assertOrderedValid(options.ordered, filename);
+    this.#assertConvergeValid(options.converge, filename, options.to);
     return this.#runWindow(async () => {
-      await this.#ensureConfig();
+      const config = await this.#ensureConfig();
+      // Converge only after a run that brings the database to the head: the
+      // declared end state describes the newest schema, and a unique index
+      // may well depend on a dedupe migration a `--to` run stops short of.
+      // A single-file run is one step of a sequence (a queue job), never its end.
+      const converge = filename === undefined && (options.converge ?? config.convergeAfterUp);
+      if (converge && options.to !== undefined) {
+        this.#logger.info(
+          'Converge after up skipped: --to stops short of the newest migration',
+          this.#fields({ command: 'up', to: options.to }),
+        );
+      }
+      // Resolved before the lock: a definition file that does not load fails
+      // the run before any migration is applied, not after.
+      const definitions =
+        converge && options.to === undefined ? await this.#resolveCollections() : [];
       await this.connect();
-      return this.#withLock(options, { command: 'up', direction: 'up' }, (signal) =>
-        this.#runUp(filename, options, signal),
-      );
+      return this.#withLock(options, { command: 'up', direction: 'up' }, async (signal) => {
+        const results = await this.#runUp(filename, options, signal);
+        // Even when nothing was pending: a converge that failed last time is
+        // retried by the next `up` instead of waiting for the next migration.
+        if (definitions.length > 0) {
+          this.#assertNotAborted(signal, results);
+          try {
+            await runConverge(this.#convergeDeps(), { definitions, trigger: 'up' }, signal);
+          } catch (error) {
+            // The migrations are applied and recorded either way — they must
+            // survive into what a `--json` consumer sees about the failure.
+            this.#attachResults(error, results);
+            throw error;
+          }
+        }
+        return results;
+      });
     });
+  }
+
+  /** `up`'s `converge` option: a boolean, and only for a bulk run that reaches the head */
+  #assertConvergeValid(converge, filename, to) {
+    if (converge === undefined) return;
+    if (typeof converge !== 'boolean') {
+      throw new ConfigInvalidError('converge must be a boolean', { converge });
+    }
+    if (converge && filename !== undefined) {
+      throw new ConfigInvalidError('converge cannot follow a single-file up', {
+        converge,
+        filename,
+      });
+    }
+    if (converge && to !== undefined) {
+      throw new ConfigInvalidError(
+        'converge cannot follow up --to: the declared state describes the newest migration',
+        { converge, to },
+      );
+    }
   }
 
   async #runUp(filename, options = {}, signal) {
@@ -1595,6 +1647,20 @@ class MigratorKit extends EventEmitter {
       `◎ Dry-run  Would ${direction === 'up' ? 'apply' : 'revert'}: ${rows.length}`,
       this.#fields({ direction, count: rows.length, dryRun: true }),
     );
+    // A converge plan is only meaningful against the database the migrations
+    // leave behind — previewing it now would compare with the wrong state.
+    if (
+      direction === 'up' &&
+      !filename &&
+      options.to === undefined &&
+      (await this.convergesAfterUp())
+    ) {
+      logger.info(
+        '◎ Dry-run  Converge after up is not previewed — it is planned against the database ' +
+          'the migrations leave behind (`converge --dry-run` once they are applied)',
+        this.#fields({ direction, dryRun: true }),
+      );
+    }
     return rows;
   }
 
@@ -1918,6 +1984,112 @@ class MigratorKit extends EventEmitter {
         ),
       );
     });
+  }
+
+  /**
+   * Bring the declared collections (`collections`, `collectionsDir`) to their
+   * declared indexes and validators — see {@link runConverge} in converge.js
+   * for the mechanics. Stateless: the live database is read and compared on
+   * every call, and nothing is recorded.
+   *
+   * `dryRun` plans without writing — no lock, no events. A real run holds the
+   * migration lock, like every other mutation. `prune` drops undeclared
+   * indexes in collections whose definition does not decide for itself.
+   * `ordered` refuses while any migration is still pending — checked under
+   * the lock, which is what lets a queue run it as the tail of a deploy.
+   */
+  async converge(options = {}) {
+    for (const key of ['dryRun', 'prune', 'noLock', 'ordered']) {
+      if (options[key] !== undefined && typeof options[key] !== 'boolean') {
+        throw new ConfigInvalidError(`${key} must be a boolean`, { [key]: options[key] });
+      }
+    }
+    const empty = (dryRun) => ({ dryRun, changed: 0, inSync: true, collections: [] });
+    if (options.dryRun) {
+      await this.#ensureConfig();
+      const definitions = await this.#resolveCollections();
+      if (definitions.length === 0) return empty(true);
+      await this.connect();
+      return runConverge(
+        this.#convergeDeps(),
+        { definitions, prune: options.prune, dryRun: true },
+        undefined,
+      );
+    }
+    return this.#runWindow(async () => {
+      await this.#ensureConfig();
+      // Before connecting or locking: a broken definition file must not cost
+      // a round trip, and must not hold the lock while it is reported.
+      const definitions = await this.#resolveCollections();
+      if (definitions.length === 0) {
+        this.#logger.info(
+          'No collections declared — set collections or collectionsDir',
+          this.#fields({ command: 'converge' }),
+        );
+        return empty(false);
+      }
+      await this.connect();
+      return this.#withLock(options, { command: 'converge' }, async (signal) => {
+        if (options.ordered) await this.#assertNothingPending();
+        return runConverge(this.#convergeDeps(), { definitions, prune: options.prune }, signal);
+      });
+    });
+  }
+
+  /**
+   * Whether a bulk `up` on this kit ends by converging: `convergeAfterUp` is
+   * on and there is something declared to converge. Resolves the config; does
+   * not connect, and does not load definition files. A layer above the kit
+   * (the queue adapter) uses it to mirror that behaviour across single-file
+   * jobs, where the kit's own after-up hook never fires.
+   */
+  async convergesAfterUp() {
+    const config = await this.#ensureConfig();
+    return (
+      config.convergeAfterUp === true &&
+      ((config.collections?.length ?? 0) > 0 || config.collectionsDir !== undefined)
+    );
+  }
+
+  /** Every declared collection, normalized — the config key first, then `collectionsDir` */
+  async #resolveCollections() {
+    const config = this.#config;
+    return resolveDefinitions({
+      inline: config.collections,
+      ...(config.collectionsDir !== undefined
+        ? { dir: path.resolve(this.#cwd ?? process.cwd(), config.collectionsDir) }
+        : {}),
+      extensions: config.fileExtensions,
+      reload: config.reloadMigrations,
+      reserved: [config.migrationsCollection, config.lockCollection],
+    });
+  }
+
+  #convergeDeps() {
+    return {
+      db: this.#requireDb(),
+      logger: this.#logger,
+      fields: (extra) => this.#fields(extra),
+      emit: (event, payload) => this.#emit(event, payload),
+      assertNotAborted: (abortSignal) => this.#assertNotAborted(abortSignal),
+    };
+  }
+
+  /**
+   * `converge({ ordered })`: refuse while a migration on disk has no applied
+   * record — a failed one included, exactly as for an ordered `up` job.
+   */
+  async #assertNothingPending() {
+    const applied = new Set(await this.#requireChangelog().getAppliedNames(this.#requireDb()));
+    const blockedBy = [];
+    for (const file of await this.#listMigrationFiles()) {
+      if (!applied.has(file)) blockedBy.push(file);
+    }
+    if (blockedBy.length === 0) return;
+    throw new MigrationBlockedError(
+      `converge is blocked: ${blockedBy.length} migration(s) still pending: ${blockedBy.join(', ')}`,
+      { command: 'converge', blockedBy },
+    );
   }
 }
 

@@ -342,6 +342,21 @@ function configBody(values, createExtension) {
   // \`export const useTransaction = true\`.
   useTransaction: false,
 
+  // ── Declared collections (experimental) ─────────────────────
+  // Indexes and validators as the end state you want: \`migronaut converge\`
+  // compares them with the database and makes the difference — no migration
+  // file per change. Here, in a directory of one file per collection, or both.
+  // collections: [
+  //   {
+  //     name: 'users',
+  //     indexes: [{ key: { email: 1 }, unique: true }],
+  //     validator: { $jsonSchema: { bsonType: 'object', required: ['email'] } },
+  //   },
+  // ],
+  // collectionsDir: './collections',
+  // Converge at the end of every bulk \`migronaut up\`.
+  // convergeAfterUp: false,
+
   // ── Lifecycle hooks (code only — not available in JSON config) ──
   // hooks: {
   //   beforeAll: async (ctx) => {},

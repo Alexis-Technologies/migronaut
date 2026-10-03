@@ -4,8 +4,10 @@
  * script testing `!= 0` is unaffected.
  *
  * Every MigronautError code has an entry (pinned by a superset test), plus
- * two CLI-condition codes that have no error class: PENDING_MIGRATIONS
- * (`status --check` found work) and AUDIT_FAILED (an audit check failed).
+ * three CLI-condition codes that have no error class: PENDING_MIGRATIONS
+ * (`status --check` found work), AUDIT_FAILED (an audit check failed) and
+ * COLLECTIONS_DRIFT (`converge --check` found the database out of step with
+ * the declared collections).
  *
  * Exported from the package root so a programmatic wrapper can mirror the
  * CLI's exit semantics without hardcoding numbers from the docs table. Kept
@@ -37,6 +39,8 @@ const EXIT_CODES = {
   MIGRATION_BLOCKED: 24,
   QUEUE_JOB_INVALID: 25,
   QUEUE_JOB_FAILED: 26,
+  CONVERGE_FAILED: 27,
+  COLLECTIONS_DRIFT: 28,
 };
 
 module.exports = { EXIT_CODES };

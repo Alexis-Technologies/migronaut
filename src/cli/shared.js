@@ -162,9 +162,13 @@ function reportError(error, { json, verbose, logger }) {
 /**
  * Construct a MigratorKit from CLI options, run `fn(migrator, cli)`, always
  * disconnect, and translate failures into a non-zero exit code with a
- * readable message. `cli` is `{ logger, json, opts }` — the one level-aware
- * logger every command must render through, so `--quiet`/`--verbose` apply to
- * command output and not only to core's log lines.
+ * readable message. `cli` is `{ logger, json, opts, spinner, stopRequested }`:
+ * the one level-aware logger every command must render through, so
+ * `--quiet`/`--verbose` apply to command output and not only to core's log
+ * lines; the spinner (undefined in JSON or quiet mode) for a command that
+ * drives its own progress text; and whether a signal asked to stop — which a
+ * command that reads, asks, then acts must check between those steps, since
+ * `migrator.stop()` is a no-op while no run is in flight.
  */
 async function withMigrator(opts, fn, options = {}) {
   // Required here, not at module top: the orchestrator is the CLI's one heavy
@@ -237,7 +241,13 @@ async function withMigrator(opts, fn, options = {}) {
     if (detachSignals.stopRequested?.()) {
       throw new RunAbortedError('Stopped by signal before the run started', { results: [] });
     }
-    await fn(migrator, { logger, json, opts });
+    await fn(migrator, {
+      logger,
+      json,
+      opts,
+      spinner,
+      stopRequested: () => detachSignals.stopRequested?.() ?? false,
+    });
   } catch (error) {
     // Safety net: clear any spinner still spinning before printing the error.
     spinner?.stop();

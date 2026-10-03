@@ -10,12 +10,17 @@ const { isBareFilename } = require('../utils/migration-name.js');
  */
 const JOB_DATA_VERSION = 1;
 
-/** One job name per kind of work — `up`/`down` carry one migration each */
-const JOB_NAMES = Object.freeze({ UP: 'up', DOWN: 'down', SYNC: 'sync' });
+/**
+ * One job name per kind of work — `up`/`down` carry one migration each, `sync`
+ * plans and enqueues what is pending, `converge` brings the declared
+ * collections to their declared state.
+ */
+const JOB_NAMES = Object.freeze({ UP: 'up', DOWN: 'down', SYNC: 'sync', CONVERGE: 'converge' });
 
 const DEFAULT_QUEUE_NAME = 'migronaut';
 /** No `:` — BullMQ rejects it in custom ids */
 const DEFAULT_SCHEDULER_ID = 'migronaut-sync';
+const DEFAULT_CONVERGE_SCHEDULER_ID = 'migronaut-converge';
 
 /**
  * Forced onto every migration job, over anything the caller configured. A
@@ -52,9 +57,26 @@ const isPositiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
  * pending file is absorbed, yet a later down → up cycle is never blocked —
  * which a custom `jobId` would do for as long as the finished job is retained.
  */
+/** A migration name as a custom-id fragment — BullMQ rejects `:` (and more) in ids */
+const idFragment = (migration) => migration.replace(/[^A-Za-z0-9._-]/g, '_');
+
 function dedupId(direction, migration) {
-  return `${direction}-${migration.replace(/[^A-Za-z0-9._-]/g, '_')}`;
+  return `${direction}-${idFragment(migration)}`;
 }
+
+/**
+ * Deduplication id for a converge job, keyed on the migration it follows. Two
+ * pods enqueueing the same deploy collapse into one converge; a later, longer
+ * deploy gets its own at its own tail — sharing one id would fold it into an
+ * earlier converge that sits in front of the new migrations, and nothing would
+ * converge after them.
+ */
+function convergeDedupId(after) {
+  return after === undefined ? 'converge' : `converge-after-${idFragment(after)}`;
+}
+
+const isGroupId = (value) =>
+  typeof value === 'string' && value.length > 0 && value.length <= MAX_GROUP_ID_LENGTH;
 
 function invalid(job, issue) {
   return new QueueJobInvalidError(`Invalid migration job: ${issue}`, {
@@ -73,7 +95,12 @@ function invalid(job, issue) {
 function parseJobData(job) {
   if (!isPlainObject(job)) throw invalid(job, 'job is not an object');
   const { name, data } = job;
-  if (name !== JOB_NAMES.UP && name !== JOB_NAMES.DOWN && name !== JOB_NAMES.SYNC) {
+  if (
+    name !== JOB_NAMES.UP &&
+    name !== JOB_NAMES.DOWN &&
+    name !== JOB_NAMES.SYNC &&
+    name !== JOB_NAMES.CONVERGE
+  ) {
     throw invalid(job, 'unknown job name');
   }
   if (!isPlainObject(data)) throw invalid(job, 'data is not an object');
@@ -86,15 +113,27 @@ function parseJobData(job) {
     return { kind: 'sync', ...(data.to !== undefined ? { to: data.to } : {}) };
   }
 
+  if (name === JOB_NAMES.CONVERGE) {
+    // No `prune`, by design: what may be dropped is decided by the
+    // definitions the worker loads, never by a payload sitting in Redis.
+    if (data.groupId !== undefined && !isGroupId(data.groupId)) {
+      throw invalid(job, 'groupId is not a short string');
+    }
+    if (data.ordered !== undefined && typeof data.ordered !== 'boolean') {
+      throw invalid(job, 'ordered is not a boolean');
+    }
+    return {
+      kind: 'converge',
+      ...(data.groupId !== undefined ? { groupId: data.groupId } : {}),
+      ...(data.ordered !== undefined ? { ordered: data.ordered } : {}),
+    };
+  }
+
   if (data.direction !== name) throw invalid(job, 'direction does not match the job name');
   if (!isBareFilename(data.migration) || data.migration.length > MAX_MIGRATION_NAME_LENGTH) {
     throw invalid(job, 'migration is not a bare filename');
   }
-  if (
-    typeof data.groupId !== 'string' ||
-    data.groupId.length === 0 ||
-    data.groupId.length > MAX_GROUP_ID_LENGTH
-  ) {
+  if (!isGroupId(data.groupId)) {
     throw invalid(job, 'groupId is not a short string');
   }
   if (
@@ -159,6 +198,28 @@ function migrationJobOptions(jobOptions, direction, migration) {
 }
 
 /**
+ * A converge job spec, ready for `queue.addBulk`: the tail of an `up` group
+ * (`after` = its last migration), or a converge of its own. `ordered: false`
+ * skips the "nothing may be pending" guard.
+ */
+function buildConvergeJob({ groupId, ordered, after, jobOptions } = {}) {
+  return {
+    name: JOB_NAMES.CONVERGE,
+    data: {
+      v: JOB_DATA_VERSION,
+      kind: 'converge',
+      ...(groupId !== undefined ? { groupId } : {}),
+      ...(ordered === false ? { ordered: false } : {}),
+    },
+    opts: {
+      ...jobOptions,
+      ...MIGRATION_JOB_OPTIONS,
+      deduplication: { id: convergeDedupId(after) },
+    },
+  };
+}
+
+/**
  * The job a scheduler tick produces: plan what is pending, enqueue it.
  *
  * `omitContext` keeps the tick out of whatever trace registered the schedule:
@@ -176,15 +237,31 @@ function buildSyncJobTemplate({ to } = {}) {
   };
 }
 
+/**
+ * The job a converge schedule produces. Its own trace per tick, for the same
+ * reason as the `sync` template above.
+ */
+function buildConvergeJobTemplate() {
+  return {
+    name: JOB_NAMES.CONVERGE,
+    data: { v: JOB_DATA_VERSION, kind: 'converge' },
+    opts: { ...MIGRATION_JOB_OPTIONS, telemetry: { omitContext: true } },
+  };
+}
+
 module.exports = {
+  DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
   FORBIDDEN_JOB_OPTIONS,
   JOB_DATA_VERSION,
   JOB_NAMES,
   MIGRATION_JOB_OPTIONS,
+  buildConvergeJob,
+  buildConvergeJobTemplate,
   buildMigrationJob,
   buildSyncJobTemplate,
+  convergeDedupId,
   dedupId,
   isPlainObject,
   migrationJobOptions,

@@ -136,6 +136,7 @@ export default defineConfig({
             { text: 'Lifecycle Hooks', link: '/guide/hooks' },
             { text: 'Using Mongoose', link: '/guide/mongoose' },
             { text: 'Seeding Data', link: '/guide/seeding' },
+            { text: 'Declared Collections', link: '/guide/collections' },
           ],
         },
         {
@@ -167,6 +168,7 @@ export default defineConfig({
             { text: 'migronaut up', link: '/commands/up' },
             { text: 'migronaut down', link: '/commands/down' },
             { text: 'migronaut redo', link: '/commands/redo' },
+            { text: 'migronaut converge', link: '/commands/converge' },
           ],
         },
         {

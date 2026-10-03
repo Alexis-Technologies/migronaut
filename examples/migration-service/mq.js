@@ -23,6 +23,11 @@ const mq = createMigrationQueue({
   // The connection string and database come from MIGRONAUT_URI / MIGRONAUT_DB.
   config: {
     migrationsDir: path.join(__dirname, 'migrations'),
+    // Declared collections, one file each: their indexes and validators as an
+    // end state. With convergeAfterUp, every group that reaches the newest
+    // migration ends with a converge job — after the migrations, in order.
+    collectionsDir: path.join(__dirname, 'collections'),
+    convergeAfterUp: true,
     // OpenTelemetry is injected like everything else: a tracer and a meter from
     // this app's own @opentelemetry/api. Until tracing.js starts an SDK both
     // are no-ops, so this costs nothing when tracing is off. (The meter stays a

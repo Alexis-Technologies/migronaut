@@ -4,6 +4,7 @@ const { assertMigrationName } = require('../utils/migration-name.js');
 const {
   FORBIDDEN_JOB_OPTIONS,
   JOB_NAMES,
+  buildConvergeJob,
   buildMigrationJob,
   isPlainObject,
   migrationJobOptions,
@@ -58,11 +59,37 @@ function newestFirst(a, b) {
 }
 
 /**
+ * Whether an `up` group ends with a converge job. Explicit `converge` wins;
+ * otherwise it mirrors the kit's own after-up hook (`convergeAfterUp`), which
+ * never fires in a queue — every job there is a single-file run. Only a group
+ * that brings the database to the head converges, as in the kit.
+ */
+async function resolveConverge(kit, { converge, filename, to }) {
+  if (converge !== undefined) {
+    assertBoolean(converge, 'converge');
+    if (converge && (filename !== undefined || to !== undefined)) {
+      throw new ConfigInvalidError(
+        'converge needs a group that reaches the newest migration — not a filename or `to`',
+        { converge },
+      );
+    }
+    return converge;
+  }
+  if (filename !== undefined || to !== undefined) return false;
+  return typeof kit.convergesAfterUp === 'function' && (await kit.convergesAfterUp()) === true;
+}
+
+/**
  * Plan an `up` group without enqueuing it: which files, in which order, under
  * which batch. The selection is `kit.dryRun('up')` — the same one a real run
  * makes, order policy included — so the plan can never name a file a run
  * would not apply. One batch number is peeked for the whole group, which is
  * what makes a later `down` revert it as a unit.
+ *
+ * A group that converges carries its converge job apart from the migration
+ * jobs, as `plan.converge`, so `plan.jobs` stays one-to-one with
+ * `plan.migrations`. With nothing pending the converge job is planned only if
+ * a dry run finds the database out of step.
  */
 async function planUpJobs(kit, options = {}) {
   const { filename, to, force = false, ordered = true, jobOptions } = options;
@@ -76,6 +103,7 @@ async function planUpJobs(kit, options = {}) {
     throw new ConfigInvalidError('force requires a filename', { force });
   }
   assertJobOptions(jobOptions);
+  const converge = await resolveConverge(kit, { converge: options.converge, filename, to });
 
   const rows = await kit.dryRun('up', filename, to !== undefined ? { to } : {});
   const migrations = [];
@@ -84,7 +112,11 @@ async function planUpJobs(kit, options = {}) {
   }
   const groupId = await newGroupId(kit);
   if (migrations.length === 0) {
-    return { groupId, direction: JOB_NAMES.UP, batch: null, migrations, jobs: [] };
+    const plan = { groupId, direction: JOB_NAMES.UP, batch: null, migrations, jobs: [] };
+    if (converge && !(await kit.converge({ dryRun: true })).inSync) {
+      plan.converge = buildConvergeJob({ groupId, ordered, jobOptions });
+    }
+    return plan;
   }
 
   const batch = await kit.nextBatch();
@@ -104,7 +136,11 @@ async function planUpJobs(kit, options = {}) {
       opts: migrationJobOptions(jobOptions, JOB_NAMES.UP, migration),
     });
   }
-  return { groupId, direction: JOB_NAMES.UP, batch, migrations, jobs };
+  const plan = { groupId, direction: JOB_NAMES.UP, batch, migrations, jobs };
+  if (converge) {
+    plan.converge = buildConvergeJob({ groupId, ordered, after: migrations.at(-1), jobOptions });
+  }
+  return plan;
 }
 
 /**
@@ -194,20 +230,33 @@ async function findDeduplicated(queue, jobs, groupId) {
   return deduplicated;
 }
 
-/** Add a planned group to the queue (atomically) and return its handle */
-async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = {}) {
+/** Whether the job stored under `id` belongs to another enqueue call (a deduplicated add) */
+async function isForeign(queue, id, groupId) {
+  if (typeof queue.getJob !== 'function') return false;
+  const stored = await queue.getJob(id);
+  return Boolean(stored && stored.data?.groupId !== groupId);
+}
+
+function assertQueue(queue) {
   if (!queue || typeof queue.addBulk !== 'function') {
     throw new ConfigInvalidError('queue must be a BullMQ Queue (it has no addBulk method)');
   }
+}
+
+/** Add a planned group to the queue (atomically) and return its handle */
+async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = {}) {
+  assertQueue(queue);
   const { groupId, direction, batch } = plan;
   let jobs = [];
   let deduplicated = [];
+  let converge = null;
 
-  if (plan.jobs.length > 0) {
-    const added = await queue.addBulk(plan.jobs);
-    if (!Array.isArray(added) || added.length !== plan.jobs.length) {
+  const specs = plan.converge ? [...plan.jobs, plan.converge] : plan.jobs;
+  if (specs.length > 0) {
+    const added = await queue.addBulk(specs);
+    if (!Array.isArray(added) || added.length !== specs.length) {
       throw new ConfigInvalidError('queue.addBulk did not return one job per migration', {
-        expected: plan.jobs.length,
+        expected: specs.length,
       });
     }
     jobs = plan.migrations.map((migration, index) => ({
@@ -216,14 +265,23 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
       index,
     }));
     deduplicated = await findDeduplicated(queue, jobs, groupId);
+    if (plan.converge) {
+      const id = String(added[specs.length - 1].id);
+      converge = { id, deduplicated: await isForeign(queue, id, groupId) };
+    }
+    const what =
+      jobs.length > 0
+        ? `${jobs.length} migration(s)${converge ? ' + converge' : ''}`
+        : 'a converge job';
     kit.logger.info(
-      `⇢ Enqueued ${jobs.length} migration(s)   [${direction}${batch !== null ? `, batch ${batch}` : ''}]`,
+      `⇢ Enqueued ${what}   [${direction}${batch !== null ? `, batch ${batch}` : ''}]`,
       {
         groupId,
         direction,
         ...(batch !== null ? { batch } : {}),
         count: jobs.length,
         deduplicated: deduplicated.length,
+        ...(converge ? { converge: true } : {}),
       },
     );
   }
@@ -232,9 +290,11 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
     groupId,
     direction,
     batch,
+    // "No migration to run" — a converge-only group is still up to date.
     upToDate: jobs.length === 0,
     jobs,
     deduplicated,
+    converge,
     wait: (waitOptions = {}) =>
       waitForGroup({
         queue,
@@ -243,8 +303,53 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
         direction,
         batch,
         jobs,
+        ...(converge ? { converge } : {}),
         timeoutMs: waitOptions.timeoutMs,
       }),
+  };
+}
+
+/**
+ * Enqueue a converge job on its own, on a queue you own: it brings the
+ * declared collections to their declared state, under the MongoDB lock.
+ * `ordered` (default true) makes it refuse while a migration is still
+ * pending — the declared state describes the newest schema.
+ */
+async function enqueueConverge(queue, kit, options = {}, internals = {}) {
+  if (!isPlainObject(options)) {
+    throw new ConfigInvalidError('enqueueConverge options must be an object');
+  }
+  const { ordered, jobOptions, queueEvents } = options;
+  if (ordered !== undefined) assertBoolean(ordered, 'ordered');
+  assertJobOptions(jobOptions);
+  assertQueue(queue);
+  const groupId = await newGroupId(kit);
+  const [added] = await queue.addBulk([buildConvergeJob({ groupId, ordered, jobOptions })]);
+  if (!added) throw new ConfigInvalidError('queue.addBulk did not return the converge job');
+  const jobId = String(added.id);
+  const deduplicated = await isForeign(queue, jobId, groupId);
+  kit.logger.info(`⇢ Enqueued a converge job${deduplicated ? ' (already queued)' : ''}`, {
+    groupId,
+    jobId,
+    deduplicated,
+  });
+  return {
+    groupId,
+    jobId,
+    deduplicated,
+    wait: async (waitOptions = {}) => {
+      const { converge } = await waitForGroup({
+        queue,
+        queueEvents: waitOptions.queueEvents ?? queueEvents ?? internals.getQueueEvents?.(),
+        groupId,
+        direction: 'converge',
+        batch: null,
+        jobs: [],
+        converge: { id: jobId },
+        timeoutMs: waitOptions.timeoutMs,
+      });
+      return converge;
+    },
   };
 }
 
@@ -270,4 +375,11 @@ async function enqueueDown(queue, kit, options = {}, internals = {}) {
   });
 }
 
-module.exports = { assertJobOptions, enqueueDown, enqueueUp, planDownJobs, planUpJobs };
+module.exports = {
+  assertJobOptions,
+  enqueueConverge,
+  enqueueDown,
+  enqueueUp,
+  planDownJobs,
+  planUpJobs,
+};

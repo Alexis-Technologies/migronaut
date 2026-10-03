@@ -99,7 +99,10 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `clientOptions` | `MongoClientOptions` | — | Driver options: TLS, AWS IAM / X.509 auth, proxies, pool sizing |
 | `client` | `MongoClient` | — | An already-connected client to reuse; migronaut never closes it |
 | `timeoutMs` | `number` | — | Stop the run when one migration exceeds this (best-effort) |
-| `reloadMigrations` | `boolean` | `false` | Bypass the ESM module cache (long-lived processes only) |
+| `reloadMigrations` | `boolean` | `false` | Bypass the ESM module cache (long-lived processes only) — for migrations and collection definition files alike |
+| `collections` | `CollectionDefinition[]` | — | [Declared collections](/guide/collections): indexes and validators as an end state, applied by `converge` |
+| `collectionsDir` | `string` | — | Directory of collection definition files, one per collection. Opt-in: nothing is read unless it is set |
+| `convergeAfterUp` | `boolean` | `false` | End every bulk `up` — no file, no `to` — by converging the declared collections, under the same lock |
 | `mongoose` | `Mongoose` | — | Mongoose instance, if your migrations use it |
 | `hooks` | `MigrationHooks` | — | [Lifecycle hooks](/guide/hooks) |
 | `logger` | `MigronautLogger \| null` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` silences all output |
@@ -200,11 +203,13 @@ config file is never required" literally true, not just a slogan. These
 | `MIGRONAUT_ON_OUT_OF_ORDER` | `onOutOfOrder` |
 | `MIGRONAUT_ENSURE_INDEXES` | `ensureIndexes` |
 | `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` |
+| `MIGRONAUT_COLLECTIONS_DIR` | `collectionsDir` |
+| `MIGRONAUT_CONVERGE_AFTER_UP` | `convergeAfterUp` |
 | `MIGRONAUT_ENV_FILE` | `envFile` |
 
-The remaining options — `fileExtensions`, `clientOptions`, `generateId`, and the
-live instances `client`, `mongoose`, `hooks`, `logger`, `telemetry` — are
-config-file/API only. They hold arrays, objects, functions or live handles, which a single
+The remaining options — `fileExtensions`, `clientOptions`, `collections`,
+`generateId`, and the live instances `client`, `mongoose`, `hooks`, `logger`,
+`telemetry` — are config-file/API only. They hold arrays, objects, functions or live handles, which a single
 environment string cannot express.
 
 ::: warning Values are rejected, never coerced

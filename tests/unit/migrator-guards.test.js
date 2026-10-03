@@ -190,3 +190,74 @@ describe('MigratorKit.generateId', () => {
     );
   });
 });
+
+describe('MigratorKit converge guards', () => {
+  const kitWith = (config) =>
+    new MigratorKit({
+      uri: 'mongodb://127.0.0.1:1/never?serverSelectionTimeoutMS=100',
+      dbName: 'nope',
+      logger: null,
+      ...config,
+    });
+
+  for (const key of ['dryRun', 'prune', 'noLock', 'ordered']) {
+    it(`should reject a non-boolean ${key} before anything connects`, async () => {
+      await assert.rejects(kitWith({}).converge({ [key]: 'yes' }), (error) => {
+        assert.ok(error instanceof ConfigInvalidError);
+        assert.deepStrictEqual(error.context, { [key]: 'yes' });
+        return true;
+      });
+    });
+  }
+
+  it('should return an empty, in-sync result without connecting when nothing is declared', async () => {
+    // The host is unreachable: a connection attempt would reject.
+    for (const dryRun of [true, false]) {
+      assert.deepStrictEqual(await kitWith({}).converge({ dryRun }), {
+        dryRun,
+        changed: 0,
+        inSync: true,
+        collections: [],
+      });
+    }
+  });
+
+  it('should reject an invalid definition file before connecting', async () => {
+    await assert.rejects(
+      kitWith({ collectionsDir: '/tmp/migronaut-guards-no-such-dir' }).converge(),
+      (error) =>
+        error instanceof ConfigInvalidError && error.message === 'collectionsDir not found',
+    );
+  });
+
+  it("should validate up's converge option", async () => {
+    await assert.rejects(guardedKit().up(undefined, { converge: 'yes' }), (error) => {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.match(error.message, /converge must be a boolean/);
+      return true;
+    });
+    await assert.rejects(
+      guardedKit().up('0001-a.js', { converge: true }),
+      /converge cannot follow a single-file up/,
+    );
+    await assert.rejects(
+      guardedKit().up(undefined, { converge: true, to: '0001-a.js' }),
+      /converge cannot follow up --to/,
+    );
+  });
+
+  it('should report whether a bulk up converges, without connecting', async () => {
+    const collections = [{ name: 'users', indexes: [] }];
+    assert.strictEqual(await kitWith({}).convergesAfterUp(), false);
+    assert.strictEqual(await kitWith({ collections }).convergesAfterUp(), false);
+    assert.strictEqual(await kitWith({ convergeAfterUp: true }).convergesAfterUp(), false);
+    assert.strictEqual(
+      await kitWith({ convergeAfterUp: true, collections }).convergesAfterUp(),
+      true,
+    );
+    assert.strictEqual(
+      await kitWith({ convergeAfterUp: true, collectionsDir: './collections' }).convergesAfterUp(),
+      true,
+    );
+  });
+});

@@ -139,6 +139,180 @@
     "clientOptions": {
       "type": "object",
       "description": "MongoDB driver options (MongoClientOptions): TLS, auth mechanisms, proxies, pool sizing. Passed to the driver as-is."
+    },
+    "collections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/collection"
+      },
+      "description": "Declared collections: `migronaut converge` keeps their indexes and validator in the declared state, with no migration file per change"
+    },
+    "collectionsDir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Directory of collection definition files, one collection per file. Opt-in: nothing is read unless this is set"
+    },
+    "convergeAfterUp": {
+      "type": "boolean",
+      "default": false,
+      "description": "End every bulk `up` (no file, no --to) by converging the declared collections under the same lock"
+    }
+  },
+  "definitions": {
+    "collection": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "indexes"
+          ]
+        },
+        {
+          "required": [
+            "validator"
+          ]
+        }
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!system\\.)[^$\\u0000]+$",
+          "description": "Collection name"
+        },
+        "indexes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/index"
+          },
+          "description": "Every index besides _id. Omit to leave the collection's indexes unmanaged"
+        },
+        "validator": {
+          "oneOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A query or { $jsonSchema } document; null or {} for no validator. Omit to leave the validator unmanaged"
+        },
+        "validationLevel": {
+          "enum": [
+            "off",
+            "strict",
+            "moderate"
+          ],
+          "description": "How the validator applies to updates. Defaults to 'strict'"
+        },
+        "validationAction": {
+          "enum": [
+            "error",
+            "warn",
+            "errorAndLog"
+          ],
+          "description": "What an invalid write does. Defaults to 'error'"
+        },
+        "prune": {
+          "type": "boolean",
+          "description": "Drop indexes this definition does not declare (otherwise they are kept and reported)"
+        }
+      }
+    },
+    "index": {
+      "type": "object",
+      "required": [
+        "key"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "enum": [
+              1,
+              -1,
+              "text",
+              "hashed",
+              "2d",
+              "2dsphere"
+            ]
+          },
+          "description": "Field → direction, in index order"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Defaults to the name MongoDB generates (email_1)"
+        },
+        "unique": {
+          "type": "boolean"
+        },
+        "sparse": {
+          "type": "boolean"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "expireAfterSeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "partialFilterExpression": {
+          "type": "object"
+        },
+        "collation": {
+          "type": "object",
+          "required": [
+            "locale"
+          ]
+        },
+        "wildcardProjection": {
+          "type": "object"
+        },
+        "weights": {
+          "type": "object"
+        },
+        "default_language": {
+          "type": "string",
+          "minLength": 1
+        },
+        "language_override": {
+          "type": "string",
+          "minLength": 1
+        },
+        "textIndexVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "2dsphereIndexVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "bits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "storageEngine": {
+          "type": "object"
+        },
+        "background": {
+          "type": "boolean",
+          "description": "Accepted and ignored — a no-op since MongoDB 4.2"
+        }
+      }
     }
   }
 }

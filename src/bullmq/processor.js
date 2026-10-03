@@ -7,9 +7,9 @@ const {
   RunAbortedError,
 } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
-const { redactUris } = require('../utils/redact.js');
+const { redactDeep, redactUris } = require('../utils/redact.js');
 const { JOB_NAMES, isPlainObject, parseJobData } = require('./jobs.js');
-const { assertJobOptions, enqueueUp } = require('./producer.js');
+const { assertJobOptions, enqueueConverge, enqueueUp } = require('./producer.js');
 
 /**
  * Failures a later attempt can get past without anything being fixed: the lock
@@ -144,7 +144,7 @@ function createMigrationProcessor(options = {}) {
               index: ctx.data.index,
               total: ctx.data.total,
             }
-          : { kind: 'sync' }),
+          : { kind: ctx.data.kind }),
         ...extra,
       }),
     );
@@ -174,6 +174,22 @@ function createMigrationProcessor(options = {}) {
     },
     'migration:skipped': (event) => {
       if (current) log(current, `⏭ Skipped ${event.migration} (${event.reason ?? 'skipped'})`);
+    },
+    'converge:start': () => {
+      if (current) progress(current, 'running');
+    },
+    'converge:action': (event) => {
+      if (!current) return;
+      const target = event.target === 'index' ? `index ${event.name}` : event.target;
+      log(
+        current,
+        event.status === 'applied'
+          ? `✔ ${event.action} ${target} on ${event.collection} [${event.durationMs ?? 0}ms]`
+          : `✖ ${event.action} ${target} on ${event.collection}: ${event.error ?? 'failed'}`,
+      );
+    },
+    'converge:end': (event) => {
+      if (current && event.success) log(current, `✔ Converged ${event.changed} change(s)`);
     },
   };
   for (const [event, listener] of Object.entries(listeners)) kit.on(event, listener);
@@ -206,15 +222,7 @@ function createMigrationProcessor(options = {}) {
         : kit.down(data.migration, ordered ? { ordered: true } : {});
 
     try {
-      const { result, waitedMs } = await withLockWait(attempt, {
-        ...waitOptions,
-        logger: kit.logger,
-        signal,
-        onWait: ({ attempts, waitedMs: soFar }) => {
-          if (attempts === 1) log(ctx, 'Migration lock held by another process — waiting…');
-          progress(ctx, 'lock-wait', { attempts, waitedMs: soFar });
-        },
-      });
+      const { result, waitedMs } = await waitForLock(ctx, attempt, signal);
       return resultOf(ctx, result, waitedMs);
     } catch (error) {
       // A duplicate rollback job: the first one already reverted it. Same
@@ -232,6 +240,43 @@ function createMigrationProcessor(options = {}) {
     }
   }
 
+  /** The lock-wait loop every run-kind job shares */
+  function waitForLock(ctx, attempt, signal) {
+    return withLockWait(attempt, {
+      ...waitOptions,
+      logger: kit.logger,
+      signal,
+      onWait: ({ attempts, waitedMs: soFar }) => {
+        if (attempts === 1) log(ctx, 'Migration lock held by another process — waiting…');
+        progress(ctx, 'lock-wait', { attempts, waitedMs: soFar });
+      },
+    });
+  }
+
+  async function runConvergeJob(ctx, signal) {
+    const { data } = ctx;
+    // Ordered by default: the tail of a deploy must not converge to a schema
+    // its own migrations have not reached yet — and the check is the kit's,
+    // under the lock, so a peer still applying the last migration is waited
+    // out rather than raced.
+    const ordered = data.ordered ?? defaultOrdered;
+    const { result, waitedMs } = await waitForLock(
+      ctx,
+      () => kit.converge(ordered ? { ordered: true } : {}),
+      signal,
+    );
+    return redactDeep({
+      kind: 'converge',
+      ...(data.groupId !== undefined ? { groupId: data.groupId } : {}),
+      changed: result.changed,
+      inSync: result.inSync,
+      collections: result.collections,
+      ...(result.unstable ? { unstable: result.unstable } : {}),
+      ...(ctx.runId ? { runId: ctx.runId } : {}),
+      lockWaitMs: waitedMs,
+    });
+  }
+
   async function runSyncJob(ctx) {
     if (!queue) {
       throw new ConfigInvalidError(
@@ -243,7 +288,7 @@ function createMigrationProcessor(options = {}) {
     // anything to do, and planning proper re-reads the whole directory.
     const pending = await kit.list('pending');
     if (pending.length === 0) {
-      return {
+      const result = {
         kind: 'sync',
         groupId: null,
         batch: null,
@@ -251,6 +296,20 @@ function createMigrationProcessor(options = {}) {
         upToDate: true,
         migrations: [],
       };
+      // With `convergeAfterUp`, a tick that finds no migration still checks
+      // the declared collections — a deploy that only changed a definition
+      // converges on the next tick. A dry run first, so an idle tick takes no
+      // lock; a job only when something differs.
+      if (
+        to === undefined &&
+        typeof kit.convergesAfterUp === 'function' &&
+        (await kit.convergesAfterUp()) &&
+        !(await kit.converge({ dryRun: true })).inSync
+      ) {
+        const handle = await enqueueConverge(queue, kit, jobOptions ? { jobOptions } : {});
+        result.converge = { jobId: handle.jobId, deduplicated: handle.deduplicated };
+      }
+      return result;
     }
     const group = await enqueueUp(queue, kit, {
       ...(to !== undefined ? { to } : {}),
@@ -265,6 +324,9 @@ function createMigrationProcessor(options = {}) {
       enqueued: group.jobs.length,
       upToDate: group.upToDate,
       migrations,
+      ...(group.converge
+        ? { converge: { jobId: group.converge.id, deduplicated: group.converge.deduplicated } }
+        : {}),
     };
   }
 
@@ -284,8 +346,10 @@ function createMigrationProcessor(options = {}) {
       current = ctx;
       abort.addEventListener('abort', onAbort, { once: true });
       await kit.connect();
-      const result =
-        ctx.data.kind === 'sync' ? await runSyncJob(ctx) : await runMigrationJob(ctx, abort);
+      let result;
+      if (ctx.data.kind === 'sync') result = await runSyncJob(ctx);
+      else if (ctx.data.kind === 'converge') result = await runConvergeJob(ctx, abort);
+      else result = await runMigrationJob(ctx, abort);
       progress(ctx, 'completed');
       await flush(ctx);
       return result;

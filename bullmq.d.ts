@@ -1,5 +1,7 @@
 import type {
   AuditReport,
+  CollectionConvergeResult,
+  ConvergeUnstable,
   LockInfo,
   MigratorKit,
   MigratorKitOptions,
@@ -49,7 +51,7 @@ export interface BullMQJobLike<Data = any, Result = any> {
 /** See {@link BullMQJobLike} for why this is structural */
 export interface BullMQQueueLike {
   name: string;
-  addBulk(jobs: MigrationJobSpec[]): Promise<BullMQJobLike[]>;
+  addBulk(jobs: (MigrationJobSpec | ConvergeJobSpec)[]): Promise<BullMQJobLike[]>;
   getJob(id: string): Promise<BullMQJobLike | undefined>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -94,14 +96,20 @@ export type BullMQQueueEventsClass<E extends BullMQQueueEventsLike = BullMQQueue
 
 // ─── Job contract ──────────────────────────────────────────────────────────────
 
-export type MigrationJobName = 'up' | 'down' | 'sync';
+export type MigrationJobName = 'up' | 'down' | 'sync' | 'converge';
 
-/** Job names: `up`/`down` carry one migration each; `sync` plans and enqueues what is pending */
-export const JOB_NAMES: Readonly<{ UP: 'up'; DOWN: 'down'; SYNC: 'sync' }>;
+/**
+ * Job names: `up`/`down` carry one migration each; `sync` plans and enqueues
+ * what is pending; `converge` brings the declared collections to their
+ * declared state.
+ */
+export const JOB_NAMES: Readonly<{ UP: 'up'; DOWN: 'down'; SYNC: 'sync'; CONVERGE: 'converge' }>;
 /** Version stamped on every job's data as `v` — a worker rejects versions it does not know */
 export const JOB_DATA_VERSION: 1;
 export const DEFAULT_QUEUE_NAME: 'migronaut';
 export const DEFAULT_SCHEDULER_ID: 'migronaut-sync';
+/** Default id of a `schedule({ job: 'converge' })` schedule */
+export const DEFAULT_CONVERGE_SCHEDULER_ID: 'migronaut-converge';
 
 /** Data of an `up` or `down` job. Stored in Redis — re-validated by the worker as untrusted input */
 export interface MigrationJobData {
@@ -133,6 +141,19 @@ export interface SyncJobData {
   to?: string;
 }
 
+/**
+ * Data of a `converge` job. There is deliberately no `prune`: what may be
+ * dropped is decided by the definitions the worker loads, never by a payload.
+ */
+export interface ConvergeJobData {
+  v: 1;
+  kind: 'converge';
+  /** The enqueue call it belongs to — the `up` group it ends, or its own */
+  groupId?: string;
+  /** `false` lets it run while migrations are pending. Default: refuse */
+  ordered?: boolean;
+}
+
 /** What a completed `up`/`down` job returns */
 export interface MigrationJobResult {
   migration: string;
@@ -157,6 +178,21 @@ export interface SyncJobResult {
   enqueued: number;
   upToDate: boolean;
   migrations: string[];
+  /** The converge job this tick added (`convergeAfterUp`), if any */
+  converge?: { jobId: string; deduplicated: boolean };
+}
+
+/** What a completed `converge` job returns — the kit's result, minus `dryRun` */
+export interface ConvergeJobResult {
+  kind: 'converge';
+  groupId?: string;
+  changed: number;
+  inSync: boolean;
+  collections: CollectionConvergeResult[];
+  unstable?: ConvergeUnstable[];
+  runId?: string;
+  /** Time (ms) spent waiting for the MongoDB migration lock */
+  lockWaitMs: number;
 }
 
 /** What a job reports through `job.updateProgress` */
@@ -167,7 +203,7 @@ export interface MigrationJobProgress {
   groupId?: string;
   index?: number;
   total?: number;
-  kind?: 'sync';
+  kind?: 'sync' | 'converge';
   /** `lock-wait` only */
   attempts?: number;
   waitedMs?: number;
@@ -205,6 +241,13 @@ export interface MigrationJobSpec {
   opts: { attempts: 1; deduplication: { id: string }; [option: string]: unknown };
 }
 
+/** A converge job as handed to `queue.addBulk` */
+export interface ConvergeJobSpec {
+  name: 'converge';
+  data: ConvergeJobData;
+  opts: { attempts: 1; deduplication: { id: string }; [option: string]: unknown };
+}
+
 /** A planned, not yet enqueued, group */
 export interface MigrationPlan {
   /** Id of this enqueue call, in the kit's `generateId` format (a UUID by default) */
@@ -215,6 +258,8 @@ export interface MigrationPlan {
   /** The files, in execution order */
   migrations: string[];
   jobs: MigrationJobSpec[];
+  /** The converge job that ends an `up` group — see `EnqueueUpOptions.converge` */
+  converge?: ConvergeJobSpec;
 }
 
 /** {@link parseJobData}'s normalized result */
@@ -230,7 +275,8 @@ export type ParsedJobData =
       force?: true;
       ordered?: boolean;
     }
-  | { kind: 'sync'; to?: string };
+  | { kind: 'sync'; to?: string }
+  | { kind: 'converge'; groupId?: string; ordered?: boolean };
 
 /**
  * Validate a job read back from the queue and return a normalized copy.
@@ -275,6 +321,21 @@ export interface EnqueueUpOptions {
    * `up` of the CLI.
    */
   ordered?: boolean;
+  /**
+   * End the group with a converge job, which runs once every migration of the
+   * group is applied (and refuses, as blocked, while one is not). Default: the
+   * kit's `convergeAfterUp` — a queue never fires the kit's own after-up hook,
+   * since each job is a single-file run. With nothing pending, a converge job
+   * is added only when a dry run finds the database out of step. Refused with
+   * a filename or `to`.
+   */
+  converge?: boolean;
+}
+
+/** Options for `enqueueConverge` */
+export interface EnqueueConvergeOptions {
+  /** Default `true`: refuse while a migration is still pending. `false` converges anyway */
+  ordered?: boolean;
 }
 
 /** Options for `enqueueDown` */
@@ -308,6 +369,8 @@ export interface GroupWaitResult {
   batch: number | null;
   /** One result per job, in group order */
   results: MigrationJobResult[];
+  /** The group's converge job, when it had one */
+  converge?: ConvergeJobResult;
 }
 
 /** Handle returned by `enqueueUp`/`enqueueDown` */
@@ -325,25 +388,53 @@ export interface MigrationGroup {
    * `jobs[].id` is that existing job, so `wait()` simply joins it.
    */
   deduplicated: string[];
+  /** The converge job ending the group, or null. `deduplicated`: a peer's identical job */
+  converge: { id: string; deduplicated: boolean } | null;
   /**
-   * Resolve when every job has finished; reject with `QueueJobFailedError` at
-   * the first one that fails or outlives `timeoutMs`. Needs QueueEvents.
+   * Resolve when every job has finished — the converge job last; reject with
+   * `QueueJobFailedError` at the first one that fails or outlives `timeoutMs`.
+   * Needs QueueEvents.
    */
   wait(options?: WaitOptions): Promise<GroupWaitResult>;
 }
 
-/** Options for {@link MigrationQueue.schedule} — exactly one of `every` / `pattern` */
+/** Handle returned by `enqueueConverge` */
+export interface ConvergeHandle {
+  groupId: string;
+  jobId: string;
+  /** True when an identical converge job was already waiting — `jobId` is that one */
+  deduplicated: boolean;
+  /** Resolve with the job's result; reject with `QueueJobFailedError`. Needs QueueEvents */
+  wait(options?: WaitOptions): Promise<ConvergeJobResult>;
+}
+
+/**
+ * Options for {@link MigrationQueue.schedule} — exactly one of `every` /
+ * `pattern`, for a `sync` schedule (the default) or a `converge` one.
+ */
 export type ScheduleOptions = (
   | { every: number; pattern?: never }
   | { pattern: string; every?: never }
 ) & {
-  /** Scheduler id. Default `'migronaut-sync'` */
-  id?: string;
   /** Time zone for `pattern` */
   tz?: string;
-  /** Each tick enqueues pending migrations only up to and including this file */
-  to?: string;
-};
+} & (
+    | {
+        /** Each tick plans and enqueues what is pending. The default */
+        job?: 'sync';
+        /** Scheduler id. Default `'migronaut-sync'` */
+        id?: string;
+        /** Each tick enqueues pending migrations only up to and including this file */
+        to?: string;
+      }
+    | {
+        /** Each tick enqueues a converge job */
+        job: 'converge';
+        /** Scheduler id. Default `'migronaut-converge'` */
+        id?: string;
+        to?: never;
+      }
+  );
 
 /** Options for {@link MigrationQueue.startWorker} — passed to the Worker constructor */
 export interface StartWorkerOptions {
@@ -362,10 +453,10 @@ export interface StartWorkerOptions {
 export interface MigrationJobView {
   id: string;
   name: string;
-  data: MigrationJobData | SyncJobData;
+  data: MigrationJobData | SyncJobData | ConvergeJobData;
   state: string;
   progress: MigrationJobProgress | number;
-  returnvalue?: MigrationJobResult | SyncJobResult;
+  returnvalue?: MigrationJobResult | SyncJobResult | ConvergeJobResult;
   failedReason?: string;
   attemptsMade: number;
   timestamp?: number;
@@ -382,12 +473,12 @@ export interface CreateMigrationProcessorOptions {
   kitOptions?: MigratorKitOptions;
   /** A kit you own instead of `config` — never disconnected by the processor */
   kit?: MigratorKit;
-  /** The queue the jobs arrive on. Needed only to process `sync` jobs */
+  /** The queue the jobs arrive on. Needed only to process `sync` jobs, which enqueue into it */
   queue?: BullMQQueueLike;
   lockWait?: LockWaitOptions;
   /** Order guard for jobs that do not say. Default `true` */
   ordered?: boolean;
-  /** Options for the migration jobs a `sync` job enqueues */
+  /** Options for the jobs a `sync` job enqueues */
   jobOptions?: MigrationJobOptions;
 }
 
@@ -399,10 +490,10 @@ export interface CreateMigrationProcessorOptions {
  */
 export interface MigrationProcessor {
   (
-    job: BullMQJobLike<MigrationJobData | SyncJobData>,
+    job: BullMQJobLike<MigrationJobData | SyncJobData | ConvergeJobData>,
     token?: string,
     signal?: AbortSignal,
-  ): Promise<MigrationJobResult | SyncJobResult>;
+  ): Promise<MigrationJobResult | SyncJobResult | ConvergeJobResult>;
   /** The kit running the jobs — subscribe to its events for metrics */
   readonly kit: MigratorKit;
   /** Stop taking the lock: a job waiting for it fails with `RunAbortedError`. Irreversible */
@@ -457,6 +548,17 @@ export function enqueueDown(
   },
 ): Promise<MigrationGroup>;
 
+/** Enqueue a converge job on its own, on a queue you own */
+export function enqueueConverge(
+  queue: BullMQQueueLike,
+  kit: MigratorKit,
+  options?: EnqueueConvergeOptions & {
+    jobOptions?: MigrationJobOptions;
+    /** Lets the returned handle's `wait()` work without further arguments */
+    queueEvents?: BullMQQueueEventsLike;
+  },
+): Promise<ConvergeHandle>;
+
 /** Wait for a group's jobs — what `MigrationGroup.wait()` calls */
 export function waitForGroup(options: {
   queue: BullMQQueueLike;
@@ -465,6 +567,8 @@ export function waitForGroup(options: {
   direction: 'up' | 'down';
   batch: number | null;
   jobs: { id: string; migration: string }[];
+  /** The group's converge job, waited for last */
+  converge?: { id: string };
   timeoutMs?: number;
 }): Promise<GroupWaitResult>;
 
@@ -563,6 +667,12 @@ export class MigrationQueue<
    * newest applied first.
    */
   enqueueDown(filename?: string, options?: EnqueueDownOptions): Promise<MigrationGroup>;
+  /**
+   * Enqueue a converge job: the declared collections brought to their declared
+   * state by the worker, under the MongoDB lock — refused while a migration is
+   * pending unless `ordered: false`. Experimental.
+   */
+  enqueueConverge(options?: EnqueueConvergeOptions): Promise<ConvergeHandle>;
 
   /** Full migration status, read from MongoDB */
   status(): Promise<StatusRow[]>;
@@ -586,10 +696,15 @@ export class MigrationQueue<
 
   /**
    * Keep the database migrated on a schedule: each tick enqueues a `sync` job
-   * that plans and enqueues whatever is pending. Idempotent. BullMQ ≥ 5.16.
+   * that plans and enqueues whatever is pending — or, with `job: 'converge'`,
+   * a converge job on a cadence of its own. Idempotent. BullMQ ≥ 5.16.
    */
   schedule(options: ScheduleOptions): Promise<void>;
-  /** Remove a schedule. Resolves whether one existed */
+  /**
+   * Remove a schedule — the sync one by default; pass
+   * {@link DEFAULT_CONVERGE_SCHEDULER_ID} (or your own id) for another.
+   * Resolves whether one existed.
+   */
   unschedule(id?: string): Promise<boolean>;
 
   /**

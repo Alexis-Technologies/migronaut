@@ -1142,3 +1142,208 @@ describe('baseline CLI (integration)', () => {
     assert.strictEqual(await mongo.db.collection('_migronaut_migrations').countDocuments(), 0);
   });
 });
+
+describe('converge CLI (integration)', () => {
+  const USERS = { name: 'users', indexes: [{ key: { email: 1 } }] };
+
+  /** A migronaut.config.json in the project dir — `collections` has no flag or env var */
+  function declare(collections, extra = {}) {
+    writeFileSync(
+      path.join(project.dir, 'migronaut.config.json'),
+      JSON.stringify({ collections, ...extra }),
+    );
+  }
+  const indexNames = async (collection) =>
+    (await mongo.db.collection(collection).listIndexes().toArray())
+      .map((index) => index.name)
+      .filter((name) => name !== '_id_');
+
+  it('should preview with --dry-run and change nothing', async () => {
+    declare([USERS]);
+    const result = await runCli(baseArgs(['converge', '--dry-run']));
+    assert.strictEqual(result.code, 0);
+    assert.match(result.stdout, /users .*│ index .*│ email_1 .*│ create/);
+    assert.match(result.stdout, /Would make 2 change\(s\) in 1 of 1 collection\(s\)/);
+    assert.deepStrictEqual(await mongo.db.listCollections({ name: 'users' }).toArray(), []);
+  });
+
+  it('should gate CI with --check: exit 28 on drift, 0 once converged', async () => {
+    declare([USERS]);
+    const drift = await runCli(baseArgs(['converge', '--check']));
+    assert.strictEqual(drift.code, 28);
+    assert.match(drift.stderr, /differs from the declared collections/);
+    const json = await runCli(baseArgs(['converge', '--check', '--json']));
+    assert.strictEqual(json.code, 28);
+    const plan = JSON.parse(json.stdout);
+    assert.strictEqual(plan.dryRun, true);
+    assert.strictEqual(plan.inSync, false);
+
+    // Additive: applied without --yes, even with stdin closed.
+    assert.strictEqual((await runCli(baseArgs(['converge']))).code, 0);
+    assert.deepStrictEqual(await indexNames('users'), ['email_1']);
+
+    // An undeclared index kept with prune off is reported, not drift.
+    await mongo.db.collection('users').createIndex({ stray: 1 });
+    const clean = await runCli(baseArgs(['converge', '--check']));
+    assert.strictEqual(clean.code, 0);
+    assert.match(clean.stdout, /1 undeclared index\(es\) kept/);
+  });
+
+  it('should ask before dropping or rebuilding an index', async () => {
+    await mongo.db.collection('users').createIndex({ email: 1 });
+    declare([{ name: 'users', indexes: [{ key: { email: 1 }, unique: true }] }]);
+
+    const declined = await runCli(baseArgs(['converge']), {}, undefined, 'n\n');
+    assert.strictEqual(declined.code, 0);
+    assert.match(declined.stdout, /recreate │ unique/);
+    assert.match(declined.stdout, /Aborted/);
+    assert.strictEqual((await mongo.db.collection('users').indexes())[1].unique, undefined);
+
+    const closed = await runCli(baseArgs(['converge']));
+    assert.strictEqual(closed.code, 6);
+    assert.match(closed.stderr, /pass --yes/);
+
+    const json = await runCli(baseArgs(['converge', '--json']));
+    assert.strictEqual(json.code, 6);
+    const refused = JSON.parse(json.stdout);
+    assert.strictEqual(refused.error.code, 'CONFIG_INVALID');
+    assert.deepStrictEqual(
+      refused.error.context.destructive.map((action) => [action.name, action.action]),
+      [['email_1', 'recreate']],
+    );
+    assert.strictEqual((await mongo.db.collection('users').indexes())[1].unique, undefined);
+
+    const accepted = await runCli(baseArgs(['converge']), {}, undefined, 'y\n');
+    assert.strictEqual(accepted.code, 0);
+    assert.match(accepted.stdout, /✔ Rebuilt {2}index email_1 on users/);
+    assert.strictEqual((await mongo.db.collection('users').indexes())[1].unique, true);
+  });
+
+  it('should apply a destructive plan with --json --yes and print the result', async () => {
+    await mongo.db.collection('users').createIndex({ stray: 1 });
+    declare([USERS]);
+    const result = await runCli(baseArgs(['converge', '--json', '--yes', '--prune']));
+    assert.strictEqual(result.code, 0);
+    const converged = JSON.parse(result.stdout);
+    assert.strictEqual(converged.dryRun, false);
+    assert.strictEqual(converged.inSync, true);
+    assert.strictEqual(converged.changed, 2);
+    assert.deepStrictEqual(await indexNames('users'), ['email_1']);
+  });
+
+  it('should exit 27 with the converge result when a step fails', async () => {
+    await mongo.db.collection('users').insertMany([{ email: 'a' }, { email: 'a' }]);
+    declare([{ name: 'users', indexes: [{ key: { email: 1 }, unique: true }] }]);
+    const result = await runCli(baseArgs(['converge', '--json']));
+    assert.strictEqual(result.code, 27);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.error.code, 'CONVERGE_FAILED');
+    assert.strictEqual(parsed.error.context.mongoCode, 11000);
+    assert.strictEqual(parsed.error.context.converge.collections[0].actions[0].status, 'failed');
+    assert.ok(!('partial' in parsed));
+  });
+
+  it('should be refused while the lock is held, though a dry run still works', async () => {
+    declare([USERS]);
+    await mongo.db.collection('_migronaut_locks').insertOne({
+      _id: 'migronaut_lock',
+      lockedAt: new Date(),
+      pid: 4242,
+      host: 'busy-host',
+      executedBy: 'someone',
+      owner: 'busy',
+    });
+    assert.strictEqual((await runCli(baseArgs(['converge']))).code, 3);
+    assert.strictEqual((await runCli(baseArgs(['converge', '--dry-run']))).code, 0);
+  });
+
+  it('should say so when nothing is declared', async () => {
+    const dry = await runCli(baseArgs(['converge', '--dry-run']));
+    assert.strictEqual(dry.code, 0);
+    assert.match(dry.stdout, /No collections declared/);
+    const run = await runCli(baseArgs(['converge']));
+    assert.strictEqual(run.code, 0);
+    assert.match(run.stdout, /No collections declared/);
+  });
+
+  it('should stop when signalled at the prompt, before changing anything', async () => {
+    await mongo.db.collection('users').createIndex({ email: 1 });
+    declare([{ name: 'users', indexes: [{ key: { email: 1 }, unique: true }] }]);
+    const child = spawn(process.execPath, [binPath, ...baseArgs(['converge'])], {
+      cwd: project.dir,
+    });
+    let stderr = '';
+    const prompted = new Promise((resolve) => {
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk);
+        if (stderr.includes('Apply these changes?')) resolve();
+      });
+    });
+    child.stdout.resume();
+    const exited = new Promise((resolve) => child.on('close', resolve));
+    await prompted;
+    child.kill('SIGTERM');
+    // Give the handler a moment, then answer yes: the stop must still win.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    child.stdin.end('y\n');
+    assert.strictEqual(await exited, 11);
+    assert.strictEqual((await mongo.db.collection('users').indexes())[1].unique, undefined);
+  });
+
+  describe('up with convergeAfterUp', () => {
+    const CONVERGE_ON = { MIGRONAUT_CONVERGE_AFTER_UP: 'true' };
+
+    it('should converge after the migrations, keeping --json the migration rows', async () => {
+      project.write('0001-a.ts', insertMigration('things', 'a'));
+      declare([{ name: 'things', indexes: [{ key: { marker: 1 } }] }]);
+      const result = await runCli(baseArgs(['up', '--json']), CONVERGE_ON);
+      assert.strictEqual(result.code, 0);
+      const rows = JSON.parse(result.stdout);
+      assert.deepStrictEqual(
+        rows.map((row) => row.file),
+        ['0001-a.ts'],
+      );
+      assert.match(result.stderr, /Created {2}index marker_1 on things/);
+      assert.deepStrictEqual(await indexNames('things'), ['marker_1']);
+    });
+
+    it('should skip the converge with --no-converge, and force it with --converge', async () => {
+      project.write('0001-a.ts', insertMigration('things', 'a'));
+      declare([{ name: 'things', indexes: [{ key: { marker: 1 } }] }]);
+      assert.strictEqual((await runCli(baseArgs(['up', '--no-converge']), CONVERGE_ON)).code, 0);
+      assert.deepStrictEqual(await indexNames('things'), []);
+      assert.strictEqual((await runCli(baseArgs(['up', '--converge']))).code, 0);
+      assert.deepStrictEqual(await indexNames('things'), ['marker_1']);
+    });
+
+    it('should refuse --converge after a single file', async () => {
+      project.write('0001-a.ts', insertMigration('things', 'a'));
+      const result = await runCli(baseArgs(['up', '0001-a.ts', '--converge']));
+      assert.strictEqual(result.code, 6);
+      assert.match(result.stderr, /needs a bulk up/);
+    });
+
+    it('should exit 27 with the applied migrations as partial when the converge fails', async () => {
+      project.write('0001-a.ts', insertMigration('things', 'a'));
+      project.write('0002-b.ts', insertMigration('things', 'a'));
+      declare([{ name: 'things', indexes: [{ key: { marker: 1 }, unique: true }] }]);
+      const result = await runCli(baseArgs(['up', '--json']), CONVERGE_ON);
+      assert.strictEqual(result.code, 27);
+      const parsed = JSON.parse(result.stdout);
+      assert.strictEqual(parsed.error.code, 'CONVERGE_FAILED');
+      assert.deepStrictEqual(
+        parsed.partial.map((row) => row.file),
+        ['0001-a.ts', '0002-b.ts'],
+      );
+    });
+
+    it('should point a bulk preview at converge --dry-run', async () => {
+      project.write('0001-a.ts', insertMigration('things', 'a'));
+      declare([{ name: 'things', indexes: [{ key: { marker: 1 } }] }]);
+      const result = await runCli(baseArgs(['dry-run', 'up', '--json']), CONVERGE_ON);
+      assert.strictEqual(result.code, 0);
+      assert.ok(Array.isArray(JSON.parse(result.stdout)));
+      assert.match(result.stderr, /converge --dry-run/);
+    });
+  });
+});

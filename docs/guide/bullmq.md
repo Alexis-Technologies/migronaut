@@ -26,7 +26,8 @@ const { results } = await group.wait(); // optional: block until they all finish
 
 ::: tip When to reach for this — and when not
 Use it when migrations should be **triggered and observed as a service**: a migration microservice,
-an operator button, scheduled convergence, a deploy pipeline that enqueues and waits.
+an operator button, a schedule that keeps the database migrated, a deploy pipeline that enqueues
+and waits.
 
 If you only need "apply what is pending when the app boots", [`runMigrations`](/guide/api) is
 simpler and needs no Redis.
@@ -174,9 +175,55 @@ await mq.unschedule();
 ```
 
 Each tick enqueues a `sync` job that plans whatever is pending and enqueues it — the queue keeps
-converging the database on the migration files. Idempotent, so every instance can call it at boot.
+the database caught up with the migration files. Idempotent, so every instance can call it at
+boot.
 After a failure, each tick re-enqueues the failing migration (and the ones behind it) until a fix
 is deployed; the failures stay visible in the queue's `failed` set.
+
+## Converge jobs
+
+[Declared collections](/guide/collections) converge as a job too — one job, under the MongoDB
+lock, applied by the same worker:
+
+```js
+const handle = await mq.enqueueConverge();
+const result = await handle.wait(); // { changed, inSync, collections, … }
+```
+
+**At the end of every deploy.** With `convergeAfterUp: true` in the kit's config, `enqueueUp`
+ends every group that reaches the newest migration with a converge job — the kit's own after-up
+hook never fires in a queue, since each job is a single-file run. `enqueueUp(undefined, {
+converge })` decides per call.
+
+- The converge job runs after the group's last migration, and **refuses** (`MIGRATION_BLOCKED`)
+  while any migration is still pending — so a failed migration stops it too, and a peer still
+  applying the last migration is waited out under the lock rather than raced.
+- `group.converge` is `{ id, deduplicated }`, and `group.wait()` resolves with
+  `converge: ConvergeJobResult` after the migration results.
+- With **nothing pending**, `enqueueUp` adds a converge-only job when a dry run finds the database
+  out of step (and nothing at all when it is in step); `upToDate` stays `true`.
+- Its deduplication id is keyed on the group's last migration: two pods enqueueing the same deploy
+  share one converge job, while a newer, longer deploy gets its own at its own tail.
+- A `sync` tick does the same: pending migrations are enqueued with their converge job; with
+  nothing pending, one dry run decides whether a converge job is needed — so a deploy that only
+  changed a definition converges on the next tick, and an idle tick takes no lock.
+
+**On its own schedule.** Index builds often belong at night, not on every sync tick:
+
+```js
+await mq.schedule({ job: 'converge', pattern: '0 3 * * *', tz: 'UTC' }); // id 'migronaut-converge'
+await mq.unschedule(DEFAULT_CONVERGE_SCHEDULER_ID);
+```
+
+A converge job is `{ v: 1, kind: 'converge', groupId?, ordered? }` — deliberately **without
+`prune`**: what may be dropped is decided by the definitions the worker loads (`prune: true` in a
+definition), never by a payload sitting in Redis. A failed converge job is not retried; with a
+schedule or `convergeAfterUp`, the next tick or deploy tries again.
+
+::: warning Roll the workers first
+A worker running old code converges to the old definitions — with `prune`, it can drop an index the
+new deploy just declared. Deploy the workers before you rely on a changed definition.
+:::
 
 ## Enqueue and wait: deploy hooks and CI
 
@@ -228,8 +275,8 @@ export class MigrationsProcessor extends WorkerHost {
 ```
 
 The producer side has the same split: `enqueueUp(queue, kit, options)`,
-`enqueueDown(queue, kit, options)`, `planUpJobs(kit, options)` and `waitForGroup(...)` work on a
-`Queue` you own.
+`enqueueDown(queue, kit, options)`, `enqueueConverge(queue, kit, options)`, `planUpJobs(kit,
+options)` and `waitForGroup(...)` work on a `Queue` you own.
 
 ::: warning Run it with `concurrency: 1`
 The processor serializes jobs inside one process whatever the Worker's concurrency, and the MongoDB
@@ -239,8 +286,8 @@ on the lock. One is the honest setting.
 
 ## Observing
 
-- **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'completed' | 'failed', migration, direction, groupId, index, total, code? }` — `code` is the typed error code of a failed job.
-- **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, and the failure line.
+- **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'completed' | 'failed', migration, direction, groupId, index, total, code? }` — `code` is the typed error code of a failed job. A `sync` or `converge` job reports `{ phase, kind }` instead of the migration fields.
+- **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step, and the failure line.
 - **Kit events**: `mq.kit.on('migration:success', …)` — the same [lifecycle events](/guide/api) as everywhere else.
 - **Worker events**: `mq.worker.on('failed', …)`.
 - **Traces**: pass `bullmq.telemetry` and the kit's `telemetry` option, and one trace runs from the
@@ -276,6 +323,8 @@ waits. So:
   migration name must be a bare filename — a job can make the worker run a migration that
   *exists in its migrations directory*, never an arbitrary path. Invalid jobs fail with
   `QueueJobInvalidError`.
+- **No decisions in jobs.** A converge job cannot ask for `prune` — what may be dropped comes from
+  the worker's own definitions.
 - **No secrets in jobs.** A job carries a filename, a group id and a batch number. The connection
   string stays in the worker's configuration.
 - **What the queue stores is redacted.** `failedReason`, stack traces, job logs and `getJob()`

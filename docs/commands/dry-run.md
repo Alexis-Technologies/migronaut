@@ -30,6 +30,13 @@ production run before committing to it.
    • 20260605120500-backfill-status.js
 ```
 
+::: tip Declared collections are not previewed here
+With `convergeAfterUp` on, a bulk `up` ends by converging the
+[declared collections](/guide/collections) — but that plan only means something against the
+database the migrations leave behind, so `dry-run up` does not guess at it. It points you at
+[`migronaut converge --dry-run`](/commands/converge), to run once the migrations are applied.
+:::
+
 ## Options
 
 | Option | Description |

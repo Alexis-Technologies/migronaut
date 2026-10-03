@@ -4,13 +4,16 @@ const { errorText } = require('../utils/error.js');
 const { isBareFilename } = require('../utils/migration-name.js');
 const { redactDeep, redactUris } = require('../utils/redact.js');
 const {
+  DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
+  JOB_NAMES,
+  buildConvergeJobTemplate,
   buildSyncJobTemplate,
   isPlainObject,
 } = require('./jobs.js');
 const { createMigrationProcessor, resolveProcessorOptions } = require('./processor.js');
-const { assertJobOptions, enqueueDown, enqueueUp } = require('./producer.js');
+const { assertJobOptions, enqueueConverge, enqueueDown, enqueueUp } = require('./producer.js');
 
 /**
  * Twice BullMQ's default job lock: its renewal (every half) then survives a
@@ -168,7 +171,8 @@ class MigrationQueue {
     );
     this.#processor = createMigrationProcessor({
       kit: this.#kit,
-      // `sync` jobs enqueue into the same queue they arrived on.
+      // `sync` jobs (and the converge jobs they add) enqueue into the queue
+      // they arrived on.
       queue: this.#queue,
       ...(lockWait !== undefined ? { lockWait } : {}),
       ...(jobOptions !== undefined ? { jobOptions } : {}),
@@ -269,6 +273,21 @@ class MigrationQueue {
       this.#queue,
       this.#kit,
       { ...options, filename, jobOptions: this.#jobOptions },
+      this.#internals(),
+    );
+  }
+
+  /**
+   * Enqueue a converge job: the declared collections brought to their
+   * declared state by the worker, under the MongoDB lock. By default it
+   * refuses while a migration is still pending (`ordered: false` lifts that).
+   */
+  async enqueueConverge(options = {}) {
+    this.#assertOpen();
+    return enqueueConverge(
+      this.#queue,
+      this.#kit,
+      { ...options, jobOptions: this.#jobOptions },
       this.#internals(),
     );
   }
@@ -402,16 +421,26 @@ class MigrationQueue {
 
   /**
    * Keep the database migrated on a schedule: every tick enqueues a `sync`
-   * job, which plans whatever is pending and enqueues it. Idempotent — safe to
-   * call from every instance at boot.
+   * job, which plans whatever is pending and enqueues it — or, with
+   * `job: 'converge'`, a converge job, on a cadence of its own (index builds
+   * often belong at night, not on every sync). Idempotent — safe to call from
+   * every instance at boot.
    */
   async schedule(options = {}) {
     this.#assertOpen();
     if (!isPlainObject(options)) {
       throw new ConfigInvalidError('schedule options must be an object');
     }
-    const { id = DEFAULT_SCHEDULER_ID, every, pattern, tz, to } = options;
+    const { job = JOB_NAMES.SYNC, every, pattern, tz, to } = options;
+    if (job !== JOB_NAMES.SYNC && job !== JOB_NAMES.CONVERGE) {
+      throw new ConfigInvalidError("schedule job must be 'sync' or 'converge'", { job });
+    }
+    const converge = job === JOB_NAMES.CONVERGE;
+    const { id = converge ? DEFAULT_CONVERGE_SCHEDULER_ID : DEFAULT_SCHEDULER_ID } = options;
     assertName(id, 'id');
+    if (converge && to !== undefined) {
+      throw new ConfigInvalidError('to only applies to a sync schedule', { to });
+    }
     if ((every === undefined) === (pattern === undefined)) {
       throw new ConfigInvalidError(
         'schedule needs exactly one of `every` (ms) or `pattern` (cron)',
@@ -437,11 +466,15 @@ class MigrationQueue {
     await this.#queue.upsertJobScheduler(
       id,
       { ...(every !== undefined ? { every } : { pattern }), ...(tz !== undefined ? { tz } : {}) },
-      buildSyncJobTemplate({ to }),
+      converge ? buildConvergeJobTemplate() : buildSyncJobTemplate({ to }),
     );
   }
 
-  /** Remove a schedule. Resolves whether one existed */
+  /**
+   * Remove a schedule — the sync one by default; pass
+   * `DEFAULT_CONVERGE_SCHEDULER_ID` (or your own id) for another. Resolves
+   * whether one existed.
+   */
   async unschedule(id = DEFAULT_SCHEDULER_ID) {
     assertName(id, 'id');
     if (typeof this.#queue.removeJobScheduler !== 'function') {

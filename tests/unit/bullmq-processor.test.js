@@ -628,6 +628,98 @@ describe('createMigrationProcessor', () => {
     });
   });
 
+  describe('converge jobs', () => {
+    const convergeJob = (data = {}) => fakeJob('converge', { kind: 'converge', ...data });
+    const converged = {
+      dryRun: false,
+      changed: 2,
+      inSync: true,
+      collections: [{ name: 'c', actions: [] }],
+    };
+
+    it('should converge under the lock, ordered by default, and return the result', async () => {
+      const kit = stubKit({
+        converge: mock.fn(async () => {
+          kit.emit('run:start', { runId: 'run-9', command: 'converge' });
+          kit.emit('converge:start', { trigger: 'converge', collections: 1 });
+          kit.emit('converge:action', {
+            collection: 'c',
+            target: 'index',
+            name: 'a_1',
+            action: 'create',
+            status: 'applied',
+            durationMs: 4,
+          });
+          kit.emit('converge:action', {
+            collection: 'c',
+            target: 'validator',
+            name: 'c',
+            action: 'modify',
+            status: 'failed',
+          });
+          kit.emit('converge:end', { success: true, changed: 2 });
+          return {
+            ...converged,
+            unstable: [{ collection: 'c', target: 'index', name: 'a_1', action: 'modify' }],
+          };
+        }),
+      });
+      const job = convergeJob({ groupId: 'g-1' });
+      const result = await createMigrationProcessor({ kit })(job);
+      assert.deepStrictEqual(kit.converge.mock.calls[0].arguments, [{ ordered: true }]);
+      assert.deepStrictEqual(result, {
+        kind: 'converge',
+        groupId: 'g-1',
+        changed: 2,
+        inSync: true,
+        collections: [{ name: 'c', actions: [] }],
+        unstable: [{ collection: 'c', target: 'index', name: 'a_1', action: 'modify' }],
+        runId: 'run-9',
+        lockWaitMs: 0,
+      });
+      assert.deepStrictEqual(job.progressUpdates.at(0), { phase: 'running', kind: 'converge' });
+      assert.deepStrictEqual(job.progressUpdates.at(-1), { phase: 'completed', kind: 'converge' });
+      assert.ok(job.logs.includes('✔ create index a_1 on c [4ms]'), job.logs.join(' | '));
+      assert.ok(job.logs.includes('✖ modify validator on c: failed'), job.logs.join(' | '));
+      assert.ok(job.logs.includes('✔ Converged 2 change(s)'));
+    });
+
+    it('should honour a job that opts out of the order guard, and the processor default', async () => {
+      const kit = stubKit({ converge: mock.fn(async () => converged) });
+      await createMigrationProcessor({ kit })(convergeJob({ ordered: false }));
+      assert.deepStrictEqual(kit.converge.mock.calls[0].arguments, [{}]);
+      await createMigrationProcessor({ kit, ordered: false })(convergeJob());
+      assert.deepStrictEqual(kit.converge.mock.calls[1].arguments, [{}]);
+    });
+
+    it('should fail a blocked converge without a retry', async () => {
+      const kit = stubKit({
+        converge: mock.fn(async () => {
+          throw new MigrationBlockedError('converge is blocked: 1 migration(s) still pending', {});
+        }),
+      });
+      const job = convergeJob();
+      await assert.rejects(createMigrationProcessor({ kit })(job), MigrationBlockedError);
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'MIGRATION_BLOCKED');
+    });
+
+    it('should wait out a held lock', async () => {
+      let calls = 0;
+      const kit = stubKit({
+        converge: mock.fn(async () => {
+          calls += 1;
+          if (calls === 1) throw new LockAlreadyHeldError('held', {});
+          return converged;
+        }),
+        lockInfo: mock.fn(async () => null),
+      });
+      const job = convergeJob();
+      const result = await createMigrationProcessor({ kit, lockWait: fastWait })(job);
+      assert.strictEqual(result.inSync, true);
+      assert.ok(job.progressUpdates.some((update) => update.phase === 'lock-wait'));
+    });
+  });
+
   describe('sync jobs', () => {
     const syncJob = (data = {}) => fakeJob('sync', { kind: 'sync', ...data });
 
@@ -656,6 +748,44 @@ describe('createMigrationProcessor', () => {
       assert.strictEqual(kit.dryRun.mock.callCount(), 0, 'the cheap probe short-circuits planning');
       assert.strictEqual(queue.addBulk.mock.callCount(), 0);
       assert.deepStrictEqual(job.progressUpdates.at(-1), { phase: 'completed', kind: 'sync' });
+    });
+
+    it('should add a converge job from an idle tick, only when the database differs', async () => {
+      const drift = { dryRun: true, changed: 1, inSync: false, collections: [] };
+      const kit = stubKit({
+        convergesAfterUp: mock.fn(async () => true),
+        converge: mock.fn(async () => drift),
+      });
+      const queue = {
+        addBulk: mock.fn(async (specs) => specs.map((spec, index) => ({ id: String(index + 1) }))),
+      };
+      const result = await createMigrationProcessor({ kit, queue })(syncJob());
+      assert.deepStrictEqual(result.converge, { jobId: '1', deduplicated: false });
+      assert.strictEqual(queue.addBulk.mock.calls[0].arguments[0][0].name, 'converge');
+
+      drift.inSync = true;
+      const quiet = await createMigrationProcessor({ kit, queue })(syncJob());
+      assert.ok(!('converge' in quiet));
+      // A tick limited by `to` stops short of the head: no converge.
+      drift.inSync = false;
+      const limited = await createMigrationProcessor({ kit, queue })(syncJob({ to: '0001-a.js' }));
+      assert.ok(!('converge' in limited));
+      assert.strictEqual(queue.addBulk.mock.callCount(), 1);
+    });
+
+    it('should report the converge job ending the group it enqueued', async () => {
+      const pending = [{ file: '0001-a.js', status: 'pending' }];
+      const kit = stubKit({
+        list: mock.fn(async () => pending),
+        dryRun: mock.fn(async () => pending),
+        convergesAfterUp: mock.fn(async () => true),
+      });
+      const queue = {
+        addBulk: mock.fn(async (specs) => specs.map((spec, index) => ({ id: String(index + 1) }))),
+      };
+      const result = await createMigrationProcessor({ kit, queue })(syncJob());
+      assert.strictEqual(result.enqueued, 1);
+      assert.deepStrictEqual(result.converge, { jobId: '2', deduplicated: false });
     });
 
     it('should enqueue what is pending as one group', async () => {

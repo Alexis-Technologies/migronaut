@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const os = require('node:os');
 const { afterEach, beforeEach, it } = require('node:test');
-const { createMigrationQueue } = require('../../bullmq.js');
+const { DEFAULT_CONVERGE_SCHEDULER_ID, createMigrationQueue } = require('../../bullmq.js');
 const {
   ConfigInvalidError,
   MigrationBlockedError,
@@ -714,6 +714,220 @@ function defineBullMQScenarios(harness) {
       assert.strictEqual(results[0].status, 'skipped');
       assert.deepStrictEqual(await markers(), ['a'], 'applied exactly once');
       assert.strictEqual((await records()).length, 1);
+    });
+  }
+
+  // ─── Converge jobs ─────────────────────────────────────────────────────────
+
+  const CONVERGING = {
+    collections: [{ name: 'things', indexes: [{ key: { marker: 1 } }] }],
+    convergeAfterUp: true,
+  };
+  /** The collection's index names — none while the collection does not exist yet */
+  const indexNames = async () => {
+    const indexes = await harness
+      .mongo()
+      .db.collection('things')
+      .listIndexes()
+      .toArray()
+      .catch((error) => {
+        if (error.code === 26) return [];
+        throw error;
+      });
+    return indexes.map((index) => index.name).filter((name) => name !== '_id_');
+  };
+  async function eventually(check, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await check())) {
+      if (Date.now() > deadline) throw new Error('condition not reached');
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+  }
+
+  it('should converge after the last migration of a group, and report it from wait()', async () => {
+    three();
+    const mq = createQueue({ config: CONVERGING });
+    const group = await mq.enqueueUp();
+    assert.strictEqual(group.jobs.length, 3);
+    assert.strictEqual(group.converge.deduplicated, false);
+    const live = await mq.queue.getJob(group.converge.id);
+    assert.strictEqual(live.name, 'converge');
+    assert.strictEqual(live.data.groupId, group.groupId);
+    assert.strictEqual(live.opts.attempts, 1);
+
+    await mq.startWorker();
+    const waited = await group.wait({ timeoutMs: 10_000 });
+    assert.strictEqual(waited.results.length, 3);
+    assert.strictEqual(waited.converge.kind, 'converge');
+    assert.strictEqual(waited.converge.groupId, group.groupId);
+    assert.strictEqual(waited.converge.inSync, true);
+    assert.strictEqual(waited.converge.changed, 1);
+    assert.strictEqual(typeof waited.converge.runId, 'string');
+    assert.deepStrictEqual(await indexNames(), ['marker_1']);
+    const logs = await harness.logsOf(mq.queue, group.converge.id);
+    assert.ok(
+      logs.some((row) => /create index marker_1 on things/.test(row)),
+      logs.join(' | '),
+    );
+  });
+
+  it('should add a converge-only job when nothing is pending but the database differs', async () => {
+    const mq = createQueue({ config: CONVERGING });
+    await mq.startWorker();
+    const drifted = await mq.enqueueUp();
+    assert.strictEqual(drifted.upToDate, true);
+    assert.deepStrictEqual(drifted.jobs, []);
+    assert.ok(drifted.converge);
+    const waited = await drifted.wait({ timeoutMs: 10_000 });
+    // The collection, then its index.
+    assert.strictEqual(waited.converge.changed, 2);
+    assert.deepStrictEqual(await indexNames(), ['marker_1']);
+
+    const settledDown = await mq.enqueueUp();
+    assert.strictEqual(settledDown.converge, null, 'in step: no job at all');
+  });
+
+  it('should not converge after a group that stops short of the head', async () => {
+    three();
+    const mq = createQueue({ config: CONVERGING });
+    assert.strictEqual((await mq.enqueueUp(undefined, { to: '0002-b.js' })).converge, null);
+    assert.strictEqual((await mq.enqueueUp('0001-a.js')).converge, null);
+    await assert.rejects(
+      mq.enqueueUp(undefined, { to: '0002-b.js', converge: true }),
+      ConfigInvalidError,
+    );
+  });
+
+  it('should fail a converge behind a failed migration as blocked, then converge after the fix', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    write('0002-b.js', failingMigration());
+    const mq = createQueue({ config: CONVERGING });
+    await mq.startWorker();
+    const group = await mq.enqueueUp();
+    await assert.rejects(group.wait({ timeoutMs: 10_000 }), QueueJobFailedError);
+    const [blocked] = await settled(mq, [group.converge.id]);
+    assert.strictEqual(blocked.state, 'failed');
+    assert.strictEqual(blocked.progress.code, 'MIGRATION_BLOCKED');
+    assert.deepStrictEqual(await indexNames(), []);
+
+    write('0002-b.js', insertMigration('things', 'b'));
+    const retry = await mq.enqueueUp();
+    const waited = await retry.wait({ timeoutMs: 10_000 });
+    assert.strictEqual(waited.converge.inSync, true);
+    assert.deepStrictEqual(await indexNames(), ['marker_1']);
+  });
+
+  it('should absorb a second enqueue of the same group, converge job included', async () => {
+    three();
+    const mq = createQueue({ config: CONVERGING });
+    const first = await mq.enqueueUp();
+    const second = await mq.enqueueUp();
+    assert.strictEqual(second.converge.id, first.converge.id);
+    assert.strictEqual(second.converge.deduplicated, true);
+    await mq.startWorker();
+    assert.strictEqual((await second.wait({ timeoutMs: 10_000 })).converge.inSync, true);
+  });
+
+  it('should converge after the newer of two overlapping deploys', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    write('0002-b.js', insertMigration('things', 'b'));
+    const mq = createQueue({ config: CONVERGING });
+    const older = await mq.enqueueUp();
+    write('0003-c.js', insertMigration('things', 'c'));
+    const newer = await mq.enqueueUp();
+    // The newer deploy's converge sits behind its own last migration, not
+    // folded into the older one's, which runs while 0003 is still pending.
+    assert.notStrictEqual(newer.converge.id, older.converge.id);
+
+    await mq.startWorker();
+    await assert.rejects(older.wait({ timeoutMs: 10_000 }), QueueJobFailedError);
+    const waited = await newer.wait({ timeoutMs: 10_000 });
+    assert.strictEqual(waited.converge.inSync, true);
+    assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
+    assert.deepStrictEqual(await indexNames(), ['marker_1']);
+  });
+
+  it('should run a converge on its own, waiting out a held lock', async () => {
+    const mq = createQueue({ config: { collections: CONVERGING.collections } });
+    await holdLock();
+    await mq.startWorker();
+    const handle = await mq.enqueueConverge();
+    assert.strictEqual(handle.deduplicated, false);
+    setTimeout(() => {
+      releaseLock().catch(() => undefined);
+    }, 150);
+    const result = await handle.wait({ timeoutMs: 10_000 });
+    assert.strictEqual(result.inSync, true);
+    assert.ok(result.lockWaitMs > 0);
+    assert.deepStrictEqual(await indexNames(), ['marker_1']);
+  });
+
+  it('should refuse an ordered converge while a migration is pending, unless told not to', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue({ config: { collections: CONVERGING.collections } });
+    await mq.startWorker();
+    const ordered = await mq.enqueueConverge();
+    await assert.rejects(ordered.wait({ timeoutMs: 10_000 }), (error) => {
+      assert.ok(error instanceof QueueJobFailedError);
+      assert.strictEqual(error.context.kind, 'converge');
+      assert.match(error.context.failedReason, /converge is blocked/);
+      return true;
+    });
+    const unordered = await mq.enqueueConverge({ ordered: false });
+    assert.strictEqual((await unordered.wait({ timeoutMs: 10_000 })).inSync, true);
+  });
+
+  it('should never take prune from a job payload', async () => {
+    await harness.mongo().db.collection('things').createIndex({ stray: 1 });
+    const mq = createQueue({ config: { collections: CONVERGING.collections } });
+    await mq.startWorker();
+    const job = await mq.queue.add(
+      'converge',
+      { v: 1, kind: 'converge', prune: true, ordered: false },
+      { attempts: 1 },
+    );
+    const [view] = await settled(mq, [job.id]);
+    assert.strictEqual(view.state, 'completed');
+    assert.deepStrictEqual((await indexNames()).sort(), ['marker_1', 'stray_1']);
+  });
+
+  it('should converge from a sync tick when nothing is pending but the database differs', async () => {
+    const mq = createQueue({ config: CONVERGING });
+    await mq.startWorker();
+    const sync = await mq.queue.add('sync', { v: 1, kind: 'sync' }, { attempts: 1 });
+    const [view] = await settled(mq, [sync.id]);
+    assert.strictEqual(view.returnvalue.upToDate, true);
+    assert.strictEqual(typeof view.returnvalue.converge.jobId, 'string');
+    await eventually(async () => (await indexNames()).length === 1);
+
+    // In step now: the next idle tick adds nothing.
+    const again = await mq.queue.add('sync', { v: 1, kind: 'sync' }, { attempts: 1 });
+    const [quiet] = await settled(mq, [again.id]);
+    assert.ok(!('converge' in quiet.returnvalue));
+  });
+
+  it('should register and remove a converge schedule', async () => {
+    const mq = createQueue({ config: { collections: CONVERGING.collections } });
+    await mq.schedule({ job: 'converge', every: 3_600_000 });
+    await assert.rejects(
+      mq.schedule({ job: 'converge', every: 1000, to: '0001-a.js' }),
+      ConfigInvalidError,
+    );
+    await assert.rejects(mq.schedule({ job: 'migrate', every: 1000 }), ConfigInvalidError);
+    assert.strictEqual(await mq.unschedule(DEFAULT_CONVERGE_SCHEDULER_ID), true);
+    assert.strictEqual(await mq.unschedule(DEFAULT_CONVERGE_SCHEDULER_ID), false);
+  });
+
+  if (harness.fake) {
+    it('should converge on a converge scheduler tick', async () => {
+      const mq = createQueue({ config: { collections: CONVERGING.collections } });
+      await mq.startWorker();
+      await mq.schedule({ job: 'converge', every: 60_000 });
+      const tick = await mq.queue._tick(DEFAULT_CONVERGE_SCHEDULER_ID);
+      const [view] = await settled(mq, [tick.id]);
+      assert.strictEqual(view.returnvalue.kind, 'converge');
+      assert.strictEqual(view.progress.kind, 'converge');
+      assert.deepStrictEqual(await indexNames(), ['marker_1']);
     });
   }
 

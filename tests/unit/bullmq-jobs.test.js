@@ -1,14 +1,18 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const {
+  DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
   FORBIDDEN_JOB_OPTIONS,
   JOB_DATA_VERSION,
   JOB_NAMES,
   MIGRATION_JOB_OPTIONS,
+  buildConvergeJob,
+  buildConvergeJobTemplate,
   buildMigrationJob,
   buildSyncJobTemplate,
+  convergeDedupId,
   dedupId,
   migrationJobOptions,
   parseJobData,
@@ -32,13 +36,17 @@ describe('job contract constants', () => {
     assert.ok(Object.isFrozen(JOB_NAMES));
     assert.ok(Object.isFrozen(MIGRATION_JOB_OPTIONS));
     assert.ok(Object.isFrozen(FORBIDDEN_JOB_OPTIONS));
-    assert.deepStrictEqual({ ...JOB_NAMES }, { UP: 'up', DOWN: 'down', SYNC: 'sync' });
+    assert.deepStrictEqual(
+      { ...JOB_NAMES },
+      { UP: 'up', DOWN: 'down', SYNC: 'sync', CONVERGE: 'converge' },
+    );
     assert.strictEqual(JOB_DATA_VERSION, 1);
   });
 
   it('should use names BullMQ accepts (no colon)', () => {
     assert.ok(!DEFAULT_QUEUE_NAME.includes(':'));
     assert.ok(!DEFAULT_SCHEDULER_ID.includes(':'));
+    assert.ok(!DEFAULT_CONVERGE_SCHEDULER_ID.includes(':'));
   });
 
   it('should give migration jobs exactly one attempt', () => {
@@ -240,5 +248,66 @@ describe('parseJobData', () => {
       () => parseJobData({ name: 'up', data: upData({ v: 9 }) }),
       (error) => !Object.hasOwn(error.context, 'jobId'),
     );
+  });
+});
+
+describe('converge jobs', () => {
+  it('should key the dedup id on the migration the converge follows', () => {
+    assert.strictEqual(convergeDedupId(), 'converge');
+    assert.strictEqual(convergeDedupId('0001-add users.js'), 'converge-after-0001-add_users.js');
+    assert.notStrictEqual(convergeDedupId('0001-a.js'), convergeDedupId('0002-b.js'));
+  });
+
+  it("should build a single-attempt job with the caller's passthrough options", () => {
+    assert.deepStrictEqual(
+      buildConvergeJob({ groupId: 'g', after: '0002-b.js', jobOptions: { removeOnComplete: 10 } }),
+      {
+        name: 'converge',
+        data: { v: 1, kind: 'converge', groupId: 'g' },
+        opts: {
+          removeOnComplete: 10,
+          attempts: 1,
+          deduplication: { id: 'converge-after-0002-b.js' },
+        },
+      },
+    );
+    assert.deepStrictEqual(buildConvergeJob({ ordered: false }).data, {
+      v: 1,
+      kind: 'converge',
+      ordered: false,
+    });
+    // `ordered: true` is the default, so it is not written.
+    assert.ok(!('ordered' in buildConvergeJob({ ordered: true }).data));
+  });
+
+  it('should give a scheduled converge its own trace per tick', () => {
+    assert.deepStrictEqual(buildConvergeJobTemplate(), {
+      name: 'converge',
+      data: { v: 1, kind: 'converge' },
+      opts: { attempts: 1, telemetry: { omitContext: true } },
+    });
+  });
+
+  it('should parse a converge job and pass nothing else on', () => {
+    assert.deepStrictEqual(parseJobData(job('converge', { v: 1, kind: 'converge' })), {
+      kind: 'converge',
+    });
+    assert.deepStrictEqual(
+      parseJobData(
+        job('converge', { v: 1, kind: 'converge', groupId: 'g', ordered: false, prune: true }),
+      ),
+      { kind: 'converge', groupId: 'g', ordered: false },
+    );
+  });
+
+  it('should refuse a malformed converge job as untrusted input', () => {
+    for (const data of [
+      { v: 2, kind: 'converge' },
+      { v: 1, kind: 'converge', groupId: '' },
+      { v: 1, kind: 'converge', groupId: 'x'.repeat(129) },
+      { v: 1, kind: 'converge', ordered: 'yes' },
+    ]) {
+      assert.throws(() => parseJobData(job('converge', data)), QueueJobInvalidError);
+    }
   });
 });

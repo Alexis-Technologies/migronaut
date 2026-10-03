@@ -5,8 +5,9 @@ const { redactUris } = require('../utils/redact.js');
 const TIMEOUT_MARKER = 'timed out before finishing';
 
 /**
- * Wait for every job of an enqueue group, in group order, and resolve
- * `{ groupId, direction, batch, results }`.
+ * Wait for every job of an enqueue group, in group order — and for the
+ * group's converge job last, when it has one — and resolve
+ * `{ groupId, direction, batch, results, converge? }`.
  *
  * Rejects with QueueJobFailedError at the first job that fails or outlives the
  * budget — the jobs after it cannot succeed anyway (they fail as blocked), and
@@ -16,7 +17,16 @@ const TIMEOUT_MARKER = 'timed out before finishing';
  * Finished jobs must still exist in the queue when this attaches: a
  * `removeOnComplete: true` queue gives it nothing to read.
  */
-async function waitForGroup({ queue, queueEvents, groupId, direction, batch, jobs, timeoutMs }) {
+async function waitForGroup({
+  queue,
+  queueEvents,
+  groupId,
+  direction,
+  batch,
+  jobs,
+  converge,
+  timeoutMs,
+}) {
   if (!queueEvents) {
     throw new ConfigInvalidError(
       'wait() needs QueueEvents — pass bullmq.QueueEvents to createMigrationQueue, ' +
@@ -29,18 +39,18 @@ async function waitForGroup({ queue, queueEvents, groupId, direction, batch, job
   }
 
   const results = [];
-  if (jobs.length === 0) return { groupId, direction, batch, results };
+  if (jobs.length === 0 && !converge) return { groupId, direction, batch, results };
 
   await queueEvents.waitUntilReady?.();
   const deadline = timeoutMs !== undefined ? Date.now() + timeoutMs : undefined;
 
-  for (const { id, migration } of jobs) {
+  /** Wait for one job; `message` and `fields` say which one in a failure */
+  async function finish(id, message, fields) {
     const fail = (failedReason, timedOut) =>
-      new QueueJobFailedError(`Migration job failed: ${migration}`, {
+      new QueueJobFailedError(message, {
         groupId,
         jobId: id,
-        migration,
-        direction,
+        ...fields,
         failedReason,
         timedOut,
         results: [...results],
@@ -55,13 +65,19 @@ async function waitForGroup({ queue, queueEvents, groupId, direction, batch, job
       if (remaining <= 0) throw fail(`wait timed out after ${timeoutMs}ms`, true);
     }
     try {
-      results.push(await job.waitUntilFinished(queueEvents, remaining));
+      return await job.waitUntilFinished(queueEvents, remaining);
     } catch (error) {
       const reason = redactUris(error instanceof Error ? error.message : String(error));
       throw fail(reason, reason.includes(TIMEOUT_MARKER));
     }
   }
-  return { groupId, direction, batch, results };
+
+  for (const { id, migration } of jobs) {
+    results.push(await finish(id, `Migration job failed: ${migration}`, { migration, direction }));
+  }
+  if (!converge) return { groupId, direction, batch, results };
+  const converged = await finish(converge.id, 'Converge job failed', { kind: 'converge' });
+  return { groupId, direction, batch, results, converge: converged };
 }
 
 module.exports = { waitForGroup };

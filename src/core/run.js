@@ -62,6 +62,12 @@ async function runMigrations(config = {}, options = {}) {
   // this is the metrics/alerting injection point for apps that embed
   // runMigrations and cannot reach the internally-constructed kit otherwise.
   onKit?.(kit);
+  // `up` keeps returning the migration rows; with `convergeAfterUp` the
+  // converge outcome rides along in the summary, from the kit's own event.
+  let converge;
+  kit.on('converge:end', (event) => {
+    if (event.trigger === 'up' && event.success) converge = event.result;
+  });
 
   try {
     await kit.connect();
@@ -79,7 +85,14 @@ async function runMigrations(config = {}, options = {}) {
       // the kit's own.
       logger: kit.logger,
     });
-    return { applied, upToDate: applied.length === 0, waited, waitedMs, attempts };
+    return {
+      applied,
+      upToDate: applied.length === 0,
+      waited,
+      waitedMs,
+      attempts,
+      ...(converge ? { converge } : {}),
+    };
   } finally {
     await kit.disconnect().catch(() => undefined);
   }

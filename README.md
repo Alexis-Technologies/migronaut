@@ -192,6 +192,7 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--
 | `migronaut up [file]` | Run all pending migrations, one named file, or up to `--to <file>` |
 | `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, one file, or to `--to <file>` |
 | `migronaut redo [file]` | Roll back then re-apply (the last migration, or one file) |
+| `migronaut converge` | Bring declared collections — indexes and validators — to their declared state |
 | `migronaut status` | Print the full migration status table (`--check` to fail CI on pending) |
 | `migronaut list` | List migrations, filtered by status |
 | `migronaut dry-run <up\|down> [file]` | Preview a run without touching the database |
@@ -199,8 +200,8 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--
 | `migronaut lock` | Show who currently holds the migration lock |
 | `migronaut unlock` | Force-release a stuck lock left behind by a crashed run |
 
-Most data commands (`up`, `down`, `redo`, `status`, `list`, `dry-run`, `import`, `baseline`,
-`create`, `audit`, `lock`, `unlock`) accept **`--json`** for machine-readable output — see
+Most data commands (`up`, `down`, `redo`, `converge`, `status`, `list`, `dry-run`, `import`,
+`baseline`, `create`, `audit`, `lock`, `unlock`) accept **`--json`** for machine-readable output — see
 [CI & automation](#ci--automation).
 
 <details>
@@ -248,6 +249,8 @@ migronaut up <file> --force        # re-run an ALREADY-applied file (asks for co
 migronaut up <file> --force --yes  # confirm a re-run non-interactively (required with --json)
 migronaut up --strict              # abort on any checksum mismatch
 migronaut up --no-lock             # skip the concurrency lock (local dev only)
+migronaut up --converge            # converge the declared collections afterwards (bulk runs only)
+migronaut up --no-converge         # don't, even with convergeAfterUp on
 migronaut up --json                # machine-readable output (array of run results)
 
 # down — roll back
@@ -264,6 +267,15 @@ migronaut redo                     # the most recently applied migration
 migronaut redo <file>              # a specific file
 migronaut redo --no-lock           # skip the lock (dev only)
 migronaut redo --json              # machine-readable output (array of run results)
+
+# converge — declared indexes and validators → the database
+migronaut converge                 # plan, ask before any drop/rebuild, then apply
+migronaut converge --dry-run       # show the plan, change nothing
+migronaut converge --check         # exit 28 if anything would change (CI gate)
+migronaut converge --prune         # also drop indexes a definition does not declare
+migronaut converge --yes           # no confirmation (required for drops/rebuilds with --json)
+migronaut converge --no-lock       # skip the concurrency lock (local dev only)
+migronaut converge --json          # machine-readable output (the converge result)
 
 # status — full status table
 migronaut status                   # the full status table
@@ -613,6 +625,53 @@ All errors extend `MigronautError` and carry a typed `code` (`LOCK_ALREADY_HELD`
 
 </details>
 
+<details id="declared-collections">
+<summary><b>Declared collections</b> — indexes and validators as an end state, with no migration file per change</summary>
+
+<br>
+
+When what matters is *the final shape* of a collection's indexes and validator — not the history
+of how it got there — declare it and let `migronaut converge` make the difference:
+
+```js
+// migronaut.config.js
+export default {
+  uri: process.env.MIGRONAUT_URI,
+  dbName: 'my_app',
+  collections: [
+    {
+      name: 'users',
+      indexes: [
+        { key: { email: 1 }, unique: true },
+        { key: { createdAt: 1 }, expireAfterSeconds: 60 * 60 * 24 * 30 },
+      ],
+      validator: { $jsonSchema: { bsonType: 'object', required: ['email'] } },
+    },
+  ],
+  collectionsDir: './collections', // …and/or one file per collection
+};
+```
+
+```bash
+migronaut converge --dry-run   # what would change
+migronaut converge             # apply — asks before dropping or rebuilding an index
+migronaut converge --check     # exit 28 on drift: a CI gate
+```
+
+- **Stateless.** Every run reads `listIndexes` / `listCollections` and compares; nothing is
+  recorded. Edit the declaration, converge again.
+- **Safe by default.** Missing indexes are created, a TTL or `hidden` change is applied in place,
+  a changed index is rebuilt (and put back if the rebuild fails). An index you did not declare is
+  **kept and reported** — dropped only with `prune`. An identical index under another name is
+  accepted as is, never silently rebuilt.
+- **Locked like a migration**, and refused before the first write when the plan has a conflict.
+- **After every deploy** with `convergeAfterUp: true` — a bulk `up` then ends by converging,
+  under the same lock — or as a [queue job](https://migronaut.vercel.app/guide/bullmq#converge-jobs).
+
+Experimental in 2.1. → **[Declared Collections](https://migronaut.vercel.app/guide/collections)**
+
+</details>
+
 <details>
 <summary><b>Migrations as a queue</b> — a migration service on BullMQ, one migration per job</summary>
 
@@ -639,6 +698,7 @@ const { results } = await group.wait();  // optional: block until they all finis
 
 await mq.enqueueDown();                  // roll the last batch back, newest first
 await mq.schedule({ every: 300_000 });   // or keep the database migrated on a schedule
+await mq.enqueueConverge();              // declared indexes and validators, as a job
 ```
 
 - **Order comes from MongoDB, not from Redis.** Every job is a normal single-file run under the
@@ -691,6 +751,11 @@ export default {
   // ── Safety ──────────────────────────────────────────────────────────────
   strict: false,        // true → abort on a checksum mismatch (instead of warn + skip)
   useTransaction: false, // true → wrap every migration in a transaction (override per file)
+
+  // ── Declared collections (experimental) — see `migronaut converge` ──────
+  // collections: [{ name: 'users', indexes: [{ key: { email: 1 }, unique: true }] }],
+  // collectionsDir: './collections', // one definition file per collection
+  // convergeAfterUp: false,          // true → every bulk `up` ends by converging
 
   // ── Code-only options (omit in migronaut.config.json) ─────────────────────────
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
@@ -823,10 +888,13 @@ optional rather than merely discouraged:
 | `MIGRONAUT_ON_OUT_OF_ORDER` | `onOutOfOrder` | `warn` |
 | `MIGRONAUT_ENSURE_INDEXES` | `ensureIndexes` | `true` |
 | `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` | `false` |
+| `MIGRONAUT_COLLECTIONS_DIR` | `collectionsDir` | — *(none read)* |
+| `MIGRONAUT_CONVERGE_AFTER_UP` | `convergeAfterUp` | `false` |
 | `MIGRONAUT_ENV_FILE` | `envFile` | `.env` |
 
-`fileExtensions`, `clientOptions`, `client`, `mongoose`, `hooks`, `logger`, `generateId` and
-`telemetry` are config-file/API only — they aren't scalars, so no environment variable can express them.
+`fileExtensions`, `clientOptions`, `collections`, `client`, `mongoose`, `hooks`, `logger`,
+`generateId` and `telemetry` are config-file/API only — they aren't scalars, so no environment
+variable can express them.
 
 A value that doesn't parse is **rejected, never coerced**: `MIGRONAUT_STRICT=on` or
 `MIGRONAUT_LOCK_TTL=abc` fails with an error naming the variable, rather than quietly turning a

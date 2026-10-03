@@ -1,4 +1,5 @@
 const {
+  DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
   JOB_DATA_VERSION,
@@ -7,7 +8,13 @@ const {
   parseJobData,
 } = require('./jobs.js');
 const { RETRYABLE_CODES, createMigrationProcessor, isRetryableError } = require('./processor.js');
-const { enqueueDown, enqueueUp, planDownJobs, planUpJobs } = require('./producer.js');
+const {
+  enqueueConverge,
+  enqueueDown,
+  enqueueUp,
+  planDownJobs,
+  planUpJobs,
+} = require('./producer.js');
 const { MigrationQueue, createMigrationQueue } = require('./service.js');
 const { waitForGroup } = require('./wait.js');
 
@@ -28,6 +35,7 @@ module.exports = {
   createMigrationProcessor,
   enqueueUp,
   enqueueDown,
+  enqueueConverge,
   planUpJobs,
   planDownJobs,
   waitForGroup,
@@ -37,6 +45,7 @@ module.exports = {
   JOB_DATA_VERSION,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
+  DEFAULT_CONVERGE_SCHEDULER_ID,
   RETRYABLE_CODES,
   dedupId,
   isRetryableError,

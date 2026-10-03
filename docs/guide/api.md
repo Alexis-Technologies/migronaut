@@ -67,6 +67,8 @@ up, even from a different project's env file.
 | `init(options?)` | `Promise<string>` | Generate a config file; returns its path. |
 | `import(options?)` | `Promise<ImportResult>` | Adopt a migrate-mongo changelog. |
 | `baseline(options?)` | `Promise<BaselineSummary>` | Mark files applied without executing them — the [`migronaut baseline`](/commands/baseline) command's engine. |
+| `converge(options?)` | `Promise<ConvergeResult>` | Bring the [declared collections](/guide/collections) to their declared indexes and validators — the [`migronaut converge`](/commands/converge) command's engine. |
+| `convergesAfterUp()` | `Promise<boolean>` | Whether a bulk `up` on this kit ends by converging (`convergeAfterUp` on, something declared). Does not connect. |
 | `nextBatch()` | `Promise<number>` | The batch number the next `up` would use — a peek, not a reservation. |
 | `generateId()` | `Promise<string>` | A new id in the kit's configured format — the [`generateId`](/guide/configuration#custom-id-format) option, else a random UUID. Does not connect. |
 | `lockInfo()` | `Promise<LockInfo \| null>` | Inspect the current lock holder, if any. |
@@ -103,10 +105,55 @@ for (const file of ['0007-a.js', '0008-b.js']) {
 
 This is exactly what the [BullMQ adapter](/guide/bullmq) does for every job.
 
+### Declared collections
+
+`converge()` compares the [declared collections](/guide/collections) with the live database and
+makes the difference — stateless, under the migration lock:
+
+```ts
+const plan = await migrator.converge({ dryRun: true }); // no lock, no writes, no events
+if (!plan.inSync) await migrator.converge();
+await migrator.converge({ prune: true });               // drop undeclared indexes too
+```
+
+| Option | Meaning |
+|---|---|
+| `dryRun` | Plan only. The result's rows are `'planned'` |
+| `prune` | Drop undeclared indexes in collections whose definition does not set `prune` |
+| `noLock` | Skip the lock (dev only) |
+| `ordered` | Refuse (`MigrationBlockedError`) while a migration is pending — checked under the lock |
+
+```ts
+interface ConvergeResult {
+  dryRun: boolean;
+  changed: number; // applied — or, in a dry run, would be
+  inSync: boolean; // nothing left to do, no conflict
+  collections: {
+    name: string;
+    actions: {
+      target: 'collection' | 'validator' | 'index';
+      name: string;
+      action: 'create' | 'modify' | 'recreate' | 'drop' | 'keep' | 'unchanged' | 'conflict';
+      status: 'planned' | 'applied' | 'failed' | 'skipped';
+      reason?: string; // what differs, or why
+      liveName?: string; // the live index, when its name differs
+      durationMs?: number;
+    }[];
+  }[];
+  unstable?: { collection: string; target: string; name: string; action: string; reason?: string }[];
+}
+```
+
+A conflicting plan, or a step that fails, rejects with `ConvergeFailedError` (`CONVERGE_FAILED`),
+whose `context.converge` is the result so far. `up(undefined, { converge: true })` converges after
+the migrations under the same lock — what `convergeAfterUp` does for every bulk `up`; `up` still
+returns its migration rows, and the converge outcome arrives as the `converge:end` event.
+
 ::: tip `MigratorKit` is an `EventEmitter`
 Subscribe to `run:start`, `run:end`, `migration:start`, `migration:success`, `migration:skipped`,
-`migration:error`, `lock:acquired`, `lock:released` and `lock:lost` to feed metrics or alerting
-without parsing log lines. See [Lifecycle Hooks → Events](/guide/hooks#events) for the payloads. For traces — spans that the
+`migration:error`, `lock:acquired`, `lock:released`, `lock:lost` and — for a real converge run —
+`converge:start`, `converge:action` and `converge:end` to feed metrics or alerting without
+parsing log lines. See [Lifecycle Hooks → Events](/guide/hooks#events) for the payloads. For traces — spans that the
 MongoDB driver's own spans nest under — and ready-made OpenTelemetry metrics, pass
 [`telemetry`](/guide/opentelemetry) in the config instead.
 :::
@@ -163,7 +210,8 @@ if (!upToDate) console.log(`Applied ${applied.length} migration(s)`);
 `onLockHeld: 'wait'` is the option that matters when several instances boot together: instances
 that lose the race to acquire the lock poll until the migrating peer finishes instead of throwing
 `LockAlreadyHeldError`. The returned `MigrationSummary` reports `waited`, `waitedMs` and
-`attempts` so you can log what actually happened.
+`attempts` so you can log what actually happened. With `convergeAfterUp`, it also carries
+`converge` — the [converge result](#declared-collections) that ended the run.
 
 `lockWaitTimeoutMs` (default 90 s) bounds **stall** time, not total wait: while a waiting
 instance can see the holder's heartbeat advancing the lock, the deadline re-arms — a healthy peer
@@ -215,7 +263,8 @@ const migrator = new MigratorKit({ logger: createLogger(process.stdout, 'debug')
 ### `EXIT_CODES`
 
 The CLI's exit-code map, so a wrapper script can mirror its semantics without hardcoding numbers.
-One entry per error code, plus `PENDING_MIGRATIONS` (from `status --check`) and `AUDIT_FAILED`.
+One entry per error code, plus `PENDING_MIGRATIONS` (from `status --check`), `AUDIT_FAILED` and
+`COLLECTIONS_DRIFT` (from `converge --check`).
 See the [exit-code table](/reference/cli#exit-codes).
 
 ## Key types
@@ -263,7 +312,8 @@ history. `outOfOrder` flags a late arrival from a parallel branch — see
 [`onOutOfOrder`](/guide/configuration#all-options).
 
 All public types are exported from the package — `MigronautConfig`, `MigrationContext`,
-`MigrationRecord`, `RunResult`, `StatusRow`, `ImportResult`, `LockInfo`, and more. See the
+`MigrationRecord`, `RunResult`, `StatusRow`, `ImportResult`, `LockInfo`, `CollectionDefinition`,
+`ConvergeResult`, and more. See the
 [error classes](#errors) below and the [Error Codes reference](/reference/error-codes).
 
 ## Errors

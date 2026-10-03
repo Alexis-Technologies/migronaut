@@ -6,6 +6,11 @@ import {
   type BullMQQueueEventsLike,
   type BullMQQueueLike,
   type BullMQWorkerLike,
+  type ConvergeHandle,
+  type ConvergeJobData,
+  type ConvergeJobResult,
+  type ConvergeJobSpec,
+  DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
   type GroupWaitResult,
@@ -26,6 +31,7 @@ import {
   createMigrationProcessor,
   createMigrationQueue,
   dedupId,
+  enqueueConverge,
   enqueueDown,
   enqueueUp,
   isRetryableError,
@@ -173,14 +179,16 @@ expectType<Promise<boolean>>(mq.unschedule('nightly'));
 const processor = createMigrationProcessor({ config, queue: realQueue });
 expectType<MigrationProcessor>(processor);
 // It is a real BullMQ processor, cancellation signal included.
-expectAssignable<Processor<MigrationJobData | SyncJobData, MigrationJobResult | SyncJobResult>>(
-  processor,
-);
-new Worker<MigrationJobData | SyncJobData, MigrationJobResult | SyncJobResult>(
-  'migronaut',
-  processor,
-  { connection, concurrency: 1 },
-);
+expectAssignable<
+  Processor<
+    MigrationJobData | SyncJobData | ConvergeJobData,
+    MigrationJobResult | SyncJobResult | ConvergeJobResult
+  >
+>(processor);
+new Worker<
+  MigrationJobData | SyncJobData | ConvergeJobData,
+  MigrationJobResult | SyncJobResult | ConvergeJobResult
+>('migronaut', processor, { connection, concurrency: 1 });
 expectType<AbortSignal | undefined>(undefined as Parameters<MigrationProcessor>[2]);
 expectType<MigratorKit>(processor.kit);
 expectType<void>(processor.shutdown('deploying'));
@@ -218,3 +226,37 @@ expectType<ParsedJobData>(parseJobData(realJob));
 declare const progress: MigrationJobProgress;
 expectType<'lock-wait' | 'running' | 'completed' | 'failed'>(progress.phase);
 expectType<MigronautErrorCode | 'UNKNOWN' | undefined>(progress.code);
+
+// ─── Converge jobs ───────────────────────────────────────────────────────────
+
+expectType<'converge'>(JOB_NAMES.CONVERGE);
+expectType<'migronaut-converge'>(DEFAULT_CONVERGE_SCHEDULER_ID);
+expectType<Promise<ConvergeHandle>>(mq.enqueueConverge());
+expectType<Promise<ConvergeHandle>>(mq.enqueueConverge({ ordered: false }));
+expectError(mq.enqueueConverge({ prune: true }));
+expectType<Promise<ConvergeHandle>>(
+  enqueueConverge(realQueue, ownKit, { queueEvents: realQueueEvents }),
+);
+expectType<Promise<MigrationGroup>>(mq.enqueueUp(undefined, { converge: true }));
+
+declare const convergeHandle: ConvergeHandle;
+expectType<Promise<ConvergeJobResult>>(convergeHandle.wait({ timeoutMs: 1000 }));
+declare const convergeGroup: MigrationGroup;
+expectType<{ id: string; deduplicated: boolean } | null>(convergeGroup.converge);
+declare const convergeWait: GroupWaitResult;
+expectType<ConvergeJobResult | undefined>(convergeWait.converge);
+declare const convergePlan: MigrationPlan;
+expectType<ConvergeJobSpec | undefined>(convergePlan.converge);
+declare const convergeResult: ConvergeJobResult;
+expectType<boolean>(convergeResult.inSync);
+expectType<number>(convergeResult.lockWaitMs);
+declare const syncResult: SyncJobResult;
+expectType<{ jobId: string; deduplicated: boolean } | undefined>(syncResult.converge);
+// A payload carries no prune — the worker's own definitions decide.
+expectError<ConvergeJobData>({ v: 1, kind: 'converge', prune: true });
+
+expectType<Promise<void>>(mq.schedule({ job: 'converge', pattern: '0 3 * * *' }));
+expectType<Promise<void>>(mq.schedule({ job: 'converge', every: 60_000, id: 'nightly-converge' }));
+expectError(mq.schedule({ job: 'converge', every: 60_000, to: '0005-x.js' }));
+expectError(mq.schedule({ job: 'migrate', every: 60_000 }));
+expectType<Promise<boolean>>(mq.unschedule(DEFAULT_CONVERGE_SCHEDULER_ID));
