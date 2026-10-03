@@ -840,11 +840,17 @@ function defineBullMQScenarios(harness) {
       const tick = await mq.queue._tick('migronaut-sync');
       const [view] = await settled(mq, [tick.id]);
       assert.deepStrictEqual(view.returnvalue.migrations, ['0001-a.js', '0002-b.js']);
+      // Until both are recorded, not just until both markers are in: the
+      // changelog write comes after the marker, and a job still writing when
+      // the test ends lands in the next test's freshly dropped database.
+      const applied = async () =>
+        (await records()).filter((record) => record.status === 'applied').length;
       const deadline = Date.now() + 10_000;
-      while ((await markers()).length < 2 && Date.now() < deadline) {
+      while ((await applied()) < 2 && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 15));
       }
       assert.deepStrictEqual(await markers(), ['a', 'b']);
+      assert.strictEqual(await applied(), 2);
     });
 
     it('should make a stalled job harmless: the re-run finds the work done', async () => {
