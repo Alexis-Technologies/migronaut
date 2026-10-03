@@ -233,8 +233,9 @@ Use a migration when the change needs **ordering against data**:
 - **A changed definition reaches each worker on redeploy.** A worker still running old code
   converges to the old declaration — with `prune`, it can drop an index the new one added. Roll
   the workers before relying on a new declaration.
-- **Tested on MongoDB 7.0.** The comparison rules follow what the server reports; on another
-  version, anything that does not settle shows up under `unstable` rather than looping.
+- **Tested on MongoDB 5.0, 6.0, 7.0 and 8.0.** The comparison rules follow what the server
+  reports; on another version, anything that does not settle shows up under `unstable` rather
+  than looping.
 
 ## Programmatic use
 

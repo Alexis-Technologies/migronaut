@@ -59,6 +59,8 @@ change before it touches your database.
   (warn by default, `onOutOfOrder: 'error'` to refuse) instead of silently applying.
 - **Lifecycle hooks** — `beforeAll`, `afterAll`, `beforeEach`, `afterEach`, `onError`.
 - **Opt-in transactions** — wrap a migration so it fully commits or fully aborts.
+- **Indexes and validators as an end state** — declare them, and `migronaut converge` brings the
+  database to match; no migration file per index change ([details](#declared-collections)).
 - **TypeScript, ESM & CommonJS** — all run with no `ts-node` plumbing.
 - **Zero config files required** — drive everything from env vars if you prefer.
 - **Pino-friendly logging** — the `logger` option is pino-compatible; pass a pino instance directly
@@ -87,6 +89,7 @@ change before it touches your database.
 | Lifecycle hooks                                 |        ❌        |          ✅          |
 | First-class TypeScript (built-in)               |        ❌        |          ✅          |
 | History preserved on rollback (never deleted)   |        ❌        |          ✅          |
+| Declared indexes & validators (`converge`)      |        ❌        |          ✅          |
 | Adopt an existing `migrate-mongo` changelog     |        —        | ✅ `migronaut import` |
 
 <sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026 (v14: optional
@@ -113,6 +116,7 @@ via a `client` argument; `migronaut` exposes the same plus a declarative per-fil
 | Credentials masked in errors, logs and `--json` |        ❌        |          ✅          |
 | Pino-compatible logger                          |        ❌        |          ✅          |
 | BullMQ queue adapter (`/bullmq` entry point)    |        ❌        |          ✅          |
+| Declared indexes & validators (`converge`)      |        ❌        |          ✅          |
 | Node floor                                      |      ≥ 18       |      ≥ 22.18        |
 
 <sub>Compared against `mongo-migrate-kit` 1.2.2 — the version this project forked from. The Node
