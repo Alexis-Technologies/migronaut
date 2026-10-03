@@ -606,6 +606,50 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
       }
     });
 
+    it("should call a timeout a timeout even when BullMQ's own timer fires first", async () => {
+      // A frozen clock: every timer fires while Date.now() is still short of
+      // the deadline — what a timer firing a millisecond early looks like.
+      const dateNow = mock.method(Date, 'now', () => 1000);
+      try {
+        const queue = {
+          getJob: async () => ({
+            // Rejects the way BullMQ does once its ttl runs out.
+            waitUntilFinished: (_queueEvents, ttl) =>
+              new Promise((_resolve, reject) => {
+                setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        'Job wait m timed out before finishing, no finish notification ' +
+                          `arrived after ${ttl}ms (id=1)`,
+                      ),
+                    ),
+                  ttl,
+                ).unref();
+              }),
+          }),
+        };
+        await assert.rejects(
+          waitForGroup({
+            queue,
+            queueEvents: {},
+            groupId: 'g',
+            direction: 'up',
+            batch: 1,
+            jobs: [{ id: '1', migration: 'a.js' }],
+            timeoutMs: 20,
+          }),
+          (error) => {
+            assert.strictEqual(error.context.timedOut, true);
+            assert.match(error.context.failedReason, /wait timed out after 20ms/);
+            return true;
+          },
+        );
+      } finally {
+        dateNow.mock.restore();
+      }
+    });
+
     it('should fail clearly when a job was removed before it could be read', async () => {
       const { queue, queueEvents } = harness();
       const group = await enqueueUp(queue, pendingKit(), { queueEvents });

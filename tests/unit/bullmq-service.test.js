@@ -560,6 +560,31 @@ describe('createMigrationQueue', () => {
       await mq.close();
     });
 
+    it('should never show a finished job without its outcome', async () => {
+      // BullMQ reads a job and its state separately: here the job fails
+      // between the two reads, so the first read has no failedReason yet.
+      const reads = [
+        { id: '1', name: 'up', data: {}, attemptsMade: 0 },
+        { id: '1', name: 'up', data: {}, attemptsMade: 1, failedReason: 'boom' },
+      ];
+      let read = 0;
+      const queue = {
+        name: 'torn',
+        addBulk: async () => [],
+        getJob: async () => ({
+          ...reads[Math.min(read++, reads.length - 1)],
+          getState: async () => 'failed',
+        }),
+      };
+      const mq = createMigrationQueue({ bullmq: { Queue: queue }, kit: stubKit() });
+      const view = await mq.getJob('1');
+      assert.deepStrictEqual(
+        [view.state, view.failedReason, view.attemptsMade],
+        ['failed', 'boom', 1],
+      );
+      await mq.close();
+    });
+
     it('should describe a job from a queue with a thinner Job', async () => {
       const queue = {
         name: 'thin',

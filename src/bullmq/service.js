@@ -501,13 +501,18 @@ class MigrationQueue {
     if (typeof id !== 'string' || id.length === 0) {
       throw new ConfigInvalidError('Job id must be a non-empty string', { id });
     }
-    const job = await this.#queue.getJob(id);
+    let job = await this.#queue.getJob(id);
     if (!job) return null;
+    const state = typeof job.getState === 'function' ? await job.getState() : 'unknown';
+    // The job and its state are two reads: one that finished in between would
+    // read as finished with no outcome (no returnvalue or failedReason, the
+    // attempt not counted). A finished job no longer changes, so read it again.
+    if (state === 'completed' || state === 'failed') job = (await this.#queue.getJob(id)) ?? job;
     return redactDeep({
       id: String(job.id),
       name: job.name,
       data: job.data,
-      state: typeof job.getState === 'function' ? await job.getState() : 'unknown',
+      state,
       progress: job.progress,
       ...(job.returnvalue != null ? { returnvalue: job.returnvalue } : {}),
       ...(job.failedReason ? { failedReason: redactOutbound(job.failedReason) } : {}),

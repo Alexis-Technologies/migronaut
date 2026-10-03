@@ -5,6 +5,16 @@ const { redactOutbound } = require('../utils/redact.js');
 const DEADLINE = Symbol('wait deadline');
 
 /**
+ * How much longer than the remaining budget BullMQ's own `waitUntilFinished`
+ * timer is given. That timer is only there to take its listeners off
+ * QueueEvents; whether the wait timed out is this module's clock to say.
+ * Given the same remaining time, BullMQ's timer can fire first — while
+ * `Date.now()` is still a millisecond short of the deadline — and a timeout
+ * would be reported as an ordinary job failure.
+ */
+const LISTENER_GRACE_MS = 1000;
+
+/**
  * Wait for every job of an enqueue group, in group order — and for the
  * group's converge job last, when it has one — and resolve
  * `{ groupId, direction, batch, results, converge? }`.
@@ -91,7 +101,7 @@ async function waitForGroup({
       return await budgeted(
         job.waitUntilFinished(
           queueEvents,
-          deadline === undefined ? undefined : deadline - Date.now(),
+          deadline === undefined ? undefined : deadline - Date.now() + LISTENER_GRACE_MS,
         ),
       );
     } catch (error) {
