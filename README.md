@@ -750,6 +750,7 @@ export default {
   // ── Bookkeeping collections ─────────────────────────────────────────────
   migrationsCollection: '_migronaut_migrations', // the append-only audit trail
   lockCollection: '_migronaut_locks',            // the concurrency lock
+  convergeLogCollection: '_migronaut_converge',  // what each converge changed
   lockTTLSeconds: 60,                       // a lock older than this is reclaimable
 
   // ── Safety ──────────────────────────────────────────────────────────────
@@ -880,6 +881,7 @@ optional rather than merely discouraged:
 | `MIGRONAUT_MIGRATIONS_DIR` | `migrationsDir` | `./migrations` |
 | `MIGRONAUT_COLLECTION` | `migrationsCollection` | `_migronaut_migrations` |
 | `MIGRONAUT_LOCK_COLLECTION` | `lockCollection` | `_migronaut_locks` |
+| `MIGRONAUT_CONVERGE_LOG_COLLECTION` | `convergeLogCollection` | `_migronaut_converge` |
 | `MIGRONAUT_LOCK_TTL` | `lockTTLSeconds` | `60` |
 | `MIGRONAUT_STRICT` | `strict` | `false` |
 | `MIGRONAUT_USE_TRANSACTION` | `useTransaction` | `false` |

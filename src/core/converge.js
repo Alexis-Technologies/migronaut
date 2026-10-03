@@ -1,7 +1,9 @@
 const { ConvergeFailedError, MigronautError } = require('../errors/index.js');
+const { pickActor } = require('../utils/actor.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
-const { CHANGE_ACTIONS, planCollection, summarize } = require('./converge-plan.js');
+const { CHANGE_ACTIONS, isDestructive, planCollection, summarize } = require('./converge-plan.js');
+const { inPlaceCapabilities } = require('./index-spec.js');
 
 /**
  * Converge: bring the declared collections' indexes and validators to their
@@ -47,7 +49,55 @@ const HINTS = {
     'an equivalent index already exists under another name — declare it under that name, or ' +
     'converge with prune to replace it',
   86: 'an index with this name already exists with a different key or options',
+  359:
+    'existing documents hold duplicate values for this key — deduplicate them in a migration ' +
+    'first (the index was left as it was)',
 };
+
+/**
+ * What the server is: a mongos in front of shards (its shard keys matter to
+ * prune), and its version (what it can change in place). Best-effort — a
+ * server that refuses to say gets the conservative answer: no in-place
+ * extras, no shard-key handling.
+ */
+async function readServer(db) {
+  const server = { mongos: false, version: undefined };
+  if (typeof db.admin !== 'function') return server;
+  try {
+    const hello = await db.admin().command({ hello: 1 });
+    server.mongos = hello?.msg === 'isdbgrid';
+  } catch {
+    // Unknown — treated as a replica set or standalone.
+  }
+  try {
+    const info = await db.admin().command({ buildInfo: 1 });
+    const [major, minor] = Array.isArray(info?.versionArray) ? info.versionArray : [];
+    if (Number.isInteger(major) && Number.isInteger(minor)) server.version = { major, minor };
+  } catch {
+    // Unknown version: only the always-available in-place changes.
+  }
+  return server;
+}
+
+/** Shard key of each named collection, behind a mongos — when `config.collections` may be read */
+async function readShardKeys(deps, names) {
+  const keys = new Map();
+  if (typeof deps.shardKeyOf !== 'function') return keys;
+  for (const name of names) {
+    try {
+      const key = await deps.shardKeyOf(name);
+      if (key) keys.set(name, key);
+    } catch {
+      // Not readable (privileges): a refused drop is caught when it happens.
+    }
+  }
+  return keys;
+}
+
+/** The server's refusal to drop the index that backs a shard key */
+function isShardKeyRefusal(error) {
+  return /shard key/i.test(errorText(error));
+}
 
 const VERBS = { create: 'create', modify: 'modify', recreate: 'rebuild', drop: 'drop' };
 const LABELS = {
@@ -240,6 +290,28 @@ async function runRebuild(db, collection, step, settle) {
   return undefined;
 }
 
+/**
+ * Make an index unique in place (MongoDB 7.0+): `prepareUnique` first — from
+ * then on no new duplicate can be written — then `unique`, which checks the
+ * existing documents. If they hold duplicates, `prepareUnique` is taken back
+ * off, so the index is exactly as it was before. Never a window without the
+ * index, and no rebuild of a large collection.
+ */
+async function convertToUnique(db, collection, step) {
+  await db.command({ collMod: collection, index: { name: step.name, prepareUnique: true } });
+  try {
+    await db.command({ collMod: collection, index: { name: step.name, unique: true } });
+  } catch (error) {
+    await db
+      .command({ collMod: collection, index: { name: step.name, prepareUnique: false } })
+      .catch(() => undefined);
+    throw error;
+  }
+  if (Object.keys(step.rest).length > 0) {
+    await db.command({ collMod: collection, index: { name: step.name, ...step.rest } });
+  }
+}
+
 /** Carry out one planned step; returns `{ error, actions, extra }` on failure, else undefined */
 async function runStep(db, collection, step, settle) {
   try {
@@ -255,12 +327,25 @@ async function runStep(db, collection, step, settle) {
       }
     } else if (step.op === 'collMod') {
       await db.command({ collMod: collection, ...step.command });
+    } else if (step.op === 'convertUnique') {
+      await convertToUnique(db, collection, step);
     } else if (step.op === 'createIndexes') {
       // One command, one pass over the collection for all of them — and all
       // or nothing: a build that fails leaves none of the batch behind.
       await db.collection(collection).createIndexes(step.specs);
     } else {
-      await dropIndex(db, collection, step.name);
+      try {
+        await dropIndex(db, collection, step.name);
+      } catch (error) {
+        // A sharded collection's shard-key index cannot be dropped, and its
+        // shard key could not be read up front: keep it, say so, go on.
+        if (!isShardKeyRefusal(error)) throw error;
+        for (const action of step.actions) {
+          action.action = 'keep';
+          action.reason = 'backs the shard key';
+        }
+        return { kept: true };
+      }
     }
     const durationMs = Date.now() - startedAt;
     for (const action of step.actions) settle(action, durationMs);
@@ -348,6 +433,56 @@ function announce(deps, collection, step) {
   }
 }
 
+/** The rows worth keeping in the history: what changed, failed, or refused the run */
+function historyActions(result) {
+  const actions = [];
+  for (const collection of result.collections) {
+    for (const action of collection.actions) {
+      if (
+        !CHANGE_ACTIONS.has(action.action) &&
+        action.action !== 'conflict' &&
+        action.status !== 'failed'
+      ) {
+        continue;
+      }
+      actions.push({ collection: collection.name, ...action });
+    }
+  }
+  return actions;
+}
+
+/**
+ * Append the run to the converge history — a run that changed something or
+ * failed; a converge that found everything in place is not news. Best-effort,
+ * like the changelog's failure trace: a history that cannot be written is
+ * warned about, never allowed to turn a converge that worked into a failure.
+ */
+async function recordHistory(deps, options, result, { startedAt, error }) {
+  if (typeof deps.record !== 'function') return;
+  if (error === undefined && result.changed === 0) return;
+  const finishedAt = new Date();
+  try {
+    await deps.record({
+      ...deps.audit(),
+      trigger: options.trigger ?? 'converge',
+      startedAt: new Date(startedAt),
+      finishedAt,
+      durationMs: finishedAt.getTime() - startedAt,
+      success: error === undefined,
+      ...(error !== undefined ? { error: errorText(error) } : {}),
+      ...pickActor(options),
+      changed: result.changed,
+      actions: historyActions(result),
+      ...(result.unstable ? { unstable: result.unstable } : {}),
+    });
+  } catch (recordError) {
+    deps.logger.warn(
+      `⚠ Could not record the converge in its history: ${errorText(recordError)}`,
+      deps.fields({ error: errorText(recordError) }),
+    );
+  }
+}
+
 function counts(result) {
   const out = {};
   for (const collection of result.collections) {
@@ -359,7 +494,8 @@ function counts(result) {
 /**
  * Plan every declared collection and, unless `dryRun`, carry the plans out.
  *
- * `options`: `{ definitions, prune?, rebuildUnique?, dryRun?, trigger? }` —
+ * `options`: `{ definitions, prune?, rebuildUnique?, dryRun?, trigger?, requestedBy?,
+ * reason? }` —
  * `definitions` normalized (collections.js); `prune` the default for
  * definitions that do not set their own; `rebuildUnique` lets a rebuild drop a
  * unique index it builds back (a conflict otherwise); `trigger` is
@@ -375,15 +511,22 @@ async function runConverge(deps, options, signal) {
   const { definitions, dryRun = false, trigger = 'converge' } = options;
   const startedAt = Date.now();
   const pruneFor = (definition) => definition.prune ?? options.prune ?? false;
+  const server = await readServer(db);
+  const capabilities = inPlaceCapabilities(server.version);
   const planOptions = (definition) => ({
     prune: pruneFor(definition),
     rebuildUnique: options.rebuildUnique === true,
+    capabilities,
   });
 
-  const live = await readLiveStates(
-    db,
-    definitions.map((definition) => definition.name),
-  );
+  const names = definitions.map((definition) => definition.name);
+  const live = await readLiveStates(db, names);
+  if (server.mongos) {
+    const shardKeys = await readShardKeys(deps, names);
+    for (const [position, name] of names.entries()) {
+      if (shardKeys.has(name)) live[position].shardKey = shardKeys.get(name);
+    }
+  }
   const plans = definitions.map((definition, position) =>
     planCollection(definition, live[position], planOptions(definition)),
   );
@@ -422,6 +565,46 @@ async function runConverge(deps, options, signal) {
     return result;
   }
 
+  /**
+   * A collection planned afresh. It may only have become *less* to do: a
+   * conflict or a drop/rebuild that the plan the run started from did not
+   * have — an index someone created meanwhile — refuses the run here, before
+   * this collection is touched, rather than act on what nobody reviewed.
+   */
+  async function replan(depsForPlan, initial, definition, initialLive) {
+    const fresh = await readLiveState(depsForPlan.db, definition.name);
+    if (initialLive.shardKey) fresh.shardKey = initialLive.shardKey;
+    const plan = planCollection(definition, fresh, planOptions(definition));
+    const known = new Set(
+      initial.actions.map((action) => `${action.target}:${action.name}:${action.action}`),
+    );
+    const introduced = plan.actions.filter(
+      (action) =>
+        (action.action === 'conflict' || isDestructive(action)) &&
+        !known.has(`${action.target}:${action.name}:${action.action}`),
+    );
+    if (introduced.length > 0) {
+      result.collections[plans.indexOf(initial)].actions = plan.actions;
+      settleRest(result);
+      throw new ConvergeFailedError(
+        `Converge stopped before ${definition.name}: it changed while the run was under way — ` +
+          introduced.map((action) => `${describe(action)} now ${action.action}`).join('; '),
+        {
+          phase: 'replan',
+          collection: definition.name,
+          introduced: introduced.map(({ target, name, action, reason }) => ({
+            target,
+            name,
+            action,
+            ...(reason !== undefined ? { reason } : {}),
+          })),
+          converge: result,
+        },
+      );
+    }
+    return plan;
+  }
+
   deps.emit('converge:start', { trigger, collections: definitions.length });
   try {
     const conflicts = [];
@@ -452,7 +635,16 @@ async function runConverge(deps, options, signal) {
       );
     }
 
-    for (const [position, plan] of plans.entries()) {
+    for (const [position, initial] of plans.entries()) {
+      // Every collection but the first is re-read and re-planned right before
+      // its turn: the ones before it may have built indexes for hours, and a
+      // plan made at the start would act on a database that has moved on.
+      const plan =
+        position === 0
+          ? initial
+          : await replan(deps, initial, definitions[position], live[position]);
+      plans[position] = plan;
+      result.collections[position].actions = plan.actions;
       for (const action of plan.actions) {
         if (action.liveName !== undefined && action.action === 'unchanged') {
           logger.warn(
@@ -463,6 +655,8 @@ async function runConverge(deps, options, signal) {
         }
       }
       if (plan.steps.length === 0) continue;
+      /** Indexes the server would not let go of (a shard key's) — not "unstable" next time */
+      const kept = new Set();
       const settle = (action, durationMs) => {
         action.status = 'applied';
         action.durationMs = durationMs;
@@ -498,6 +692,16 @@ async function runConverge(deps, options, signal) {
         }
         announce(deps, plan.name, step);
         const failure = await runStep(db, plan.name, step, settle);
+        if (failure?.kept) {
+          for (const action of step.actions) {
+            kept.add(action.name);
+            logger.warn(
+              `⚠ ${plan.name}: index "${action.name}" backs the shard key — kept, not dropped`,
+              deps.fields({ collection: plan.name, index: action.name }),
+            );
+          }
+          continue;
+        }
         if (failure) {
           const { error, actions, extra } = failure;
           for (const action of actions) {
@@ -521,13 +725,12 @@ async function runConverge(deps, options, signal) {
       // run — a comparison rule that disagrees with this server version — so
       // it is reported instead of silently rebuilt forever.
       const definition = definitions[position];
-      const after = planCollection(
-        definition,
-        await readLiveState(db, definition.name),
-        planOptions(definition),
-      );
+      const afterLive = await readLiveState(db, definition.name);
+      if (live[position].shardKey) afterLive.shardKey = live[position].shardKey;
+      const after = planCollection(definition, afterLive, planOptions(definition));
       for (const action of after.actions) {
         if (!CHANGE_ACTIONS.has(action.action)) continue;
+        if (action.action === 'drop' && kept.has(action.name)) continue;
         (result.unstable ??= []).push({
           collection: plan.name,
           target: action.target,
@@ -565,6 +768,7 @@ async function runConverge(deps, options, signal) {
         deps.fields({ kept }),
       );
     }
+    await recordHistory(deps, options, result, { startedAt });
     deps.emit('converge:end', {
       trigger,
       success: true,
@@ -577,6 +781,7 @@ async function runConverge(deps, options, signal) {
     return result;
   } catch (error) {
     finalize(result);
+    await recordHistory(deps, options, result, { startedAt, error });
     deps.emit('converge:end', {
       trigger,
       success: false,

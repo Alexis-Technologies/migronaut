@@ -67,6 +67,10 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
     duplicate-key error quotes, on top of credentials. `schedule({ every })` needs at least 1000 ms.
   - Dedup ids encode file names reversibly (two names can no longer share one and absorb each
     other's job), and a forced re-run has a dedup id of its own.
+  - **A schedule holds a failed migration**: a `sync` tick whose next migration failed, with its
+    file unchanged since, enqueues nothing (`returnvalue.held`, and a warning) instead of re-running
+    it every tick; a changed file or an explicit `enqueueUp(name)` resumes it.
+  - Jobs carry `requestedBy` / `reason` (`enqueueUp` / `enqueueDown` / `enqueueConverge` options).
 - **`bullmq.d.ts`** — hand-written types for the entry point, with structural `BullMQ*Like`
   interfaces instead of an import of `bullmq`, generic over the classes you inject.
 - **`up(file, { batch })`** — stamp an explicit batch number instead of the next free one, and
@@ -81,6 +85,14 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
   `checksum` for it.
 - **`list(filter, { checksums: false })`** / **`status({ checksums: false })`** — skip hashing the
   applied files, for a caller that needs names and dates only.
+- **Who asked, and why** — `up`, `down`, `redo` and `converge` take `requestedBy` (≤ 128
+  characters) and `reason` (≤ 512), and `migronaut up` / `down` / `redo` / `converge` take
+  `--reason`. They are stamped on the changelog (`requestedBy` / `reason` on an apply,
+  `revertRequestedBy` / `revertReason` on a revert; a later apply that says nothing clears the old
+  ones) and on the converge history; `status()` rows show them. `executedBy` stays the OS user —
+  on a queue worker, the container's — which is why the requester has fields of its own. A failed
+  attempt's trace now also records the checksum of the file version that failed
+  (`StatusRow.failedChecksum`).
 - **`runMigrations(config, { signal })`** — an `AbortSignal` (wired to SIGTERM) stops a wait for
   the lock between polls, and a run that holds it between migrations.
 - **`LockInfo.runId` and `LockInfo.ttlMs`** — which run holds the lock (also on `migronaut lock`),
@@ -189,6 +201,25 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
     drift — a CI gate; `--ordered` refuses while a migration is pending.
   - **Results say what changed**: every row that changes, drops or keeps something carries
     `from` and `to` — the live and the declared index or validator, as plain JSON.
+  - **History** — every converge that changes something or fails appends an entry to
+    `_migronaut_converge` (`convergeLogCollection`, `MIGRONAUT_CONVERGE_LOG_COLLECTION`): when,
+    the trigger, the run id, who ran it and where, who asked and why, and every row it touched
+    with its `from` / `to`. Read it with `MigratorKit.convergeHistory({ limit })` or
+    `migronaut converge --history [--limit n] [--json]`. Best-effort, and a database that never
+    converges never gets the collection.
+  - **In place where the server can**: making an index unique (MongoDB 7.0+, `collMod`
+    `prepareUnique` then `unique` — duplicates leave the index as it was) and adding a TTL to a
+    single-field index (5.1+) are `modify`, not a rebuild. (6.0 accepts the unique conversion but
+    did not enforce it in our tests, so it rebuilds.)
+  - **Sharded clusters**: behind a `mongos`, prune never drops the index backing a shard key (read
+    from `config.collections`, or kept with a warning when the server refuses the drop).
+  - **Re-planned before each collection**: every collection after the first is read and planned
+    again right before its turn; one that changed meanwhile into a conflict or a new drop/rebuild
+    stops the run (`ConvergeFailedError`, `phase: 'replan'`) before it is touched.
+  - **Regular expressions** in a validator or partial filter must use flags the driver stores as
+    written (`i`, `m`; a `BSONRegExp` for server options) — `g` would become dotAll and `s`, `u`,
+    `y` vanish — and compare in their stored form. A `__proto__` key in a JSON definition stays a
+    key.
   - **At scale**: all declared collections are read with one `listCollections` and a bounded
     fan-out of `listIndexes`; the new indexes of a collection are built by one `createIndexes`
     (one pass over the data); a connection that fails mid-rebuild is reported, never "repaired"

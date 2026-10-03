@@ -133,7 +133,19 @@ function dropsUniqueConstraint(declared, drops) {
   return declared.options.unique === true && drops.some((index) => index.options.unique === true);
 }
 
-function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps) {
+/**
+ * Whether a live index backs the collection's shard key (its key begins with
+ * every shard-key field, in order) — the server refuses to drop it, so prune
+ * leaves it alone instead of failing on it last.
+ */
+function backsShardKey(index, shardKey) {
+  if (!shardKey) return false;
+  const shardFields = Object.keys(shardKey);
+  const fields = index.serverKey.map(([field]) => field);
+  return shardFields.every((field, position) => fields[position] === field);
+}
+
+function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities }, row, steps) {
   const defaultCollation = live.options?.collation;
   const liveIndexes = [];
   for (const raw of live.indexes) {
@@ -167,7 +179,12 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps
       continue;
     }
     consumed.add(current.name);
-    const { diffs, inPlace, rebuild } = compareIndex(declared, current, defaultCollation);
+    const { diffs, inPlace, rebuild } = compareIndex(
+      declared,
+      current,
+      defaultCollation,
+      capabilities,
+    );
     if (diffs.length === 0) {
       row({ target: 'index', name: declared.name, action: 'unchanged' });
     } else if (!rebuild) {
@@ -179,11 +196,18 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps
         from: indexValue(current.raw),
         to: indexValue(declared.spec),
       });
-      modifies.push({
-        op: 'collMod',
-        command: { index: { name: declared.name, ...inPlace } },
-        actions: [action],
-      });
+      const { unique, ...rest } = inPlace;
+      modifies.push(
+        unique
+          ? // Two collMods: prepareUnique (no new duplicates from here on),
+            // then unique (checks the existing data) — see converge.js.
+            { op: 'convertUnique', name: declared.name, rest, actions: [action] }
+          : {
+              op: 'collMod',
+              command: { index: { name: declared.name, ...rest } },
+              actions: [action],
+            },
+      );
     } else {
       const reason = diffs.join(', ');
       const action = row({
@@ -305,7 +329,15 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps
   // Last, so an index is only ever removed once everything declared exists.
   for (const index of liveIndexes) {
     if (consumed.has(index.name) || declaredNames.has(index.name)) continue;
-    if (prune) {
+    if (prune && backsShardKey(index, live.shardKey)) {
+      row({
+        target: 'index',
+        name: index.name,
+        action: 'keep',
+        reason: 'backs the shard key',
+        from: indexValue(index.raw),
+      });
+    } else if (prune) {
       const action = row({
         target: 'index',
         name: index.name,
@@ -361,7 +393,11 @@ function planCollection(definition, live, options = {}) {
   return { ...plan, steps: batchCreates(plan.steps) };
 }
 
-function planCollectionSteps(definition, live, { prune = false, rebuildUnique = false } = {}) {
+function planCollectionSteps(
+  definition,
+  live,
+  { prune = false, rebuildUnique = false, capabilities = {} } = {},
+) {
   const name = definition.name;
   const actions = [];
   const steps = [];
@@ -409,7 +445,7 @@ function planCollectionSteps(definition, live, { prune = false, rebuildUnique = 
     planValidator(name, desired, liveValidator(live.options), row, steps);
   }
   if (declaredIndexes !== undefined) {
-    planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps);
+    planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities }, row, steps);
   }
   return { name, actions, steps };
 }

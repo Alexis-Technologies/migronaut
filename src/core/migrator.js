@@ -1,5 +1,6 @@
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 // `mongodb` is required lazily inside connect(): loading the driver costs ~60ms
 // and pulls in ~150 modules, which `--help`, `--version`, `init` and `create`
@@ -19,6 +20,7 @@ const {
   OutOfOrderMigrationError,
   RunAbortedError,
 } = require('../errors/index.js');
+const { actorIssue, pickActor } = require('../utils/actor.js');
 const { computeChecksum } = require('../utils/checksum.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
@@ -36,6 +38,7 @@ const { safeUsername } = require('../utils/user.js');
 const { runAudit } = require('./audit.js');
 const { runBaseline } = require('./baseline.js');
 const { Changelog } = require('./changelog.js');
+const { ConvergeLog } = require('./converge-log.js');
 const { resolveDefinitions } = require('./collections.js');
 const { isCollectionName, loadConfig } = require('./config.js');
 const { buildContext } = require('./context.js');
@@ -107,6 +110,8 @@ class MigratorKit extends EventEmitter {
   #cwd;
   /** filepath → {mtimeMs, size, checksum} — spares repeat status()/audit() calls a full re-hash */
   #checksumCache = new Map();
+  /** The converge history store, created on first use */
+  #convergeLogStore;
   /**
    * Definitions an after-up converge resolved, kept only while `up()` is being
    * refused for a held lock: a caller polling for the lock retries `up()`
@@ -788,6 +793,43 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
+   * Validate `requestedBy` / `reason`: who asked for a run, and why — stamped
+   * on what it writes to the changelog (and on a converge's history entry).
+   * The OS user that ran it is `executedBy` already; on a queue worker that is
+   * the container's, which is why the requester has a field of its own.
+   */
+  static #assertActorValid(options) {
+    for (const key of ['requestedBy', 'reason']) {
+      const issue = actorIssue(key, options?.[key]);
+      if (issue) {
+        throw new ConfigInvalidError(issue, {
+          [key]:
+            typeof options[key] === 'string'
+              ? `${options[key].length} characters`
+              : typeof options[key],
+        });
+      }
+    }
+  }
+
+  /** Just the `requestedBy` / `reason` of `options` */
+  static #actorOptions(options) {
+    return pickActor(options);
+  }
+
+  /** The `requestedBy` / `reason` of `options`, as changelog fields */
+  static #actorFields(options, prefix) {
+    const fields = {};
+    if (options?.requestedBy !== undefined) {
+      fields[prefix ? `${prefix}RequestedBy` : 'requestedBy'] = options.requestedBy;
+    }
+    if (options?.reason !== undefined) {
+      fields[prefix ? `${prefix}Reason` : 'reason'] = options.reason;
+    }
+    return fields;
+  }
+
+  /**
    * Validate `checksum`: the SHA-256 the caller expects the named file to have
    * — how a queue job says which version of the file it was planned with.
    */
@@ -1028,7 +1070,7 @@ class MigratorKit extends EventEmitter {
    * `up` and `down`, so a fix to one direction cannot silently miss the other.
    */
   async #executeMigrationSteps(
-    { name, direction, context, index, total, results, batch, onSuccess },
+    { name, direction, context, index, total, results, batch, onSuccess, failureFields },
     span,
   ) {
     const config = this.#config;
@@ -1145,6 +1187,7 @@ class MigratorKit extends EventEmitter {
             ...batchField,
             ...(durationMs !== undefined ? { duration: durationMs } : {}),
             ...(this.#runId ? { runId: this.#runId } : {}),
+            ...failureFields,
           });
         } catch {
           // Duplicate key when an 'applied' record exists (forced re-run), or
@@ -1173,6 +1216,7 @@ class MigratorKit extends EventEmitter {
     this.#assertOrderedValid(options.ordered, filename);
     this.#assertConvergeValid(options.converge, filename, options.to);
     this.#assertChecksumOptionValid(options.checksum, filename);
+    MigratorKit.#assertActorValid(options);
     return this.#runWindow(async () => {
       const config = await this.#ensureConfig();
       // Converge only after a run that brings the database to the head: the
@@ -1201,7 +1245,11 @@ class MigratorKit extends EventEmitter {
           if (definitions.length > 0) {
             this.#assertNotAborted(signal, results);
             try {
-              await runConverge(this.#convergeDeps(), { definitions, trigger: 'up' }, signal);
+              await runConverge(
+                this.#convergeDeps(),
+                { definitions, trigger: 'up', ...pickActor(options) },
+                signal,
+              );
             } catch (error) {
               // The migrations are applied and recorded either way — they must
               // survive into what a `--json` consumer sees about the failure.
@@ -1406,9 +1454,14 @@ class MigratorKit extends EventEmitter {
                 duration: elapsed,
                 ...(this.#runId ? { runId: this.#runId } : {}),
                 ...(migration.description ? { description: migration.description } : {}),
+                ...MigratorKit.#actorFields(options),
               },
               session,
             ),
+          // What a failed attempt's trace records besides the failure: the
+          // version of the file that failed (a breaker compares it), and who
+          // asked for the run.
+          failureFields: { checksum, ...MigratorKit.#actorFields(options) },
         });
         appliedCount += 1;
         return 'done';
@@ -1474,6 +1527,7 @@ class MigratorKit extends EventEmitter {
     this.#assertBatchValid(options.batch);
     this.#assertToValid(options.to, filename, options);
     this.#assertOrderedValid(options.ordered, filename);
+    MigratorKit.#assertActorValid(options);
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();
@@ -1588,7 +1642,12 @@ class MigratorKit extends EventEmitter {
           total: names.length,
           results,
           onSuccess: async (_migration, _elapsed, session) => {
-            const result = await changelog.markReverted(db, name, session);
+            const result = await changelog.markReverted(
+              db,
+              name,
+              session,
+              MigratorKit.#actorOptions(options),
+            );
             // Under --no-lock or onLockLost:'warn' a peer may have flipped the
             // record first: the down() body already ran against the data, but
             // the changelog still claims the migration is applied. Silence
@@ -1651,6 +1710,8 @@ class MigratorKit extends EventEmitter {
    */
   async redo(filename, options = {}) {
     this.#assertFilename(filename);
+    MigratorKit.#assertActorValid(options);
+    const actor = MigratorKit.#actorOptions(options);
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();
@@ -1672,10 +1733,10 @@ class MigratorKit extends EventEmitter {
           target = newest.name;
         }
 
-        const downResults = await this.#runDown(target, {}, signal);
+        const downResults = await this.#runDown(target, actor, signal);
         let upResults;
         try {
-          upResults = await this.#runUp(target, {}, signal);
+          upResults = await this.#runUp(target, actor, signal);
         } catch (error) {
           // The revert already happened — after a failed re-apply that is the
           // single most important fact, so the down rows must survive into the
@@ -1906,6 +1967,12 @@ class MigratorKit extends EventEmitter {
       ...(record.origin ? { origin: record.origin } : {}),
       ...(record.status === 'failed' && record.error ? { error: record.error } : {}),
       ...(record.status === 'failed' && record.failedAt ? { failedAt: record.failedAt } : {}),
+      // The version of the file that failed — what tells "failed and unchanged since" apart.
+      ...(record.status === 'failed' && record.checksum ? { failedChecksum: record.checksum } : {}),
+      ...(record.requestedBy ? { requestedBy: record.requestedBy } : {}),
+      ...(record.reason ? { reason: record.reason } : {}),
+      ...(record.revertRequestedBy ? { revertRequestedBy: record.revertRequestedBy } : {}),
+      ...(record.revertReason ? { revertReason: record.revertReason } : {}),
     };
   }
 
@@ -2121,6 +2188,8 @@ class MigratorKit extends EventEmitter {
         throw new ConfigInvalidError(`${key} must be a boolean`, { [key]: options[key] });
       }
     }
+    MigratorKit.#assertActorValid(options);
+    const actor = pickActor(options);
     const empty = (dryRun) => ({ dryRun, changed: 0, inSync: true, collections: [] });
     if (options.dryRun) {
       await this.#ensureConfig();
@@ -2150,7 +2219,7 @@ class MigratorKit extends EventEmitter {
         if (options.ordered) await this.#assertNothingPending();
         return runConverge(
           this.#convergeDeps(),
-          { definitions, prune: options.prune, rebuildUnique: options.rebuildUnique },
+          { definitions, prune: options.prune, rebuildUnique: options.rebuildUnique, ...actor },
           signal,
         );
       });
@@ -2182,18 +2251,55 @@ class MigratorKit extends EventEmitter {
         : {}),
       extensions: config.fileExtensions,
       reload: config.reloadMigrations,
-      reserved: [config.migrationsCollection, config.lockCollection],
+      reserved: [config.migrationsCollection, config.lockCollection, config.convergeLogCollection],
     });
   }
 
   #convergeDeps() {
+    const db = this.#requireDb();
     return {
-      db: this.#requireDb(),
+      db,
       logger: this.#logger,
       fields: (extra) => this.#fields(extra),
       emit: (event, payload) => this.#emit(event, payload),
       assertNotAborted: (abortSignal) => this.#assertNotAborted(abortSignal),
+      // The history entry's who-and-where, like a changelog record's.
+      audit: () => ({
+        ...(this.#runId ? { runId: this.#runId } : {}),
+        executedBy: safeUsername(),
+        host: os.hostname(),
+        environment: this.#environment(),
+      }),
+      record: (entry) => this.#convergeLog().append(db, entry),
+      // Behind a mongos only: the shard key, so prune never tries to drop its index.
+      shardKeyOf: async (name) =>
+        (
+          await this.#client
+            .db('config')
+            .collection('collections')
+            .findOne({ _id: `${db.databaseName}.${name}` }, { projection: { key: 1 } })
+        )?.key,
     };
+  }
+
+  #convergeLog() {
+    this.#convergeLogStore ??= new ConvergeLog(this.#config.convergeLogCollection);
+    return this.#convergeLogStore;
+  }
+
+  /**
+   * The converge history, newest first: one entry per converge that changed
+   * something or failed — when, triggered how, by whom and why, and every
+   * index or validator it touched, with its before and after. Read-only.
+   */
+  async convergeHistory(options = {}) {
+    const { limit = 20 } = options;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      throw new ConfigInvalidError('limit must be an integer from 1 to 1000', { limit });
+    }
+    await this.#ensureConfig();
+    await this.connect();
+    return this.#convergeLog().list(this.#requireDb(), limit);
   }
 
   /**

@@ -57,6 +57,17 @@ function send(res, status, body) {
   res.end(payload);
 }
 
+/**
+ * Who asked, and why — recorded on the changelog by the worker. In a real
+ * service `requestedBy` comes from the authenticated caller, not the body.
+ */
+function who({ requestedBy, reason }) {
+  return {
+    ...(requestedBy !== undefined ? { requestedBy } : {}),
+    ...(reason !== undefined ? { reason } : {}),
+  };
+}
+
 async function readJson(req) {
   const chunks = [];
   let size = 0;
@@ -95,31 +106,34 @@ const routes = {
 
   'GET /migrations/pending': async (_req, res) => send(res, 200, { pending: await mq.pending() }),
 
-  // { "to"?: file, "name"?: file, "force"?: boolean, "wait"?: boolean }
+  // { "to"?: file, "name"?: file, "force"?: boolean, "wait"?: boolean, "requestedBy"?, "reason"? }
   'POST /migrations/up': async (req, res) => {
-    const { name, to, force, wait } = await readJson(req);
-    const options = {};
+    const { name, to, force, wait, ...actor } = await readJson(req);
+    const options = who(actor);
     if (to !== undefined) options.to = to;
     if (force !== undefined) options.force = force;
     await respondWithGroup(res, await mq.enqueueUp(name, options), wait === true);
   },
 
-  // { "name"?: file, "steps"?: n, "batch"?: n, "to"?: file, "wait"?: boolean } — default: last batch
+  // { "name"?: file, "steps"?: n, "batch"?: n, "to"?: file, "wait"?: boolean, "requestedBy"?, "reason"? }
+  // — default: last batch
   'POST /migrations/down': async (req, res) => {
-    const { name, steps, batch, to, wait } = await readJson(req);
-    const options = {};
+    const { name, steps, batch, to, wait, ...actor } = await readJson(req);
+    const options = who(actor);
     if (steps !== undefined) options.steps = steps;
     if (batch !== undefined) options.batch = batch;
     if (to !== undefined) options.to = to;
     await respondWithGroup(res, await mq.enqueueDown(name, options), wait === true);
   },
 
-  // { "ordered"?: boolean, "wait"?: boolean } — the declared collections, as a job of its own
+  // { "ordered"?: boolean, "wait"?: boolean, "requestedBy"?, "reason"? } — the declared
+  // collections, as a job of its own
   'POST /migrations/converge': async (req, res) => {
-    const { ordered, wait } = await readJson(req);
-    const { wait: waitForJob, ...handle } = await mq.enqueueConverge(
-      ordered !== undefined ? { ordered } : {},
-    );
+    const { ordered, wait, ...actor } = await readJson(req);
+    const { wait: waitForJob, ...handle } = await mq.enqueueConverge({
+      ...who(actor),
+      ...(ordered !== undefined ? { ordered } : {}),
+    });
     if (wait !== true) return send(res, 202, handle);
     return send(res, 200, { ...handle, result: await waitForJob({ timeoutMs: WAIT_TIMEOUT_MS }) });
   },

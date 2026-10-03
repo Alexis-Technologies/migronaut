@@ -1,7 +1,7 @@
 const { needsConfirmation } = require('../../core/converge-plan.js');
 const { ConfigInvalidError, RunAbortedError } = require('../../errors/index.js');
 const { confirm, defineCommand, EXIT_CODES } = require('../shared.js');
-const { renderConvergeTable } = require('../table.js');
+const { renderConvergeHistory, renderConvergeTable } = require('../table.js');
 
 /**
  * Every row the operator must confirm, across all collections: a dropped or
@@ -45,6 +45,9 @@ function registerConverge(program) {
       ],
       ['--prune', 'Drop undeclared indexes (in collections whose definition does not decide)'],
       ['--ordered', 'Refuse while any migration is still pending'],
+      ['--reason <text>', 'Why — recorded in the converge history (who: the OS user)'],
+      ['--history', 'Show the converge history instead of converging (read-only)'],
+      ['--limit <n>', 'How many history entries to show (with --history; default 20)'],
       [
         '--rebuild-unique',
         'Allow rebuilding a unique index (drops the constraint until the new one is built)',
@@ -61,6 +64,14 @@ function registerConverge(program) {
     // ask only when the plan drops or rebuilds an index, then apply — the way
     // `unlock` reads the lock before asking.
     run: async (migrator, opts, _positionals, { logger, json, spinner, stopRequested }) => {
+      if (opts.history) {
+        return migrator.convergeHistory(
+          opts.limit !== undefined ? { limit: Number(opts.limit) } : {},
+        );
+      }
+      if (opts.limit !== undefined) {
+        throw new ConfigInvalidError('--limit only applies to --history');
+      }
       const prune = {
         ...(opts.prune ? { prune: true } : {}),
         ...(opts.rebuildUnique ? { rebuildUnique: true } : {}),
@@ -112,12 +123,21 @@ function registerConverge(program) {
       }
       spinner?.start('Converging…');
       try {
-        return await migrator.converge({ noLock: opts.noLock, ...prune, ...ordered });
+        return await migrator.converge({
+          noLock: opts.noLock,
+          ...prune,
+          ...ordered,
+          ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
+        });
       } finally {
         spinner?.stop();
       }
     },
     render: (result, { logger, opts }) => {
+      if (Array.isArray(result)) {
+        logger.info(renderConvergeHistory(result));
+        return;
+      }
       // A real run's own lines (✔ Created …, the rollup) are already out.
       if (!result.dryRun) return;
       if (result.collections.length === 0) {

@@ -1,7 +1,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { ConfigInvalidError } = require('../errors/index.js');
-const { isPlainObject, toWire } = require('../utils/canonical.js');
+const { isPlainObject, regExpIssue, toWire } = require('../utils/canonical.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
@@ -42,6 +42,10 @@ function join(base, key) {
 
 /** What makes a validator unsendable — a function, a symbol, a cycle — or null */
 function unsendable(value, seen = new Set()) {
+  if (seen.size === 0) {
+    const issue = regExpIssue(value);
+    if (issue) return issue;
+  }
   const type = typeof value;
   if (type === 'function') return 'must not contain functions';
   if (type === 'symbol') return 'must not contain symbols';

@@ -214,6 +214,29 @@ prompt: `convergeAfterUp` is the consent.
 `migronaut dry-run up` does not preview the converge — the plan is only meaningful against the
 database the migrations leave behind. Run `migronaut converge --dry-run` once they are applied.
 
+## History
+
+Converge is stateless — it never acts on a record of what it did — but it keeps one for you. Every
+converge that changes something or fails appends an entry to `_migronaut_converge`
+(`convergeLogCollection`): when, triggered how (`converge` or the converge after `up`), the run id,
+who ran it and where (`executedBy`, `host`, `environment`), who asked and why (`requestedBy`,
+`reason`), and every index or validator it touched with its `from` and `to`. A converge that finds
+everything in place is not recorded, and a database that never converges never gets the
+collection.
+
+```bash
+migronaut converge --reason "TICKET-123: email must be unique"
+migronaut converge --history            # the newest 20; --limit n, --json
+```
+
+```js
+await kit.converge({ requestedBy: 'alice', reason: 'TICKET-123' });
+const [last] = await kit.convergeHistory({ limit: 1 });
+```
+
+Writing the history is best-effort, like the changelog's failure trace: if it cannot be written the
+converge warns and carries on.
+
 ## When to use a migration instead
 
 Use a migration when the change needs **ordering against data**:
@@ -237,7 +260,12 @@ Use a migration when the change needs **ordering against data**:
   largest build.
 - **Permissions.** Creating and dropping indexes needs `readWrite`; `collMod` — validators, TTL
   and `hidden` changes — needs `dbAdmin`. A missing privilege fails with a hint.
-- **No zero-gap rebuild.** A `recreate` drops before it creates. To change an index with no
+- **Some changes need no rebuild.** Where the server can, converge changes an index in place
+  instead of dropping it: `hidden`, a TTL's value, **making an index unique** (MongoDB 7.0+:
+  `collMod` with `prepareUnique`, then `unique` — duplicates make it fail and the index is left as
+  it was; 6.0 has the commands but did not enforce the converted index in our tests, so it gets a
+  rebuild) and **adding a TTL** to a single-field index (5.1+). The plan shows these as `modify`.
+- **No zero-gap rebuild.** Anything else is a `recreate`, which drops before it creates. To change an index with no
   window, declare the new one under a **new name**, converge, then remove the old declaration
   and converge with `prune`. For a **unique** index the window is a real risk — a duplicate
   written during the build leaves neither index buildable — so such a rebuild is a `conflict`
@@ -246,6 +274,11 @@ Use a migration when the change needs **ordering against data**:
 - **A changed definition reaches each worker on redeploy.** A worker still running old code
   converges to the old declaration — with `prune`, it can drop an index the new one added. Roll
   the workers before relying on a new declaration.
+- **Sharded clusters.** Behind a `mongos`, converge reads each collection's shard key (from
+  `config.collections`, when the user may) and never prunes the index that backs it; if the key
+  cannot be read and the server refuses the drop, the index is kept with a warning. Index builds
+  go through `mongos` as usual. CI proves replica sets, not sharded clusters — try a converge
+  with `--dry-run` there first.
 - **Tested on MongoDB 5.0, 6.0, 7.0 and 8.0.** The comparison rules follow what the server
   reports; on another version, anything that does not settle shows up under `unstable` rather
   than looping.

@@ -332,6 +332,8 @@ function configBody(values, createExtension) {
   // ── Bookkeeping collections ─────────────────────────────────
   migrationsCollection: '_migronaut_migrations',
   lockCollection: '_migronaut_locks',
+  // What each \`migronaut converge\` changed — see \`converge --history\`.
+  convergeLogCollection: '_migronaut_converge',
   // Seconds before a held lock is considered stale and reclaimable.
   lockTTLSeconds: 60,
 
@@ -434,6 +436,7 @@ function defaultConfigJson(values = {}) {
     sequential: false,
     migrationsCollection: '_migronaut_migrations',
     lockCollection: '_migronaut_locks',
+    convergeLogCollection: '_migronaut_converge',
     lockTTLSeconds: 60,
     strict: false,
     useTransaction: false,
@@ -483,6 +486,7 @@ function secretConfigOptions(createExtension, migrationsDir) {
     // ── Bookkeeping collections ─────────────────────────────
     migrationsCollection: '_migronaut_migrations',
     lockCollection: '_migronaut_locks',
+    convergeLogCollection: '_migronaut_converge',
     lockTTLSeconds: 60,
 
     // ── Behavior ────────────────────────────────────────────

@@ -39,6 +39,13 @@
       "pattern": "^(?!system\\.)[^$\\u0000]+$",
       "description": "Collection used for the concurrency lock"
     },
+    "convergeLogCollection": {
+      "type": "string",
+      "minLength": 1,
+      "default": "_migronaut_converge",
+      "pattern": "^(?!system\\.)[^$\\u0000]+$",
+      "description": "Collection holding the converge history (written on the first converge that changes something)"
+    },
     "lockTTLSeconds": {
       "type": "integer",
       "minimum": 1,

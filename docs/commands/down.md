@@ -37,6 +37,7 @@ History is **never deleted**: each reverted record has its `status` set to `reve
 | `--batch <n>` | Revert every migration in batch number `n`. |
 | `--steps <n>` | Revert the **last N applied** migrations, newest first, ignoring batch grouping. |
 | `--to <file>` | Revert everything applied **after** this file. The named file stays applied. |
+| `--reason <text>` | Why — stamped on the reverted records (`revertReason`). Shown by `status`. |
 | `--no-lock` | Skip the concurrency lock. **Dev only.** |
 | `--json` | Emit the run results as a JSON array on stdout. |
 

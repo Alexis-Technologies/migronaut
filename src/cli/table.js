@@ -329,6 +329,27 @@ function renderConvergeTable(result, { all = false } = {}) {
   return `${renderTable(['Collection', 'Target', 'Index', 'Action', 'Detail'], cells)}\n${line}`;
 }
 
+/**
+ * Render the converge history: one line per converge that changed something
+ * or failed, newest first — the audit view (`migronaut converge --history`).
+ */
+function renderConvergeHistory(entries) {
+  if (entries.length === 0) return 'No converge has changed anything yet';
+  const colors = palette();
+  const cells = entries.map((entry) => [
+    entry.startedAt instanceof Date ? entry.startedAt.toISOString() : String(entry.startedAt),
+    entry.trigger,
+    entry.success ? colors.green('ok') : colors.red('failed'),
+    String(entry.changed),
+    truncate(sanitize(entry.requestedBy ?? entry.executedBy ?? ''), MAX_NAME_WIDTH),
+    truncate(
+      sanitize(entry.reason ?? (entry.success ? '' : (entry.error ?? ''))),
+      MAX_DETAIL_WIDTH,
+    ),
+  ]);
+  return renderTable(['When', 'Trigger', 'Result', 'Changes', 'Who', 'Why'], cells);
+}
+
 module.exports = {
   charWidth,
   sanitize,
@@ -339,4 +360,5 @@ module.exports = {
   renderImportTable,
   renderRowsOrEmpty,
   renderConvergeTable,
+  renderConvergeHistory,
 };

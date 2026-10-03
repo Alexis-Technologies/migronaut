@@ -15,6 +15,7 @@ function registerUp(program) {
       ['--step', 'Apply each migration as its own batch (revert individually later)'],
       ['--converge', 'Converge the declared collections afterwards (overrides convergeAfterUp)'],
       ['--no-converge', 'Do not converge afterwards, whatever convergeAfterUp says'],
+      ['--reason <text>', 'Why — recorded on the changelog with the run (who: the OS user)'],
     ],
     lockable: true,
     mutating: true,
@@ -53,6 +54,7 @@ function registerUp(program) {
         ...(opts.step ? { step: true } : {}),
         ...(opts.to ? { to: opts.to } : {}),
         ...(typeof opts.converge === 'boolean' ? { converge: opts.converge } : {}),
+        ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
       }),
     // No render: core logs every ✔ Applied line itself — and, after a bulk run
     // that converges, every converge line too. `--json` stays the migration

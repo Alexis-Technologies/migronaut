@@ -1191,11 +1191,12 @@ describe('converge CLI (integration)', () => {
 
   it('should ask before dropping or rebuilding an index', async () => {
     await mongo.db.collection('users').createIndex({ email: 1 });
-    declare([{ name: 'users', indexes: [{ key: { email: 1 }, unique: true }] }]);
+    // unique + sparse: a rebuild (making an index unique alone is in place on 6.0+).
+    declare([{ name: 'users', indexes: [{ key: { email: 1 }, unique: true, sparse: true }] }]);
 
     const declined = await runCli(baseArgs(['converge']), {}, undefined, 'n\n');
     assert.strictEqual(declined.code, 0);
-    assert.match(declined.stdout, /recreate │ unique/);
+    assert.match(declined.stdout, /recreate │ unique, sparse/);
     assert.match(declined.stdout, /Aborted/);
     assert.strictEqual((await mongo.db.collection('users').indexes())[1].unique, undefined);
 
@@ -1250,6 +1251,20 @@ describe('converge CLI (integration)', () => {
     assert.strictEqual(result.code, 27, result.stderr);
     assert.doesNotMatch(result.stdout, /Apply these changes/);
     assert.match(result.stderr, /conflict/);
+  });
+
+  it('should record why, and show the history with --history', async () => {
+    declare([USERS]);
+    assert.strictEqual((await runCli(baseArgs(['converge', '--reason', 'TICKET-3']))).code, 0);
+    const json = await runCli(baseArgs(['converge', '--history', '--json']));
+    assert.strictEqual(json.code, 0);
+    const [entry] = JSON.parse(json.stdout);
+    assert.strictEqual(entry.reason, 'TICKET-3');
+    assert.strictEqual(entry.changed, 2);
+    const table = await runCli(baseArgs(['converge', '--history']));
+    assert.match(table.stdout, /When .*│ Trigger .*│ Result/);
+    assert.match(table.stdout, /TICKET-3/);
+    assert.strictEqual((await runCli(baseArgs(['converge', '--limit', '3']))).code, 6);
   });
 
   it('should refuse with --ordered while a migration is pending', async () => {
@@ -1324,7 +1339,8 @@ describe('converge CLI (integration)', () => {
 
   it('should stop when signalled at the prompt, before changing anything', async () => {
     await mongo.db.collection('users').createIndex({ email: 1 });
-    declare([{ name: 'users', indexes: [{ key: { email: 1 }, unique: true }] }]);
+    // A rebuild, so the CLI asks (unique alone is made in place on 6.0+).
+    declare([{ name: 'users', indexes: [{ key: { email: 1 }, unique: true, sparse: true }] }]);
     const child = spawn(process.execPath, [binPath, ...baseArgs(['converge'])], {
       cwd: project.dir,
     });

@@ -599,6 +599,59 @@ function defineBullMQScenarios(harness) {
     });
   });
 
+  it('should hold a failed migration on schedule ticks until its file changes', async () => {
+    write('0001-a.js', failingMigration());
+    const mq = createQueue();
+    await mq.startWorker();
+    const tick = async () => {
+      const job = await mq.queue.add('sync', { v: 1, kind: 'sync' }, { attempts: 1 });
+      const [view] = await settled(mq, [job.id]);
+      return view.returnvalue;
+    };
+
+    const first = await tick();
+    assert.strictEqual(first.enqueued, 1);
+    await assert.rejects(
+      (async () => {
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const [record] = await records();
+          if (record?.status === 'failed') throw new Error('failed as expected');
+          if (Date.now() > deadline) return;
+          await new Promise((resolve) => setTimeout(resolve, 15));
+        }
+      })(),
+      /failed as expected/,
+    );
+
+    // Same file, same failure waiting to happen: the tick holds the line.
+    const second = await tick();
+    assert.strictEqual(second.enqueued, 0);
+    assert.strictEqual(second.held.migration, '0001-a.js');
+
+    // A fix is a changed file: the next tick enqueues it again.
+    write('0001-a.js', insertMigration('things', 'a'));
+    const third = await tick();
+    assert.strictEqual(third.enqueued, 1);
+    assert.ok(!('held' in third));
+  });
+
+  it('should carry who asked, and why, into the changelog', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue();
+    await mq.startWorker();
+    const group = await mq.enqueueUp(undefined, {
+      requestedBy: 'deploy-bot',
+      reason: 'release 42',
+    });
+    await group.wait({ timeoutMs: 10_000 });
+    const [record] = await records();
+    assert.deepStrictEqual([record.requestedBy, record.reason], ['deploy-bot', 'release 42']);
+    // The worker's OS user ran it; the requester is a separate field.
+    assert.strictEqual(typeof record.executedBy, 'string');
+    await assert.rejects(mq.enqueueUp(undefined, { reason: '' }), /reason/);
+  });
+
   it('should refuse a forced or unordered job its worker does not allow', async () => {
     write('0001-a.js', insertMigration('things', 'a'));
     const mq = createQueue();

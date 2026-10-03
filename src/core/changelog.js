@@ -224,10 +224,22 @@ class Changelog {
     const { name, appliedAt, ...fields } = record;
     const update = {
       $set: fields,
-      // A re-apply clears the stale revert marker — and the failure trace a
-      // markFailed() from an earlier crashed attempt may have left.
-      $unset: { revertedAt: '', failedAt: '', error: '' },
+      // A re-apply clears the stale revert marker (and who asked for the
+      // revert, and why) — and the failure trace a markFailed() from an earlier
+      // crashed attempt may have left.
+      $unset: {
+        revertedAt: '',
+        revertRequestedBy: '',
+        revertReason: '',
+        failedAt: '',
+        error: '',
+      },
     };
+    // Who asked for this apply, and why — or nobody said: then the previous
+    // apply's answer must not linger as if it were this one's.
+    for (const key of ['requestedBy', 'reason']) {
+      if (fields[key] === undefined) update.$unset[key] = '';
+    }
     if (appliedAt !== undefined) {
       update.$set.appliedAt = appliedAt;
       update.$setOnInsert = { firstAppliedAt: appliedAt };
@@ -288,11 +300,23 @@ class Changelog {
    * was no longer `'applied'` (a concurrent peer got there first) — the caller
    * decides what to do with that, since this module stays logger-free.
    */
-  async markReverted(db, name, session) {
+  async markReverted(db, name, session, actor = {}) {
+    const update = {
+      $set: {
+        status: 'reverted',
+        ...(actor.requestedBy !== undefined ? { revertRequestedBy: actor.requestedBy } : {}),
+        ...(actor.reason !== undefined ? { revertReason: actor.reason } : {}),
+      },
+      // Server time, like markApplied's appliedAt — one clock for the whole trail.
+      $currentDate: { revertedAt: true },
+    };
+    const unset = {};
+    if (actor.requestedBy === undefined) unset.revertRequestedBy = '';
+    if (actor.reason === undefined) unset.revertReason = '';
+    if (Object.keys(unset).length > 0) update.$unset = unset;
     return this.#coll(db).updateOne(
       { name, status: 'applied' },
-      // Server time, like markApplied's appliedAt — one clock for the whole trail.
-      { $set: { status: 'reverted' }, $currentDate: { revertedAt: true } },
+      update,
       session ? { session } : {},
     );
   }

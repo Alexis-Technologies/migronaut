@@ -12,7 +12,7 @@ const serverError = (code, message = `server error ${code}`) =>
  * indexes the way the server reports them (`v`, a plain key object, options
  * as given), records every write in `ops`, and lets a test make any call fail.
  */
-function fakeDb(collections = {}, { fail = {}, reads = [] } = {}) {
+function fakeDb(collections = {}, { fail = {}, reads = [], server } = {}) {
   const state = {};
   for (const [name, spec] of Object.entries(collections)) {
     state[name] = {
@@ -34,6 +34,17 @@ function fakeDb(collections = {}, { fail = {}, reads = [] } = {}) {
   const db = {
     state,
     ops,
+    // `server`: { version: [major, minor], mongos } — absent, the fake says nothing.
+    ...(server
+      ? {
+          admin: () => ({
+            command: async (command) => {
+              if (command.hello) return server.mongos ? { msg: 'isdbgrid' } : {};
+              return { versionArray: [...server.version, 0, 0] };
+            },
+          }),
+        }
+      : {}),
     listCollections: (filter, options) => ({
       toArray: async () => {
         reads.push(['listCollections', options]);
@@ -62,6 +73,11 @@ function fakeDb(collections = {}, { fail = {}, reads = [] } = {}) {
       const entry = state[collMod];
       if (rest.index) {
         const index = entry.indexes.find((candidate) => candidate.name === rest.index.name);
+        if (rest.index.unique === true) {
+          maybeFail('collModUnique');
+          index.unique = true;
+        }
+        if (rest.index.prepareUnique !== undefined) index.prepareUnique = rest.index.prepareUnique;
         if (rest.index.expireAfterSeconds !== undefined) {
           index.expireAfterSeconds = rest.index.expireAfterSeconds;
         }
@@ -681,6 +697,278 @@ describe('runConverge — at scale', () => {
       },
     );
     assert.deepStrictEqual(db.ops, ['dropIndex c.a_1', 'createIndex c.a_1']);
+  });
+});
+
+describe('runConverge — in place, by server version', () => {
+  const nonUnique = () => ({ c: { indexes: [{ v: 2, key: { a: 1 }, name: 'a_1' }] } });
+  const declareUnique = () =>
+    definitions({ name: 'c', indexes: [{ key: { a: 1 }, unique: true }] });
+
+  it('should make an index unique in place on 7.0+, with prepareUnique first', async () => {
+    const db = fakeDb(nonUnique(), { server: { version: [7, 0] } });
+    const { deps } = makeDeps(db);
+    const result = await runConverge(deps, { definitions: declareUnique() }, undefined);
+    assert.deepStrictEqual(db.ops, ['collMod c a_1', 'collMod c a_1']);
+    assert.strictEqual(result.collections[0].actions[0].action, 'modify');
+    assert.strictEqual(db.state.c.indexes[1].unique, true);
+  });
+
+  it('should rebuild instead on an older or unknown server', async () => {
+    // 6.0 has the commands but did not enforce the converted index in our tests.
+    for (const server of [{ version: [6, 0] }, { version: [5, 0] }, undefined]) {
+      const db = fakeDb(nonUnique(), server ? { server } : {});
+      const { deps } = makeDeps(db);
+      await runConverge(deps, { definitions: declareUnique() }, undefined);
+      assert.deepStrictEqual(db.ops, ['dropIndex c.a_1', 'createIndex c.a_1']);
+    }
+  });
+
+  it('should take prepareUnique back off when the data holds duplicates', async () => {
+    const db = fakeDb(nonUnique(), {
+      server: { version: [7, 0] },
+      fail: { collModUnique: serverError(359, 'Cannot convert the index to unique') },
+    });
+    const { deps } = makeDeps(db);
+    await assert.rejects(
+      runConverge(deps, { definitions: declareUnique() }, undefined),
+      (error) => error.context.mongoCode === 359 && /deduplicate/.test(error.context.hint),
+    );
+    assert.deepStrictEqual(db.ops, ['collMod c a_1', 'collMod c a_1', 'collMod c a_1']);
+    assert.strictEqual(db.state.c.indexes[1].prepareUnique, false);
+    assert.strictEqual(db.state.c.indexes[1].unique, undefined);
+  });
+
+  it('should add a TTL in place on 5.1+, single-field indexes only', async () => {
+    const db = fakeDb(
+      {
+        c: {
+          indexes: [
+            { v: 2, key: { t: 1 }, name: 't_1' },
+            { v: 2, key: { a: 1, t: 1 }, name: 'a_1_t_1' },
+          ],
+        },
+      },
+      { server: { version: [5, 1] } },
+    );
+    const { deps } = makeDeps(db);
+    await runConverge(
+      deps,
+      {
+        definitions: definitions({
+          name: 'c',
+          indexes: [
+            { key: { t: 1 }, expireAfterSeconds: 60 },
+            { key: { a: 1, t: 1 }, expireAfterSeconds: 60 },
+          ],
+        }),
+      },
+      undefined,
+    );
+    assert.deepStrictEqual(db.ops, [
+      'collMod c t_1',
+      'dropIndex c.a_1_t_1',
+      'createIndex c.a_1_t_1',
+    ]);
+  });
+});
+
+describe('runConverge — sharded clusters', () => {
+  it('should keep the index that backs a shard key when it can read the key', async () => {
+    const db = fakeDb(
+      { c: { indexes: [{ v: 2, key: { tenant: 1, at: 1 }, name: 'tenant_1_at_1' }] } },
+      { server: { version: [7, 0], mongos: true } },
+    );
+    const { deps } = makeDeps(db);
+    deps.shardKeyOf = async () => ({ tenant: 1 });
+    const result = await runConverge(
+      deps,
+      { definitions: definitions({ name: 'c', indexes: [], prune: true }) },
+      undefined,
+    );
+    assert.deepStrictEqual(db.ops, []);
+    assert.deepStrictEqual(
+      result.collections[0].actions.map((a) => [a.name, a.action, a.reason]),
+      [['tenant_1_at_1', 'keep', 'backs the shard key']],
+    );
+  });
+
+  it('should keep it, with a warning, when the server refuses the drop', async () => {
+    const db = fakeDb(
+      { c: { indexes: [{ v: 2, key: { tenant: 1 }, name: 'tenant_1' }] } },
+      {
+        server: { version: [7, 0], mongos: true },
+        fail: { dropIndex: serverError(72, 'cannot drop index tenant_1: it backs the shard key') },
+      },
+    );
+    const { deps, lines } = makeDeps(db);
+    // config.collections not readable.
+    deps.shardKeyOf = async () => {
+      throw serverError(13, 'not authorized');
+    };
+    const result = await runConverge(
+      deps,
+      { definitions: definitions({ name: 'c', indexes: [], prune: true }) },
+      undefined,
+    );
+    const [row] = result.collections[0].actions;
+    assert.deepStrictEqual([row.action, row.status], ['keep', 'skipped']);
+    assert.ok(lines.some((line) => line.level === 'warn' && /shard key/.test(line.message)));
+    assert.strictEqual(result.unstable, undefined, 'kept on purpose, not unstable');
+  });
+});
+
+describe('runConverge — history', () => {
+  const withRecorder = (db, record) => {
+    const made = makeDeps(db);
+    made.deps.audit = () => ({ runId: 'run-1', executedBy: 'ci', host: 'h', environment: 'test' });
+    made.deps.record = record;
+    return made;
+  };
+
+  it('should record a converge that changed something, with who, why and every row', async () => {
+    const entries = [];
+    const { deps } = withRecorder(fakeDb({ c: { indexes: [] } }), async (entry) =>
+      entries.push(entry),
+    );
+    await runConverge(
+      deps,
+      {
+        definitions: definitions({ name: 'c', indexes: [{ key: { a: 1 } }] }),
+        requestedBy: 'alice',
+        reason: 'TICKET-7',
+      },
+      undefined,
+    );
+    const [entry] = entries;
+    assert.strictEqual(entry.success, true);
+    assert.strictEqual(entry.trigger, 'converge');
+    assert.deepStrictEqual([entry.requestedBy, entry.reason], ['alice', 'TICKET-7']);
+    assert.deepStrictEqual([entry.runId, entry.executedBy, entry.host], ['run-1', 'ci', 'h']);
+    assert.strictEqual(entry.changed, 1);
+    assert.deepStrictEqual(
+      entry.actions.map((a) => [a.collection, a.name, a.action, a.status]),
+      [['c', 'a_1', 'create', 'applied']],
+    );
+    assert.deepStrictEqual(entry.actions[0].to, { key: { a: 1 }, name: 'a_1' });
+    assert.ok(entry.finishedAt >= entry.startedAt);
+  });
+
+  it('should record a failed converge, and nothing for one that found everything in place', async () => {
+    const entries = [];
+    const record = async (entry) => entries.push(entry);
+    const failing = withRecorder(
+      fakeDb({ c: { indexes: [] } }, { fail: { createIndexes: serverError(13, 'denied') } }),
+      record,
+    );
+    await assert.rejects(
+      runConverge(
+        failing.deps,
+        { definitions: definitions({ name: 'c', indexes: [{ key: { a: 1 } }] }) },
+        undefined,
+      ),
+    );
+    assert.strictEqual(entries[0].success, false);
+    assert.match(entries[0].error, /denied/);
+    assert.strictEqual(entries[0].actions[0].status, 'failed');
+
+    const quiet = withRecorder(
+      fakeDb({ c: { indexes: [{ v: 2, key: { a: 1 }, name: 'a_1' }] } }),
+      record,
+    );
+    await runConverge(
+      quiet.deps,
+      { definitions: definitions({ name: 'c', indexes: [{ key: { a: 1 } }] }) },
+      undefined,
+    );
+    assert.strictEqual(entries.length, 1, 'an in-sync converge is not news');
+  });
+
+  it('should warn, not fail, when the history cannot be written', async () => {
+    const { deps, lines } = withRecorder(fakeDb({ c: { indexes: [] } }), async () => {
+      throw new Error('history collection not writable');
+    });
+    const result = await runConverge(
+      deps,
+      { definitions: definitions({ name: 'c', indexes: [{ key: { a: 1 } }] }) },
+      undefined,
+    );
+    assert.strictEqual(result.changed, 1);
+    assert.ok(lines.some((line) => line.level === 'warn' && /history/.test(line.message)));
+  });
+});
+
+describe('runConverge — re-planned before each collection', () => {
+  it('should stop before a collection that changed meanwhile into a conflict', async () => {
+    const db = fakeDb({ a: { indexes: [] }, b: { indexes: [] } });
+    // While a's index builds, someone creates an index b's declaration collides with.
+    const collection = db.collection;
+    db.collection = (name) => {
+      const handle = collection(name);
+      if (name !== 'a') return handle;
+      return {
+        ...handle,
+        createIndexes: async (specs) => {
+          db.state.b.indexes.push({ v: 2, key: { e: 1 }, name: 'by_e' });
+          return handle.createIndexes(specs);
+        },
+      };
+    };
+    const { deps } = makeDeps(db);
+    await assert.rejects(
+      runConverge(
+        deps,
+        {
+          definitions: definitions(
+            { name: 'a', indexes: [{ key: { x: 1 } }] },
+            { name: 'b', indexes: [{ key: { e: 1 }, unique: true }] },
+          ),
+        },
+        undefined,
+      ),
+      (error) => {
+        assert.ok(error instanceof ConvergeFailedError);
+        assert.strictEqual(error.context.phase, 'replan');
+        assert.strictEqual(error.context.collection, 'b');
+        assert.deepStrictEqual(
+          error.context.introduced.map((row) => [row.name, row.action]),
+          [['e_1', 'conflict']],
+        );
+        return true;
+      },
+    );
+    assert.deepStrictEqual(db.ops, ['createIndex a.x_1'], 'b was not touched');
+  });
+
+  it('should carry on when a collection only needs less than planned', async () => {
+    const db = fakeDb({ a: { indexes: [] }, b: { indexes: [] } });
+    const collection = db.collection;
+    db.collection = (name) => {
+      const handle = collection(name);
+      if (name !== 'a') return handle;
+      return {
+        ...handle,
+        createIndexes: async (specs) => {
+          // Someone else built b's declared index already.
+          db.state.b.indexes.push({ v: 2, key: { e: 1 }, name: 'e_1' });
+          return handle.createIndexes(specs);
+        },
+      };
+    };
+    const { deps } = makeDeps(db);
+    const result = await runConverge(
+      deps,
+      {
+        definitions: definitions(
+          { name: 'a', indexes: [{ key: { x: 1 } }] },
+          { name: 'b', indexes: [{ key: { e: 1 } }] },
+        ),
+      },
+      undefined,
+    );
+    assert.deepStrictEqual(db.ops, ['createIndex a.x_1']);
+    assert.strictEqual(result.collections[1].actions[0].action, 'unchanged');
+    assert.strictEqual(result.changed, 1);
   });
 });
 

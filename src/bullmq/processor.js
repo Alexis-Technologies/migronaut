@@ -8,6 +8,7 @@ const {
   NotAppliedError,
   RunAbortedError,
 } = require('../errors/index.js');
+const { pickActor } = require('../utils/actor.js');
 const { errorText } = require('../utils/error.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
 const {
@@ -289,8 +290,9 @@ function createMigrationProcessor(options = {}) {
             ...(ordered ? { ordered: true } : {}),
             ...(data.force ? { force: true } : {}),
             ...(data.checksum ? { checksum: data.checksum } : {}),
+            ...pickActor(data),
           })
-        : kit.down(data.migration, ordered ? { ordered: true } : {});
+        : kit.down(data.migration, { ...(ordered ? { ordered: true } : {}), ...pickActor(data) });
 
     try {
       const { result, waitedMs } = await waitForLock(ctx, attempt, signal);
@@ -350,7 +352,7 @@ function createMigrationProcessor(options = {}) {
     const ordered = data.ordered ?? defaultOrdered;
     const { result, waitedMs } = await waitForLock(
       ctx,
-      () => kit.converge(ordered ? { ordered: true } : {}),
+      () => kit.converge({ ...(ordered ? { ordered: true } : {}), ...pickActor(data) }),
       signal,
     );
     return redactDeep({
@@ -363,6 +365,30 @@ function createMigrationProcessor(options = {}) {
       ...(ctx.runId ? { runId: ctx.runId } : {}),
       lockWaitMs: waitedMs,
     });
+  }
+
+  /**
+   * The circuit breaker of a schedule: the next migration in line failed, and
+   * its file is still the version that failed. Re-enqueueing it every tick
+   * would re-run a migration that may have half-applied its changes, again and
+   * again, adding a failed job each time — until a fix is deployed (the
+   * checksum changes) or someone asks for it explicitly (`enqueueUp(name)`,
+   * which never consults this). Returns `{ migration, reason, failedAt? }`.
+   */
+  async function heldFailure(first, to) {
+    if (!first || (to !== undefined && first.file > to)) return undefined;
+    if (typeof kit.list !== 'function' || typeof kit.dryRun !== 'function') return undefined;
+    const row = (await kit.list('all', { checksums: false })).find(
+      (candidate) => candidate.file === first.file,
+    );
+    if (row?.status !== 'failed' || typeof row.failedChecksum !== 'string') return undefined;
+    const [planned] = await kit.dryRun('up', first.file);
+    if (planned?.checksum !== row.failedChecksum) return undefined;
+    return {
+      migration: first.file,
+      reason: 'failed, and unchanged since',
+      ...(row.failedAt ? { failedAt: row.failedAt } : {}),
+    };
   }
 
   async function runSyncJob(ctx) {
@@ -398,6 +424,23 @@ function createMigrationProcessor(options = {}) {
         result.converge = { jobId: handle.jobId, deduplicated: handle.deduplicated };
       }
       return result;
+    }
+    const held = await heldFailure(pending[0], to);
+    if (held) {
+      kit.logger.warn(
+        `⚠ sync: ${held.migration} failed and has not changed since — not enqueued again ` +
+          `until the file changes (or enqueueUp('${held.migration}') asks for it)`,
+        { migration: held.migration },
+      );
+      return {
+        kind: 'sync',
+        groupId: null,
+        batch: null,
+        enqueued: 0,
+        upToDate: false,
+        migrations: [],
+        held,
+      };
     }
     const group = await enqueueUp(queue, kit, {
       ...(to !== undefined ? { to } : {}),

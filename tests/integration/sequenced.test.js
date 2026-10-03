@@ -404,6 +404,48 @@ describe('sequenced single-file runs (integration)', () => {
     });
   });
 
+  describe('who asked, and why', () => {
+    it('should stamp requestedBy and reason on applies and reverts, and clear stale ones', async () => {
+      setup();
+      three();
+      await migrator.up('0001-a.js', { requestedBy: 'alice', reason: 'TICKET-1' });
+      await migrator.down('0001-a.js', { requestedBy: 'bob', reason: 'bad deploy' });
+      let [row] = (await migrator.status()).filter((r) => r.file === '0001-a.js');
+      assert.deepStrictEqual(
+        [row.requestedBy, row.reason, row.revertRequestedBy, row.revertReason],
+        ['alice', 'TICKET-1', 'bob', 'bad deploy'],
+      );
+      // A re-apply nobody explains carries no explanation from before.
+      await migrator.up('0001-a.js');
+      [row] = (await migrator.status()).filter((r) => r.file === '0001-a.js');
+      assert.deepStrictEqual(
+        [row.requestedBy, row.reason, row.revertRequestedBy, row.revertReason],
+        [undefined, undefined, undefined, undefined],
+      );
+      await migrator.redo('0001-a.js', { reason: 'replay' });
+      [row] = (await migrator.status()).filter((r) => r.file === '0001-a.js');
+      assert.strictEqual(row.reason, 'replay');
+      await assert.rejects(migrator.up('0002-b.js', { reason: '' }), /reason/);
+      await assert.rejects(
+        migrator.up('0002-b.js', { requestedBy: 'x'.repeat(129) }),
+        /requestedBy/,
+      );
+    });
+
+    it('should keep the version of a failed file on its trace', async () => {
+      setup();
+      project.write(
+        '0001-a.js',
+        'export async function up() { throw new Error("nope"); }\nexport async function down() {}\n',
+      );
+      await assert.rejects(migrator.up('0001-a.js', { requestedBy: 'ci' }));
+      const [row] = await migrator.status();
+      assert.strictEqual(row.status, 'failed');
+      assert.match(row.failedChecksum, /^[0-9a-f]{64}$/);
+      assert.strictEqual(row.requestedBy, 'ci');
+    });
+  });
+
   describe("dryRun('up') and the order policy", () => {
     async function lateArrival(overrides) {
       setup(overrides);

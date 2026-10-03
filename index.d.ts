@@ -189,6 +189,12 @@ export interface MigronautConfig {
   migrationsCollection: string;
   /** Collection name for distributed lock. Default: '_migronaut_locks' */
   lockCollection: string;
+  /**
+   * Collection holding the converge history — one entry per converge that
+   * changed something or failed. Created by the first such converge, never
+   * before. Default: '_migronaut_converge'
+   */
+  convergeLogCollection: string;
   /** How long (seconds) a lock is considered stale. Default: 60 */
   lockTTLSeconds: number;
   /**
@@ -437,6 +443,10 @@ export interface ConvergeOptions {
    * CLI: `--rebuild-unique`.
    */
   rebuildUnique?: boolean;
+  /** Who asked for this converge — recorded in the converge history */
+  requestedBy?: string;
+  /** Why — recorded in the converge history */
+  reason?: string;
 }
 
 export type ConvergeTarget = 'collection' | 'validator' | 'index';
@@ -495,6 +505,33 @@ export interface ConvergeAction {
 export interface CollectionConvergeResult {
   name: string;
   actions: ConvergeAction[];
+}
+
+/**
+ * One entry of the converge history (`convergeLogCollection`): a converge that
+ * changed something or failed.
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface ConvergeHistoryEntry {
+  runId?: string;
+  /** `'converge'`, or `'up'` for the converge that ended a bulk `up` */
+  trigger: ConvergeTrigger;
+  startedAt: Date;
+  finishedAt: Date;
+  durationMs: number;
+  success: boolean;
+  /** Redacted failure message (`success: false` only) */
+  error?: string;
+  executedBy: string;
+  host: string;
+  environment: string;
+  requestedBy?: string;
+  reason?: string;
+  /** Changes applied */
+  changed: number;
+  /** The rows that changed, failed or refused the run — each with its collection and `from` / `to` */
+  actions: Array<ConvergeAction & { collection: string }>;
+  unstable?: ConvergeUnstable[];
 }
 
 /**
@@ -718,6 +755,14 @@ export interface StatusRow {
    * (`up(file, { checksum })`).
    */
   checksum?: string;
+  /** Who asked for the apply, and why — when the run said (`requestedBy` / `reason` options) */
+  requestedBy?: string;
+  reason?: string;
+  /** Who asked for the revert, and why — on reverted history rows */
+  revertRequestedBy?: string;
+  revertReason?: string;
+  /** The checksum of the file version that failed (status `'failed'` only) */
+  failedChecksum?: string;
 }
 
 // ─── Import (migrate-mongo adoption) ────────────────────────────────────────────
@@ -872,6 +917,14 @@ export interface UpOptions {
    * with a filename or `to`.
    */
   converge?: boolean;
+  /**
+   * Who asked for this run (≤ 128 characters) — stamped on the changelog
+   * records it writes. `executedBy` is the OS user that ran it; on a queue
+   * worker that is the container's, which is why the requester is separate.
+   */
+  requestedBy?: string;
+  /** Why (≤ 512 characters) — a ticket, a sentence; stamped like `requestedBy` */
+  reason?: string;
 }
 
 /** Options for {@link MigratorKit.down} */
@@ -898,6 +951,14 @@ export interface DownOptions {
    * first (by `appliedAt`, the order `steps` uses). Requires a filename.
    */
   ordered?: boolean;
+  /**
+   * Who asked for this run (≤ 128 characters) — stamped on the records it
+   * reverts (`revertRequestedBy`). `executedBy` is the OS user that ran it; on a queue
+   * worker that is the container's, which is why the requester is separate.
+   */
+  requestedBy?: string;
+  /** Why (≤ 512 characters) — a ticket, a sentence; stamped as `revertReason` */
+  reason?: string;
 }
 
 /** Payload common to every lifecycle event */
@@ -1054,6 +1115,10 @@ export interface StatusOptions {
 export interface RedoOptions {
   /** Skip lock acquisition (dev only) */
   noLock?: boolean;
+  /** Who asked — stamped on the revert and on the re-apply */
+  requestedBy?: string;
+  /** Why — stamped like `requestedBy` */
+  reason?: string;
 }
 
 /** Options for {@link MigratorKit.create} */
@@ -1259,6 +1324,11 @@ export class MigratorKit extends EventEmitter {
    * on and something is declared. Resolves the config; does not connect.
    */
   convergesAfterUp(): Promise<boolean>;
+  /**
+   * The converge history, newest first (`limit` 1–1000, default 20): one entry
+   * per converge that changed something or failed. Read-only.
+   */
+  convergeHistory(options?: { limit?: number }): Promise<ConvergeHistoryEntry[]>;
 }
 
 // ─── Programmatic entry points ─────────────────────────────────────────────────

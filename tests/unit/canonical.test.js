@@ -96,3 +96,32 @@ describe('isPlainObject', () => {
     assert.ok(!isPlainObject(null));
   });
 });
+
+describe('canonical — what survives the trip to the server', () => {
+  const { BSONRegExp } = require('mongodb');
+  const { regExpIssue } = require('../../src/utils/canonical.js');
+
+  it('should compare a RegExp by the options the driver stores', () => {
+    // i and m as they are; the driver writes g as dotAll (s), and reads s back as g.
+    assert.ok(deepEqual(/x/i, /x/i));
+    assert.ok(deepEqual(new BSONRegExp('x', 's'), /x/g));
+    assert.ok(!deepEqual(/x/i, /x/m));
+  });
+
+  it('should refuse RegExp flags the driver changes or drops, and accept the rest', () => {
+    assert.strictEqual(regExpIssue({ a: /x/i, b: [/y/m] }), null);
+    assert.strictEqual(regExpIssue({ a: new BSONRegExp('x', 'sx') }), null);
+    for (const regExp of [/x/g, /x/s, /x/u, /x/y]) {
+      assert.match(regExpIssue({ $and: [{ a: regExp }] }), /cannot be stored as written/);
+    }
+  });
+
+  it('should keep a __proto__ key a key — in comparison and on the wire', () => {
+    const declared = JSON.parse('{"__proto__": {"a": 1}, "b": 2}');
+    assert.deepStrictEqual(Object.keys(canonical(declared)), ['__proto__', 'b']);
+    assert.ok(!deepEqual(declared, { b: 2 }), 'the key is not silently lost');
+    const wire = toWire(declared);
+    assert.deepStrictEqual(Object.keys(wire), ['__proto__', 'b']);
+    assert.strictEqual(Object.getPrototypeOf(wire), Object.prototype);
+  });
+});

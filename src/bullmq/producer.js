@@ -1,4 +1,5 @@
 const { ConfigInvalidError, MigrationBlockedError } = require('../errors/index.js');
+const { actorIssue, pickActor } = require('../utils/actor.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { assertId, randomId } = require('../utils/id.js');
 const { assertMigrationName } = require('../utils/migration-name.js');
@@ -35,6 +36,15 @@ function assertJobOptions(jobOptions) {
       );
     }
   }
+}
+
+/** Validate the `requestedBy` / `reason` of an enqueue call, and return them */
+function actorOf(options) {
+  for (const key of ['requestedBy', 'reason']) {
+    const issue = actorIssue(key, options[key]);
+    if (issue) throw new ConfigInvalidError(issue, { [key]: typeof options[key] });
+  }
+  return pickActor(options);
 }
 
 function assertBoolean(value, name) {
@@ -101,6 +111,7 @@ async function planUpJobs(kit, options = {}) {
   if (to !== undefined) assertMigrationName(to);
   assertBoolean(force, 'force');
   assertBoolean(ordered, 'ordered');
+  const actor = actorOf(options);
   if (force && filename === undefined) {
     // A bulk plan only ever holds pending files — there is no applied target
     // for `force` to re-run.
@@ -123,7 +134,7 @@ async function planUpJobs(kit, options = {}) {
   if (migrations.length === 0) {
     const plan = { groupId, direction: JOB_NAMES.UP, batch: null, migrations, jobs: [] };
     if (converge && !(await kit.converge({ dryRun: true })).inSync) {
-      plan.converge = buildConvergeJob({ groupId, ordered, jobOptions });
+      plan.converge = buildConvergeJob({ groupId, ordered, jobOptions, ...actor });
     }
     return plan;
   }
@@ -142,13 +153,20 @@ async function planUpJobs(kit, options = {}) {
         force,
         ordered,
         checksum: checksums.get(migration),
+        ...actor,
       }),
       opts: migrationJobOptions(jobOptions, JOB_NAMES.UP, migration, { force }),
     });
   }
   const plan = { groupId, direction: JOB_NAMES.UP, batch, migrations, jobs };
   if (converge) {
-    plan.converge = buildConvergeJob({ groupId, ordered, after: migrations.at(-1), jobOptions });
+    plan.converge = buildConvergeJob({
+      groupId,
+      ordered,
+      after: migrations.at(-1),
+      jobOptions,
+      ...actor,
+    });
   }
   return plan;
 }
@@ -191,6 +209,7 @@ async function planDownJobs(kit, options = {}) {
   if (to !== undefined) assertMigrationName(to);
   assertBoolean(ordered, 'ordered');
   assertJobOptions(jobOptions);
+  const actor = actorOf(options);
 
   const selection = {};
   if (steps !== undefined) selection.steps = steps;
@@ -218,6 +237,7 @@ async function planDownJobs(kit, options = {}) {
         total: rows.length,
         batch: row.batch,
         ordered,
+        ...actor,
       }),
       opts: migrationJobOptions(jobOptions, JOB_NAMES.DOWN, row.file),
     });
@@ -339,8 +359,11 @@ async function enqueueConverge(queue, kit, options = {}, internals = {}) {
   if (ordered !== undefined) assertBoolean(ordered, 'ordered');
   assertJobOptions(jobOptions);
   assertQueue(queue);
+  const actor = actorOf(options);
   const groupId = await newGroupId(kit);
-  const [added] = await queue.addBulk([buildConvergeJob({ groupId, ordered, jobOptions })]);
+  const [added] = await queue.addBulk([
+    buildConvergeJob({ groupId, ordered, jobOptions, ...actor }),
+  ]);
   if (!added) throw new ConfigInvalidError('queue.addBulk did not return the converge job');
   const jobId = String(added.id);
   const deduplicated = await isForeign(queue, jobId, groupId);

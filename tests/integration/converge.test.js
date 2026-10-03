@@ -189,6 +189,10 @@ describe('converge (integration) — every kind of index reaches a fixed point',
   });
 
   it('should leave the clustered index of a clustered collection out of everything', async () => {
+    const {
+      versionArray: [major, minor],
+    } = await mongo.db.admin().command({ buildInfo: 1 });
+    if (major < 5 || (major === 5 && minor < 3)) return; // clustered collections arrived in 5.3
     await mongo.db.createCollection('clustered', {
       clusteredIndex: { key: { _id: 1 }, unique: true, name: 'cluster' },
     });
@@ -222,18 +226,23 @@ describe('converge (integration) — changes', () => {
 
   it('should rebuild an index whose options changed', async () => {
     await convergeToFixedPoint([{ name: 'c', indexes: [{ key: { a: 1 } }] }]);
+    // sparse has no in-place path: drop and create.
     const result = await convergeToFixedPoint([
-      { name: 'c', indexes: [{ key: { a: 1 }, unique: true }] },
+      { name: 'c', indexes: [{ key: { a: 1 }, unique: true, sparse: true }] },
     ]);
     assert.deepStrictEqual(rows(result), ['c/index:a_1:recreate']);
-    assert.strictEqual((await indexesOf('c'))[0].unique, true);
+    assert.deepStrictEqual(
+      [(await indexesOf('c'))[0].unique, (await indexesOf('c'))[0].sparse],
+      [true, true],
+    );
   });
 
   it('should put the old index back when a unique rebuild meets duplicates', async () => {
     await mongo.db.collection('dups').insertMany([{ x: 1 }, { x: 1 }]);
     await mongo.db.collection('dups').createIndex({ x: 1 });
+    // unique + sparse: no in-place path for sparse, so this one is a rebuild.
     const kit = kitWith({
-      collections: [{ name: 'dups', indexes: [{ key: { x: 1 }, unique: true }] }],
+      collections: [{ name: 'dups', indexes: [{ key: { x: 1 }, unique: true, sparse: true }] }],
     });
     await assert.rejects(kit.converge(), (error) => {
       assert.ok(error instanceof ConvergeFailedError);
@@ -263,6 +272,104 @@ describe('converge (integration) — changes', () => {
     await convergeToFixedPoint(collections, { rebuildUnique: true });
     const [index] = await indexesOf('emails');
     assert.deepStrictEqual([index.unique, index.sparse], [true, true]);
+  });
+
+  it('should make an index unique in place where the server can, never dropping it', async () => {
+    await mongo.db.collection('accounts').insertMany([{ e: 1 }, { e: 2 }]);
+    await mongo.db.collection('accounts').createIndex({ e: 1 });
+    const collections = [{ name: 'accounts', indexes: [{ key: { e: 1 }, unique: true }] }];
+    const { version } = await mongo.db.admin().command({ buildInfo: 1 });
+    const [major] = version.split('.').map(Number);
+    const result = await convergeToFixedPoint(collections);
+    // 7.0+: collMod prepareUnique → unique, no rebuild; before that, a rebuild.
+    assert.deepStrictEqual(rows(result), [
+      `accounts/index:e_1:${major >= 7 ? 'modify' : 'recreate'}`,
+    ]);
+    assert.strictEqual((await indexesOf('accounts'))[0].unique, true);
+    await assert.rejects(mongo.db.collection('accounts').insertOne({ e: 1 }), /E11000/);
+  });
+
+  it('should leave the index as it was when its data holds duplicates', async () => {
+    const { version } = await mongo.db.admin().command({ buildInfo: 1 });
+    if (Number(version.split('.')[0]) < 7) return; // a rebuild there — covered above
+    await mongo.db.collection('dupes').insertMany([{ e: 1 }, { e: 1 }]);
+    await mongo.db.collection('dupes').createIndex({ e: 1 });
+    const kit = kitWith({
+      collections: [{ name: 'dupes', indexes: [{ key: { e: 1 }, unique: true }] }],
+    });
+    await assert.rejects(kit.converge(), (error) => {
+      assert.ok(error instanceof ConvergeFailedError);
+      assert.match(error.message, /deduplicate/);
+      return true;
+    });
+    const [index] = await indexesOf('dupes');
+    assert.strictEqual(index.unique, undefined);
+    assert.notStrictEqual(index.prepareUnique, true, 'prepareUnique was taken back off');
+    // …so writes are not blocked by a half-made constraint.
+    await mongo.db.collection('dupes').insertOne({ e: 1 });
+  });
+
+  it('should add a TTL to a single-field index in place where the server can', async () => {
+    await mongo.db.collection('sessions').createIndex({ seenAt: 1 });
+    const result = await convergeToFixedPoint([
+      { name: 'sessions', indexes: [{ key: { seenAt: 1 }, expireAfterSeconds: 3600 }] },
+    ]);
+    const { version } = await mongo.db.admin().command({ buildInfo: 1 });
+    const [major, minor] = version.split('.').map(Number);
+    const inPlace = major > 5 || (major === 5 && minor >= 1);
+    assert.deepStrictEqual(rows(result), [
+      `sessions/index:seenAt_1:${inPlace ? 'modify' : 'recreate'}`,
+    ]);
+    assert.strictEqual((await indexesOf('sessions'))[0].expireAfterSeconds, 3600);
+  });
+
+  it('should keep a history of the converges that changed something', async () => {
+    const collections = [{ name: 'c', indexes: [{ key: { a: 1 } }] }];
+    const kit = kitWith({ collections });
+    // Nothing yet: the history collection is created by the first entry only.
+    assert.deepStrictEqual(await kit.convergeHistory(), []);
+    assert.deepStrictEqual(
+      await mongo.db.listCollections({ name: '_migronaut_converge' }).toArray(),
+      [],
+    );
+
+    await kit.converge({ requestedBy: 'alice', reason: 'TICKET-9' });
+    await kit.converge(); // in sync: not recorded
+    const [entry, ...rest] = await kit.convergeHistory();
+    assert.deepStrictEqual(rest, []);
+    assert.strictEqual(entry.success, true);
+    assert.deepStrictEqual([entry.requestedBy, entry.reason], ['alice', 'TICKET-9']);
+    assert.ok(entry.startedAt instanceof Date);
+    assert.match(entry.runId, /^[0-9a-f-]{36}$/);
+    assert.deepStrictEqual(
+      entry.actions.map((action) => `${action.collection}/${action.name}:${action.action}`),
+      ['c/c:create', 'c/a_1:create'],
+    );
+    await assert.rejects(kit.convergeHistory({ limit: 0 }), ConfigInvalidError);
+  });
+
+  it('should settle a validator and a partial filter that hold regular expressions', async () => {
+    await convergeToFixedPoint([
+      {
+        name: 'emails',
+        validator: { address: { $regex: /@example\.com$/i } },
+        indexes: [
+          { key: { address: 1 }, partialFilterExpression: { address: { $type: 'string' } } },
+        ],
+      },
+    ]);
+    // A flag the driver would change (g → dotAll) is refused up front.
+    const kit = kitWith({ collections: [{ name: 'bad', validator: { a: { $regex: /x/g } } }] });
+    await assert.rejects(kit.converge(), (error) => {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.match(JSON.stringify(error.context), /cannot be stored as written/);
+      return true;
+    });
+  });
+
+  it('should refuse a definition of the history collection itself', async () => {
+    const kit = kitWith({ collections: [{ name: '_migronaut_converge', indexes: [] }] });
+    await assert.rejects(kit.converge(), ConfigInvalidError);
   });
 
   it('should restore a text index from the form the server reports', async () => {

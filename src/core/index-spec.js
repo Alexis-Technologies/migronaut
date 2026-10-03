@@ -1,4 +1,4 @@
-const { deepEqual, isPlainObject, toWire } = require('../utils/canonical.js');
+const { deepEqual, isPlainObject, regExpIssue, toWire } = require('../utils/canonical.js');
 
 /**
  * One declared index against one live index: validation, normalization, and
@@ -167,6 +167,8 @@ function indexIssues(index, path) {
       report(option)('must be an object');
     }
   }
+  const filterIssue = regExpIssue(index.partialFilterExpression);
+  if (filterIssue) report('partialFilterExpression')(filterIssue);
   const ttl = index.expireAfterSeconds;
   if (ttl !== undefined && (!Number.isSafeInteger(ttl) || ttl < 0)) {
     report('expireAfterSeconds')('must be a non-negative integer (seconds)');
@@ -389,20 +391,45 @@ function sameDeclaredSignature(a, b) {
 }
 
 /**
+ * What the server can change in place, by version — `{ major, minor }` from
+ * `buildInfo`, or undefined when unknown (then nothing beyond the always-
+ * available `hidden` and TTL change).
+ */
+function inPlaceCapabilities(version) {
+  const atLeast = (major, minor) =>
+    version !== undefined &&
+    (version.major > major || (version.major === major && version.minor >= minor));
+  return {
+    // collMod prepareUnique → unique: a non-unique index becomes unique
+    // without being dropped — no window without it, no second scan. The
+    // commands exist since 6.0, but a 6.0 server reported the conversion and
+    // went on accepting duplicates in our tests; 7.0 is where it is enforced.
+    unique: atLeast(7, 0),
+    // collMod expireAfterSeconds on a single-field index that has no TTL yet.
+    addTtl: atLeast(5, 1),
+  };
+}
+
+/**
  * Compare a declaration with the live index it is paired with.
  *
  * Returns `{ diffs, inPlace }`: `diffs` lists every option that differs,
  * `inPlace` the subset `collMod` can change without a rebuild — the TTL of an
- * index that already has one, and `hidden`. Everything else needs the index
- * dropped and created again.
+ * index that already has one, and `hidden`; with `capabilities` (see
+ * {@link inPlaceCapabilities}) also making an index unique and adding a TTL.
+ * Everything else needs the index dropped and created again.
  */
-function compareIndex(declared, live, defaultCollation) {
+function compareIndex(declared, live, defaultCollation, capabilities = {}) {
   const diffs = [];
   const inPlace = {};
   if (!sameKey(declared, live)) diffs.push('key');
   const d = declared.options;
   const l = live.options;
-  if (Boolean(d.unique) !== Boolean(l.unique)) diffs.push('unique');
+  if (Boolean(d.unique) !== Boolean(l.unique)) {
+    diffs.push('unique');
+    // Only towards unique: the server converts that way, not back.
+    if (d.unique && capabilities.unique) inPlace.unique = true;
+  }
   if (Boolean(d.sparse) !== Boolean(l.sparse)) diffs.push('sparse');
   if (Boolean(d.hidden) !== Boolean(l.hidden)) {
     diffs.push('hidden');
@@ -413,6 +440,10 @@ function compareIndex(declared, live, defaultCollation) {
   if (ttlDeclared !== undefined || ttlLive !== undefined) {
     if (ttlDeclared === undefined || ttlLive === undefined) {
       diffs.push('expireAfterSeconds');
+      const singleField = declared.serverKey.length === 1 && !declared.isText;
+      if (ttlLive === undefined && capabilities.addTtl && singleField) {
+        inPlace.expireAfterSeconds = Number(ttlDeclared);
+      }
     } else if (Number(ttlDeclared) !== Number(ttlLive)) {
       diffs.push('expireAfterSeconds');
       inPlace.expireAfterSeconds = Number(ttlDeclared);
@@ -450,6 +481,7 @@ function restoreSpec(raw) {
 
 module.exports = {
   DIRECTIONS,
+  inPlaceCapabilities,
   INDEX_KEYS,
   SEMANTIC_OPTIONS,
   compareIndex,

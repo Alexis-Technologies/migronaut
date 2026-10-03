@@ -849,6 +849,20 @@ group: all drops, then all creates. A plan with any conflict refuses the whole r
 write. A rebuild whose create fails re-creates what it dropped from `restoreSpec(raw)`, best-effort,
 and reports `restored`.
 
+**History, not state.** Converge never reads what it did before — but every real run that changed
+something or failed appends an entry to `convergeLogCollection` ([converge-log.js](src/core/converge-log.js)),
+best-effort, with the run id, who and where, `requestedBy`/`reason`, and each row's `from`/`to`.
+The collection and its `startedAt` index are created by the first entry, never at connect.
+
+**What the server can do decides how.** `readServer` asks `hello` (a `mongos`?) and `buildInfo` (the
+version) once per run. The version feeds `inPlaceCapabilities`: unique-ization by `collMod`
+(`prepareUnique` → `unique`, 7.0+, rolled back on duplicates) and adding a TTL (5.1+) become
+`modify` steps; behind a `mongos` the shard keys are read so prune keeps their indexes (and a
+refused drop is kept, not failed).
+
+**Re-plan, then act.** Each collection after the first is re-read and re-planned right before its
+steps; a conflict or a destructive row the initial plan lacked stops the run (`phase: 'replan'`).
+
 **After `up`.** The hook lives in `up()`, not `#runUp` (which `redo` reuses): bulk only, no `to`,
 definitions resolved before the lock, converge inside the same `#withLock` callback even with zero
 pending; on failure the migration rows are attached as `context.results`, the converge result as
@@ -951,6 +965,10 @@ The high-impact ones for code changes:
   New fields bump `JOB_DATA_VERSION`; workers roll out first.
 - **Scheduler ticks get a retention unless `jobOptions` sets one** (100 completed, 500 failed):
   a schedule mints a job per tick forever.
+- **A tick holds a failed, unchanged migration.** `sync` enqueues nothing while the next
+  migration's `'failed'` trace carries the checksum of the file still on disk (`markFailed` records
+  it) — a circuit breaker, since re-running a half-applied migration on every tick is the worst
+  retry policy. A changed file, or an explicit `enqueueUp(name)`, resumes it.
 - **`generateId` is called with no arguments, and must be synchronous.** No "purpose" argument
   (`'run'`/`'group'`) is passed on purpose: `ulid(seedTime)` and `nanoid(size)` would read it as
   their own first parameter, and passing third-party generators as they are is the point. Async is

@@ -22,6 +22,8 @@ migronaut converge --check     # exit 28 if anything would change — a CI gate
 migronaut converge             # plan, ask before any drop or rebuild, then apply
 migronaut converge --prune     # also drop indexes a definition does not declare
 migronaut converge --ordered   # refuse while a migration is still pending
+migronaut converge --reason "TICKET-123"  # why — recorded in the converge history
+migronaut converge --history   # what converge has changed, newest first (read-only)
 migronaut converge --yes       # no confirmation
 migronaut converge --rebuild-unique  # allow rebuilding a unique index (see below)
 ```
@@ -56,6 +58,9 @@ Rows that need nothing are folded into the summary; `--verbose` lists them too.
 | `--check` | Like `--dry-run`, then exit `28` (`COLLECTIONS_DRIFT`) if anything would change or conflict. An undeclared index kept with prune off is not drift. |
 | `--prune` | Drop indexes a definition does not declare — in collections whose definition does not set `prune` itself. With `indexes: []` that is every index but `_id`, and converge warns. |
 | `--ordered` | Refuse (`MIGRATION_BLOCKED`, exit `24`) while any migration is still pending — checked under the lock. |
+| `--reason <text>` | Why — recorded in the [converge history](/guide/collections#history) with the run. |
+| `--history` | Show the converge history instead of converging: when, triggered how, who asked and why, how many changes. `--json` prints the full entries, with every row's `from` / `to`. |
+| `--limit <n>` | With `--history`: how many entries (default 20, at most 1000). |
 | `-y, --yes` | Apply drops, rebuilds and validator changes without asking. **Required** for them with `--json`. |
 | `--rebuild-unique` | Allow a rebuild that drops a unique index and builds a unique one back. Without it such a rebuild is a `conflict`. |
 | `--no-lock` | Skip the concurrency lock. **Dev only.** |

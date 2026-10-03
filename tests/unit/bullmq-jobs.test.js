@@ -307,6 +307,22 @@ describe('parseJobData', () => {
     ['sync', { v: 1, kind: 'sync' }],
     ['sync', { v: 1, kind: 'sync', to: '0003-c.js' }],
     ['converge', { v: 1, kind: 'converge', groupId: 'g', ordered: true }],
+    [
+      'up',
+      {
+        v: 1,
+        direction: 'up',
+        migration: 'a.js',
+        groupId: 'g',
+        index: 0,
+        total: 1,
+        batch: 1,
+        ordered: true,
+        requestedBy: 'deploy-bot',
+        reason: 'release 42',
+      },
+    ],
+    ['converge', { v: 1, kind: 'converge', ordered: true, requestedBy: 'ops', reason: 'nightly' }],
     ['converge', { v: 1, kind: 'converge' }],
   ];
   for (const [name, data] of GOLDEN_V1) {
@@ -364,6 +380,17 @@ describe('parseJobData', () => {
     ['force that is not `true`', () => job('up', upData({ force: 'yes' })), /force/],
     ['force on a down job', () => job('down', upData({ direction: 'down', force: true })), /force/],
     ['a non-boolean ordered', () => job('up', upData({ ordered: 0 })), /ordered/],
+    ['an empty reason', () => job('up', upData({ reason: '' })), /reason/],
+    [
+      'an oversized requestedBy',
+      () => job('up', upData({ requestedBy: 'x'.repeat(129) })),
+      /requestedBy/,
+    ],
+    [
+      'a requestedBy that is not a string',
+      () => job('converge', { v: 1, kind: 'converge', requestedBy: 7 }),
+      /requestedBy/,
+    ],
     ['a sync target that is not a filename', () => job('sync', { v: 1, to: '../x' }), /to is not/],
   ];
 

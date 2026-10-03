@@ -20,6 +20,7 @@ const DEFAULT_CONFIG = {
   migrationsDir: './migrations',
   migrationsCollection: '_migronaut_migrations',
   lockCollection: '_migronaut_locks',
+  convergeLogCollection: '_migronaut_converge',
   lockTTLSeconds: 60,
   strict: false,
   useTransaction: false,
@@ -71,6 +72,11 @@ const CONFIG_KEYS = [
   },
   {
     path: 'lockCollection',
+    check: isCollectionName,
+    message: "must be a valid collection name (no '$'/NUL, not system.*)",
+  },
+  {
+    path: 'convergeLogCollection',
     check: isCollectionName,
     message: "must be a valid collection name (no '$'/NUL, not system.*)",
   },
@@ -195,8 +201,21 @@ function validateConfig(config, options = {}) {
   // pure data, so this costs nothing. Definition *files* are loaded only when
   // a converge runs: importing them here would make one broken file block
   // every command, an emergency `down` included.
+  // Three bookkeeping collections, three jobs: sharing one would mix records.
+  const bookkeeping = ['migrationsCollection', 'lockCollection', 'convergeLogCollection'];
+  for (const [position, key] of bookkeeping.entries()) {
+    for (const other of bookkeeping.slice(0, position)) {
+      if (config[key] !== undefined && config[key] === config[other]) {
+        issues.push({ path: key, message: `must differ from ${other}` });
+      }
+    }
+  }
   if (Array.isArray(config.collections)) {
-    const reserved = [config.migrationsCollection, config.lockCollection];
+    const reserved = [
+      config.migrationsCollection,
+      config.lockCollection,
+      config.convergeLogCollection,
+    ];
     for (const issue of collectionsIssues(config.collections, { reserved })) issues.push(issue);
   }
   return issues;
@@ -289,6 +308,11 @@ const ENV_KEYS = [
   { env: 'MIGRONAUT_MIGRATIONS_DIR', path: 'migrationsDir', parse: parseString },
   { env: 'MIGRONAUT_COLLECTION', path: 'migrationsCollection', parse: parseString },
   { env: 'MIGRONAUT_LOCK_COLLECTION', path: 'lockCollection', parse: parseString },
+  {
+    env: 'MIGRONAUT_CONVERGE_LOG_COLLECTION',
+    path: 'convergeLogCollection',
+    parse: parseString,
+  },
   { env: 'MIGRONAUT_LOCK_TTL', path: 'lockTTLSeconds', parse: parsePositiveInteger },
   { env: 'MIGRONAUT_STRICT', path: 'strict', parse: parseBoolean },
   { env: 'MIGRONAUT_USE_TRANSACTION', path: 'useTransaction', parse: parseBoolean },

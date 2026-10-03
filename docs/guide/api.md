@@ -60,8 +60,8 @@ up, even from a different project's env file.
 | `down(filename?, options?)` | `Promise<RunResult[]>` | Revert the last batch, or a file/batch/last-N. |
 | `redo(filename?, options?)` | `Promise<RunResult[]>` | Revert then re-apply, both under one lock. |
 | `dryRun(direction, filename?, options?)` | `Promise<StatusRow[]>` | Preview `'up'`/`'down'` without writing. |
-| `status()` | `Promise<StatusRow[]>` | Full status of every known migration. |
-| `list(filter)` | `Promise<StatusRow[]>` | Filtered status: `'all' \| 'pending' \| 'applied'`. |
+| `status(options?)` | `Promise<StatusRow[]>` | Full status of every known migration. `{ checksums: false }` skips hashing applied files. |
+| `list(filter, options?)` | `Promise<StatusRow[]>` | Filtered status: `'all' \| 'pending' \| 'applied'`; same `checksums` option. |
 | `audit()` | `Promise<AuditReport>` | Read-only health check — the [`migronaut audit`](/commands/audit) command's engine. |
 | `create(name, options?)` | `Promise<string>` | Scaffold a new migration; returns its path. |
 | `init(options?)` | `Promise<string>` | Generate a config file; returns its path. |
@@ -69,6 +69,7 @@ up, even from a different project's env file.
 | `baseline(options?)` | `Promise<BaselineSummary>` | Mark files applied without executing them — the [`migronaut baseline`](/commands/baseline) command's engine. |
 | `converge(options?)` | `Promise<ConvergeResult>` | Bring the [declared collections](/guide/collections) to their declared indexes and validators — the [`migronaut converge`](/commands/converge) command's engine. |
 | `convergesAfterUp()` | `Promise<boolean>` | Whether a bulk `up` on this kit ends by converging (`convergeAfterUp` on, something declared). Does not connect. |
+| `convergeHistory(options?)` | `Promise<ConvergeHistoryEntry[]>` | The [converge history](/guide/collections#history), newest first (`{ limit }`, default 20). Read-only. |
 | `nextBatch()` | `Promise<number>` | The batch number the next `up` would use — a peek, not a reservation. |
 | `generateId()` | `Promise<string>` | A new id in the kit's configured format — the [`generateId`](/guide/configuration#custom-id-format) option, else a random UUID. Does not connect. |
 | `lockInfo()` | `Promise<LockInfo \| null>` | Inspect the current lock holder, if any. |
@@ -77,6 +78,13 @@ up, even from a different project's env file.
 
 `up`/`down`/`redo` return a [`RunResult[]`](#runresult); `status`/`list`/`dryRun` return
 [`StatusRow[]`](#statusrow).
+
+`up`, `down`, `redo` and `converge` take `requestedBy` (≤ 128 characters) and `reason` (≤ 512):
+who asked for the run, and why. They are stamped on what the run writes — `requestedBy` /
+`reason` on applied records, `revertRequestedBy` / `revertReason` on reverted ones, both on a
+converge history entry — and `status()` shows them. `executedBy` stays the OS user that ran it.
+`up(file, { checksum })` refuses any other version of the file than the one with that SHA-256 (the
+`checksum` that `dryRun('up')` rows carry).
 
 `baseline({ to?, noLock? })` adopts an existing database with no prior migration tool: it stamps
 migration files as applied — checksums from disk, one shared batch, `origin: 'baseline'` — without

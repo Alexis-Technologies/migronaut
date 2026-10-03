@@ -43,6 +43,7 @@ Nothing to migrate
 | `-f, --force` | Re-run an **already-applied** file (requires a `[file]`). Prompts for confirmation. |
 | `-y, --yes` | Skip the confirmation prompt for `--force` (required in `--json` mode). |
 | `--strict` | Override config: abort on a checksum mismatch instead of warning. |
+| `--reason <text>` | Why — stamped on the changelog records the run writes (`reason`; who: the OS user, `executedBy`). Shown by `status`. |
 | `--no-lock` | Skip the concurrency lock. **Dev only** — warns loudly. |
 | `--converge` | After the migrations, converge the [declared collections](/guide/collections), under the same lock — even when nothing was pending. Bulk runs only: refused with a `[file]` or `--to`. |
 | `--no-converge` | Don't converge afterwards, even with `convergeAfterUp: true`. |

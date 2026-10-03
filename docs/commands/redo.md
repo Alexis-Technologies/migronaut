@@ -28,6 +28,7 @@ during development:
 | Option | Description |
 |---|---|
 | `[file]` | Redo a specific migration file instead of the last applied one. |
+| `--reason <text>` | Why — stamped on the revert and on the re-apply. |
 | `--no-lock` | Skip the concurrency lock. **Dev only.** |
 | `--json` | Emit the run results as a JSON array on stdout. |
 

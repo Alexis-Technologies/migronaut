@@ -53,6 +53,67 @@ function sortFlags(flags) {
   return [...String(flags)].sort().join('');
 }
 
+/**
+ * A JavaScript RegExp's flags as the server stores them. The driver writes
+ * `i` and `m` as they are, `g` as the server's `s` (dotAll) — and drops every
+ * other flag. Comparing in this form is what lets a declared `/x/i` and the
+ * `/x/i` read back compare equal, and a `BSONRegExp('x', 's')` match too.
+ */
+const DRIVER_REGEXP_FLAGS = { i: 'i', m: 'm', g: 's' };
+function storedFlags(flags) {
+  let out = '';
+  for (const flag of String(flags)) out += DRIVER_REGEXP_FLAGS[flag] ?? '';
+  return out;
+}
+
+/** JavaScript RegExp flags that do not survive the trip to the server as written */
+const UNSTORABLE_FLAGS = /[^im]/g;
+
+/**
+ * Why `value` cannot be stored as declared — a RegExp whose flags the driver
+ * changes (`g` becomes dotAll) or drops (`s`, `u`, `y`, `d`, `v`) — or null.
+ * A `BSONRegExp` states server options directly and is always fine.
+ */
+function regExpIssue(value, seen = new Set()) {
+  if (value instanceof RegExp) {
+    const bad = value.flags.match(UNSTORABLE_FLAGS);
+    return bad
+      ? `regular expression /${value.source}/${value.flags}: flag(s) ${bad.join('')} cannot be ` +
+          'stored as written (the driver keeps only i and m, and turns g into dotAll) — use ' +
+          "BSONRegExp from 'bson' for server options"
+      : null;
+  }
+  if (value === null || typeof value !== 'object' || seen.has(value)) return null;
+  seen.add(value);
+  const items =
+    value instanceof Map
+      ? [...value.values()]
+      : Array.isArray(value)
+        ? value
+        : isPlainObject(value)
+          ? Object.values(value)
+          : [];
+  for (const item of items) {
+    const issue = regExpIssue(item, seen);
+    if (issue) return issue;
+  }
+  return null;
+}
+
+/**
+ * Assign without invoking setters: a key named `__proto__` (JSON.parse makes
+ * one an own property) must stay a key, not replace the object's prototype —
+ * otherwise it vanishes from what is sent and what is compared.
+ */
+function assign(target, key, value) {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
 /** A JSON-safe, key-sorted stand-in for `value` (see the module comment) */
 function canonical(value) {
   if (value === undefined || value === null) return null;
@@ -73,7 +134,9 @@ function canonical(value) {
     const time = value.getTime();
     return { $date: Number.isNaN(time) ? 'invalid' : value.toISOString() };
   }
-  if (value instanceof RegExp) return { $regex: value.source, $options: sortFlags(value.flags) };
+  if (value instanceof RegExp) {
+    return { $regex: value.source, $options: sortFlags(storedFlags(value.flags)) };
+  }
   const bson = bsonType(value);
   if (bson !== undefined) return canonicalBson(bson, value);
   const entries = value instanceof Map ? [...value.entries()] : Object.entries(value);
@@ -87,7 +150,7 @@ function canonical(value) {
     if (item !== undefined) keys.push([String(key), item]);
   }
   keys.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  for (const [key, item] of keys) out[key] = canonical(item);
+  for (const [key, item] of keys) assign(out, key, canonical(item));
   return out;
 }
 
@@ -108,9 +171,9 @@ function toWire(value) {
   if (!isPlainObject(value)) return value;
   const out = {};
   for (const [key, item] of Object.entries(value)) {
-    if (item !== undefined) out[key] = toWire(item);
+    if (item !== undefined) assign(out, key, toWire(item));
   }
   return out;
 }
 
-module.exports = { canonical, deepEqual, isPlainObject, toWire };
+module.exports = { canonical, deepEqual, isPlainObject, regExpIssue, toWire };

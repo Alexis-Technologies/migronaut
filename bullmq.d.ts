@@ -148,6 +148,10 @@ export interface MigrationJobData {
   ordered?: boolean;
   /** SHA-256 of the migration file when the job was planned */
   checksum?: string;
+  /** Who asked (≤ 128 characters) — carried by the jobs, stamped on the changelog / converge history */
+  requestedBy?: string;
+  /** Why (≤ 512 characters) — carried and stamped like `requestedBy` */
+  reason?: string;
 }
 
 /**
@@ -176,6 +180,10 @@ export interface ConvergeJobData {
    * producer; a job without it gets the worker's default (refuse).
    */
   ordered?: boolean;
+  /** Who asked (≤ 128 characters) — carried by the jobs, stamped on the changelog / converge history */
+  requestedBy?: string;
+  /** Why (≤ 512 characters) — carried and stamped like `requestedBy` */
+  reason?: string;
 }
 
 /**
@@ -210,6 +218,12 @@ export interface SyncJobResult {
   migrations: string[];
   /** The converge job this tick added (`convergeAfterUp`), if any */
   converge?: { jobId: string; deduplicated: boolean };
+  /**
+   * Present when the tick enqueued nothing because the next migration failed
+   * and its file has not changed since — a schedule's circuit breaker. A fix
+   * (a changed file) or an explicit `enqueueUp(name)` resumes the line.
+   */
+  held?: { migration: string; reason: string; failedAt?: Date };
 }
 
 /**
@@ -378,12 +392,20 @@ export interface EnqueueUpOptions {
    * a filename or `to`.
    */
   converge?: boolean;
+  /** Who asked (≤ 128 characters) — carried by the jobs, stamped on the changelog / converge history */
+  requestedBy?: string;
+  /** Why (≤ 512 characters) — carried and stamped like `requestedBy` */
+  reason?: string;
 }
 
 /** Options for `enqueueConverge` */
 export interface EnqueueConvergeOptions {
   /** Default `true`: refuse while a migration is still pending. `false` converges anyway */
   ordered?: boolean;
+  /** Who asked (≤ 128 characters) — carried by the jobs, stamped on the changelog / converge history */
+  requestedBy?: string;
+  /** Why (≤ 512 characters) — carried and stamped like `requestedBy` */
+  reason?: string;
 }
 
 /** Options for `enqueueDown` */
@@ -400,6 +422,10 @@ export interface EnqueueDownOptions {
    * CLI's unguarded `down`.
    */
   ordered?: boolean;
+  /** Who asked (≤ 128 characters) — carried by the jobs, stamped on the changelog / converge history */
+  requestedBy?: string;
+  /** Why (≤ 512 characters) — carried and stamped like `requestedBy` */
+  reason?: string;
 }
 
 /** Options for a group's `wait()` */

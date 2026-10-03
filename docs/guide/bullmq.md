@@ -84,7 +84,7 @@ Three rules explain every behaviour on this page:
 
 | Method | Returns | |
 |---|---|---|
-| `enqueueUp(filename?, { to?, force?, ordered? })` | `MigrationGroup` | All pending, pending up to `to`, or one file |
+| `enqueueUp(filename?, { to?, force?, ordered?, requestedBy?, reason? })` | `MigrationGroup` | All pending, pending up to `to`, or one file |
 | `enqueueDown(filename?, { steps?, batch?, to?, ordered? })` | `MigrationGroup` | Last batch (default), a batch, the last N, back to `to`, or one file |
 | `startWorker(options?)` | your `Worker` | Connects to MongoDB, then starts a concurrency-1 worker |
 | `status()` / `pending()` / `audit()` / `lockInfo()` | | Read straight from MongoDB — same as the [kit methods](/guide/api) |
@@ -186,8 +186,11 @@ the database caught up with the migration files. Idempotent, so every instance c
 boot. Ticks carry the queue's `jobOptions`; when those set no retention, a tick keeps the last 100
 completed and 500 failed jobs (`removeOnComplete: { count: 100 }`, `removeOnFail: { count: 500 }`)
 — a schedule mints a job per tick forever, and BullMQ keeps every finished job by default.
-After a failure, each tick re-enqueues the failing migration (and the ones behind it) until a fix
-is deployed; the failures stay visible in the queue's `failed` set.
+After a failure, the schedule **holds the line**: a tick whose next migration failed, and whose
+file is still the version that failed, enqueues nothing and reports it (`returnvalue.held`, and a
+warning) instead of re-running a migration that may have half-applied its changes on every tick.
+Deploy a fix — a changed file — and the next tick enqueues it again; `enqueueUp(name)` asks for it
+explicitly whenever you decide a retry is right.
 
 ## Converge jobs
 
@@ -357,6 +360,14 @@ end the enqueue they interrupt. So:
   duplicate-key error quotes (`dup key: { <redacted> }`) are masked too — a queue keeps failed
   jobs and serves them to dashboards.
 - **The API in front of it is yours to protect.** Whoever can enqueue can roll back.
+
+## Who asked, and why
+
+A worker runs as the container's OS user — that is the changelog's `executedBy`. Say who actually
+asked, and why, when you enqueue: `enqueueUp(undefined, { requestedBy: user.email, reason:
+'release 42' })` (also `enqueueDown` and `enqueueConverge`). The jobs carry both, and they are
+stamped on the changelog records (`requestedBy`, `reason`; `revertRequestedBy`, `revertReason` for
+a rollback) and on the [converge history](/guide/collections#history).
 
 ## Upgrading: the job contract
 

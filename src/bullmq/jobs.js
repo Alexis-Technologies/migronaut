@@ -1,4 +1,5 @@
 const { ConfigInvalidError, QueueJobInvalidError } = require('../errors/index.js');
+const { actorIssue, pickActor } = require('../utils/actor.js');
 const { MAX_ID_LENGTH } = require('../utils/id.js');
 const { isBareFilename } = require('../utils/migration-name.js');
 
@@ -71,9 +72,11 @@ const JOB_FIELDS = Object.freeze({
     'force',
     'ordered',
     'checksum',
+    'requestedBy',
+    'reason',
   ]),
   sync: new Set(['v', 'kind', 'to']),
-  converge: new Set(['v', 'kind', 'groupId', 'ordered']),
+  converge: new Set(['v', 'kind', 'groupId', 'ordered', 'requestedBy', 'reason']),
 });
 /** The limit every migronaut id is minted under — a producer's own check and this one agree */
 const MAX_GROUP_ID_LENGTH = MAX_ID_LENGTH;
@@ -228,6 +231,10 @@ function parseJobData(job) {
       );
     }
   }
+  for (const key of ['requestedBy', 'reason']) {
+    const issue = actorIssue(key, data[key]);
+    if (issue) throw invalid(job, issue);
+  }
 
   if (name === JOB_NAMES.SYNC) {
     if (data.to !== undefined && !isBareFilename(data.to)) {
@@ -249,6 +256,7 @@ function parseJobData(job) {
       kind: 'converge',
       ...(data.groupId !== undefined ? { groupId: data.groupId } : {}),
       ...(data.ordered !== undefined ? { ordered: data.ordered } : {}),
+      ...pickActor(data),
     };
   }
 
@@ -297,6 +305,7 @@ function parseJobData(job) {
     ...(data.force ? { force: true } : {}),
     ...(data.ordered !== undefined ? { ordered: data.ordered } : {}),
     ...(data.checksum !== undefined ? { checksum: data.checksum } : {}),
+    ...pickActor(data),
   };
 }
 
@@ -315,6 +324,8 @@ function buildMigrationJob({
   force,
   ordered = true,
   checksum,
+  requestedBy,
+  reason,
 }) {
   return {
     name: direction,
@@ -329,6 +340,7 @@ function buildMigrationJob({
       ...(force ? { force: true } : {}),
       ordered: ordered !== false,
       ...(checksum !== undefined ? { checksum } : {}),
+      ...pickActor({ requestedBy, reason }),
     },
   };
 }
@@ -348,7 +360,7 @@ function migrationJobOptions(jobOptions, direction, migration, { force = false }
  * skips the "nothing may be pending" guard; like a migration job's, it is
  * always written.
  */
-function buildConvergeJob({ groupId, ordered, after, jobOptions } = {}) {
+function buildConvergeJob({ groupId, ordered, after, jobOptions, requestedBy, reason } = {}) {
   return {
     name: JOB_NAMES.CONVERGE,
     data: {
@@ -356,6 +368,7 @@ function buildConvergeJob({ groupId, ordered, after, jobOptions } = {}) {
       kind: 'converge',
       ...(groupId !== undefined ? { groupId } : {}),
       ordered: ordered !== false,
+      ...pickActor({ requestedBy, reason }),
     },
     opts: {
       ...jobOptions,

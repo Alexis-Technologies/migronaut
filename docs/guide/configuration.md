@@ -84,6 +84,7 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `migrationsDir` | `string` | `'./migrations'` | Directory holding migration files |
 | `migrationsCollection` | `string` | `'_migronaut_migrations'` | Collection storing the changelog |
 | `lockCollection` | `string` | `'_migronaut_locks'` | Collection used for the concurrency lock |
+| `convergeLogCollection` | `string` | `'_migronaut_converge'` | Collection holding the [converge history](/guide/collections#history) — created by the first converge that changes something |
 | `lockTTLSeconds` | `number` | `60` | Seconds before a lock is considered stale |
 | `strict` | `boolean` | `false` | Abort (vs. warn) on a checksum mismatch |
 | `useTransaction` | `boolean` | `false` | Wrap every migration in a transaction globally |
@@ -191,6 +192,7 @@ config file is never required" literally true, not just a slogan. These
 | `MIGRONAUT_MIGRATIONS_DIR` | `migrationsDir` |
 | `MIGRONAUT_COLLECTION` | `migrationsCollection` |
 | `MIGRONAUT_LOCK_COLLECTION` | `lockCollection` |
+| `MIGRONAUT_CONVERGE_LOG_COLLECTION` | `convergeLogCollection` |
 | `MIGRONAUT_LOCK_TTL` | `lockTTLSeconds` |
 | `MIGRONAUT_STRICT` | `strict` |
 | `MIGRONAUT_USE_TRANSACTION` | `useTransaction` |
