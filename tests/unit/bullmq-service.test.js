@@ -473,13 +473,26 @@ describe('createMigrationQueue', () => {
           { file: '0001-a.js', status: 'applied', appliedAt: new Date(1) },
         ]),
       });
-      const { mq } = make({ kit });
+      const { mq } = make({ kit, allow: { unordered: true } });
       const up = await mq.enqueueUp('0003-c.js', { ordered: false });
       assert.strictEqual(up.jobs[0].migration, '0003-c.js');
       const down = await mq.enqueueDown(undefined, { steps: 1 });
       assert.strictEqual(down.direction, 'down');
       assert.deepStrictEqual(kit.dryRun.mock.calls[1].arguments, ['down', undefined, { steps: 1 }]);
       await mq.close();
+    });
+
+    it("should refuse at enqueue what its own workers' policy would refuse", async () => {
+      const { mq, kit } = make();
+      await assert.rejects(mq.enqueueUp('0003-c.js', { force: true }), /allow\.force/);
+      await assert.rejects(mq.enqueueUp('0003-c.js', { ordered: false }), /allow\.unordered/);
+      await assert.rejects(mq.enqueueConverge({ ordered: false }), /allow\.unordered/);
+      assert.strictEqual(kit.dryRun.mock.callCount(), 0, 'refused before planning');
+      const strict = make({ allow: { down: false } });
+      await assert.rejects(strict.mq.enqueueDown(), /allow\.down/);
+      assert.throws(() => make({ allow: { everything: true } }), ConfigInvalidError);
+      await mq.close();
+      await strict.mq.close();
     });
 
     it('should read status straight from the kit', async () => {
@@ -660,6 +673,7 @@ describe('createMigrationQueue', () => {
       ['neither every nor pattern', {}],
       ['both every and pattern', { every: 1000, pattern: '* * * * *' }],
       ['a non-positive every', { every: 0 }],
+      ['an every below a second', { every: 999 }],
       ['a non-numeric every', { every: '1000' }],
       ['an empty pattern', { pattern: '' }],
       ['a non-string pattern', { pattern: 5 }],

@@ -17,13 +17,23 @@ function isDuplicateKeyError(error) {
 }
 
 /**
- * Map a raw lock document to the public LockInfo shape. Strips internal fields —
- * most importantly the `owner` token and the `nonce`, which together prove lock
- * ownership and must never leak into error context or CLI output.
+ * Map a raw lock document to the public LockInfo shape. The `nonce` — what
+ * proves ownership — never leaves this module. The `owner` is the holder's run
+ * id, the same value its events, log lines and changelog records carry, so it
+ * is reported as `runId`: "which run holds the lock?" is the first question
+ * when one is stuck. `ttlMs` is the holder's own TTL, which paces its
+ * heartbeat (written since 2.1; absent from an older holder's document).
  */
 function toLockInfo(doc) {
   if (!doc) return null;
-  return { lockedAt: doc.lockedAt, pid: doc.pid, host: doc.host, executedBy: doc.executedBy };
+  return {
+    lockedAt: doc.lockedAt,
+    pid: doc.pid,
+    host: doc.host,
+    executedBy: doc.executedBy,
+    ...(typeof doc.owner === 'string' ? { runId: doc.owner } : {}),
+    ...(typeof doc.ttlMs === 'number' ? { ttlMs: doc.ttlMs } : {}),
+  };
 }
 
 /**
@@ -88,6 +98,7 @@ class MigrationLock {
       executedBy: { $literal: safeUsername() },
       owner: { $literal: owner },
       nonce: { $literal: nonce },
+      ttlMs: { $literal: this.ttlMs },
     };
 
     let result;
@@ -123,6 +134,7 @@ class MigrationLock {
         const holder = await collection.findOne({ _id: LOCK_ID });
         throw new LockAlreadyHeldError('Migration lock is already held', {
           holder: toLockInfo(holder) ?? undefined,
+          ttlMs: this.ttlMs,
         });
       }
       throw error;
@@ -147,6 +159,7 @@ class MigrationLock {
     if (!current || current.owner !== owner || current.nonce !== nonce) {
       throw new LockAlreadyHeldError('Migration lock is already held', {
         holder: toLockInfo(current) ?? undefined,
+        ttlMs: this.ttlMs,
       });
     }
     this.#owner = owner;

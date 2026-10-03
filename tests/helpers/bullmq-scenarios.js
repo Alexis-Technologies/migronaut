@@ -121,6 +121,9 @@ function defineBullMQScenarios(harness) {
     }
   }
 
+  /** A queue whose jobs give up on a block quickly — for scenarios that expect one */
+  const QUICK_BLOCK = { lockWait: { lockPollIntervalMs: 20, lockWaitTimeoutMs: 300 } };
+
   async function holdLock() {
     await harness.mongo().db.collection(LOCK_COLLECTION).insertOne({
       _id: 'migronaut_lock',
@@ -282,10 +285,17 @@ function defineBullMQScenarios(harness) {
 
   it('should refuse a single file while an earlier one is still pending', async () => {
     three();
-    const mq = createQueue();
+    // An earlier migration that never failed may be in flight on another
+    // worker: the job waits for it (within its lock-wait budget), then refuses.
+    const mq = createQueue(QUICK_BLOCK);
     await mq.startWorker();
     const group = await mq.enqueueUp('0002-b.js');
     const [view] = await settled(mq, [group.jobs[0].id]);
+    const logs = await harness.logsOf(mq.queue, group.jobs[0].id);
+    assert.ok(
+      logs.some((row) => /not applied yet — waiting/.test(row)),
+      logs.join(' | '),
+    );
 
     assert.strictEqual(view.state, 'failed');
     assert.match(view.failedReason, /0002-b\.js is blocked/);
@@ -295,9 +305,61 @@ function defineBullMQScenarios(harness) {
     assert.deepStrictEqual(await records(), [], 'a blocked job leaves no trace in the changelog');
   });
 
+  it('should let a later job wait for an earlier one still in flight on another worker', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    write('0002-b.js', insertMigration('things', 'b'));
+    await holdLock();
+    // Two workers that both take a job — no global concurrency — and a lock
+    // that frees with the later job polling far more often: it gets there
+    // first, finds 0001 not applied (but not failed), and must wait for it.
+    const slow = createQueue({
+      globalConcurrency: false,
+      lockWait: { lockPollIntervalMs: 400, lockWaitTimeoutMs: 10_000 },
+    });
+    const fast = createQueue({
+      globalConcurrency: false,
+      lockWait: { lockPollIntervalMs: 20, lockWaitTimeoutMs: 10_000 },
+    });
+    await slow.startWorker();
+    const group = await slow.enqueueUp();
+    const [first, second] = group.jobs.map((job) => job.id);
+    const deadline = Date.now() + 10_000;
+    while ((await slow.getJob(first))?.state !== 'active') {
+      if (Date.now() > deadline) throw new Error('the first job never started');
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    await fast.startWorker();
+    while ((await fast.getJob(second))?.progress?.phase !== 'lock-wait') {
+      if (Date.now() > deadline) throw new Error('the second job never waited');
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    await releaseLock();
+
+    const views = await settled(slow, [first, second]);
+    assert.deepStrictEqual(
+      views.map((view) => view.state),
+      ['completed', 'completed'],
+    );
+    assert.deepStrictEqual(await markers(), ['a', 'b']);
+  });
+
+  it('should refuse to apply a file that changed since its job was planned', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue();
+    const group = await mq.enqueueUp();
+    // A worker from another deploy: same name, other content.
+    write('0001-a.js', insertMigration('things', 'a-elsewhere'));
+    await mq.startWorker();
+    const [view] = await settled(mq, [group.jobs[0].id]);
+    assert.strictEqual(view.state, 'failed');
+    assert.strictEqual(view.progress.code, 'CHECKSUM_MISMATCH');
+    assert.match(view.failedReason, /not the file this run was planned with/);
+    assert.deepStrictEqual(await markers(), []);
+  });
+
   it('should run that same file when the job opts out of the order guard', async () => {
     three();
-    const mq = createQueue();
+    const mq = createQueue({ allow: { unordered: true } });
     await mq.startWorker();
     const group = await mq.enqueueUp('0002-b.js', { ordered: false });
     await group.wait({ timeoutMs: 10_000 });
@@ -319,6 +381,8 @@ function defineBullMQScenarios(harness) {
       assert.strictEqual(error.context.timedOut, false);
       // The cause travels with the message: it is all the queue ever sees.
       assert.match(error.context.failedReason, /intentional failure/);
+      // …and the typed code with the error, so a caller branches without parsing.
+      assert.strictEqual(error.context.code, 'MIGRATION_EXECUTION_FAILED');
       assert.strictEqual(error.context.results.length, 1);
       assert.strictEqual(error.context.results[0].status, 'applied');
       return true;
@@ -499,7 +563,7 @@ function defineBullMQScenarios(harness) {
 
   it('should refuse, on the worker, a rollback job that skips newer work', async () => {
     three();
-    const mq = createQueue();
+    const mq = createQueue(QUICK_BLOCK);
     await mq.startWorker();
     await (await mq.enqueueUp()).wait({ timeoutMs: 10_000 });
 
@@ -535,9 +599,38 @@ function defineBullMQScenarios(harness) {
     });
   });
 
-  it('should re-run an applied migration when forced', async () => {
+  it('should refuse a forced or unordered job its worker does not allow', async () => {
     write('0001-a.js', insertMigration('things', 'a'));
     const mq = createQueue();
+    await mq.startWorker();
+    await (await mq.enqueueUp()).wait({ timeoutMs: 10_000 });
+    // Hand-added, as anything with write access to Redis could.
+    const base = {
+      v: 1,
+      direction: 'up',
+      migration: '0001-a.js',
+      groupId: 'x',
+      index: 0,
+      total: 1,
+    };
+    const forced = await mq.queue.add('up', { ...base, batch: 9, force: true }, { attempts: 1 });
+    const unordered = await mq.queue.add(
+      'up',
+      { ...base, batch: 9, ordered: false },
+      { attempts: 1 },
+    );
+    const views = await settled(mq, [forced.id, unordered.id]);
+    for (const view of views) {
+      assert.strictEqual(view.state, 'failed');
+      assert.strictEqual(view.progress.code, 'QUEUE_JOB_INVALID', 'refused before it ever ran');
+      assert.match(view.failedReason, /is not allowed by this worker/);
+    }
+    assert.deepStrictEqual(await markers(), ['a'], 'nothing was re-run');
+  });
+
+  it('should re-run an applied migration when forced', async () => {
+    write('0001-a.js', insertMigration('things', 'a'));
+    const mq = createQueue({ allow: { force: true } });
     await mq.startWorker();
     await (await mq.enqueueUp()).wait({ timeoutMs: 10_000 });
 
@@ -591,7 +684,7 @@ function defineBullMQScenarios(harness) {
   it('should not retry a non-retryable failure even when a job was given attempts', async () => {
     write('0001-a.js', insertMigration('things', 'a'));
     write('0002-b.js', insertMigration('things', 'b'));
-    const mq = createQueue();
+    const mq = createQueue(QUICK_BLOCK);
     await mq.startWorker();
     // Enqueued some other way, with retries: the blocked job must still fail once.
     const job = await mq.queue.add(
@@ -864,7 +957,11 @@ function defineBullMQScenarios(harness) {
 
   it('should refuse an ordered converge while a migration is pending, unless told not to', async () => {
     write('0001-a.js', insertMigration('things', 'a'));
-    const mq = createQueue({ config: { collections: CONVERGING.collections } });
+    const mq = createQueue({
+      config: { collections: CONVERGING.collections },
+      ...QUICK_BLOCK,
+      allow: { unordered: true },
+    });
     await mq.startWorker();
     const ordered = await mq.enqueueConverge();
     await assert.rejects(ordered.wait({ timeoutMs: 10_000 }), (error) => {

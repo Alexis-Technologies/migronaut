@@ -4,6 +4,7 @@ const { ConfigInvalidError, MigrationExecutionFailedError } = require('../../src
 const {
   ATTRIBUTES,
   DURATION_BUCKETS_SECONDS,
+  MAX_STATUS_MESSAGE_LENGTH,
   METRICS,
   NOOP_SPAN,
   SPANS,
@@ -454,6 +455,25 @@ describe('errorType', () => {
   });
 });
 
+describe('failureText — what a tracing backend receives', () => {
+  it('should mask the values a duplicate-key error quotes', () => {
+    const error = new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
+      cause: 'E11000 duplicate key error index: email_1 dup key: { email: "alice@example.com" }',
+    });
+    assert.strictEqual(
+      failureText(error),
+      'Migration up failed: 0001-a.js — E11000 duplicate key error index: email_1 dup key: ' +
+        '{ <redacted> }',
+    );
+  });
+
+  it('should bound the message', () => {
+    const text = failureText(new Error('x'.repeat(5000)));
+    assert.strictEqual(text.length, MAX_STATUS_MESSAGE_LENGTH);
+    assert.ok(text.endsWith('…'));
+  });
+});
+
 describe('failureText', () => {
   it('should mask URI credentials — a driver message can echo the connection string', () => {
     const text = failureText(new Error('connect failed: mongodb://app:hunter2@db.internal/app'));
@@ -483,13 +503,14 @@ describe('failureText', () => {
 });
 
 describe('metrics', () => {
-  it('should create three duration histograms in seconds and two counters', () => {
+  it('should create four duration histograms in seconds and two counters', () => {
     const meter = fakeMeter();
     createTelemetry({ meter });
     assert.deepStrictEqual(Object.keys(meter.instruments).sort(), [
       'migronaut.lock.acquire.duration',
       'migronaut.lock.lost',
       'migronaut.lock.refused',
+      'migronaut.lock.wait.duration',
       'migronaut.migration.duration',
       'migronaut.run.duration',
     ]);
@@ -497,6 +518,7 @@ describe('metrics', () => {
       METRICS.RUN_DURATION,
       METRICS.MIGRATION_DURATION,
       METRICS.LOCK_ACQUIRE_DURATION,
+      METRICS.LOCK_WAIT_DURATION,
     ]) {
       const instrument = meter.instruments[name];
       assert.strictEqual(instrument.kind, 'histogram');
@@ -509,7 +531,26 @@ describe('metrics', () => {
     }
     for (const name of [METRICS.LOCK_REFUSED, METRICS.LOCK_LOST]) {
       assert.strictEqual(meter.instruments[name].kind, 'counter');
+      // A counter of events says what it counts, as the conventions ask.
+      assert.match(meter.instruments[name].options.unit, /^\{\w+\}$/);
     }
+  });
+
+  it('should record how a lock wait ended, in seconds', () => {
+    const meter = fakeMeter();
+    const telemetry = createTelemetry({ meter }, { dbName: 'app' });
+    telemetry.lockWaited({ waitedMs: 2500, outcome: 'acquired' });
+    telemetry.lockWaited({ waitedMs: 90_000, outcome: 'timeout' });
+    assert.deepStrictEqual(meter.instruments[METRICS.LOCK_WAIT_DURATION].points, [
+      {
+        value: 2.5,
+        attributes: { 'db.namespace': 'app', 'migronaut.lock.wait.outcome': 'acquired' },
+      },
+      {
+        value: 90,
+        attributes: { 'db.namespace': 'app', 'migronaut.lock.wait.outcome': 'timeout' },
+      },
+    ]);
   });
 
   it('should size the buckets for migrations — ascending, from 10ms to an hour', () => {

@@ -160,6 +160,8 @@ describe('sequenced single-file runs (integration)', () => {
           name: '0003-c.js',
           direction: 'up',
           blockedBy: ['0001-a.js', '0002-b.js'],
+          // None of them failed: they may simply be in flight elsewhere.
+          failed: [],
         });
         return true;
       });
@@ -191,6 +193,8 @@ describe('sequenced single-file runs (integration)', () => {
       await assert.rejects(migrator.up('0002-b.js', { ordered: true }), (error) => {
         assert.ok(error instanceof MigrationBlockedError);
         assert.deepStrictEqual(error.context.blockedBy, ['0001-a.js']);
+        // The failed trace is what tells a stopped line from one in flight.
+        assert.deepStrictEqual(error.context.failed, ['0001-a.js']);
         return true;
       });
     });
@@ -241,6 +245,32 @@ describe('sequenced single-file runs (integration)', () => {
         'nothing outside the sequence was imported',
       );
       assert.deepStrictEqual(await batches(), []);
+    });
+
+    it('should apply a file only in the version it was planned with', async () => {
+      setup();
+      three();
+      const [planned] = await migrator.dryRun('up', '0001-a.js');
+      assert.match(planned.checksum, /^[0-9a-f]{64}$/);
+      project.write('0001-a.js', insertMigration('things', 'a-edited'));
+      await assert.rejects(
+        migrator.up('0001-a.js', { ordered: true, checksum: planned.checksum }),
+        (error) => {
+          assert.ok(error instanceof ChecksumMismatchError);
+          assert.strictEqual(error.context.planned, true);
+          assert.strictEqual(error.context.expected, planned.checksum);
+          return true;
+        },
+      );
+      assert.deepStrictEqual(await batches(), [], 'nothing applied, nothing recorded');
+      const [current] = await migrator.dryRun('up', '0001-a.js');
+      const [row] = await migrator.up('0001-a.js', { ordered: true, checksum: current.checksum });
+      assert.strictEqual(row.status, 'applied');
+      // Already applied: a duplicate job is skipped whatever it planned with.
+      const [again] = await migrator.up('0001-a.js', { checksum: planned.checksum });
+      assert.strictEqual(again.status, 'skipped');
+      await assert.rejects(migrator.up(undefined, { checksum: current.checksum }), /filename/);
+      await assert.rejects(migrator.up('0002-b.js', { checksum: 'nope' }), /SHA-256/);
     });
 
     it('should leave an unordered single-file run exactly as it was', async () => {
@@ -311,6 +341,7 @@ describe('sequenced single-file runs (integration)', () => {
           name: '0001-a.js',
           direction: 'down',
           blockedBy: ['0003-c.js', '0002-b.js'],
+          failed: [],
         });
         return true;
       });

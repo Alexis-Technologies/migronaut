@@ -66,6 +66,7 @@ Combined short flags are not supported: write `-f -y`, not `-fy`.
 | `migronaut converge --dry-run` | Show the plan, change nothing |
 | `migronaut converge --check` | Exit 28 if anything would change (CI gate) |
 | `migronaut converge --prune` | Also drop indexes a definition does not declare |
+| `migronaut converge --ordered` | Refuse while a migration is still pending (exit 24) |
 | `migronaut converge --yes` | Apply drops and rebuilds without asking (required for them with `--json`) |
 | `migronaut converge --rebuild-unique` | Allow rebuilding a unique index (a `conflict` otherwise) |
 | `migronaut converge --no-lock` | Skip the lock (dev only) |

@@ -2,13 +2,15 @@ const { MigratorKit } = require('../core/migrator.js');
 const { ConfigInvalidError, MigronautError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { isBareFilename } = require('../utils/migration-name.js');
-const { redactDeep, redactUris } = require('../utils/redact.js');
+const { redactDeep, redactOutbound } = require('../utils/redact.js');
 const {
   DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
   JOB_NAMES,
   buildConvergeJobTemplate,
+  permissionsNeeded,
+  resolveAllow,
   buildSyncJobTemplate,
   isPlainObject,
 } = require('./jobs.js');
@@ -23,6 +25,8 @@ const { assertJobOptions, enqueueConverge, enqueueDown, enqueueUp } = require('.
 const DEFAULT_LOCK_DURATION_MS = 60_000;
 /** One stall is a crashed worker; a second on the same job is a pattern — fail it */
 const DEFAULT_MAX_STALLED_COUNT = 1;
+/** The shortest interval `schedule({ every })` accepts */
+const MIN_SCHEDULE_EVERY_MS = 1000;
 
 const isClass = (value) => typeof value === 'function';
 
@@ -84,6 +88,7 @@ class MigrationQueue {
   #workerOptions;
   #telemetry;
   #globalConcurrency;
+  #allow;
   #closing;
 
   constructor(options) {
@@ -102,6 +107,7 @@ class MigrationQueue {
       workerOptions = {},
       globalConcurrency = true,
       lockWait,
+      allow,
     } = options;
 
     if (!isPlainObject(bullmq)) {
@@ -181,7 +187,9 @@ class MigrationQueue {
       ...(kit !== undefined ? { kit } : {}),
       ...(config !== undefined ? { config } : {}),
       ...(lockWait !== undefined ? { lockWait } : {}),
+      ...(allow !== undefined ? { allow } : {}),
     });
+    this.#allow = resolveAllow(allow);
 
     this.#ownsKit = kit === undefined;
     this.#kit = kit ?? new MigratorKit(config ?? {}, kitOptions);
@@ -206,7 +214,25 @@ class MigrationQueue {
       queue: this.#queue,
       ...(lockWait !== undefined ? { lockWait } : {}),
       ...(jobOptions !== undefined ? { jobOptions } : {}),
+      ...(allow !== undefined ? { allow } : {}),
     });
+  }
+
+  /**
+   * Refuse, at the enqueue call, a request this object's own policy would
+   * refuse on the worker — a job that can only fail is better not added. The
+   * same `allow` belongs on every process that enqueues and every worker.
+   */
+  #assertPermitted(request) {
+    for (const permission of permissionsNeeded(request)) {
+      if (!this.#allow[permission]) {
+        throw new ConfigInvalidError(
+          `${permission === 'unordered' ? 'ordered: false' : permission} is not allowed by this ` +
+            `queue (allow.${permission})`,
+          { permission },
+        );
+      }
+    }
   }
 
   /** An injected instance must be on the queue this object is configured for */
@@ -305,6 +331,12 @@ class MigrationQueue {
    */
   async enqueueUp(filename, options = {}) {
     this.#assertOpen();
+    this.#assertPermitted({
+      kind: 'migration',
+      direction: JOB_NAMES.UP,
+      force: options?.force === true,
+      ordered: options?.ordered,
+    });
     return enqueueUp(
       this.#queue,
       this.#kit,
@@ -320,6 +352,11 @@ class MigrationQueue {
    */
   async enqueueDown(filename, options = {}) {
     this.#assertOpen();
+    this.#assertPermitted({
+      kind: 'migration',
+      direction: JOB_NAMES.DOWN,
+      ordered: options?.ordered,
+    });
     return enqueueDown(
       this.#queue,
       this.#kit,
@@ -335,6 +372,7 @@ class MigrationQueue {
    */
   async enqueueConverge(options = {}) {
     this.#assertOpen();
+    this.#assertPermitted({ kind: 'converge', ordered: options?.ordered });
     return enqueueConverge(
       this.#queue,
       this.#kit,
@@ -472,7 +510,7 @@ class MigrationQueue {
       state: typeof job.getState === 'function' ? await job.getState() : 'unknown',
       progress: job.progress,
       ...(job.returnvalue != null ? { returnvalue: job.returnvalue } : {}),
-      ...(job.failedReason ? { failedReason: redactUris(job.failedReason) } : {}),
+      ...(job.failedReason ? { failedReason: redactOutbound(job.failedReason) } : {}),
       attemptsMade: job.attemptsMade ?? 0,
       ...(job.timestamp !== undefined ? { timestamp: job.timestamp } : {}),
       ...(job.processedOn !== undefined ? { processedOn: job.processedOn } : {}),
@@ -507,8 +545,12 @@ class MigrationQueue {
         'schedule needs exactly one of `every` (ms) or `pattern` (cron)',
       );
     }
-    if (every !== undefined && (!Number.isFinite(every) || every <= 0)) {
-      throw new ConfigInvalidError('every must be a positive number of milliseconds', { every });
+    // A tick is a job, a Redis round trip and a changelog read: a schedule
+    // faster than once a second is a typo, not a cadence.
+    if (every !== undefined && (!Number.isFinite(every) || every < MIN_SCHEDULE_EVERY_MS)) {
+      throw new ConfigInvalidError(`every must be at least ${MIN_SCHEDULE_EVERY_MS} milliseconds`, {
+        every,
+      });
     }
     if (pattern !== undefined && (typeof pattern !== 'string' || pattern.length === 0)) {
       throw new ConfigInvalidError('pattern must be a cron expression', { pattern });

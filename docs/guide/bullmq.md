@@ -79,7 +79,8 @@ Three rules explain every behaviour on this page:
 | `jobOptions` | | Passed to every job: `removeOnComplete`, `removeOnFail`, `keepLogs`, … Options that reorder or retry jobs are rejected |
 | `workerOptions` | | Defaults for `startWorker()`: `lockDuration` (default 60000), `maxStalledCount` (1), `stalledInterval`, … |
 | `globalConcurrency` | `true` | Set the queue's global concurrency to 1 when the worker starts |
-| `lockWait` | | `{ onLockHeld: 'wait' \| 'throw', lockWaitTimeoutMs: 90000, lockPollIntervalMs: 500 }` — how a job behaves when the MongoDB lock is held |
+| `allow` | | `{ down: true, force: false, unordered: false }` — what a job may ask for beyond applying what is pending in order. See [Security](#security) |
+| `lockWait` | | `{ onLockHeld: 'wait' \| 'throw', lockWaitTimeoutMs, lockPollIntervalMs: 500 }` — how a job behaves when the MongoDB lock is held. The timeout defaults to 90 s or 1.5× the holder's lock TTL, whichever is longer; polls back off up to 5 s |
 
 | Method | Returns | |
 |---|---|---|
@@ -110,8 +111,9 @@ Three rules explain every behaviour on this page:
 ```
 
 `wait()` resolves when every job has finished, or rejects with a `QueueJobFailedError` at the first
-one that fails or outlives `timeoutMs` — `error.context` carries `migration`, `jobId`,
-`failedReason`, `timedOut` and the `results` that finished before it.
+one that fails or outlives `timeoutMs` (one budget for the whole call, connecting included) —
+`error.context` carries `migration`, `jobId`, `failedReason`, `timedOut`, the job's own typed
+`code` (`MIGRATION_BLOCKED`, `CHECKSUM_MISMATCH`, …) and the `results` that finished before it.
 
 ## Ordering and failure
 
@@ -126,6 +128,11 @@ transient condition worth retrying — the MongoDB lock being held — is waited
 | `0001` | completed — applied |
 | `0002` | failed — `MIGRATION_EXECUTION_FAILED`, with the cause in `failedReason` |
 | `0003` | failed — `MIGRATION_BLOCKED`: it never ran, because `0002` is still pending |
+
+A job blocked by an earlier migration that has **not** failed — no `'failed'` trace in the
+changelog — waits for it instead, within its `lockWait` budget: with several workers taking jobs,
+the earlier one may simply still be in flight elsewhere. Only a block that outlasts the budget
+fails the job. A block by a migration that did fail stops the line at once, as above.
 
 Nothing is left half-ordered. Fix the migration, deploy, and call `enqueueUp()` again: it plans what
 is still pending (`0002`, `0003`) as a new group.
@@ -337,10 +344,18 @@ end the enqueue they interrupt. So:
   migrations. Invalid jobs fail with `QueueJobInvalidError`.
 - **No decisions in jobs.** A converge job cannot ask for `prune` — what may be dropped comes from
   the worker's own definitions.
+- **Permissions beyond the ordinary are opt-in.** A job can only *ask*; the worker decides with
+  `allow`. By default it runs rollbacks but refuses `force` (re-running an applied migration) and
+  `ordered: false` (skipping the order guard) — a job asking for either fails as
+  `QUEUE_JOB_INVALID` before anything runs. `allow: { force: true, unordered: true }` turns them
+  on; `allow: { down: false }` makes a worker that never rolls back. The facade applies the same
+  policy to its own `enqueue*` calls, so give producers and workers the same `allow`.
 - **No secrets in jobs.** A job carries a filename, a group id and a batch number. The connection
   string stays in the worker's configuration.
 - **What the queue stores is redacted.** `failedReason`, stack traces, job logs and `getJob()`
-  output pass through the same credential redaction as migronaut's logs.
+  output pass through the same credential redaction as migronaut's logs, and the values a
+  duplicate-key error quotes (`dup key: { <redacted> }`) are masked too — a queue keeps failed
+  jobs and serves them to dashboards.
 - **The API in front of it is yours to protect.** Whoever can enqueue can roll back.
 
 ## Upgrading: the job contract
@@ -349,8 +364,11 @@ Jobs are versioned (`data.v`). A worker accepts every version from `MIN_JOB_DATA
 its own, so jobs already in the queue survive an upgrade of the workers; it refuses a newer
 version, and any field it does not know, as `QueueJobInvalidError` — a meaning it cannot honour is
 never dropped silently. So: **roll the workers out before the producers** (the processes that
-enqueue). A migration file is part of the same rule — a worker that does not have the file yet
-fails its job with `MIGRATION_FILE_NOT_FOUND`.
+enqueue). A migration file is part of the same rule. An `up` job carries the checksum of the file
+its plan saw: a worker that does not have the file yet fails the job with
+`MIGRATION_FILE_NOT_FOUND`, and one that has *another version* of it — an edited pending file —
+fails it with `CHECKSUM_MISMATCH` (`context.planned: true`) instead of applying the wrong one. Enqueue
+again once every worker runs the new deploy.
 
 ## TypeScript
 
@@ -378,7 +396,8 @@ the package root, like every other [error class](/reference/error-codes).
 ## FAQ
 
 **Can I run several workers?** Yes. They take turns (global concurrency 1), and even without that
-the MongoDB lock and the order guard keep the sequence.
+the MongoDB lock and the order guard keep the sequence: a job that gets to the lock before an
+earlier one still in flight on another worker waits for it rather than failing.
 
 **Several databases?** One `createMigrationQueue` per database, each with its own `queueName`.
 

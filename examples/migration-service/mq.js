@@ -52,6 +52,11 @@ const mq = createMigrationQueue({
   queueName: 'migrations',
   // Keep finished jobs around: `wait()` and GET /migrations/jobs/:id read them.
   jobOptions: { removeOnComplete: { count: 1000 }, removeOnFail: { count: 5000 } },
+  // What a job may ask for beyond "apply what is pending, in order". The API
+  // in server.js offers `force` and `ordered: false`, so this service allows
+  // them; a service that does not offer them should leave both off (the
+  // default) — then a job planted in Redis cannot ask for them either.
+  allow: { force: true, unordered: true },
 });
 
 module.exports = { connection, mq };

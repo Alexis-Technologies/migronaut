@@ -1,5 +1,6 @@
 const { MigronautError } = require('../errors/index.js');
 const { errorText } = require('./error.js');
+const { redactOutbound } = require('./redact.js');
 
 /**
  * OpenTelemetry's `SpanStatusCode.ERROR`. Spelled as a number because the enum
@@ -26,6 +27,7 @@ const ATTRIBUTES = {
   LOCK_ACQUIRE_MS: 'migronaut.lock.acquire_ms',
   LOCK_SKIPPED: 'migronaut.lock.skipped',
   LOCK_LOST_REASON: 'migronaut.lock.lost_reason',
+  LOCK_WAIT_OUTCOME: 'migronaut.lock.wait.outcome',
   MIGRATION_NAME: 'migronaut.migration.name',
   MIGRATION_DIRECTION: 'migronaut.migration.direction',
   MIGRATION_BATCH: 'migronaut.migration.batch',
@@ -33,12 +35,15 @@ const ATTRIBUTES = {
   MIGRATION_TOTAL: 'migronaut.migration.total',
   MIGRATION_TRANSACTION: 'migronaut.migration.transaction',
   ERROR_TYPE: 'error.type',
+  /** The database a run is against — OpenTelemetry's database semantic convention */
+  DB_NAMESPACE: 'db.namespace',
 };
 
 const METRICS = {
   RUN_DURATION: 'migronaut.run.duration',
   MIGRATION_DURATION: 'migronaut.migration.duration',
   LOCK_ACQUIRE_DURATION: 'migronaut.lock.acquire.duration',
+  LOCK_WAIT_DURATION: 'migronaut.lock.wait.duration',
   LOCK_REFUSED: 'migronaut.lock.refused',
   LOCK_LOST: 'migronaut.lock.lost',
 };
@@ -49,6 +54,9 @@ const METRICS = {
  * than five seconds into one bucket; these span 10ms to an hour.
  */
 const DURATION_BUCKETS_SECONDS = [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 900, 3600];
+
+/** The longest span status message sent — a blocked run can list hundreds of files */
+const MAX_STATUS_MESSAGE_LENGTH = 1024;
 
 /**
  * Mark a promise an SDK handed back as handled. A tracer that wraps the work
@@ -118,7 +126,79 @@ function failureText(error) {
     error instanceof MigronautError && typeof error.context?.cause === 'string'
       ? errorText(error.context.cause)
       : undefined;
-  return cause ? `${message} — ${cause}` : message;
+  // A span goes to a third-party backend: no data values, and a bounded size.
+  const text = redactOutbound(cause ? `${message} — ${cause}` : message);
+  return text.length > MAX_STATUS_MESSAGE_LENGTH
+    ? `${text.slice(0, MAX_STATUS_MESSAGE_LENGTH - 1)}…`
+    : text;
+}
+
+/** The parts of `telemetry` — anything else in it is a typo, mentioned at debug level */
+const TELEMETRY_KEYS = Object.freeze(['tracer', 'meter', 'attributes']);
+/** Static attributes are dimensions: a handful at most */
+const MAX_STATIC_ATTRIBUTES = 20;
+
+const hasMethods = (value, names) => {
+  if (typeof value !== 'object' || value === null) return false;
+  for (const name of names) {
+    if (typeof value[name] !== 'function') return false;
+  }
+  return true;
+};
+
+/**
+ * Issues with the `telemetry` option. Absent, `null` and an empty object all
+ * mean "off" — a config that builds it conditionally must not have to special-
+ * case the disabled branch. What is present has to be usable: a tracer that
+ * cannot start a span would fail on the first run, long after the mistake.
+ * Lives here, next to the calls it vouches for: no other module knows an
+ * OpenTelemetry method name.
+ */
+function telemetryIssues(telemetry) {
+  if (telemetry === undefined || telemetry === null) return [];
+  if (typeof telemetry !== 'object' || Array.isArray(telemetry)) {
+    return [{ path: 'telemetry', message: 'must be an object' }];
+  }
+  const issues = [];
+  if (telemetry.tracer != null && !hasMethods(telemetry.tracer, ['startActiveSpan'])) {
+    issues.push({
+      path: 'telemetry.tracer',
+      message: 'must be an OpenTelemetry Tracer (an object with startActiveSpan)',
+    });
+  }
+  if (
+    telemetry.meter != null &&
+    !hasMethods(telemetry.meter, ['createHistogram', 'createCounter'])
+  ) {
+    issues.push({
+      path: 'telemetry.meter',
+      message: 'must be an OpenTelemetry Meter (an object with createHistogram and createCounter)',
+    });
+  }
+  const attributes = telemetry.attributes;
+  if (attributes !== undefined) {
+    if (attributes === null || typeof attributes !== 'object' || Array.isArray(attributes)) {
+      issues.push({ path: 'telemetry.attributes', message: 'must be an object' });
+    } else {
+      const keys = Object.keys(attributes);
+      if (keys.length > MAX_STATIC_ATTRIBUTES) {
+        issues.push({
+          path: 'telemetry.attributes',
+          message: `must hold at most ${MAX_STATIC_ATTRIBUTES} attributes — they are dimensions`,
+        });
+      }
+      for (const key of keys) {
+        const value = attributes[key];
+        if (!['string', 'number', 'boolean'].includes(typeof value)) {
+          issues.push({
+            path: `telemetry.attributes.${key}`,
+            message: 'must be a string, a number or a boolean',
+          });
+        }
+      }
+    }
+  }
+  return issues;
 }
 
 /** What the kit holds when there is no tracer: the same surface, doing nothing */
@@ -161,9 +241,14 @@ function guardSpan(span) {
  * (`trace.getTracer(…)`, `metrics.getMeter(…)`): migronaut asks them for a
  * span or an instrument and never looks at the SDK behind them.
  */
-function createTelemetry(telemetry) {
+function createTelemetry(telemetry, { dbName } = {}) {
   const tracer = telemetry?.tracer ?? undefined;
   const meter = telemetry?.meter ?? undefined;
+  // On every span and every metric point: which database the run was against
+  // (one process can migrate many — one kit per tenant), plus the caller's own
+  // low-cardinality dimensions. The caller's cannot overwrite migronaut's.
+  const base = defined({ ...telemetry?.attributes, [ATTRIBUTES.DB_NAMESPACE]: dbName });
+  const withBase = (attributes) => ({ ...base, ...defined(attributes) });
 
   /**
    * Run `fn(span)` with a new span as the active one, and leave ending it to
@@ -194,7 +279,7 @@ function createTelemetry(telemetry) {
     };
     // Three arguments, always: an SDK picks the overload by argument count.
     safe(() =>
-      tracer.startActiveSpan(name, { attributes: defined(attributes) }, (span) =>
+      tracer.startActiveSpan(name, { attributes: withBase(attributes) }, (span) =>
         run(guardSpan(span)),
       ),
     );
@@ -230,28 +315,33 @@ function createTelemetry(telemetry) {
           }),
         )
       : undefined;
-  const counter = (name, description) =>
-    meter ? safe(() => meter.createCounter(name, { description })) : undefined;
+  const counter = (name, description, unit) =>
+    meter ? safe(() => meter.createCounter(name, { description, unit })) : undefined;
 
   const runDuration = histogram(METRICS.RUN_DURATION, 'Duration of a migration run');
   const migrationDuration = histogram(METRICS.MIGRATION_DURATION, 'Duration of one migration');
   const lockAcquireDuration = histogram(
     METRICS.LOCK_ACQUIRE_DURATION,
-    'Time taken to acquire the migration lock',
+    'Round trip of the successful migration lock acquisition',
+  );
+  const lockWaitDuration = histogram(
+    METRICS.LOCK_WAIT_DURATION,
+    'Time spent waiting for a held migration lock, by how the wait ended',
   );
   const lockRefused = counter(
     METRICS.LOCK_REFUSED,
-    'Runs refused because the migration lock was held',
+    'Attempts refused because the migration lock was held',
+    '{refusal}',
   );
-  const lockLost = counter(METRICS.LOCK_LOST, 'Migration locks lost mid-run');
+  const lockLost = counter(METRICS.LOCK_LOST, 'Migration locks lost mid-run', '{loss}');
 
   // Durations are measured in milliseconds everywhere in migronaut and
   // reported in seconds, the unit OpenTelemetry's conventions settle on.
   const record = (instrument, durationMs, attributes) => {
-    if (instrument) safe(() => instrument.record(durationMs / 1000, defined(attributes)));
+    if (instrument) safe(() => instrument.record(durationMs / 1000, withBase(attributes)));
   };
   const increment = (instrument) => {
-    if (instrument) safe(() => instrument.add(1));
+    if (instrument) safe(() => instrument.add(1, withBase()));
   };
   const failure = (error) =>
     error !== undefined ? { [ATTRIBUTES.ERROR_TYPE]: errorType(error) } : {};
@@ -275,6 +365,14 @@ function createTelemetry(telemetry) {
     lockAcquired(acquireMs) {
       record(lockAcquireDuration, acquireMs);
     },
+    /**
+     * A wait for a held lock ended — `outcome` is `'acquired'`, `'timeout'`
+     * or `'aborted'`. Only waits that happened are recorded: the free-lock
+     * path is `lock.acquire.duration`'s.
+     */
+    lockWaited({ waitedMs, outcome }) {
+      record(lockWaitDuration, waitedMs, { [ATTRIBUTES.LOCK_WAIT_OUTCOME]: outcome });
+    },
     lockRefused() {
       increment(lockRefused);
     },
@@ -286,7 +384,10 @@ function createTelemetry(telemetry) {
 
 module.exports = {
   ATTRIBUTES,
+  TELEMETRY_KEYS,
+  telemetryIssues,
   DURATION_BUCKETS_SECONDS,
+  MAX_STATUS_MESSAGE_LENGTH,
   METRICS,
   NOOP_SPAN,
   SPANS,

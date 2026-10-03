@@ -3,8 +3,11 @@ const { describe, it } = require('node:test');
 const {
   DEFAULT_LOCK_POLL_INTERVAL_MS,
   DEFAULT_LOCK_WAIT_TIMEOUT_MS,
+  MAX_LOCK_POLL_INTERVAL_MS,
   assertLockWaitOptions,
+  backoffDelay,
   jitteredDelay,
+  waitBudget,
   withLockWait,
 } = require('../../src/core/lock-wait.js');
 const {
@@ -139,6 +142,120 @@ describe('withLockWait', () => {
     assert.ok(waits[1].waitedMs > 0);
   });
 
+  it('should stamp a timed-out refusal with what the wait did', async () => {
+    await assert.rejects(
+      withLockWait(
+        async () => {
+          throw held();
+        },
+        { onLockHeld: 'wait', lockPollIntervalMs: 5, lockWaitTimeoutMs: 30 },
+      ),
+      (error) => {
+        assert.ok(error instanceof LockAlreadyHeldError);
+        assert.strictEqual(error.context.timedOut, true);
+        assert.ok(error.context.attempts > 1);
+        assert.ok(error.context.waitedMs >= 0);
+        assert.ok(error.context.holder, 'the holder is kept');
+        return true;
+      },
+    );
+  });
+
+  it('should measure the wait by the clock, from the first refusal', async () => {
+    let calls = 0;
+    const outcome = await withLockWait(async () => {
+      calls += 1;
+      if (calls === 1) throw held();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return 'done';
+    }, fast);
+    assert.ok(outcome.waitedMs >= 20, `the slow last attempt counts: ${outcome.waitedMs}`);
+  });
+
+  it('should keep waiting when an onWait callback throws', async () => {
+    const outcome = await withLockWait(refusedThenFree(2), {
+      ...fast,
+      onWait: () => {
+        throw new Error('reporting broke');
+      },
+    });
+    assert.strictEqual(outcome.attempts, 3);
+  });
+
+  it('should report how a wait ended through onSettle — and stay quiet without one', async () => {
+    const settled = [];
+    const onSettle = (info) => settled.push(info);
+    await withLockWait(async () => 'free', { ...fast, onSettle });
+    assert.deepStrictEqual(settled, [], 'no wait, nothing to report');
+
+    await withLockWait(refusedThenFree(1), { ...fast, onSettle });
+    assert.strictEqual(settled[0].outcome, 'acquired');
+    assert.strictEqual(settled[0].attempts, 2);
+
+    await assert.rejects(
+      withLockWait(
+        async () => {
+          throw held();
+        },
+        { onLockHeld: 'wait', lockPollIntervalMs: 5, lockWaitTimeoutMs: 30, onSettle },
+      ),
+    );
+    assert.strictEqual(settled[1].outcome, 'timeout');
+
+    const controller = new AbortController();
+    const pending = withLockWait(
+      async () => {
+        throw held();
+      },
+      {
+        onLockHeld: 'wait',
+        lockPollIntervalMs: 5000,
+        lockWaitTimeoutMs: 60_000,
+        signal: controller.signal,
+        onSettle,
+      },
+    );
+    setTimeout(() => controller.abort(), 10);
+    await assert.rejects(pending, RunAbortedError);
+    assert.strictEqual(settled[2].outcome, 'aborted');
+
+    // A throwing reporter changes nothing about the outcome.
+    const outcome = await withLockWait(refusedThenFree(1), {
+      ...fast,
+      onSettle: () => {
+        throw new Error('nope');
+      },
+    });
+    assert.strictEqual(outcome.result, 'done');
+  });
+
+  it('should wait out whatever isTransient says is transient', async () => {
+    const busy = new Error('an earlier job is in flight');
+    const outcome = await withLockWait(
+      refusedThenFree(2, () => busy),
+      { ...fast, isTransient: (error) => error === busy },
+    );
+    assert.strictEqual(outcome.attempts, 3);
+  });
+
+  it("should warn once when the budget is no longer than the holder's heartbeat", async () => {
+    const warnings = [];
+    const logger = { info() {}, debug() {}, warn: (msg) => warnings.push(msg) };
+    await withLockWait(
+      refusedThenFree(
+        3,
+        () =>
+          new LockAlreadyHeldError('held', {
+            holder: { lockedAt: new Date(0), ttlMs: 60_000 },
+            ttlMs: 60_000,
+          }),
+      ),
+      { onLockHeld: 'wait', lockPollIntervalMs: 2, lockWaitTimeoutMs: 1000, logger },
+    );
+    assert.strictEqual(warnings.length, 1);
+    assert.match(warnings[0], /heartbeat/);
+  });
+
   describe('abort signal', () => {
     it('should not start an attempt when already aborted', async () => {
       let calls = 0;
@@ -203,6 +320,18 @@ describe('assertLockWaitOptions', () => {
     assert.ok(DEFAULT_LOCK_WAIT_TIMEOUT_MS > DEFAULT_LOCK_POLL_INTERVAL_MS);
   });
 
+  it('should leave the timeout to its TTL-based default when it is not given', () => {
+    assertLockWaitOptions({ lockWaitTimeoutMs: undefined, lockPollIntervalMs: 10 });
+  });
+
+  it('should reject a poll interval no timer can honour, and an unknown onLockHeld', () => {
+    assert.throws(() => assertLockWaitOptions({ lockPollIntervalMs: 2 ** 31 }), /at most/);
+    assert.throws(
+      () => assertLockWaitOptions({ onLockHeld: 'Wait' }),
+      (error) => error instanceof ConfigInvalidError && error.context.onLockHeld === 'Wait',
+    );
+  });
+
   for (const value of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5, '500', null]) {
     it(`should reject ${String(value)} for either budget, naming the option`, () => {
       assert.throws(
@@ -217,6 +346,49 @@ describe('assertLockWaitOptions', () => {
       );
     });
   }
+});
+
+describe('waitBudget', () => {
+  const refusal = (context) => new LockAlreadyHeldError('held', context);
+
+  it("should honour the caller's budget whatever the TTL", () => {
+    assert.strictEqual(waitBudget(5000, refusal({ ttlMs: 600_000 })), 5000);
+  });
+
+  it("should stretch the default to outlast the holder's heartbeat and stale window", () => {
+    // The holder's own TTL wins over this process's.
+    assert.strictEqual(
+      waitBudget(undefined, refusal({ holder: { ttlMs: 600_000 }, ttlMs: 60_000 })),
+      900_000,
+    );
+    // A pre-2.1 holder: this process's TTL is the best guess.
+    assert.strictEqual(waitBudget(undefined, refusal({ holder: {}, ttlMs: 300_000 })), 450_000);
+    // The default never shrinks below 90s.
+    assert.strictEqual(
+      waitBudget(undefined, refusal({ ttlMs: 10_000 })),
+      DEFAULT_LOCK_WAIT_TIMEOUT_MS,
+    );
+    assert.strictEqual(waitBudget(undefined, refusal()), DEFAULT_LOCK_WAIT_TIMEOUT_MS);
+  });
+});
+
+describe('backoffDelay', () => {
+  it('should double from the base, jittered, up to the cap', () => {
+    const within = (value, expected) =>
+      value >= expected * 0.75 && value <= Math.ceil(expected * 1.25);
+    assert.ok(within(backoffDelay(500, 1), 500));
+    assert.ok(within(backoffDelay(500, 2), 1000));
+    assert.ok(within(backoffDelay(500, 3), 2000));
+    assert.ok(within(backoffDelay(500, 50), MAX_LOCK_POLL_INTERVAL_MS));
+  });
+
+  it('should never sleep through more than a quarter of the budget, nor below the base', () => {
+    for (let attempt = 1; attempt < 20; attempt++) {
+      assert.ok(backoffDelay(10, attempt, 100) <= Math.ceil(25 * 1.25));
+    }
+    // A base above the cap is kept: the caller asked for it.
+    assert.ok(backoffDelay(8000, 5) >= 8000 * 0.75);
+  });
 });
 
 describe('jitteredDelay', () => {

@@ -110,7 +110,11 @@ Guide: <https://migronaut.vercel.app/guide/opentelemetry>
 ## Before you deploy something like this
 
 - **Authenticate it.** These endpoints can roll your database back. The example has no auth on
-  purpose (it is an example); put it behind your gateway, a network policy, or your own middleware.
+  purpose (it is an example) and listens on `127.0.0.1` unless `HOST` says otherwise; put it
+  behind your gateway, a network policy, or your own middleware before you widen that.
+- **Decide what a job may ask for.** The example's worker allows `force` and `ordered: false`
+  because its API offers them (`allow` in `mq.js`). A service that does not offer them should leave
+  them off — the default — so a job planted in Redis cannot ask for them either.
 - **Give the worker time to finish.** On `SIGTERM` the service stops taking the lock and lets the
   migration in flight complete. In Kubernetes, set `terminationGracePeriodSeconds` above your
   longest migration, or the pod is killed mid-migration and BullMQ re-runs the job elsewhere.

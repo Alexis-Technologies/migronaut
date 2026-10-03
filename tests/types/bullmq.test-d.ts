@@ -1,6 +1,6 @@
 import { Job, type Processor, Queue, QueueEvents, Worker } from 'bullmq';
 import { BullMQOtel } from 'bullmq-otel';
-import { expectAssignable, expectError, expectType } from 'tsd';
+import { expectAssignable, expectError, expectNotAssignable, expectType } from 'tsd';
 import {
   type BullMQJobLike,
   type BullMQQueueEventsLike,
@@ -18,7 +18,9 @@ import {
   MIN_JOB_DATA_VERSION,
   JOB_NAMES,
   type MigrationGroup,
+  type CreateMigrationProcessorOptions,
   type MigrationJobData,
+  type MigrationJobPermissions,
   type MigrationJobProgress,
   type MigrationJobResult,
   type MigrationJobView,
@@ -219,6 +221,9 @@ expectType<'down'>(JOB_NAMES.DOWN);
 expectType<'sync'>(JOB_NAMES.SYNC);
 expectType<1>(JOB_DATA_VERSION);
 expectType<1>(MIN_JOB_DATA_VERSION);
+expectAssignable<CreateMigrationProcessorOptions>({ allow: { force: true, unordered: false } });
+expectNotAssignable<CreateMigrationProcessorOptions>({ allow: { sudo: true } });
+expectAssignable<MigrationJobPermissions>({ down: false });
 expectType<'migronaut'>(DEFAULT_QUEUE_NAME);
 expectType<'migronaut-sync'>(DEFAULT_SCHEDULER_ID);
 expectType<readonly MigronautErrorCode[]>(RETRYABLE_CODES);

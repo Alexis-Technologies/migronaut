@@ -21,12 +21,15 @@ migronaut converge --dry-run   # show what would change, change nothing
 migronaut converge --check     # exit 28 if anything would change — a CI gate
 migronaut converge             # plan, ask before any drop or rebuild, then apply
 migronaut converge --prune     # also drop indexes a definition does not declare
+migronaut converge --ordered   # refuse while a migration is still pending
 migronaut converge --yes       # no confirmation
 migronaut converge --rebuild-unique  # allow rebuilding a unique index (see below)
 ```
 
-Without `--yes`, converge plans first. A plan that only creates or modifies is applied straight
-away; one that would **drop or rebuild an index** is shown, then confirmed:
+Without `--yes`, converge plans first. A plan that only creates indexes or modifies them in place is
+applied straight away; one that would **drop or rebuild an index**, or **change the validator of a
+collection that already exists** (tightening one can start rejecting your application's writes),
+is shown, then confirmed. A plan with a conflict is refused without asking:
 
 ```
 ◎ Planned  2 change(s) in 1 of 2 collection(s)
@@ -51,8 +54,9 @@ Rows that need nothing are folded into the summary; `--verbose` lists them too.
 |---|---|
 | `--dry-run` | Plan and print, change nothing. Takes no lock. |
 | `--check` | Like `--dry-run`, then exit `28` (`COLLECTIONS_DRIFT`) if anything would change or conflict. An undeclared index kept with prune off is not drift. |
-| `--prune` | Drop indexes a definition does not declare — in collections whose definition does not set `prune` itself. |
-| `-y, --yes` | Apply drops and rebuilds without asking. **Required** for them with `--json`. |
+| `--prune` | Drop indexes a definition does not declare — in collections whose definition does not set `prune` itself. With `indexes: []` that is every index but `_id`, and converge warns. |
+| `--ordered` | Refuse (`MIGRATION_BLOCKED`, exit `24`) while any migration is still pending — checked under the lock. |
+| `-y, --yes` | Apply drops, rebuilds and validator changes without asking. **Required** for them with `--json`. |
 | `--rebuild-unique` | Allow a rebuild that drops a unique index and builds a unique one back. Without it such a rebuild is a `conflict`. |
 | `--no-lock` | Skip the concurrency lock. **Dev only.** |
 | `--json` | Print the converge result as JSON. |
@@ -69,8 +73,9 @@ rebuild a unique index (and keep it unique) is a `conflict` that refuses the run
 declare the changed index under a **new name**, converge, then remove the old declaration and
 converge with `--prune`. A converge after `up` and a queue job never pass the flag.
 
-`--json` without `--yes` applies a plan that only creates or modifies; a plan that would drop or
-rebuild an index is refused with `CONFIG_INVALID` (exit `6`), listing those actions in
+`--json` without `--yes` applies a plan that only creates or modifies indexes; a plan that would
+drop or rebuild an index, or change an existing collection's validator, is refused with
+`CONFIG_INVALID` (exit `6`), listing those actions in
 `error.context.destructive` — so a pipeline can apply "only if safe". A closed stdin at the prompt
 is refused the same way.
 
@@ -87,8 +92,18 @@ is refused the same way.
     {
       "name": "users",
       "actions": [
-        { "target": "index", "name": "email_1", "action": "recreate", "reason": "unique", "status": "applied", "durationMs": 17 },
-        { "target": "index", "name": "createdAt_1", "action": "modify", "reason": "expireAfterSeconds", "status": "applied", "durationMs": 6 }
+        {
+          "target": "index", "name": "email_1", "action": "recreate", "reason": "unique",
+          "from": { "key": { "email": 1 }, "name": "email_1" },
+          "to": { "key": { "email": 1 }, "name": "email_1", "unique": true },
+          "status": "applied", "durationMs": 17
+        },
+        {
+          "target": "index", "name": "createdAt_1", "action": "modify", "reason": "expireAfterSeconds",
+          "from": { "key": { "createdAt": 1 }, "name": "createdAt_1", "expireAfterSeconds": 3600 },
+          "to": { "key": { "createdAt": 1 }, "name": "createdAt_1", "expireAfterSeconds": 86400 },
+          "status": "applied", "durationMs": 6
+        }
       ]
     }
   ]
@@ -102,6 +117,7 @@ is refused the same way.
 | `inSync` | Nothing left to do and no conflict |
 | `collections[].actions[].action` | `create`, `modify`, `recreate`, `drop`, `keep`, `unchanged`, `conflict` |
 | `collections[].actions[].status` | `planned` (dry run), `applied`, `failed`, `skipped` (nothing to do, or not reached) |
+| `collections[].actions[].from` / `.to` | What is there now, and what the row puts there — the index (`{ key, name, …options }`) or the validator (`{ validator, validationLevel, validationAction }`) |
 | `unstable` | Present when something applied still compares as changed afterwards |
 
 ## Exit codes

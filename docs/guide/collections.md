@@ -227,7 +227,14 @@ Use a migration when the change needs **ordering against data**:
 
 - **Index builds hold the migration lock.** A large build can take minutes, and every pod that
   converges at boot waits for it. Converge big collections from a deploy step, not application
-  startup.
+  startup. New indexes of one collection are built by a single `createIndexes` — one pass over
+  the collection, all or nothing — and each build is announced as it starts (`converge:action`
+  with status `started`, and a log line).
+- **A broken connection mid-build is reported, not repaired.** If the connection fails (or a
+  client-side timeout fires) while a rebuild's new index is being built, the server may still be
+  building it, so the old index is not put back; the error says so, and `converge --dry-run`
+  shows what the server finished. Give the client used for converge timeouts that outlast your
+  largest build.
 - **Permissions.** Creating and dropping indexes needs `readWrite`; `collMod` — validators, TTL
   and `hidden` changes — needs `dbAdmin`. A missing privilege fails with a hint.
 - **No zero-gap rebuild.** A `recreate` drops before it creates. To change an index with no

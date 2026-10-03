@@ -450,6 +450,8 @@ function restoreSpec(raw) {
 
 module.exports = {
   DIRECTIONS,
+  INDEX_KEYS,
+  SEMANTIC_OPTIONS,
   compareIndex,
   defaultIndexName,
   indexIssues,

@@ -1,17 +1,29 @@
-const { isDestructive } = require('../../core/converge-plan.js');
+const { needsConfirmation } = require('../../core/converge-plan.js');
 const { ConfigInvalidError, RunAbortedError } = require('../../errors/index.js');
 const { confirm, defineCommand, EXIT_CODES } = require('../shared.js');
 const { renderConvergeTable } = require('../table.js');
 
-/** Every row a run would drop or rebuild an index for, across all collections */
-function destructiveActions(plan) {
+/**
+ * Every row the operator must confirm, across all collections: a dropped or
+ * rebuilt index, or a validator change on a collection that holds data.
+ */
+function actionsToConfirm(plan) {
   const found = [];
   for (const collection of plan.collections) {
     for (const action of collection.actions) {
-      if (isDestructive(action)) found.push({ collection: collection.name, ...action });
+      if (needsConfirmation(action, collection.actions)) {
+        found.push({ collection: collection.name, ...action });
+      }
     }
   }
   return found;
+}
+
+/** Whether a plan holds a conflict — the run refuses it whatever the answer */
+function hasConflict(plan) {
+  return plan.collections.some((collection) =>
+    collection.actions.some((action) => action.action === 'conflict'),
+  );
 }
 
 function assertNotStopped(stopRequested) {
@@ -32,11 +44,15 @@ function registerConverge(program) {
         `Exit with code ${EXIT_CODES.COLLECTIONS_DRIFT} if anything would change (CI gate; implies --dry-run)`,
       ],
       ['--prune', 'Drop undeclared indexes (in collections whose definition does not decide)'],
+      ['--ordered', 'Refuse while any migration is still pending'],
       [
         '--rebuild-unique',
         'Allow rebuilding a unique index (drops the constraint until the new one is built)',
       ],
-      ['-y, --yes', 'Drop and rebuild indexes without asking (required for that with --json)'],
+      [
+        '-y, --yes',
+        'Drop and rebuild indexes, and change validators, without asking (required with --json)',
+      ],
     ],
     lockable: true,
     mutating: true,
@@ -49,6 +65,7 @@ function registerConverge(program) {
         ...(opts.prune ? { prune: true } : {}),
         ...(opts.rebuildUnique ? { rebuildUnique: true } : {}),
       };
+      const ordered = opts.ordered ? { ordered: true } : {};
       const planOnly = Boolean(opts.dryRun || opts.check);
       if (planOnly || !opts.yes) {
         spinner?.start('Comparing declared collections with the database…');
@@ -60,16 +77,18 @@ function registerConverge(program) {
         }
         if (planOnly) return plan;
         assertNotStopped(stopRequested);
-        const destructive = destructiveActions(plan);
-        if (destructive.length > 0) {
+        const destructive = actionsToConfirm(plan);
+        // A plan with a conflict is refused by the run itself — asking first
+        // would be a question whose answer changes nothing.
+        if (destructive.length > 0 && !hasConflict(plan)) {
           // --json is non-interactive: dropping an index the operator never
           // saw listed is exactly what the confirmation is for, so it needs an
           // explicit --yes rather than a silent go-ahead. An additive plan
           // applies without one.
           if (json) {
             throw new ConfigInvalidError(
-              `converge would drop or rebuild ${destructive.length} index(es) — pass --yes to ` +
-                'confirm in --json mode',
+              `converge would drop or rebuild an index, or change a validator ` +
+                `(${destructive.length} change(s)) — pass --yes to confirm in --json mode`,
               { destructive },
             );
           }
@@ -93,7 +112,7 @@ function registerConverge(program) {
       }
       spinner?.start('Converging…');
       try {
-        return await migrator.converge({ noLock: opts.noLock, ...prune });
+        return await migrator.converge({ noLock: opts.noLock, ...prune, ...ordered });
       } finally {
         spinner?.stop();
       }

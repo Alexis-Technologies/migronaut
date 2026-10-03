@@ -213,10 +213,24 @@ that lose the race to acquire the lock poll until the migrating peer finishes in
 `attempts` so you can log what actually happened. With `convergeAfterUp`, it also carries
 `converge` — the [converge result](#declared-collections) that ended the run.
 
-`lockWaitTimeoutMs` (default 90 s) bounds **stall** time, not total wait: while a waiting
-instance can see the holder's heartbeat advancing the lock, the deadline re-arms — a healthy peer
-working through a long backlog never times its waiters out. Only a holder that stops renewing
-runs the budget down.
+`lockWaitTimeoutMs` bounds **stall** time, not total wait: while a waiting instance can see the
+holder's heartbeat advancing the lock, the deadline re-arms — a healthy peer working through a
+long backlog never times its waiters out. Only a holder that stops renewing runs the budget down.
+Left out, it is 90 s or 1.5× the holder's `lockTTLSeconds`, whichever is longer — the heartbeat
+moves the lock only every TTL/2, and a crashed holder's lock is reclaimable only after a full TTL.
+Polls start at `lockPollIntervalMs` (500 ms) and back off, doubling, up to 5 s, so a fleet waiting
+out a long deploy does not hammer the lock document. A wait that times out rethrows the
+`LockAlreadyHeldError` with `context.timedOut`, `attempts` and `waitedMs`.
+
+Pass a `signal` so a shutdown reaches the call: the wait stops between polls, and a run that
+already holds the lock stops between migrations (the one executing finishes), with a
+`RunAbortedError`:
+
+```ts
+const controller = new AbortController();
+process.once('SIGTERM', () => controller.abort('SIGTERM'));
+await runMigrations(config, { onLockHeld: 'wait', signal: controller.signal });
+```
 
 `onKit` receives the internally-constructed `MigratorKit` right after construction (before
 connect), so an embedding application can subscribe to its lifecycle events — metrics without log
@@ -229,7 +243,8 @@ await runMigrations(config, {
     kit.on('migration:success', ({ migration, durationMs }) => {
       metrics.timing('migration.duration', durationMs, { migration });
     });
-    kit.on('lock:acquired', ({ acquireMs }) => metrics.timing('migration.lock_wait', acquireMs));
+    // acquireMs is the acquire round trip; the wait itself is the summary's waitedMs.
+    kit.on('lock:acquired', ({ acquireMs }) => metrics.timing('migration.lock_acquire', acquireMs));
   },
 });
 ```

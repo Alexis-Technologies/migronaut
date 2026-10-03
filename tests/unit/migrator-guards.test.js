@@ -261,3 +261,31 @@ describe('MigratorKit converge guards', () => {
     );
   });
 });
+
+describe('MigratorKit config resolution', () => {
+  it('should load the config once for callers that ask at the same time', async () => {
+    const { makeProject } = require('../helpers/project.js');
+    const project = makeProject();
+    try {
+      // A factory, as one that fetches a secret would be: it must run once.
+      project.write(
+        'migronaut.config.js',
+        'let calls = 0;\n' +
+          'export default () => {\n' +
+          '  calls += 1;\n' +
+          '  globalThis.__migronautConfigCalls = calls;\n' +
+          "  return { uri: 'mongodb://127.0.0.1:1/never', dbName: 'once', logger: null };\n" +
+          '};\n',
+      );
+      const kit = new MigratorKit({}, { cwd: project.dir });
+      const ids = await Promise.all([kit.generateId(), kit.generateId(), kit.generateId()]);
+      assert.strictEqual(new Set(ids).size, 3);
+      assert.strictEqual(globalThis.__migronautConfigCalls, 1);
+      await kit.generateId();
+      assert.strictEqual(globalThis.__migronautConfigCalls, 1, 'cached afterwards too');
+    } finally {
+      delete globalThis.__migronautConfigCalls;
+      project.cleanup();
+    }
+  });
+});

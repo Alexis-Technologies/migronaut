@@ -5,6 +5,7 @@ const {
   RETRYABLE_CODES,
   createMigrationProcessor,
   isRetryableError,
+  isTransientForJob,
 } = require('../../src/bullmq/processor.js');
 const { MigratorKit } = require('../../src/core/migrator.js');
 const {
@@ -121,11 +122,48 @@ describe('createMigrationProcessor', () => {
       assert.strictEqual(kit.connect.mock.callCount(), 1);
     });
 
-    it('should pass force through and drop the guard when the job opts out', async () => {
+    it('should pass force through and drop the guard when the job opts out — if allowed', async () => {
       const kit = stubKit();
-      const processor = createMigrationProcessor({ kit });
+      const processor = createMigrationProcessor({ kit, allow: { force: true, unordered: true } });
       await processor(upJob({ force: true, ordered: false }));
       assert.deepStrictEqual(kit.up.mock.calls[0].arguments[1], { batch: 4, force: true });
+    });
+
+    it('should refuse what a payload may not ask for by default — force, ordered: false', async () => {
+      const kit = stubKit();
+      const processor = createMigrationProcessor({ kit });
+      for (const [data, permission] of [
+        [{ force: true }, 'force'],
+        [{ ordered: false }, 'unordered'],
+      ]) {
+        const job = upJob(data);
+        await assert.rejects(processor(job), (error) => {
+          assert.ok(error instanceof QueueJobInvalidError);
+          assert.strictEqual(error.context.permission, permission);
+          assert.match(error.message, new RegExp(`allow\\.${permission}`));
+          return true;
+        });
+      }
+      assert.strictEqual(kit.up.mock.callCount(), 0);
+      assert.strictEqual(kit.connect.mock.callCount(), 0, 'refused before connecting');
+    });
+
+    it('should let a worker refuse rollbacks altogether', async () => {
+      const kit = stubKit();
+      await assert.rejects(
+        createMigrationProcessor({ kit, allow: { down: false } })(downJob()),
+        (error) => error instanceof QueueJobInvalidError && error.context.permission === 'down',
+      );
+      assert.strictEqual(kit.down.mock.callCount(), 0);
+    });
+
+    it('should validate allow', () => {
+      for (const allow of ['all', { sudo: true }, { force: 'yes' }]) {
+        assert.throws(
+          () => createMigrationProcessor({ kit: stubKit(), allow }),
+          ConfigInvalidError,
+        );
+      }
     });
 
     it('should let the processor default the guard off for jobs that do not say', async () => {
@@ -356,6 +394,23 @@ describe('createMigrationProcessor', () => {
       assert.ok(job.progressUpdates.some((update) => update.phase === 'lock-wait'));
     });
 
+    it('should report a long wait every few seconds, not on every poll', async () => {
+      let calls = 0;
+      const kit = stubKit({
+        up: mock.fn(async (name) => {
+          calls += 1;
+          if (calls <= 6) {
+            throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+          }
+          return [{ file: name, status: 'applied' }];
+        }),
+      });
+      const job = upJob();
+      await createMigrationProcessor({ kit, lockWait: fastWait })(job);
+      const waits = job.progressUpdates.filter((update) => update.phase === 'lock-wait');
+      assert.strictEqual(waits.length, 1, `6 polls in well under 2s: ${waits.length} updates`);
+    });
+
     it("should fail at once under onLockHeld: 'throw', leaving the error retryable", async () => {
       const kit = stubKit({ up: heldOnce() });
       const job = upJob({}, { attempts: 3 });
@@ -368,6 +423,69 @@ describe('createMigrationProcessor', () => {
         },
       );
       assert.strictEqual(kit.up.mock.callCount(), 1);
+    });
+  });
+
+  describe('what the queue stores', () => {
+    it("should keep a duplicate key's values out of the message, stack and job log", async () => {
+      const kit = stubKit({
+        up: mock.fn(async () => {
+          throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
+            cause: 'E11000 duplicate key error index: email_1 dup key: { email: "a@b.c" }',
+          });
+        }),
+      });
+      const job = upJob();
+      await assert.rejects(createMigrationProcessor({ kit })(job), (error) => {
+        assert.ok(!error.message.includes('a@b.c'), error.message);
+        assert.ok(!error.stack.includes('a@b.c'));
+        assert.match(error.message, /dup key: \{ <redacted> \}/);
+        return true;
+      });
+      assert.ok(!job.logs.join('\n').includes('a@b.c'), job.logs.join(' | '));
+    });
+  });
+
+  describe('blocked jobs', () => {
+    const blockedOnce = (failed) => {
+      let calls = 0;
+      return mock.fn(async (name) => {
+        calls += 1;
+        if (calls === 1) {
+          throw new MigrationBlockedError('blocked', { blockedBy: ['0000-z.js'], failed });
+        }
+        return [{ file: name, status: 'applied' }];
+      });
+    };
+
+    it('should wait out a block by migrations that have not failed — they may be in flight', async () => {
+      const kit = stubKit({ up: blockedOnce([]) });
+      const job = upJob();
+      const result = await createMigrationProcessor({ kit, lockWait: fastWait })(job);
+      assert.strictEqual(result.status, 'applied');
+      assert.strictEqual(kit.up.mock.callCount(), 2);
+      assert.ok(
+        job.logs.some((row) => /not applied yet — waiting/.test(row)),
+        job.logs.join(' | '),
+      );
+    });
+
+    it('should fail at once on a block by a migration that failed', async () => {
+      const kit = stubKit({ up: blockedOnce(['0000-z.js']) });
+      await assert.rejects(
+        createMigrationProcessor({ kit, lockWait: fastWait })(upJob()),
+        MigrationBlockedError,
+      );
+      assert.strictEqual(kit.up.mock.callCount(), 1);
+    });
+
+    it('should tell the transient cases apart', () => {
+      assert.ok(isTransientForJob(new LockAlreadyHeldError('held')));
+      assert.ok(isTransientForJob(new MigrationBlockedError('b', { failed: [] })));
+      assert.ok(!isTransientForJob(new MigrationBlockedError('b', { failed: ['x'] })));
+      // A block from a hand-made kit without the field is never waited on.
+      assert.ok(!isTransientForJob(new MigrationBlockedError('b', { blockedBy: ['x'] })));
+      assert.ok(!isTransientForJob(new Error('other')));
     });
   });
 
@@ -800,7 +918,13 @@ describe('createMigrationProcessor', () => {
 
     it('should honour a job that opts out of the order guard, and the processor default', async () => {
       const kit = stubKit({ converge: mock.fn(async () => converged) });
-      await createMigrationProcessor({ kit })(convergeJob({ ordered: false }));
+      await assert.rejects(
+        createMigrationProcessor({ kit })(convergeJob({ ordered: false })),
+        QueueJobInvalidError,
+      );
+      await createMigrationProcessor({ kit, allow: { unordered: true } })(
+        convergeJob({ ordered: false }),
+      );
       assert.deepStrictEqual(kit.converge.mock.calls[0].arguments, [{}]);
       await createMigrationProcessor({ kit, ordered: false })(convergeJob());
       assert.deepStrictEqual(kit.converge.mock.calls[1].arguments, [{}]);

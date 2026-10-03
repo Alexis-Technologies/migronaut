@@ -48,8 +48,11 @@ Some things are working as intended, and are not vulnerabilities:
   you put in front of it — is the ability to apply and roll back migrations
   *that exist in the worker's migrations directory*. Protect both as you would
   the deploy pipeline. What a job can never do is name a file outside that
-  directory or carry code: payloads are validated as untrusted data, and a job
-  that fails the check is rejected (`QUEUE_JOB_INVALID`) before anything runs.
+  directory (or a file next to the migrations that is not one) or carry code:
+  payloads are validated as untrusted data, and a job that fails the check is
+  rejected (`QUEUE_JOB_INVALID`) before anything runs. A job also cannot
+  re-run an applied migration (`force`) or skip the order guard unless the
+  worker's `allow` option says so — both are off by default.
 
 Things that *are* in scope: leaking connection credentials into output, files,
 error context or queue jobs; executing code from a source that should be data (a migration

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
 const { trace } = require('@opentelemetry/api');
 const { LOCK_ID, MigrationLock } = require('../../src/core/lock.js');
+const { runMigrations } = require('../../src/core/run.js');
 const {
   LockAlreadyHeldError,
   LockLostError,
@@ -108,6 +109,8 @@ describe('telemetry — spans (integration)', () => {
     const { 'migronaut.lock.acquire_ms': acquireMs, ...runAttributes } = run.attributes;
     assert.strictEqual(typeof acquireMs, 'number');
     assert.deepStrictEqual(runAttributes, {
+      // Which database — one process may migrate many.
+      'db.namespace': DB,
       'migronaut.run.id': runIds[0],
       'migronaut.run.command': 'up',
       'migronaut.run.direction': 'up',
@@ -117,6 +120,7 @@ describe('telemetry — spans (integration)', () => {
       'migronaut.run.total': 2,
     });
     assert.deepStrictEqual(migrations[0].attributes, {
+      'db.namespace': DB,
       'migronaut.migration.name': '0001-a.ts',
       'migronaut.migration.direction': 'up',
       'migronaut.migration.batch': 1,
@@ -372,13 +376,84 @@ describe('telemetry — metrics (integration)', () => {
     // The same wall-clock figure `run:end` reports, in the unit OpenTelemetry asks for.
     assert.strictEqual(run.value.sum, ended[0].durationMs / 1000);
     assert.deepStrictEqual(run.attributes, {
+      'db.namespace': DB,
       'migronaut.run.command': 'up',
       'migronaut.run.direction': 'up',
     });
     const [migration] = data['migronaut.migration.duration'];
     assert.strictEqual(migration.value.count, 2);
-    assert.deepStrictEqual(migration.attributes, { 'migronaut.migration.direction': 'up' });
+    assert.deepStrictEqual(migration.attributes, {
+      'db.namespace': DB,
+      'migronaut.migration.direction': 'up',
+    });
     assert.strictEqual(data['migronaut.lock.acquire.duration'][0].value.count, 1);
+  });
+
+  it("should add the caller's static attributes to every span and point", async () => {
+    project.write('0001-a.ts', probedMigration('a'));
+    const kit = migrator({
+      telemetry: {
+        tracer: tracing.tracer,
+        meter: metrics.meter,
+        // A tenant dimension — and an attempt to relabel the database, which loses.
+        attributes: { tenant: 'acme', 'db.namespace': 'other' },
+      },
+    });
+    await kit.up();
+    await kit.disconnect();
+    const [run] = runSpans();
+    assert.strictEqual(run.attributes.tenant, 'acme');
+    assert.strictEqual(run.attributes['db.namespace'], DB);
+    assert.strictEqual(migrationSpans()[0].attributes.tenant, 'acme');
+    const data = await metrics.collect();
+    for (const name of ['migronaut.run.duration', 'migronaut.migration.duration']) {
+      assert.strictEqual(data[name][0].attributes.tenant, 'acme', name);
+    }
+    assert.strictEqual(data['migronaut.lock.acquire.duration'][0].attributes.tenant, 'acme');
+  });
+
+  it('should time a wait for a held lock, with how it ended', async () => {
+    project.write('0001-a.ts', probedMigration('a'));
+    await mongo.db.collection(LOCK_COLLECTION).insertOne({
+      _id: LOCK_ID,
+      lockedAt: new Date(),
+      pid: 1,
+      host: 'peer',
+      executedBy: 'peer',
+      owner: 'peer-run',
+    });
+    let release;
+    const summary = await runMigrations(
+      {
+        uri: mongo.uri,
+        dbName: DB,
+        migrationsDir: project.dir,
+        logger: null,
+        telemetry: { meter: metrics.meter },
+      },
+      {
+        onLockHeld: 'wait',
+        lockPollIntervalMs: 20,
+        lockWaitTimeoutMs: 5000,
+        // Freed once refused — a timer alone races a slow connect.
+        onKit: (kit) =>
+          kit.once('run:end', () => {
+            release = mongo.db.collection(LOCK_COLLECTION).deleteOne({ _id: LOCK_ID });
+          }),
+      },
+    );
+    await release;
+    assert.strictEqual(summary.waited, true);
+    const data = await metrics.collect();
+    const [wait] = data['migronaut.lock.wait.duration'];
+    assert.strictEqual(wait.value.count, 1, 'one wait, however many polls');
+    assert.ok(Math.abs(wait.value.sum - summary.waitedMs / 1000) < 0.05);
+    assert.deepStrictEqual(wait.attributes, {
+      'db.namespace': DB,
+      'migronaut.lock.wait.outcome': 'acquired',
+    });
+    // Each poll was a refusal — the counter says how hard it polled.
+    assert.ok(data['migronaut.lock.refused'][0].value >= 1);
   });
 
   it('should split failures out by error type', async () => {

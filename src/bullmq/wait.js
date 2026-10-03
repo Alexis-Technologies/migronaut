@@ -1,8 +1,8 @@
 const { ConfigInvalidError, QueueJobFailedError } = require('../errors/index.js');
-const { redactUris } = require('../utils/redact.js');
+const { redactOutbound } = require('../utils/redact.js');
 
-/** How BullMQ words a `waitUntilFinished` that ran out of time */
-const TIMEOUT_MARKER = 'timed out before finishing';
+/** Rejects a budgeted await that outlived the deadline — told apart from every other failure */
+const DEADLINE = Symbol('wait deadline');
 
 /**
  * Wait for every job of an enqueue group, in group order — and for the
@@ -27,6 +27,12 @@ async function waitForGroup({
   converge,
   timeoutMs,
 }) {
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+    throw new ConfigInvalidError('timeoutMs must be a positive finite number', { timeoutMs });
+  }
+  const results = [];
+  // Nothing was enqueued: nothing to wait for, and no reason to need QueueEvents.
+  if (jobs.length === 0 && !converge) return { groupId, direction, batch, results };
   if (!queueEvents) {
     throw new ConfigInvalidError(
       'wait() needs QueueEvents — pass bullmq.QueueEvents to createMigrationQueue, ' +
@@ -34,41 +40,66 @@ async function waitForGroup({
       { groupId },
     );
   }
-  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
-    throw new ConfigInvalidError('timeoutMs must be a positive finite number', { timeoutMs });
-  }
 
-  const results = [];
-  if (jobs.length === 0 && !converge) return { groupId, direction, batch, results };
-
-  await queueEvents.waitUntilReady?.();
+  // One budget for everything this call awaits — connecting QueueEvents and
+  // reading a job included: with a Redis that is down, those are the awaits
+  // that would otherwise hang.
   const deadline = timeoutMs !== undefined ? Date.now() + timeoutMs : undefined;
+  const budgeted = (promise) => {
+    if (deadline === undefined) return promise;
+    let timer;
+    const expired = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(DEADLINE), Math.max(0, deadline - Date.now()));
+    });
+    return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+  };
+  const timedOut = () => deadline !== undefined && Date.now() >= deadline;
+
+  /**
+   * The typed code a failed job reported in its progress — what a caller
+   * branches on (MIGRATION_BLOCKED, CHECKSUM_MISMATCH, …) instead of parsing
+   * `failedReason`. Best-effort: the job may be gone, or Redis unreachable.
+   */
+  async function failureCode(id) {
+    try {
+      const code = (await budgeted(queue.getJob(id)))?.progress?.code;
+      return typeof code === 'string' && code.length <= 64 ? code : undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   /** Wait for one job; `message` and `fields` say which one in a failure */
   async function finish(id, message, fields) {
-    const fail = (failedReason, timedOut) =>
+    const fail = (failedReason, timedOut, code) =>
       new QueueJobFailedError(message, {
         groupId,
         jobId: id,
         ...fields,
         failedReason,
         timedOut,
+        ...(code !== undefined ? { code } : {}),
         results: [...results],
       });
 
-    const job = await queue.getJob(id);
-    if (!job) throw fail('job not found — it was removed before wait() could read it', false);
-
-    let remaining;
-    if (deadline !== undefined) {
-      remaining = deadline - Date.now();
-      if (remaining <= 0) throw fail(`wait timed out after ${timeoutMs}ms`, true);
-    }
+    const outOfTime = () => fail(`wait timed out after ${timeoutMs}ms`, true);
     try {
-      return await job.waitUntilFinished(queueEvents, remaining);
+      await budgeted(queueEvents.waitUntilReady?.());
+      const job = await budgeted(queue.getJob(id));
+      if (!job) throw fail('job not found — it was removed before wait() could read it', false);
+      if (timedOut()) throw outOfTime();
+      return await budgeted(
+        job.waitUntilFinished(
+          queueEvents,
+          deadline === undefined ? undefined : deadline - Date.now(),
+        ),
+      );
     } catch (error) {
-      const reason = redactUris(error instanceof Error ? error.message : String(error));
-      throw fail(reason, reason.includes(TIMEOUT_MARKER));
+      if (error instanceof QueueJobFailedError) throw error;
+      // Decided by the clock, not by how BullMQ happens to word its timeout.
+      if (error === DEADLINE || timedOut()) throw outOfTime();
+      const reason = redactOutbound(error instanceof Error ? error.message : String(error));
+      throw fail(reason, false, await failureCode(id));
     }
   }
 

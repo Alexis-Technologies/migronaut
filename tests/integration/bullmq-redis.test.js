@@ -263,7 +263,7 @@ describe(
           // Registered inside a span — the trace every tick would otherwise join.
           await tracing.tracer.startActiveSpan('deploy', async (span) => {
             try {
-              await mq.schedule({ every: 400 });
+              await mq.schedule({ every: 1000 }); // the shortest interval schedule() accepts
             } finally {
               span.end();
             }

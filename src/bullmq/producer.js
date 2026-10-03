@@ -1,4 +1,5 @@
 const { ConfigInvalidError, MigrationBlockedError } = require('../errors/index.js');
+const { mapLimit } = require('../utils/concurrency.js');
 const { assertId, randomId } = require('../utils/id.js');
 const { assertMigrationName } = require('../utils/migration-name.js');
 const {
@@ -10,6 +11,9 @@ const {
   migrationJobOptions,
 } = require('./jobs.js');
 const { waitForGroup } = require('./wait.js');
+
+/** Job lookups in flight while checking a group for deduplicated adds */
+const LOOKUP_CONCURRENCY = 16;
 
 /**
  * `jobOptions` is a passthrough for retention and logging knobs
@@ -107,8 +111,13 @@ async function planUpJobs(kit, options = {}) {
 
   const rows = await kit.dryRun('up', filename, to !== undefined ? { to } : {});
   const migrations = [];
+  /** The version of each file the plan was made from — a worker refuses any other */
+  const checksums = new Map();
   for (const row of rows) {
-    if (row.status !== 'applied' || force) migrations.push(row.file);
+    if (row.status !== 'applied' || force) {
+      migrations.push(row.file);
+      if (typeof row.checksum === 'string') checksums.set(row.file, row.checksum);
+    }
   }
   const groupId = await newGroupId(kit);
   if (migrations.length === 0) {
@@ -132,8 +141,9 @@ async function planUpJobs(kit, options = {}) {
         batch,
         force,
         ordered,
+        checksum: checksums.get(migration),
       }),
-      opts: migrationJobOptions(jobOptions, JOB_NAMES.UP, migration),
+      opts: migrationJobOptions(jobOptions, JOB_NAMES.UP, migration, { force }),
     });
   }
   const plan = { groupId, direction: JOB_NAMES.UP, batch, migrations, jobs };
@@ -150,7 +160,8 @@ async function planUpJobs(kit, options = {}) {
  * error instead of a group that fails halfway through.
  */
 async function assertTopOfStack(kit, migrations) {
-  const applied = await kit.list('applied');
+  // Names and dates are all this needs — not a re-hash of every applied file.
+  const applied = await kit.list('applied', { checksums: false });
   applied.sort(newestFirst);
   const planned = new Set(migrations);
   let deepest = -1;
@@ -222,7 +233,8 @@ async function planDownJobs(kit, options = {}) {
  */
 async function findDeduplicated(queue, jobs, groupId) {
   if (typeof queue.getJob !== 'function') return [];
-  const stored = await Promise.all(jobs.map((job) => queue.getJob(job.id)));
+  // A first deploy can enqueue hundreds of jobs: read them back a few at a time.
+  const stored = await mapLimit(jobs, LOOKUP_CONCURRENCY, (job) => queue.getJob(job.id));
   const deduplicated = [];
   for (const [index, job] of stored.entries()) {
     if (job && job.data?.groupId !== groupId) deduplicated.push(jobs[index].migration);
@@ -298,7 +310,11 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
     wait: (waitOptions = {}) =>
       waitForGroup({
         queue,
-        queueEvents: waitOptions.queueEvents ?? queueEvents ?? getQueueEvents?.(),
+        // An empty group waits for nothing: no QueueEvents connection for it.
+        queueEvents:
+          waitOptions.queueEvents ??
+          queueEvents ??
+          (jobs.length > 0 || converge ? getQueueEvents?.() : undefined),
         groupId,
         direction,
         batch,

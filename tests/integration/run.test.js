@@ -5,6 +5,7 @@ const { pendingMigrations, runMigrations } = require('../../src/core/run.js');
 const {
   LockAlreadyHeldError,
   MigrationExecutionFailedError,
+  RunAbortedError,
 } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { failingMigration, insertMigration, makeProject } = require('../helpers/project.js');
@@ -107,20 +108,19 @@ describe('runMigrations (programmatic entry point)', () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await holdLock();
 
-    // Release the peer's lock shortly after we start waiting.
-    const release = (async () => {
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      await mongo.db.collection(LOCK_COLLECTION).deleteOne({ _id: 'migronaut_lock' });
-    })();
-
-    const [summary] = await Promise.all([
-      runMigrations(config(), {
-        onLockHeld: 'wait',
-        lockPollIntervalMs: 40,
-        lockWaitTimeoutMs: 5_000,
-      }),
-      release,
-    ]);
+    // Release the peer's lock once we have been refused at least once — a
+    // timer alone races a slow connect, which would find the lock free.
+    let release;
+    const summary = await runMigrations(config(), {
+      onLockHeld: 'wait',
+      lockPollIntervalMs: 40,
+      lockWaitTimeoutMs: 5_000,
+      onKit: (kit) =>
+        kit.once('run:end', () => {
+          release = mongo.db.collection(LOCK_COLLECTION).deleteOne({ _id: 'migronaut_lock' });
+        }),
+    });
+    await release;
 
     assert.strictEqual(summary.waited, true);
     // The wait is observable, not just a boolean: how long and how many polls.
@@ -146,6 +146,88 @@ describe('runMigrations (programmatic entry point)', () => {
       }),
       LockAlreadyHeldError,
     );
+  });
+});
+
+describe('runMigrations signal (integration)', () => {
+  it('should stop waiting for a held lock as soon as its signal aborts', async () => {
+    project = makeProject();
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await holdLock();
+    const controller = new AbortController();
+    setTimeout(() => controller.abort('SIGTERM'), 80);
+    const started = Date.now();
+    await assert.rejects(
+      runMigrations(config(), {
+        onLockHeld: 'wait',
+        lockPollIntervalMs: 2000,
+        lockWaitTimeoutMs: 60_000,
+        signal: controller.signal,
+      }),
+      (error) => {
+        assert.ok(error instanceof RunAbortedError);
+        assert.strictEqual(error.context.reason, 'SIGTERM');
+        return true;
+      },
+    );
+    assert.ok(Date.now() - started < 1500, 'the 2s poll sleep was cut short');
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+  });
+
+  it('should not even connect for a signal that is already aborted', async () => {
+    project = makeProject();
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await assert.rejects(
+      runMigrations(config(), { signal: AbortSignal.abort('too late') }),
+      RunAbortedError,
+    );
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+    await assert.rejects(runMigrations(config(), { signal: 'stop' }), /AbortSignal/);
+  });
+
+  it('should load collection definitions once while it waits for the lock', async () => {
+    project = makeProject();
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const counter = `${project.dir}/definition-loads.txt`;
+    require('node:fs').mkdirSync(`${project.dir}/collections`);
+    // ESM: a reload query string re-evaluates it (a CommonJS file would be
+    // served from require.cache whatever the URL says).
+    project.write(
+      'collections/things.mjs',
+      "import { appendFileSync } from 'node:fs';\n" +
+        `appendFileSync(${JSON.stringify(counter)}, 'x');\n` +
+        'export default { indexes: [{ key: { marker: 1 } }] };\n',
+    );
+    await holdLock();
+    // Freed after a few refusals, whatever the machine's speed.
+    let refusals = 0;
+    let release;
+    const summary = await runMigrations(
+      {
+        ...config(),
+        collectionsDir: `${project.dir}/collections`,
+        fileExtensions: ['.ts', '.mjs'],
+        convergeAfterUp: true,
+        // Each load is a fresh evaluation — what made every poll cost a module.
+        reloadMigrations: true,
+      },
+      {
+        onLockHeld: 'wait',
+        lockPollIntervalMs: 20,
+        lockWaitTimeoutMs: 5000,
+        onKit: (kit) =>
+          kit.on('run:end', () => {
+            refusals += 1;
+            if (refusals === 3) {
+              release = mongo.db.collection(LOCK_COLLECTION).deleteOne({ _id: 'migronaut_lock' });
+            }
+          }),
+      },
+    );
+    await release;
+    assert.ok(summary.attempts > 2, `it polled: ${summary.attempts}`);
+    assert.strictEqual(summary.converge.inSync, true);
+    assert.strictEqual(require('node:fs').readFileSync(counter, 'utf8'), 'x');
   });
 });
 

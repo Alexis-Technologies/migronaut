@@ -60,8 +60,8 @@ your own "application startup" span shows up as part of it.
 
 | Span | Emitted | Attributes |
 |---|---|---|
-| `migronaut.run` | Once per `up` / `down` / `redo` / `baseline` / `import` / `converge` that acquired the lock | `migronaut.run.id`, `migronaut.run.command`, `migronaut.run.direction`, `migronaut.lock.acquire_ms` (or `migronaut.lock.skipped` under `--no-lock`); at the end `migronaut.run.applied`, `.reverted`, `.skipped`, `.total`, and `migronaut.lock.lost_reason` if the lock was lost |
-| `migronaut.migration` | Once per migration executed, as a child of the run | `migronaut.migration.name`, `.direction`, `.batch`, `.index`, `.total`, `.transaction`, and `migronaut.run.id` |
+| `migronaut.run` | Once per `up` / `down` / `redo` / `baseline` / `import` / `converge` that acquired the lock | `migronaut.run.id`, `migronaut.run.command`, `migronaut.run.direction`, `migronaut.lock.acquire_ms` (or `migronaut.lock.skipped` under `--no-lock`); at the end `migronaut.run.applied`, `migronaut.run.reverted`, `migronaut.run.skipped`, `migronaut.run.total`, and `migronaut.lock.lost_reason` if the lock was lost |
+| `migronaut.migration` | Once per migration executed, as a child of the run | `migronaut.migration.name`, `migronaut.migration.direction`, `migronaut.migration.batch`, `migronaut.migration.index`, `migronaut.migration.total`, `migronaut.migration.transaction`, and `migronaut.run.id` |
 
 A failure sets the span's status to `ERROR` with the failure message, and `error.type` to the
 [error code](/reference/error-codes) (`MIGRATION_EXECUTION_FAILED`, `LOCK_LOST`, …) — or, for an
@@ -73,15 +73,34 @@ driver's index commands nest under it.
 `migronaut.run.id` is the same `runId` found on log lines, lifecycle events and changelog records —
 the join key between a trace and the database.
 
+Every span and every metric point also carries `db.namespace` — the database name, in
+OpenTelemetry's database convention — so one process migrating several databases (a kit per
+tenant) produces series you can tell apart. Add your own low-cardinality dimensions with
+`telemetry.attributes`:
+
+```js
+telemetry: {
+  tracer: trace.getTracer('@alexify/migronaut'),
+  meter: metrics.getMeter('@alexify/migronaut'),
+  attributes: { tenant: 'acme', region: 'eu-west-1' }, // at most 20; scalars only
+},
+```
+
+They go on every span and metric point; they cannot replace `db.namespace` or a `migronaut.*`
+attribute.
+
 ### Metrics
 
 | Instrument | Type | Recorded | Attributes |
 |---|---|---|---|
 | `migronaut.run.duration` | histogram, `s` | Every run that acquired the lock | `migronaut.run.command`, `migronaut.run.direction`, `error.type` |
 | `migronaut.migration.duration` | histogram, `s` | Every migration executed | `migronaut.migration.direction`, `error.type` |
-| `migronaut.lock.acquire.duration` | histogram, `s` | Every successful lock acquisition | — |
-| `migronaut.lock.refused` | counter | A run refused because the lock was held | — |
-| `migronaut.lock.lost` | counter | A lock lost mid-run | — |
+| `migronaut.lock.acquire.duration` | histogram, `s` | Every successful lock acquisition — the acquire round trip, not the wait before it | — |
+| `migronaut.lock.wait.duration` | histogram, `s` | Every wait for a held lock (`runMigrations` with `onLockHeld: 'wait'`, a queue job) — one point per wait, however many polls | `migronaut.lock.wait.outcome`: `acquired`, `timeout` or `aborted` |
+| `migronaut.lock.refused` | counter, `{refusal}` | A run refused because the lock was held — one per poll of a waiting caller | — |
+| `migronaut.lock.lost` | counter, `{loss}` | A lock lost mid-run | — |
+
+Every point also carries `db.namespace` and your `telemetry.attributes`.
 
 Durations are in seconds, with bucket boundaries from 10 ms to an hour (an SDK's defaults are sized
 for milliseconds and would put every migration in one bucket). `error.type` is present only on
@@ -159,8 +178,10 @@ await runMigrations(
 
 When several instances boot together, the ones that lose the race for the lock poll for it. Those
 attempts emit **no span** — a span per poll would bury the one run that did the work — so the wait
-shows as a gap before `migronaut.run` in the surrounding span. It is counted instead:
-`migronaut.lock.refused` goes up once per attempt, and `runMigrations` returns `waitedMs`.
+shows as a gap before `migronaut.run` in the surrounding span. It is measured instead:
+`migronaut.lock.wait.duration` records each wait once, with how it ended (`acquired`, `timeout`,
+`aborted`), `migronaut.lock.refused` goes up once per attempt, and `runMigrations` returns
+`waitedMs`.
 
 ## Through a BullMQ queue
 
@@ -231,9 +252,12 @@ wires all of this up, with a Jaeger in its `docker-compose.yml`.
   guarded: an exporter that is down, or an SDK that throws, costs you the telemetry and nothing
   else. A tracer that misbehaves — throws before or after running the work, or runs it twice —
   still gets each migration executed exactly once.
-- **Nothing unredacted leaves the process.** A driver error can echo the connection string; the
-  span's status message goes through the same credential redaction as every log line. No exception
-  event is recorded, because it would carry the raw message and stack.
+- **No credentials, and no quoted data, reach the backend.** A driver error can echo the connection
+  string, and a duplicate-key error quotes the offending values (an email, say): the span's status
+  message masks both — credentials as every log line does, `dup key: { … }` values on top, since a
+  tracing backend is a third party — and is cut at 1 KB. No exception event is recorded, because it
+  would carry the raw message and stack. Other text a server error may contain is passed on, so
+  treat status messages as you would error logs.
 - **No new dependency.** `@opentelemetry/api` is not a dependency of migronaut, nor a peer. The
   types are structural (`MigronautTracer`, `MigronautMeter`): a real `Tracer` and `Meter` satisfy
   them, and they resolve for users who never installed OpenTelemetry.

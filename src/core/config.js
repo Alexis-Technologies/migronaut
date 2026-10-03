@@ -3,6 +3,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { ConfigInvalidError } = require('../errors/index.js');
 const { isCollectionName } = require('../utils/collection-name.js');
+const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
 const { applyEnvFile } = require('../utils/env.js');
 const { errorText } = require('../utils/error.js');
 const { resolveLogger } = require('../utils/logger.js');
@@ -161,47 +162,6 @@ const KNOWN_CONFIG_KEYS = new Set([
   'telemetry',
 ]);
 for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
-
-/** The two parts of `telemetry` — anything else in it is a typo, mentioned at debug level */
-const TELEMETRY_KEYS = new Set(['tracer', 'meter']);
-
-const hasMethods = (value, names) => {
-  if (typeof value !== 'object' || value === null) return false;
-  for (const name of names) {
-    if (typeof value[name] !== 'function') return false;
-  }
-  return true;
-};
-
-/**
- * Issues with the `telemetry` option. Absent, `null` and an empty object all
- * mean "off" — a config that builds it conditionally must not have to special-
- * case the disabled branch. What is present has to be usable: a tracer that
- * cannot start a span would fail on the first run, long after the mistake.
- */
-function telemetryIssues(telemetry) {
-  if (telemetry === undefined || telemetry === null) return [];
-  if (typeof telemetry !== 'object' || Array.isArray(telemetry)) {
-    return [{ path: 'telemetry', message: 'must be an object' }];
-  }
-  const issues = [];
-  if (telemetry.tracer != null && !hasMethods(telemetry.tracer, ['startActiveSpan'])) {
-    issues.push({
-      path: 'telemetry.tracer',
-      message: 'must be an OpenTelemetry Tracer (an object with startActiveSpan)',
-    });
-  }
-  if (
-    telemetry.meter != null &&
-    !hasMethods(telemetry.meter, ['createHistogram', 'createCounter'])
-  ) {
-    issues.push({
-      path: 'telemetry.meter',
-      message: 'must be an OpenTelemetry Meter (an object with createHistogram and createCounter)',
-    });
-  }
-  return issues;
-}
 
 /**
  * Validate the merged config, returning a list of `{ path, message }` issues
@@ -539,7 +499,7 @@ async function loadConfig(options = {}) {
   // (`trace`, `metrics`) instead of a tracer and a meter turns it off silently.
   if (config.telemetry) {
     for (const key in config.telemetry) {
-      if (!TELEMETRY_KEYS.has(key)) (unknown ??= []).push(`telemetry.${key}`);
+      if (!TELEMETRY_KEYS.includes(key)) (unknown ??= []).push(`telemetry.${key}`);
     }
   }
   if (unknown) {

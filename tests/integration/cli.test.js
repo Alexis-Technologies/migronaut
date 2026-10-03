@@ -1219,6 +1219,47 @@ describe('converge CLI (integration)', () => {
     assert.strictEqual((await mongo.db.collection('users').indexes())[1].unique, true);
   });
 
+  it('should ask before changing the validator of a collection that holds data', async () => {
+    await mongo.db.createCollection('users', { validator: { email: { $type: 'string' } } });
+    declare([{ name: 'users', validator: { email: { $type: 'string' }, age: { $type: 'int' } } }]);
+    const closed = await runCli(baseArgs(['converge']));
+    assert.strictEqual(closed.code, 6);
+    assert.match(closed.stderr, /pass --yes/);
+    const json = JSON.parse((await runCli(baseArgs(['converge', '--json']))).stdout);
+    const [change] = json.error.context.destructive;
+    assert.deepStrictEqual([change.target, change.action], ['validator', 'modify']);
+    assert.deepStrictEqual(change.to.validator.age, { $type: 'int' });
+    assert.strictEqual((await runCli(baseArgs(['converge', '--yes']))).code, 0);
+  });
+
+  it('should not ask about a plan that is refused anyway', async () => {
+    // A conflict (an undeclared index covers the declared unique one's key)
+    // next to a rebuild that would otherwise be confirmed.
+    await mongo.db.collection('users').createIndex({ email: 1 }, { name: 'by_email' });
+    await mongo.db.collection('users').createIndex({ stray: 1 });
+    declare([
+      {
+        name: 'users',
+        indexes: [
+          { key: { email: 1 }, unique: true },
+          { key: { stray: 1 }, sparse: true },
+        ],
+      },
+    ]);
+    const result = await runCli(baseArgs(['converge']));
+    assert.strictEqual(result.code, 27, result.stderr);
+    assert.doesNotMatch(result.stdout, /Apply these changes/);
+    assert.match(result.stderr, /conflict/);
+  });
+
+  it('should refuse with --ordered while a migration is pending', async () => {
+    project.write('0001-a.js', insertMigration('things', 'a'));
+    declare([USERS]);
+    const result = await runCli(baseArgs(['converge', '--ordered']));
+    assert.strictEqual(result.code, 24);
+    assert.match(result.stderr, /converge is blocked/);
+  });
+
   it('should rebuild a unique index only with --rebuild-unique', async () => {
     await mongo.db.collection('users').createIndex({ email: 1 }, { unique: true });
     declare([{ name: 'users', indexes: [{ key: { email: 1 }, unique: true, sparse: true }] }]);

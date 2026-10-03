@@ -1,4 +1,4 @@
-const { QueueJobInvalidError } = require('../errors/index.js');
+const { ConfigInvalidError, QueueJobInvalidError } = require('../errors/index.js');
 const { MAX_ID_LENGTH } = require('../utils/id.js');
 const { isBareFilename } = require('../utils/migration-name.js');
 
@@ -82,8 +82,22 @@ const isPlainObject = (value) =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 const isPositiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
 
-/** A migration name as a custom-id fragment — BullMQ rejects `:` (and more) in ids */
-const idFragment = (migration) => migration.replace(/[^A-Za-z0-9._-]/g, '_');
+/**
+ * A migration name as an id fragment: letters, digits, `.`, `_` and `-` as
+ * they are; every other character as `~` and its UTF-8 bytes in hex (`a b.js`
+ * → `a~20b.js`). Reversible on purpose — two names must never share a
+ * fragment, or the second file's job would be absorbed as a duplicate of the
+ * first's.
+ */
+function idFragment(migration) {
+  return migration.replace(/[^A-Za-z0-9._-]/gu, (char) => {
+    let encoded = '';
+    for (const byte of Buffer.from(char, 'utf8')) {
+      encoded += `~${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+    }
+    return encoded;
+  });
+}
 
 /**
  * Deduplication id for one migration in one direction. BullMQ holds the key
@@ -91,8 +105,11 @@ const idFragment = (migration) => migration.replace(/[^A-Za-z0-9._-]/g, '_');
  * pending file is absorbed, yet a later down → up cycle is never blocked —
  * which a custom `jobId` would do for as long as the finished job is retained.
  */
-function dedupId(direction, migration) {
-  return `${direction}-${idFragment(migration)}`;
+function dedupId(direction, migration, { force = false } = {}) {
+  // A forced re-run is a request of its own: a plain job for the same file
+  // still waiting must not absorb it. (`~force` can never be part of a
+  // fragment — there `~` is always followed by two upper-case hex digits.)
+  return `${direction}${force ? '~force' : ''}-${idFragment(migration)}`;
 }
 
 /**
@@ -108,6 +125,61 @@ function convergeDedupId(after) {
 
 const isGroupId = (value) =>
   typeof value === 'string' && value.length > 0 && value.length <= MAX_GROUP_ID_LENGTH;
+
+/**
+ * What a worker accepts from the queue by default. Anything that can write to
+ * Redis can enqueue, so the requests a payload can make that go beyond "apply
+ * what is pending, in order" are opt-in: re-running an applied migration
+ * (`force`) and skipping the order guard (`ordered: false`). A rollback is
+ * allowed — it is the queue's other everyday job — but can be switched off.
+ */
+const DEFAULT_ALLOW = Object.freeze({ down: true, force: false, unordered: false });
+
+/** Validate an `allow` option and fill in the defaults */
+function resolveAllow(allow) {
+  if (allow === undefined) return DEFAULT_ALLOW;
+  if (!isPlainObject(allow)) {
+    throw new ConfigInvalidError('allow must be an object', { allow: typeof allow });
+  }
+  for (const key of Object.keys(allow)) {
+    if (!(key in DEFAULT_ALLOW)) {
+      throw new ConfigInvalidError(
+        `allow.${key} is not a known permission (down, force, unordered)`,
+        { key },
+      );
+    }
+    if (typeof allow[key] !== 'boolean') {
+      throw new ConfigInvalidError(`allow.${key} must be a boolean`, { [key]: allow[key] });
+    }
+  }
+  return Object.freeze({ ...DEFAULT_ALLOW, ...allow });
+}
+
+/** The permissions a parsed job (or an enqueue request) needs: `'down'`, `'force'`, `'unordered'` */
+function permissionsNeeded(data) {
+  const needed = [];
+  if (data.kind === 'migration' && data.direction === JOB_NAMES.DOWN) needed.push('down');
+  if (data.force) needed.push('force');
+  if (data.ordered === false) needed.push('unordered');
+  return needed;
+}
+
+/** Refuse a well-formed job this worker is not allowed to run */
+function assertAllowed(job, data, allow) {
+  for (const permission of permissionsNeeded(data)) {
+    if (!allow[permission]) {
+      throw new QueueJobInvalidError(
+        `Refused migration job: ${permission === 'unordered' ? 'ordered: false' : permission} ` +
+          `is not allowed by this worker (allow.${permission})`,
+        {
+          ...(job?.id !== undefined ? { jobId: String(job.id) } : {}),
+          issue: 'not allowed',
+          permission,
+        },
+      );
+    }
+  }
+}
 
 function invalid(job, issue) {
   return new QueueJobInvalidError(`Invalid migration job: ${issue}`, {
@@ -262,11 +334,11 @@ function buildMigrationJob({
 }
 
 /** Per-job options: the caller's passthrough, then the ones the contract owns */
-function migrationJobOptions(jobOptions, direction, migration) {
+function migrationJobOptions(jobOptions, direction, migration, { force = false } = {}) {
   return {
     ...jobOptions,
     ...MIGRATION_JOB_OPTIONS,
-    deduplication: { id: dedupId(direction, migration) },
+    deduplication: { id: dedupId(direction, migration, { force }) },
   };
 }
 
@@ -343,6 +415,7 @@ function buildConvergeJobTemplate({ jobOptions } = {}) {
 }
 
 module.exports = {
+  DEFAULT_ALLOW,
   DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
@@ -353,6 +426,7 @@ module.exports = {
   MIN_JOB_DATA_VERSION,
   MIGRATION_JOB_OPTIONS,
   TICK_RETENTION,
+  assertAllowed,
   buildConvergeJob,
   buildConvergeJobTemplate,
   buildMigrationJob,
@@ -362,4 +436,6 @@ module.exports = {
   isPlainObject,
   migrationJobOptions,
   parseJobData,
+  permissionsNeeded,
+  resolveAllow,
 };

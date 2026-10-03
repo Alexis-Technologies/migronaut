@@ -120,7 +120,10 @@ export const DEFAULT_SCHEDULER_ID: 'migronaut-sync';
 /** Default id of a `schedule({ job: 'converge' })` schedule */
 export const DEFAULT_CONVERGE_SCHEDULER_ID: 'migronaut-converge';
 
-/** Data of an `up` or `down` job. Stored in Redis — re-validated by the worker as untrusted input */
+/**
+ * Data of an `up` or `down` job. Stored in Redis — re-validated by the worker as untrusted input
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
 export interface MigrationJobData {
   v: 1;
   direction: 'up' | 'down';
@@ -147,7 +150,10 @@ export interface MigrationJobData {
   checksum?: string;
 }
 
-/** Data of a `sync` job — what a schedule tick enqueues */
+/**
+ * Data of a `sync` job — what a schedule tick enqueues
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
 export interface SyncJobData {
   v: 1;
   kind: 'sync';
@@ -158,6 +164,7 @@ export interface SyncJobData {
 /**
  * Data of a `converge` job. There is deliberately no `prune`: what may be
  * dropped is decided by the definitions the worker loads, never by a payload.
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
 export interface ConvergeJobData {
   v: 1;
@@ -171,7 +178,10 @@ export interface ConvergeJobData {
   ordered?: boolean;
 }
 
-/** What a completed `up`/`down` job returns */
+/**
+ * What a completed `up`/`down` job returns
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
 export interface MigrationJobResult {
   migration: string;
   direction: 'up' | 'down';
@@ -186,7 +196,10 @@ export interface MigrationJobResult {
   lockWaitMs: number;
 }
 
-/** What a completed `sync` job returns */
+/**
+ * What a completed `sync` job returns
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
 export interface SyncJobResult {
   kind: 'sync';
   groupId: string | null;
@@ -199,7 +212,10 @@ export interface SyncJobResult {
   converge?: { jobId: string; deduplicated: boolean };
 }
 
-/** What a completed `converge` job returns — the kit's result, minus `dryRun` */
+/**
+ * What a completed `converge` job returns — the kit's result, minus `dryRun`
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
 export interface ConvergeJobResult {
   kind: 'converge';
   groupId?: string;
@@ -212,7 +228,10 @@ export interface ConvergeJobResult {
   lockWaitMs: number;
 }
 
-/** What a job reports through `job.updateProgress` */
+/**
+ * What a job reports through `job.updateProgress`
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
 export interface MigrationJobProgress {
   phase: 'lock-wait' | 'running' | 'completed' | 'failed';
   migration?: string;
@@ -329,9 +348,12 @@ export function isRetryableError(error: unknown): boolean;
 export interface LockWaitOptions {
   /** Default `'wait'` — unlike `runMigrations`, nothing is blocked on a job */
   onLockHeld?: OnLockHeld;
-  /** Max time (ms) to wait without observing the holder make progress. Default 90000 */
+  /**
+   * Max time (ms) to wait without observing the holder make progress. Default
+   * 90000, or 1.5× the holder's lock TTL when that is longer
+   */
   lockWaitTimeoutMs?: number;
-  /** Default 500 */
+  /** First poll interval (ms); polls back off, doubling, up to 5 s. Default 500 */
   lockPollIntervalMs?: number;
 }
 
@@ -498,6 +520,22 @@ export interface MigrationJobView {
 
 // ─── Processor ─────────────────────────────────────────────────────────────────
 
+/**
+ * What a worker accepts from a job's payload beyond "apply what is pending, in
+ * order". Anything that can write to Redis can enqueue, so the requests that
+ * go further are opt-in; a job asking for one that is off fails as
+ * `QUEUE_JOB_INVALID` (`context.permission`) before anything runs.
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface MigrationJobPermissions {
+  /** Roll back (`down` jobs). Default `true` */
+  down?: boolean;
+  /** Re-run an applied migration (`force: true`). Default `false` */
+  force?: boolean;
+  /** Skip the order guard (`ordered: false`, on any job). Default `false` */
+  unordered?: boolean;
+}
+
 /** Options for {@link createMigrationProcessor} */
 export interface CreateMigrationProcessorOptions {
   /** Config for a MigratorKit the processor creates (and disconnects on `close()`) */
@@ -512,6 +550,8 @@ export interface CreateMigrationProcessorOptions {
   ordered?: boolean;
   /** Options for the jobs a `sync` job enqueues */
   jobOptions?: MigrationJobOptions;
+  /** What a job may ask for beyond the ordinary — see {@link MigrationJobPermissions} */
+  allow?: MigrationJobPermissions;
 }
 
 /**
@@ -668,11 +708,19 @@ export interface CreateMigrationQueueOptions<
   workerOptions?: StartWorkerOptions;
   /**
    * Set the queue's global concurrency to 1 when the worker starts (BullMQ
-   * ≥ 5.9), so several pods take turns. Default `true`. Correctness never
-   * depends on it — the MongoDB lock and the order guard do that.
+   * ≥ 5.9), so several pods take turns. Default `true`. The order never
+   * depends on it — the MongoDB lock and the order guard keep it; without it,
+   * a job that reaches the lock before an earlier one still in flight on
+   * another worker waits for that one (within its lock-wait budget).
    */
   globalConcurrency?: boolean;
   lockWait?: LockWaitOptions;
+  /**
+   * What the worker accepts from a job — and what `enqueueUp` / `enqueueDown` /
+   * `enqueueConverge` accept on this object, so a request its own worker would
+   * refuse fails at the call. Give every producer and worker the same policy.
+   */
+  allow?: MigrationJobPermissions;
 }
 
 /**

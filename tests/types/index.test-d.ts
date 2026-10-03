@@ -8,7 +8,7 @@ import {
   trace,
 } from '@opentelemetry/api';
 import { pino } from 'pino';
-import { expectAssignable, expectError, expectType } from 'tsd';
+import { expectAssignable, expectError, expectNotAssignable, expectType } from 'tsd';
 import {
   type AuditReport,
   type BaselineSummary,
@@ -154,6 +154,11 @@ expectType<Promise<BaselineSummary>>(kit.baseline({ to: '0002-b.ts' }));
 expectType<Promise<BaselineSummary>>(kit.baseline());
 expectType<Promise<LockInfo | null>>(kit.lockInfo());
 expectType<Promise<LockInfo | null>>(kit.forceUnlock());
+expectAssignable<MigronautTelemetry>({ attributes: { tenant: 'acme', shard: 2, canary: true } });
+expectNotAssignable<MigronautTelemetry>({ attributes: { tenant: { id: 1 } } });
+declare const holder: LockInfo;
+expectType<string | undefined>(holder.runId);
+expectType<number | undefined>(holder.ttlMs);
 
 // ─── Typed lifecycle events ──────────────────────────────────────────────────
 
@@ -213,6 +218,10 @@ expectType<
   }>
 >(runMigrations({}, { onLockHeld: 'wait', lockWaitTimeoutMs: 90_000, lockPollIntervalMs: 250 }));
 expectError(runMigrations({}, { onLockHeld: 'retry' }));
+expectAssignable<Promise<{ waitedMs: number }>>(
+  runMigrations({}, { onLockHeld: 'wait', signal: AbortSignal.timeout(1000) }),
+);
+expectError(runMigrations({}, { signal: 'stop' }));
 // onKit hands out the internally-constructed kit for event subscriptions.
 void runMigrations({}, { onKit: (k) => void expectType<MigratorKit>(k) });
 
@@ -258,6 +267,13 @@ expectType<Promise<RunResult[]>>(kit.up('0003-c.ts', { batch: 7, ordered: true }
 expectType<Promise<RunResult[]>>(kit.down('0003-c.ts', { ordered: true }));
 expectType<Promise<number>>(kit.nextBatch());
 expectError(kit.up('0003-c.ts', { batch: 'seven' }));
+expectType<Promise<RunResult[]>>(kit.up('0003-c.ts', { ordered: true, checksum: 'a'.repeat(64) }));
+expectError(kit.up('0003-c.ts', { checksum: 42 }));
+expectType<Promise<StatusRow[]>>(kit.list('applied', { checksums: false }));
+expectType<Promise<StatusRow[]>>(kit.status({ checksums: false }));
+expectError(kit.list('applied', { checksums: 'no' }));
+declare const dryRow: StatusRow;
+expectType<string | undefined>(dryRow.checksum);
 expectError(kit.up('0003-c.ts', { ordered: 'yes' }));
 expectAssignable<MigronautError>(
   new MigrationBlockedError('blocked', { name: 'x', direction: 'up', blockedBy: ['a'] }),

@@ -26,9 +26,35 @@ const CHANGE_ACTIONS = new Set(['create', 'modify', 'recreate', 'drop']);
 /** Server defaults for a collection that has a validator but did not say how to apply it */
 const VALIDATOR_DEFAULTS = { validationLevel: 'strict', validationAction: 'error' };
 
-/** Whether a row drops or rebuilds an index — what the CLI asks to confirm */
+/** Whether a row drops or rebuilds an index */
 function isDestructive(action) {
   return action.target === 'index' && (action.action === 'drop' || action.action === 'recreate');
+}
+
+/**
+ * Whether a row is one the CLI asks to confirm: a destructive index change,
+ * or a validator change on a collection that already holds data — tightening
+ * a validator (`validationAction: 'error'`) can start rejecting the
+ * application's writes. A validator created with a new collection guards
+ * nothing yet.
+ */
+function needsConfirmation(action, collectionActions = []) {
+  if (isDestructive(action)) return true;
+  if (action.target !== 'validator' || !CHANGE_ACTIONS.has(action.action)) return false;
+  const created = collectionActions.some(
+    (other) => other.target === 'collection' && other.action === 'create',
+  );
+  return !created;
+}
+
+/**
+ * An index as data for a result row (`from` / `to`): plain JSON, the key as
+ * an object, without the server-managed `v`/`ns` — what a reader of `--json`
+ * or of the converge history needs to see what changed.
+ */
+function indexValue(spec) {
+  const { key, v: _v, ns: _ns, background: _background, ...rest } = spec;
+  return { key: key instanceof Map ? Object.fromEntries(key) : { ...key }, ...rest };
 }
 
 const isEmptyValidator = (validator) =>
@@ -62,12 +88,12 @@ function planValidator(name, desired, current, row, steps) {
       row({ target: 'validator', name, action: 'unchanged' });
       return;
     }
-    const action = row({ target: 'validator', name, action: 'drop' });
+    const action = row({ target: 'validator', name, action: 'drop', from: current });
     steps.push({ op: 'collMod', command: { validator: {} }, actions: [action] });
     return;
   }
   if (current === null) {
-    const action = row({ target: 'validator', name, action: 'create' });
+    const action = row({ target: 'validator', name, action: 'create', to: desired });
     steps.push({ op: 'collMod', command: { ...desired }, actions: [action] });
     return;
   }
@@ -79,7 +105,14 @@ function planValidator(name, desired, current, row, steps) {
     row({ target: 'validator', name, action: 'unchanged' });
     return;
   }
-  const action = row({ target: 'validator', name, action: 'modify', reason: diffs.join(', ') });
+  const action = row({
+    target: 'validator',
+    name,
+    action: 'modify',
+    reason: diffs.join(', '),
+    from: current,
+    to: desired,
+  });
   steps.push({ op: 'collMod', command: { ...desired }, actions: [action] });
 }
 
@@ -124,7 +157,12 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps
   for (const declared of declaredIndexes) {
     const current = byName.get(declared.name);
     if (!current) {
-      const action = row({ target: 'index', name: declared.name, action: 'create' });
+      const action = row({
+        target: 'index',
+        name: declared.name,
+        action: 'create',
+        to: indexValue(declared.spec),
+      });
       pending.push({ declared, live: undefined, reason: undefined, action });
       continue;
     }
@@ -138,6 +176,8 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps
         name: declared.name,
         action: 'modify',
         reason: diffs.join(', '),
+        from: indexValue(current.raw),
+        to: indexValue(declared.spec),
       });
       modifies.push({
         op: 'collMod',
@@ -146,7 +186,14 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps
       });
     } else {
       const reason = diffs.join(', ');
-      const action = row({ target: 'index', name: declared.name, action: 'recreate', reason });
+      const action = row({
+        target: 'index',
+        name: declared.name,
+        action: 'recreate',
+        reason,
+        from: indexValue(current.raw),
+        to: indexValue(declared.spec),
+      });
       pending.push({ declared, live: current, reason, action });
     }
   }
@@ -178,6 +225,7 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps
         blockers.length === 1 &&
         compareIndex(declared, blockers[0], defaultCollation).diffs.length === 0;
       action.liveName = blockers[0].name;
+      action.from = indexValue(blockers[0].raw);
       if (!prune) {
         if (identical) {
           // The index the declaration describes exists, only under another
@@ -263,10 +311,17 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps
         name: index.name,
         action: 'drop',
         reason: 'not declared',
+        from: indexValue(index.raw),
       });
       steps.push({ op: 'dropIndex', name: index.name, actions: [action] });
     } else {
-      row({ target: 'index', name: index.name, action: 'keep', reason: 'not declared' });
+      row({
+        target: 'index',
+        name: index.name,
+        action: 'keep',
+        reason: 'not declared',
+        from: indexValue(index.raw),
+      });
     }
   }
 }
@@ -278,7 +333,35 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique }, row, steps
  * result rows (status `'planned'`), `steps` the operations that carry them
  * out, in execution order, each pointing at the rows it settles.
  */
-function planCollection(definition, live, { prune = false, rebuildUnique = false } = {}) {
+/**
+ * Fold every run of consecutive `createIndex` steps into one `createIndexes`:
+ * the server builds several indexes in a single pass over the collection, so
+ * three new indexes on a large collection cost one scan, not three. Only
+ * neighbours merge — the order between creates, modifications, rebuilds and
+ * drops is kept as planned.
+ */
+function batchCreates(steps) {
+  const batched = [];
+  for (const step of steps) {
+    const last = batched.at(-1);
+    if (step.op !== 'createIndex') {
+      batched.push(step);
+    } else if (last?.op === 'createIndexes') {
+      last.specs.push(step.spec);
+      last.actions.push(...step.actions);
+    } else {
+      batched.push({ op: 'createIndexes', specs: [step.spec], actions: [...step.actions] });
+    }
+  }
+  return batched;
+}
+
+function planCollection(definition, live, options = {}) {
+  const plan = planCollectionSteps(definition, live, options);
+  return { ...plan, steps: batchCreates(plan.steps) };
+}
+
+function planCollectionSteps(definition, live, { prune = false, rebuildUnique = false } = {}) {
   const name = definition.name;
   const actions = [];
   const steps = [];
@@ -306,10 +389,17 @@ function planCollection(definition, live, { prune = false, rebuildUnique = false
     // says "no validator" is already true of a collection that does not exist.
     if (!desired && !(declaredIndexes?.length > 0)) return { name, actions, steps };
     const linked = [row({ target: 'collection', name, action: 'create' })];
-    if (desired) linked.push(row({ target: 'validator', name, action: 'create' }));
+    if (desired) {
+      linked.push(row({ target: 'validator', name, action: 'create', to: desired }));
+    }
     steps.push({ op: 'createCollection', options: desired ? { ...desired } : {}, actions: linked });
     for (const declared of declaredIndexes ?? []) {
-      const action = row({ target: 'index', name: declared.name, action: 'create' });
+      const action = row({
+        target: 'index',
+        name: declared.name,
+        action: 'create',
+        to: indexValue(declared.spec),
+      });
       steps.push({ op: 'createIndex', spec: declared.spec, actions: [action] });
     }
     return { name, actions, steps };
@@ -347,8 +437,10 @@ module.exports = {
   UNIQUE_REBUILD_REASON,
   VALIDATOR_DEFAULTS,
   desiredValidator,
+  indexValue,
   isDestructive,
   isEmptyValidator,
+  needsConfirmation,
   liveValidator,
   planCollection,
   summarize,

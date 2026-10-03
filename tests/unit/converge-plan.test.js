@@ -6,6 +6,7 @@ const {
   desiredValidator,
   isDestructive,
   liveValidator,
+  needsConfirmation,
   planCollection,
   summarize,
 } = require('../../src/core/converge-plan.js');
@@ -33,7 +34,9 @@ const rows = (plan) =>
 /** Steps as compact strings, in execution order */
 const steps = (plan) =>
   plan.steps.map((step) => {
-    if (step.op === 'createIndex') return `create ${step.spec.name}`;
+    if (step.op === 'createIndexes') {
+      return `create ${step.specs.map((spec) => spec.name).join(',')}`;
+    }
     if (step.op === 'dropIndex') return `drop ${step.name}`;
     if (step.op === 'createCollection') return 'createCollection';
     if (step.op === 'collMod') {
@@ -404,6 +407,60 @@ describe('planCollection — indexes', () => {
     assert.deepStrictEqual(plan.steps[0].drops, [
       { name: 'a_1', restore: { key: { a: 1 }, name: 'a_1' } },
     ]);
+  });
+});
+
+describe('planCollection — what a row says changed (from / to)', () => {
+  it('should carry the live and the declared index as plain data', () => {
+    const plan = planCollection(
+      definition({ indexes: [{ key: { a: 1 }, unique: true }, { key: { n: 1 } }], prune: true }),
+      existing([
+        { key: { a: 1 }, name: 'a_1', ns: 'db.c' },
+        { key: { gone: 1 }, name: 'gone_1' },
+      ]),
+      { prune: true },
+    );
+    const byName = Object.fromEntries(plan.actions.map((action) => [action.name, action]));
+    assert.deepStrictEqual(byName.a_1.from, { key: { a: 1 }, name: 'a_1' });
+    assert.deepStrictEqual(byName.a_1.to, { key: { a: 1 }, name: 'a_1', unique: true });
+    assert.deepStrictEqual(byName.n_1.to, { key: { n: 1 }, name: 'n_1' });
+    assert.strictEqual(byName.n_1.from, undefined);
+    assert.deepStrictEqual(byName.gone_1.from, { key: { gone: 1 }, name: 'gone_1' });
+    // Plain JSON all the way: what --json and the converge history store.
+    assert.doesNotThrow(() => JSON.stringify(plan.actions));
+    assert.ok(!(byName.a_1.to.key instanceof Map));
+  });
+
+  it("should carry a validator's live and declared states", () => {
+    const plan = planCollection(
+      definition({ validator: { a: { $type: 'int' } }, validationAction: 'warn' }),
+      existing([], { validator: { a: { $type: 'string' } } }),
+    );
+    const [row] = plan.actions;
+    assert.deepStrictEqual(row.from.validator, { a: { $type: 'string' } });
+    assert.deepStrictEqual(row.to, {
+      validator: { a: { $type: 'int' } },
+      validationLevel: 'strict',
+      validationAction: 'warn',
+    });
+  });
+});
+
+describe('needsConfirmation', () => {
+  it('should ask for index drops and rebuilds, and for validator changes on existing data', () => {
+    assert.ok(needsConfirmation({ target: 'index', action: 'drop' }));
+    assert.ok(needsConfirmation({ target: 'index', action: 'recreate' }));
+    assert.ok(!needsConfirmation({ target: 'index', action: 'create' }));
+    for (const action of ['create', 'modify', 'drop']) {
+      assert.ok(needsConfirmation({ target: 'validator', action }, []), action);
+    }
+    assert.ok(!needsConfirmation({ target: 'validator', action: 'unchanged' }, []));
+    // A validator born with its collection guards no existing writes.
+    const fresh = [
+      { target: 'collection', action: 'create' },
+      { target: 'validator', action: 'create' },
+    ];
+    assert.ok(!needsConfirmation(fresh[1], fresh));
   });
 });
 

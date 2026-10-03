@@ -6,6 +6,11 @@ const { connection, mq } = require('./mq.js');
 
 const ROLE = process.env.ROLE ?? 'all';
 const PORT = Number(process.env.PORT ?? 3000);
+// Loopback unless told otherwise: these endpoints can roll the database back,
+// and the example has no authentication (see the README).
+const HOST = process.env.HOST ?? '127.0.0.1';
+/** How long in-flight requests get to finish on shutdown before they are cut */
+const SHUTDOWN_GRACE_MS = 5000;
 const MAX_BODY_BYTES = 16 * 1024;
 /** How long a `"wait": true` request may hold the connection */
 const WAIT_TIMEOUT_MS = 5 * 60_000;
@@ -21,8 +26,20 @@ const STATUS_BY_CODE = {
   MIGRATION_IRREVERSIBLE: 409,
   CHECKSUM_MISMATCH: 409,
   CONVERGE_FAILED: 409,
+  QUEUE_JOB_INVALID: 400,
+  QUEUE_JOB_FAILED: 409,
   CONNECTION_FAILED: 503,
 };
+
+/**
+ * The parts of an error's context fit for an HTTP client. The lock holder
+ * (host, pid, OS user of another process) is internal detail.
+ */
+function publicContext(context) {
+  if (!context || typeof context !== 'object') return undefined;
+  const { holder: _holder, ...rest } = context;
+  return rest;
+}
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -136,7 +153,13 @@ async function handle(req, res) {
   const { pathname } = new URL(req.url, 'http://localhost');
   const jobMatch = req.method === 'GET' && /^\/migrations\/jobs\/([^/]+)$/.exec(pathname);
   if (jobMatch) {
-    const job = await mq.getJob(decodeURIComponent(jobMatch[1]));
+    let id;
+    try {
+      id = decodeURIComponent(jobMatch[1]);
+    } catch {
+      throw new HttpError(400, 'Malformed job id');
+    }
+    const job = await mq.getJob(id);
     return job ? send(res, 200, job) : send(res, 404, { error: { message: 'No such job' } });
   }
   const route = routes[`${req.method} ${pathname}`];
@@ -147,10 +170,12 @@ async function handle(req, res) {
 const server = http.createServer((req, res) => {
   handle(req, res).catch((error) => {
     if (error instanceof MigronautError) {
-      // Messages and context are already redacted by migronaut — safe to return.
-      const status = STATUS_BY_CODE[error.code] ?? 500;
+      // Messages and context are already redacted by migronaut. A failed wait
+      // carries the job's own code (MIGRATION_BLOCKED, …), which picks the
+      // status better than QUEUE_JOB_FAILED alone.
+      const status = STATUS_BY_CODE[error.context?.code] ?? STATUS_BY_CODE[error.code] ?? 500;
       return send(res, status, {
-        error: { code: error.code, message: error.message, context: error.context },
+        error: { code: error.code, message: error.message, context: publicContext(error.context) },
       });
     }
     if (error instanceof HttpError) {
@@ -168,8 +193,8 @@ async function main() {
     console.log(`worker started on queue "${mq.queueName}"`);
   }
   if (ROLE === 'api' || ROLE === 'all') {
-    await new Promise((resolve) => server.listen(PORT, resolve));
-    console.log(`api listening on http://127.0.0.1:${PORT}`);
+    await new Promise((resolve) => server.listen(PORT, HOST, resolve));
+    console.log(`api listening on http://${HOST}:${PORT}`);
   }
 }
 
@@ -178,14 +203,24 @@ async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`${signal} received — shutting down`);
-  // Stop accepting requests, let the migration in flight finish, then release
-  // everything this process opened — in that order.
-  if (server.listening) await new Promise((resolve) => server.close(resolve));
-  await mq.close();
-  await connection.quit();
-  // Last: the spans of the migration that just finished are still in the
-  // exporter's batch, and process.exit() below would drop them.
-  await shutdownTracing();
+  // Stop accepting requests and stop the worker at the same time: a pending
+  // `"wait": true` request must not keep the worker taking new jobs. A job
+  // that had not started its migration goes back to the queue; one that had
+  // finishes. Requests still open after the grace period are cut.
+  const grace = setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS);
+  try {
+    await Promise.all([
+      server.listening ? new Promise((resolve) => server.close(resolve)) : undefined,
+      mq.close(),
+    ]);
+  } finally {
+    clearTimeout(grace);
+    // Whatever closing the queue did, release the rest — and last the spans of
+    // the migration that just finished, still in the exporter's batch, which
+    // process.exit() below would drop.
+    await connection.quit().catch(() => undefined);
+    await shutdownTracing();
+  }
 }
 
 for (const signal of ['SIGTERM', 'SIGINT']) {

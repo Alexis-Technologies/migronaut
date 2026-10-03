@@ -37,8 +37,13 @@ function fakeDb(collections = {}, { fail = {}, reads = [] } = {}) {
     listCollections: (filter, options) => ({
       toArray: async () => {
         reads.push(['listCollections', options]);
-        const entry = state[filter.name];
-        return entry ? [{ name: filter.name, type: entry.type, options: entry.options }] : [];
+        const names = typeof filter.name === 'string' ? [filter.name] : filter.name.$in;
+        const found = [];
+        for (const name of names) {
+          const entry = state[name];
+          if (entry) found.push({ name, type: entry.type, options: entry.options });
+        }
+        return found;
       },
     }),
     createCollection: async (name, options) => {
@@ -78,18 +83,21 @@ function fakeDb(collections = {}, { fail = {}, reads = [] } = {}) {
           return state[name].indexes.map((index) => ({ ...index }));
         },
       }),
-      createIndexes: async ([spec]) => {
-        const { key, ...options } = spec;
-        ops.push(`createIndex ${name}.${spec.name}`);
+      // One command, all or nothing — as the server builds several indexes.
+      createIndexes: async (specs) => {
+        for (const spec of specs) ops.push(`createIndex ${name}.${spec.name}`);
         maybeFail('createIndexes');
         state[name] ??= {
           type: 'collection',
           options: {},
           indexes: [{ v: 2, key: { _id: 1 }, name: '_id_' }],
         };
-        const plainKey = key instanceof Map ? Object.fromEntries(key) : key;
-        state[name].indexes.push({ v: 2, key: plainKey, ...options });
-        return [spec.name];
+        for (const spec of specs) {
+          const { key, ...options } = spec;
+          const plainKey = key instanceof Map ? Object.fromEntries(key) : key;
+          state[name].indexes.push({ v: 2, key: plainKey, ...options });
+        }
+        return specs.map((spec) => spec.name);
       },
       dropIndex: async (indexName) => {
         ops.push(`dropIndex ${name}.${indexName}`);
@@ -571,6 +579,125 @@ describe('runConverge — refusals and failures', () => {
   });
 });
 
+describe('runConverge — at scale', () => {
+  it('should read every collection with one listCollections', async () => {
+    const reads = [];
+    const db = fakeDb({ a: { indexes: [] }, b: { indexes: [] }, c: { indexes: [] } }, { reads });
+    const { deps } = makeDeps(db);
+    await runConverge(
+      deps,
+      {
+        definitions: definitions(
+          { name: 'a', indexes: [] },
+          { name: 'b', indexes: [] },
+          { name: 'c', indexes: [] },
+          { name: 'missing', indexes: [] },
+        ),
+        dryRun: true,
+      },
+      undefined,
+    );
+    assert.strictEqual(reads.filter(([read]) => read === 'listCollections').length, 1);
+    assert.strictEqual(reads.filter(([read]) => read === 'listIndexes').length, 3);
+  });
+
+  it('should build the new indexes of a collection in one command', async () => {
+    const db = fakeDb({ c: { indexes: [] } });
+    const calls = [];
+    const collection = db.collection;
+    db.collection = (name) => {
+      const handle = collection(name);
+      return {
+        ...handle,
+        createIndexes: (specs) => {
+          calls.push(specs.map((spec) => spec.name));
+          return handle.createIndexes(specs);
+        },
+      };
+    };
+    const { deps, events } = makeDeps(db);
+    const result = await runConverge(
+      deps,
+      {
+        definitions: definitions({
+          name: 'c',
+          indexes: [{ key: { a: 1 } }, { key: { b: 1 } }, { key: { c: 1 } }],
+        }),
+      },
+      undefined,
+    );
+    assert.deepStrictEqual(calls, [['a_1', 'b_1', 'c_1']]);
+    assert.strictEqual(result.changed, 3);
+    const applied = events.filter(
+      ([event, e]) => event === 'converge:action' && e.status === 'applied',
+    );
+    assert.strictEqual(applied.length, 3, 'every row still settles on its own');
+  });
+
+  it('should fail every index of a batch the server refused, naming them all', async () => {
+    const db = fakeDb(
+      { c: { indexes: [] } },
+      { fail: { createIndexes: serverError(67, 'cannot create index') } },
+    );
+    const { deps } = makeDeps(db);
+    await assert.rejects(
+      runConverge(
+        deps,
+        {
+          definitions: definitions({ name: 'c', indexes: [{ key: { a: 1 } }, { key: { b: 1 } }] }),
+        },
+        undefined,
+      ),
+      (error) => {
+        assert.match(error.message, /Could not create indexes "a_1", "b_1" on c/);
+        const statuses = error.context.converge.collections[0].actions.map((a) => a.status);
+        assert.deepStrictEqual(statuses, ['failed', 'failed']);
+        return true;
+      },
+    );
+  });
+
+  it('should not put an index back after the connection broke mid-rebuild', async () => {
+    const lost = Object.assign(new Error('connection timed out'), {
+      name: 'MongoNetworkTimeoutError',
+    });
+    const db = fakeDb(
+      { c: { indexes: [{ v: 2, key: { a: 1 }, name: 'a_1' }] } },
+      { fail: { createIndexes: lost } },
+    );
+    const { deps } = makeDeps(db);
+    await assert.rejects(
+      runConverge(
+        deps,
+        { definitions: definitions({ name: 'c', indexes: [{ key: { a: 1 }, unique: true }] }) },
+        undefined,
+      ),
+      (error) => {
+        // The server may still be building: a restore would race it.
+        assert.strictEqual(error.context.restored, false);
+        assert.strictEqual(error.context.uncertain, true);
+        assert.match(error.message, /connection failed mid-build/);
+        return true;
+      },
+    );
+    assert.deepStrictEqual(db.ops, ['dropIndex c.a_1', 'createIndex c.a_1']);
+  });
+});
+
+describe('runConverge — warnings', () => {
+  it('should say out loud that indexes: [] with prune drops every index', async () => {
+    const db = fakeDb({ c: { indexes: [{ v: 2, key: { a: 1 }, name: 'a_1' }] } });
+    const { deps, lines } = makeDeps(db);
+    await runConverge(
+      deps,
+      { definitions: definitions({ name: 'c', indexes: [], prune: true }), dryRun: true },
+      undefined,
+    );
+    const warning = lines.find((line) => line.level === 'warn');
+    assert.match(warning.message, /indexes: \[\] with prune drops every index but _id \(a_1\)/);
+  });
+});
+
 describe('runConverge — tolerated races', () => {
   it('should set the validator on a collection created since it was read', async () => {
     const db = fakeDb({}, { fail: { createCollection: serverError(48, 'already exists') } });
@@ -579,7 +706,7 @@ describe('runConverge — tolerated races', () => {
     const real = db.listCollections;
     let first = true;
     db.listCollections = (filter, options) => {
-      if (first && filter.name === 'c') {
+      if (first) {
         first = false;
         return { toArray: async () => [] };
       }

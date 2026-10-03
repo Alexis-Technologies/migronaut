@@ -74,4 +74,20 @@ describe('config schema sync', () => {
     }
     assert.strictEqual(schema.properties.envFile.default, '.env');
   });
+
+  it('should describe exactly the index options and definition keys the validator accepts', () => {
+    // The validator is strict, and so is the schema: a key one accepts and the
+    // other does not is a config that validates in the editor and fails at
+    // run time — or the other way round.
+    const { INDEX_KEYS } = require(path.join(repoRoot, 'src', 'core', 'index-spec.js'));
+    const { DEFINITION_KEYS } = require(path.join(repoRoot, 'src', 'core', 'collections.js'));
+    assert.deepStrictEqual(
+      Object.keys(schema.definitions.index.properties).sort(),
+      [...INDEX_KEYS].sort(),
+    );
+    assert.deepStrictEqual(
+      Object.keys(schema.definitions.collection.properties).sort(),
+      [...DEFINITION_KEYS].sort(),
+    );
+  });
 });

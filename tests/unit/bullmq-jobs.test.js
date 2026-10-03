@@ -68,6 +68,31 @@ describe('dedupId', () => {
     }
     assert.strictEqual(dedupId('up', '0001-a.js'), 'up-0001-a.js');
   });
+
+  it('should never give two migrations one dedup id', () => {
+    // A lossy mapping would let the second file's job be absorbed as a
+    // duplicate of the first's — in the same enqueue call.
+    const names = [
+      '0001-add users.js',
+      '0001-add_users.js',
+      '0001-add~20users.js',
+      '0002-café.js',
+      '0002-cafè.js',
+      '0003-міграція.js',
+      '0003-a:b.js',
+    ];
+    const ids = new Set(names.map((name) => dedupId('up', name)));
+    assert.strictEqual(ids.size, names.length);
+    assert.strictEqual(dedupId('up', '0003-a:b.js'), 'up-0003-a~3Ab.js');
+    for (const id of ids) assert.match(id, /^[A-Za-z0-9._~-]+$/);
+  });
+
+  it('should keep a forced re-run apart from a plain job for the same file', () => {
+    assert.notStrictEqual(dedupId('up', 'a.js', { force: true }), dedupId('up', 'a.js'));
+    assert.strictEqual(dedupId('up', 'a.js', { force: true }), 'up~force-a.js');
+    // No file name can produce the forced id.
+    assert.notStrictEqual(dedupId('up', '~force-a.js'), 'up~force-a.js');
+  });
 });
 
 describe('buildMigrationJob / migrationJobOptions', () => {
@@ -370,7 +395,7 @@ describe('parseJobData', () => {
 describe('converge jobs', () => {
   it('should key the dedup id on the migration the converge follows', () => {
     assert.strictEqual(convergeDedupId(), 'converge');
-    assert.strictEqual(convergeDedupId('0001-add users.js'), 'converge-after-0001-add_users.js');
+    assert.strictEqual(convergeDedupId('0001-add users.js'), 'converge-after-0001-add~20users.js');
     assert.notStrictEqual(convergeDedupId('0001-a.js'), convergeDedupId('0002-b.js'));
   });
 

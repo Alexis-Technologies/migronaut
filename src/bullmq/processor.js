@@ -1,14 +1,22 @@
-const { MigratorKit } = require('../core/migrator.js');
+const { MigratorKit, RECORD_LOCK_WAIT } = require('../core/migrator.js');
 const { assertLockWaitOptions, withLockWait } = require('../core/lock-wait.js');
 const {
   ConfigInvalidError,
+  LockAlreadyHeldError,
+  MigrationBlockedError,
   MigronautError,
   NotAppliedError,
   RunAbortedError,
 } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
-const { redactDeep, redactUris } = require('../utils/redact.js');
-const { JOB_NAMES, isPlainObject, parseJobData } = require('./jobs.js');
+const { redactDeep, redactOutbound } = require('../utils/redact.js');
+const {
+  JOB_NAMES,
+  assertAllowed,
+  isPlainObject,
+  parseJobData,
+  resolveAllow,
+} = require('./jobs.js');
 const { assertJobOptions, enqueueConverge, enqueueUp } = require('./producer.js');
 
 /**
@@ -27,9 +35,30 @@ const RETRYABLE_CODES = Object.freeze([
   'CONNECTION_FAILED',
 ]);
 
+/**
+ * What a job waits out instead of failing: a held lock — and a block by
+ * migrations that have not failed. With more than one worker taking jobs
+ * (global concurrency off or unsupported, several processors), the job for an
+ * earlier migration can still be in flight on another worker when a later one
+ * takes the lock; failing the later job would fail its whole group although
+ * nothing went wrong. A blocker with a `'failed'` trace stopped the line for
+ * real, and that job fails at once, as before.
+ */
+function isTransientForJob(error) {
+  if (error instanceof LockAlreadyHeldError) return true;
+  return (
+    error instanceof MigrationBlockedError &&
+    Array.isArray(error.context?.failed) &&
+    error.context.failed.length === 0
+  );
+}
+
 function isRetryableError(error) {
   return !(error instanceof MigronautError) || RETRYABLE_CODES.includes(error.code);
 }
+
+/** The least time between two `lock-wait` progress updates of one job */
+const WAIT_PROGRESS_INTERVAL_MS = 2000;
 
 /** What BullMQ checks (by name, not only by class) to fail a job without retrying it */
 const UNRECOVERABLE_ERROR_NAME = 'UnrecoverableError';
@@ -89,12 +118,12 @@ function prepareErrorForQueue(error) {
   if (!(error instanceof Error)) return;
   const cause = error instanceof MigronautError ? error.context?.cause : undefined;
   try {
-    const message = redactUris(error.message);
+    const message = redactOutbound(error.message);
     error.message =
       typeof cause === 'string' && cause.length > 0 && !message.includes(cause)
-        ? `${message} — ${redactUris(cause)}`
+        ? `${message} — ${redactOutbound(cause)}`
         : message;
-    if (typeof error.stack === 'string') error.stack = redactUris(error.stack);
+    if (typeof error.stack === 'string') error.stack = redactOutbound(error.stack);
   } catch {
     // A frozen error cannot be rewritten; its message was written by us anyway.
   }
@@ -109,7 +138,7 @@ function resolveProcessorOptions(options) {
   if (!isPlainObject(options)) {
     throw new ConfigInvalidError('createMigrationProcessor options must be an object');
   }
-  const { kit, config, lockWait = {}, jobOptions, ordered = true } = options;
+  const { kit, config, lockWait = {}, jobOptions, ordered = true, allow } = options;
   if (kit !== undefined && config !== undefined) {
     throw new ConfigInvalidError('Pass either `kit` or `config`, not both');
   }
@@ -125,14 +154,9 @@ function resolveProcessorOptions(options) {
   // Unlike runMigrations, waiting is the default: nothing is blocked on this
   // job, and the budget only burns while the lock's holder is stalled.
   const waitOptions = { onLockHeld: 'wait', ...lockWait };
-  if (waitOptions.onLockHeld !== 'wait' && waitOptions.onLockHeld !== 'throw') {
-    throw new ConfigInvalidError("lockWait.onLockHeld must be 'wait' or 'throw'", {
-      onLockHeld: waitOptions.onLockHeld,
-    });
-  }
   assertLockWaitOptions(waitOptions);
   assertJobOptions(jobOptions);
-  return { waitOptions, defaultOrdered: ordered };
+  return { waitOptions, defaultOrdered: ordered, allow: resolveAllow(allow) };
 }
 
 /**
@@ -147,7 +171,7 @@ function resolveProcessorOptions(options) {
  * signal only to processors whose `length` is at least 3.
  */
 function createMigrationProcessor(options = {}) {
-  const { waitOptions, defaultOrdered } = resolveProcessorOptions(options);
+  const { waitOptions, defaultOrdered, allow } = resolveProcessorOptions(options);
   const { kit: injectedKit, config, kitOptions, queue, jobOptions } = options;
 
   const ownsKit = injectedKit === undefined;
@@ -174,7 +198,7 @@ function createMigrationProcessor(options = {}) {
     ctx.writes.add(pending);
     pending.finally(() => ctx.writes.delete(pending));
   }
-  const log = (ctx, row) => write(ctx, (job) => job.log?.(redactUris(row)));
+  const log = (ctx, row) => write(ctx, (job) => job.log?.(redactOutbound(row)));
   const progress = (ctx, phase, extra) =>
     write(ctx, (job) =>
       job.updateProgress?.({
@@ -264,6 +288,7 @@ function createMigrationProcessor(options = {}) {
             batch: data.batch,
             ...(ordered ? { ordered: true } : {}),
             ...(data.force ? { force: true } : {}),
+            ...(data.checksum ? { checksum: data.checksum } : {}),
           })
         : kit.down(data.migration, ordered ? { ordered: true } : {});
 
@@ -292,8 +317,25 @@ function createMigrationProcessor(options = {}) {
       ...waitOptions,
       logger: kit.logger,
       signal,
-      onWait: ({ attempts, waitedMs: soFar }) => {
-        if (attempts === 1) log(ctx, 'Migration lock held by another process — waiting…');
+      isTransient: isTransientForJob,
+      // A duck-typed kit has no telemetry to report to.
+      onSettle: (wait) => kit[RECORD_LOCK_WAIT]?.(wait),
+      onWait: ({ attempts, waitedMs: soFar, code }) => {
+        // Each progress update is a Redis write and an event-stream entry:
+        // a long wait reports every few seconds, not on every poll.
+        const now = Date.now();
+        if (attempts > 1 && now - (ctx.lastWaitProgressAt ?? 0) < WAIT_PROGRESS_INTERVAL_MS) {
+          return;
+        }
+        ctx.lastWaitProgressAt = now;
+        if (attempts === 1) {
+          log(
+            ctx,
+            code === 'MIGRATION_BLOCKED'
+              ? 'Earlier migration(s) not applied yet — waiting for them…'
+              : 'Migration lock held by another process — waiting…',
+          );
+        }
         progress(ctx, 'lock-wait', { attempts, waitedMs: soFar });
       },
     });
@@ -428,6 +470,9 @@ function createMigrationProcessor(options = {}) {
       // Validated before anything connects: a payload that fails the contract
       // must not reach the kit, let alone the filesystem.
       ctx.data = parseJobData(job);
+      // Well-formed is not the same as permitted: what a payload may ask for
+      // beyond the ordinary is this worker's decision, not Redis's.
+      assertAllowed(job, ctx.data, allow);
       current = ctx;
       // A job fetched while this process shuts down goes straight back.
       if (shutdownController.signal.aborted) throw shutdownController.signal.reason;
@@ -468,7 +513,9 @@ function createMigrationProcessor(options = {}) {
         });
       }
       write(ctx, (target) =>
-        target.log?.(`✖ ${errorText(error)}${ctx.runId ? ` [run ${ctx.runId}]` : ''}`),
+        target.log?.(
+          redactOutbound(`✖ ${errorText(error)}${ctx.runId ? ` [run ${ctx.runId}]` : ''}`),
+        ),
       );
       await flush(ctx);
       throw error;
@@ -512,6 +559,7 @@ module.exports = {
   RETRYABLE_CODES,
   WAITING_ERROR_NAME,
   createMigrationProcessor,
+  isTransientForJob,
   isRetryableError,
   resolveProcessorOptions,
 };

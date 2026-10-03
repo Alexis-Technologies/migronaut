@@ -700,6 +700,32 @@ describe('validateConfig', () => {
       }
     });
 
+    it('should accept a handful of scalar static attributes, and nothing else', () => {
+      assert.deepStrictEqual(
+        validateConfig(
+          validConfig({ telemetry: { attributes: { tenant: 'a', shard: 3, canary: true } } }),
+        ),
+        [],
+      );
+      assert.deepStrictEqual(validateConfig(validConfig({ telemetry: { attributes: 'x' } })), [
+        { path: 'telemetry.attributes', message: 'must be an object' },
+      ]);
+      assert.deepStrictEqual(
+        validateConfig(validConfig({ telemetry: { attributes: { tenant: { id: 1 } } } })),
+        [
+          {
+            path: 'telemetry.attributes.tenant',
+            message: 'must be a string, a number or a boolean',
+          },
+        ],
+      );
+      const many = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`k${i}`, i]));
+      assert.match(
+        validateConfig(validConfig({ telemetry: { attributes: many } }))[0].message,
+        /at most 20/,
+      );
+    });
+
     it('should refuse a meter missing either instrument factory', () => {
       for (const bad of [
         'meter',

@@ -434,6 +434,16 @@ Each entry: **responsibility · key exports · nuances you must know.**
   `lockWaitTimeoutMs`. See the [deep dive](#65-the-programmatic-api-runjs).
 
 ### `src/core/lock-wait.js` — the wait-for-the-lock loop
+The budget bounds *stall* time and, left unset, defaults to `max(90 s, 1.5 × holder TTL)` (the
+holder writes its `ttlMs` into the lock document; an older holder falls back to this process's
+TTL) — an explicit budget is honoured and only warned about when it is shorter than the holder's
+heartbeat. Polls back off from `lockPollIntervalMs`, doubling, capped at 5 s and at a quarter of
+the budget (so a live heartbeat is always observed). `isTransient` widens what is waited out (the
+queue's "an earlier job is still in flight"), `signal` aborts between polls, and `onSettle`
+reports a wait that happened (`acquired` / `timeout` / `aborted`) — which is how
+`migronaut.lock.wait.duration` is recorded, through the kit's non-exported `RECORD_LOCK_WAIT`
+symbol.
+
 - **Responsibility:** `withLockWait(attempt, options)` — retry `attempt()` while it rejects with
   `LockAlreadyHeldError`, bounded by a *stall* budget that re-arms whenever the holder's `lockedAt`
   advanced (a live peer is never timed out). Shared by `runMigrations` and the queue processor.
@@ -604,7 +614,9 @@ itself (`randomId()`, never the user's generator) and exists for exactly that re
 `owner` alone, a generator that hands two runs the same id — `() => process.env.DEPLOY_ID`, or a
 counter that starts at 1 in every process — would let the second run pass the readback and migrate
 alongside the first, then delete the first run's lock on its way out. Correlation is the user's to
-shape; mutual exclusion is not. Neither field is ever exposed (`toLockInfo` strips both).
+shape; mutual exclusion is not. The nonce is never exposed (`toLockInfo` strips it); the owner
+is, as `LockInfo.runId`, since it is the run id every event and log line already carries. The
+holder also writes its `ttlMs`, so a waiter can size its patience to the holder's heartbeat.
 
 Mixed versions contend safely: a release that predates the nonce compares `owner` only and writes
 no nonce, and each side checks just the fields it knows — a nonce-less document can never match a
@@ -696,7 +708,11 @@ Every design choice below follows from refusing to trust the queue's memory:
   majors, they cannot be combined with deduplication, and they would move the ordering truth into
   Redis.
 - **A failed migration stops the line by itself.** The jobs behind it find it still pending and
-  fail as `MIGRATION_BLOCKED` without running. No queue pause, no cross-job state.
+  fail as `MIGRATION_BLOCKED` without running. No queue pause, no cross-job state. What tells a
+  stopped line from a busy one is the changelog's `'failed'` trace: `MigrationBlockedError`
+  carries `context.failed`, and a job blocked only by migrations that never failed (the earlier
+  job still in flight on another worker) waits for them within its lock-wait budget
+  (`isTransientForJob`) instead of failing its group.
 - **`attempts: 1`, always.** A BullMQ retry re-queues the job *behind* the waiting ones, so the
   migrations after it would run first — and be blocked. The one transient condition worth retrying,
   a held lock, is waited out *inside* the job (`withLockWait`), where order is kept. `jobOptions`
@@ -761,8 +777,20 @@ before the kit is touched (version, names, positions, and the migration name wit
 `isBareFilename` rule `#filepath` uses); the kit then re-validates — and an `ordered` single-file
 `up` (every queue job) refuses a target that is not a file of the migration sequence, so a payload
 can never make the worker import a dotfile, a declaration file or a helper module. Everything
-BullMQ stores about a failure — message, stack, log rows — goes through the redaction chokepoint
-first, and the cause is folded into the message because `failedReason` is all a dashboard shows.
+BullMQ stores about a failure — message, stack, log rows — goes through `redactOutbound` first
+(credentials, and the values a duplicate-key error quotes: a queue keeps failed jobs and serves
+them to dashboards), and the cause is folded into the message because `failedReason` is all a
+dashboard shows.
+
+**Well-formed is not permitted.** After parsing, a job is checked against the worker's `allow`
+policy (`down` on, `force` and `unordered` off by default): a payload can only *ask* to re-run an
+applied migration or skip the order guard; the worker decides. The facade applies the same policy
+to its own `enqueue*` calls, so a request its worker would refuse fails at the call.
+
+**A job names a file and its version.** An `up` job carries the checksum its plan saw (from
+`dryRun('up')` rows); the kit refuses another version under the same name
+(`up(name, { checksum })` → `CHECKSUM_MISMATCH`, `context.planned`). A worker from another deploy
+therefore never applies a different file than the one that was planned.
 
 **The contract evolves by rule.** A producer writes `JOB_DATA_VERSION`; a worker accepts every
 version from `MIN_JOB_DATA_VERSION` up to its own (jobs already queued survive a worker upgrade),
@@ -909,6 +937,8 @@ The high-impact ones for code changes:
   [§6.6](#66-the-queue-adapter-bullmq). Do not "add retries": they reorder the queue.
 - **A queue job behind a failed migration fails (`MIGRATION_BLOCKED`) rather than waiting**, and a
   job for an already-applied migration *completes* as `skipped`. Both are the queue doing its job.
+  A job behind migrations that are merely not applied yet (no `'failed'` trace) does wait, within
+  its lock-wait budget — they may be in flight on another worker.
 - **Non-retryable queue errors are renamed `UnrecoverableError` only when the job has
   `attempts > 1`.** The adapter cannot import BullMQ's class; BullMQ matches the name. With the
   adapter's own single-attempt jobs there is nothing to prevent, so the typed name stays.

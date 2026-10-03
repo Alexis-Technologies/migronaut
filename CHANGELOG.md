@@ -49,6 +49,24 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
   - An injected `Queue` (or `QueueEvents`) on another name or prefix than the facade's is rejected,
     and the facade takes an injected queue's prefix by default; `startWorker()` can be retried
     after a failed start; a closed queue refuses every further call.
+  - **A worker decides what a job may ask for** — the `allow` option (`{ down: true, force:
+    false, unordered: false }` by default) on `createMigrationProcessor` and
+    `createMigrationQueue`: a payload asking to re-run an applied migration or to skip the order
+    guard is refused (`QUEUE_JOB_INVALID`, `context.permission`) unless allowed. The facade's
+    `enqueue*` calls follow the same policy.
+  - **A job runs only the file it was planned with**: an `up` job carries the plan-time checksum,
+    and a worker with another version of the file fails it (`CHECKSUM_MISMATCH`,
+    `context.planned`) instead of applying it.
+  - **Several workers without global concurrency**: a job blocked only by earlier migrations that
+    have not failed (one may be in flight on another worker) waits for them within its lock-wait
+    budget instead of failing its group; `MigrationBlockedError` carries `context.failed`.
+  - `wait()` holds every await to its one `timeoutMs` budget, decides a timeout by the clock, and
+    its `QueueJobFailedError` carries the job's own typed `code`; an empty group can be waited for
+    without QueueEvents. A long lock wait reports progress every few seconds, not every poll.
+  - What the queue stores about a failure — `failedReason`, stack, job logs — masks the values a
+    duplicate-key error quotes, on top of credentials. `schedule({ every })` needs at least 1000 ms.
+  - Dedup ids encode file names reversibly (two names can no longer share one and absorb each
+    other's job), and a forced re-run has a dedup id of its own.
 - **`bullmq.d.ts`** — hand-written types for the entry point, with structural `BullMQ*Like`
   interfaces instead of an import of `bullmq`, generic over the classes you inject.
 - **`up(file, { batch })`** — stamp an explicit batch number instead of the next free one, and
@@ -56,7 +74,17 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
   batch.
 - **`up(file, { ordered: true })` / `down(file, { ordered: true })`** — refuse a single-file run
   that would go out of sequence (`MigrationBlockedError`); an ordered `up` also applies the
-  `strict` drift check and the `onOutOfOrder` policy a bulk run would.
+  `strict` drift check and the `onOutOfOrder` policy a bulk run would, and only targets a file of
+  the migration sequence.
+- **`up(file, { checksum })`** — refuse (`CHECKSUM_MISMATCH`, `context.planned`) to apply any other
+  version of the file than the one with this SHA-256; `dryRun('up')` rows carry each file's
+  `checksum` for it.
+- **`list(filter, { checksums: false })`** / **`status({ checksums: false })`** — skip hashing the
+  applied files, for a caller that needs names and dates only.
+- **`runMigrations(config, { signal })`** — an `AbortSignal` (wired to SIGTERM) stops a wait for
+  the lock between polls, and a run that holds it between migrations.
+- **`LockInfo.runId` and `LockInfo.ttlMs`** — which run holds the lock (also on `migronaut lock`),
+  and the holder's TTL, which the lock document now records.
 - **Three error codes**: `MIGRATION_BLOCKED` (exit 24), `QUEUE_JOB_INVALID` (25),
   `QUEUE_JOB_FAILED` (26), with `MigrationBlockedError`, `QueueJobInvalidError` and
   `QueueJobFailedError` exported from the package root.
@@ -86,10 +114,15 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
     driver nests its command spans under the migration that issued them. That is what lifecycle
     events cannot do, and why this lives in the kit: at application startup there is no ambient
     span, and the driver instrumentation records nothing without a parent.
-  - **Metrics**: `migronaut.run.duration`, `migronaut.migration.duration` and
-    `migronaut.lock.acquire.duration` (histograms, in seconds, with boundaries from 10ms to an
-    hour), and the counters `migronaut.lock.refused` and `migronaut.lock.lost`.
-  - **Failures** set the span's status to `ERROR` with a redacted message, and `error.type` — on
+  - **Metrics**: `migronaut.run.duration`, `migronaut.migration.duration`,
+    `migronaut.lock.acquire.duration` and `migronaut.lock.wait.duration` (one point per wait for a
+    held lock, by `migronaut.lock.wait.outcome`: `acquired`, `timeout`, `aborted`) — histograms,
+    in seconds, with boundaries from 10ms to an hour — and the counters `migronaut.lock.refused`
+    and `migronaut.lock.lost`.
+  - **Dimensions**: every span and metric point carries `db.namespace` (the database name), plus
+    the caller's own static attributes from `telemetry.attributes` (at most 20 scalars).
+  - **Failures** set the span's status to `ERROR` with a redacted message (credentials and the
+    values a duplicate-key error quotes masked, at most 1 KB), and `error.type` — on
     the span and on the metric point — to the typed error code. No exception event is recorded: it
     would carry the unredacted message and stack.
   - **A run that never got the lock emits no span.** A caller polling for a busy lock retries the
@@ -150,8 +183,16 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
     field only first — the driver reads keys back as plain objects.
     Anything applied that still compares as changed is reported under `unstable` instead of being
     rebuilt on every run.
-  - **The CLI plans first** and asks before any drop or rebuild; `--json` refuses such a plan
-    without `--yes` (and applies a purely additive one). `--check` exits `28` on drift — a CI gate.
+  - **The CLI plans first** and asks before any drop or rebuild, and before changing the validator
+    of a collection that holds data; `--json` refuses such a plan without `--yes` (and applies a
+    purely additive one); a plan with a conflict is refused without asking. `--check` exits `28` on
+    drift — a CI gate; `--ordered` refuses while a migration is pending.
+  - **Results say what changed**: every row that changes, drops or keeps something carries
+    `from` and `to` — the live and the declared index or validator, as plain JSON.
+  - **At scale**: all declared collections are read with one `listCollections` and a bounded
+    fan-out of `listIndexes`; the new indexes of a collection are built by one `createIndexes`
+    (one pass over the data); a connection that fails mid-rebuild is reported, never "repaired"
+    by restoring the old index next to a build the server may still be running.
   - **`convergeAfterUp` config option** (`MIGRONAUT_CONVERGE_AFTER_UP`) — a bulk `up` (no file, no
     `to`; also `runMigrations`) ends by converging under the same lock, even when nothing was
     pending, so a failed converge is retried by the next deploy. `up(undefined, { converge })` and
@@ -198,13 +239,26 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
   share a single connection instead of each opening (and all but one leaking) a client. Matters
   for a long-lived kit serving several callers.
 - The lock-wait loop of `runMigrations` moved to `src/core/lock-wait.js`, shared with the queue
-  processor; `runMigrations` behaves exactly as before.
+  processor. Two changes to how it waits: **polls back off**, doubling from `lockPollIntervalMs`
+  up to 5 s (and at most a quarter of the budget), so a fleet waiting out a long deploy no longer
+  hammers the lock document; and **the default `lockWaitTimeoutMs` follows the holder's TTL** —
+  `max(90 s, 1.5 × lockTTLSeconds)` — so a holder with a long TTL, whose heartbeat moves the lock
+  only every TTL/2, is no longer mistaken for a stalled one. An explicit `lockWaitTimeoutMs` is
+  used as given (with a warning when it is shorter than the holder's heartbeat). `waitedMs` is
+  now measured by the clock from the first refusal, and a wait that times out rethrows the
+  refusal with `context.timedOut`, `attempts` and `waitedMs`.
+- **`runMigrations` validates `onLockHeld`** (`CONFIG_INVALID`): a value other than `'throw'` or
+  `'wait'` — `'Wait'`, say — used to behave as `'throw'` without a word. A poll interval above the
+  largest timer (2³¹−1 ms, which Node fires after 1 ms) is refused too.
 - **The lock document gained a `nonce` field**, minted by migronaut on every acquire and matched
   alongside `owner` when the lock is confirmed, renewed and released. The owner token is the run
   id, whose format `generateId` now decides; the nonce keeps mutual exclusion independent of it,
   so a generator that repeats an id can blur correlation but never let two runs hold the lock.
-  Older releases ignore the field and can share a database with this one. Like `owner`, it is
-  never exposed by `lock`, `lockInfo()` or error context.
+  Older releases ignore the field and can share a database with this one. The nonce is never
+  exposed; the owner — the holder's run id — now is, as `LockInfo.runId` (`lock`, `lockInfo()`,
+  `LockAlreadyHeldError` context), next to the holder's `ttlMs`, also written since this release:
+  "which run holds the lock?" is the first question about a stuck one, and the nonce, not the
+  owner, is what proves ownership.
 - **A `generateId` config key that is not a function is now rejected** (`CONFIG_INVALID`). The key
   was previously unknown and ignored, like any stray key.
 - **A `telemetry` config key that is not usable is now rejected** (`CONFIG_INVALID`): it must be an

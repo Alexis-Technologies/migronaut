@@ -59,7 +59,7 @@ describe('MigrationLock.acquire', () => {
     await assert.rejects(lock.acquire(), LockAlreadyHeldError);
   });
 
-  it('should not leak the owner token in the LockAlreadyHeldError context', async () => {
+  it('should report the holder by run id, never by nonce, in the LockAlreadyHeldError context', async () => {
     const { db, collection } = makeDb();
     // eslint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
     collection.updateOne.mock.mockImplementationOnce(() => Promise.reject({ code: 11000 }));
@@ -67,11 +67,13 @@ describe('MigrationLock.acquire', () => {
     collection.findOne.mock.mockImplementationOnce(() =>
       Promise.resolve({
         _id: LOCK_ID,
-        owner: 'secret-owner-token',
+        owner: 'run-7',
+        nonce: 'secret-nonce',
         lockedAt,
         pid: 999,
         host: 'ci-runner',
         executedBy: 'deploy',
+        ttlMs: 120_000,
       }),
     );
     const lock = new MigrationLock(db, '_migronaut_locks', 60);
@@ -81,21 +83,26 @@ describe('MigrationLock.acquire', () => {
         pid: 999,
         host: 'ci-runner',
         executedBy: 'deploy',
+        runId: 'run-7',
+        ttlMs: 120_000,
       });
-      assert.ok(!JSON.stringify(error.context).includes('secret-owner-token'));
+      // This process's own TTL, for a waiter whose holder predates ttlMs.
+      assert.strictEqual(error.context.ttlMs, 60_000);
+      assert.ok(!JSON.stringify(error.context).includes('secret-nonce'));
       return true;
     });
   });
 
-  it('should not leak the owner token when losing the stale-reclaim race', async () => {
+  it('should not leak the nonce when losing the stale-reclaim race', async () => {
     const { db, collection } = makeDb();
     collection.findOne.mock.mockImplementationOnce(() =>
-      Promise.resolve({ _id: LOCK_ID, owner: 'other-writer', pid: 7 }),
+      Promise.resolve({ _id: LOCK_ID, owner: 'other-writer', nonce: 'their-nonce', pid: 7 }),
     );
     const lock = new MigrationLock(db, '_migronaut_locks', 60);
     await assert.rejects(lock.acquire(), (error) => {
-      assert.ok(!JSON.stringify(error.context).includes('other-writer'));
+      assert.ok(!JSON.stringify(error.context).includes('their-nonce'));
       assert.strictEqual(error.context.holder.pid, 7);
+      assert.strictEqual(error.context.holder.runId, 'other-writer');
       return true;
     });
   });
@@ -178,19 +185,30 @@ describe('MigrationLock.acquire', () => {
 });
 
 describe('toLockInfo', () => {
-  it('should strip the owner token, the nonce and _id from a lock document', () => {
+  it('should strip the nonce and _id, and report the owner as the run id', () => {
     const lockedAt = new Date();
     assert.deepStrictEqual(
       toLockInfo({
         _id: LOCK_ID,
-        owner: 'secret-owner-token',
+        owner: 'run-42',
         nonce: 'secret-nonce',
         lockedAt,
         pid: 42,
         host: 'box',
         executedBy: 'alex',
+        ttlMs: 60_000,
       }),
-      { lockedAt, pid: 42, host: 'box', executedBy: 'alex' },
+      { lockedAt, pid: 42, host: 'box', executedBy: 'alex', runId: 'run-42', ttlMs: 60_000 },
+    );
+    // A hand-written or pre-2.1 document: only what it has.
+    assert.deepStrictEqual(
+      toLockInfo({ _id: LOCK_ID, lockedAt, pid: 1, host: 'h', executedBy: 'u' }),
+      {
+        lockedAt,
+        pid: 1,
+        host: 'h',
+        executedBy: 'u',
+      },
     );
   });
 

@@ -90,6 +90,23 @@ class Changelog {
     return names;
   }
 
+  /**
+   * Which of `names` carry a `'failed'` trace — what tells a migration that
+   * failed (the line is stopped) from one that simply has not run yet (it may
+   * be in flight elsewhere). Served by the `status_name` index.
+   */
+  async getFailedNames(db, names) {
+    if (names.length === 0) return [];
+    const docs = await this.#coll(db)
+      .find({ status: 'failed', name: { $in: names } })
+      .sort({ name: 1 })
+      .project({ name: 1, _id: 0 })
+      .toArray();
+    const failed = [];
+    for (const doc of docs) failed.push(doc.name);
+    return failed;
+  }
+
   /** Return a single record by migration name, or null */
   async getByName(db, name) {
     return this.#coll(db).findOne({ name });

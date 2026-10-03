@@ -1,4 +1,5 @@
 const { ConvergeFailedError, MigronautError } = require('../errors/index.js');
+const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { CHANGE_ACTIONS, planCollection, summarize } = require('./converge-plan.js');
 
@@ -29,6 +30,9 @@ const READ_OPTIONS = Object.freeze({
   bsonRegExp: false,
 });
 
+/** listIndexes calls in flight while reading many collections — a pace, not a pool */
+const READ_CONCURRENCY = 8;
+
 const NAMESPACE_NOT_FOUND = 26;
 const INDEX_NOT_FOUND = 27;
 const NAMESPACE_EXISTS = 48;
@@ -54,12 +58,31 @@ const LABELS = {
 };
 
 /**
+ * Every named collection's live state, in order: one `listCollections` for
+ * all of them, then their `listIndexes` a few at a time — not two sequential
+ * round trips per collection, which for a few hundred declared collections
+ * is the better part of a minute before the first decision.
+ */
+async function readLiveStates(db, names) {
+  const infos = await db
+    .listCollections({ name: { $in: names } }, { nameOnly: false, ...READ_OPTIONS })
+    .toArray();
+  const byName = new Map();
+  for (const info of infos) byName.set(info.name, info);
+  return mapLimit(names, READ_CONCURRENCY, (name) => liveStateOf(db, name, byName.get(name)));
+}
+
+/**
  * One collection's live state: `{ exists, type?, options?, indexes }`. A view
  * or a time-series collection is reported by type (the planner refuses it)
  * without listing indexes.
  */
 async function readLiveState(db, name) {
-  const [info] = await db.listCollections({ name }, { nameOnly: false, ...READ_OPTIONS }).toArray();
+  const [state] = await readLiveStates(db, [name]);
+  return state;
+}
+
+async function liveStateOf(db, name, info) {
   if (!info) return { exists: false, indexes: [] };
   const options = info.options ?? {};
   if (info.type !== undefined && info.type !== 'collection') {
@@ -88,22 +111,54 @@ function describe(action) {
   return action.target === 'validator' ? 'the validator' : 'the collection';
 }
 
+/** What a failed step was doing — one row, or the indexes one command built together */
+function describeAll(actions) {
+  if (actions.length === 1) return describe(actions[0]);
+  return `indexes ${actions.map((action) => `"${action.name}"`).join(', ')}`;
+}
+
+/**
+ * Errors that leave it unknown what the server did: the connection broke, or
+ * a client-side deadline ran out, while the server may well still be building.
+ * After one of these, nothing is "put back" — a restore would race a build the
+ * server is still running; the next converge reads what actually happened.
+ */
+const CONNECTION_ERROR_NAMES = new Set([
+  'MongoNetworkError',
+  'MongoNetworkTimeoutError',
+  'MongoServerSelectionError',
+  'MongoOperationTimeoutError',
+  'MongoTopologyClosedError',
+]);
+const CONNECTION_ERROR_CODES = new Set([50, 89, 91, 189, 10107, 11600, 11602, 13435]);
+
+function isConnectionTrouble(error) {
+  return CONNECTION_ERROR_NAMES.has(error?.name) || CONNECTION_ERROR_CODES.has(error?.code);
+}
+
 /** What a failed rebuild left behind, when it could not put the dropped index back */
 function lostIndexes(extra) {
   if (extra.restored !== false) return '';
+  if (extra.uncertain) {
+    return (
+      ` — the connection failed mid-build, so ${extra.dropped.map((name) => `"${name}"`).join(', ')} ` +
+      'was not put back: the server may still be building; converge --dry-run shows what it finished'
+    );
+  }
   return (
     ` — the dropped index(es) ${extra.dropped.map((name) => `"${name}"`).join(', ')} could ` +
     `not be put back (${extra.restoreError}); the collection is without them until fixed`
   );
 }
 
-function wrapFailure(error, collection, action, result, extra = {}) {
+function wrapFailure(error, collection, actions, result, extra = {}) {
+  const action = actions[0];
   if (error instanceof MigronautError) return attachConverge(error, result);
   const mongoCode = typeof error?.code === 'number' ? error.code : undefined;
   const hint = mongoCode !== undefined ? HINTS[mongoCode] : undefined;
   const cause = errorText(error);
   return new ConvergeFailedError(
-    `Could not ${VERBS[action.action] ?? action.action} ${describe(action)} on ${collection}: ` +
+    `Could not ${VERBS[action.action] ?? action.action} ${describeAll(actions)} on ${collection}: ` +
       `${cause}${hint ? ` — ${hint}` : ''}${lostIndexes(extra)}`,
     {
       phase: 'apply',
@@ -152,6 +207,14 @@ async function runRebuild(db, collection, step, settle) {
     try {
       await db.collection(collection).createIndexes([spec]);
     } catch (error) {
+      const droppedNames = dropped.map((drop) => drop.name);
+      if (isConnectionTrouble(error)) {
+        return {
+          error,
+          actions: [action],
+          extra: { restored: false, uncertain: true, dropped: droppedNames },
+        };
+      }
       const restoreErrors = [];
       for (const drop of dropped) {
         if (created.has(drop.name)) continue;
@@ -163,10 +226,10 @@ async function runRebuild(db, collection, step, settle) {
       }
       return {
         error,
-        action,
+        actions: [action],
         extra: {
           restored: restoreErrors.length === 0,
-          dropped: dropped.map((drop) => drop.name),
+          dropped: droppedNames,
           ...(restoreErrors.length > 0 ? { restoreError: restoreErrors.join('; ') } : {}),
         },
       };
@@ -177,7 +240,7 @@ async function runRebuild(db, collection, step, settle) {
   return undefined;
 }
 
-/** Carry out one planned step; returns a failure descriptor (see runRebuild) or undefined */
+/** Carry out one planned step; returns `{ error, actions, extra }` on failure, else undefined */
 async function runStep(db, collection, step, settle) {
   try {
     if (step.op === 'rebuild') return await runRebuild(db, collection, step, settle);
@@ -192,8 +255,10 @@ async function runStep(db, collection, step, settle) {
       }
     } else if (step.op === 'collMod') {
       await db.command({ collMod: collection, ...step.command });
-    } else if (step.op === 'createIndex') {
-      await db.collection(collection).createIndexes([step.spec]);
+    } else if (step.op === 'createIndexes') {
+      // One command, one pass over the collection for all of them — and all
+      // or nothing: a build that fails leaves none of the batch behind.
+      await db.collection(collection).createIndexes(step.specs);
     } else {
       await dropIndex(db, collection, step.name);
     }
@@ -201,7 +266,11 @@ async function runStep(db, collection, step, settle) {
     for (const action of step.actions) settle(action, durationMs);
     return undefined;
   } catch (error) {
-    return { error, action: step.actions[0], extra: {} };
+    return {
+      error,
+      actions: step.op === 'createIndexes' ? step.actions : [step.actions[0]],
+      extra: {},
+    };
   }
 }
 
@@ -242,7 +311,7 @@ function touched(result) {
 }
 
 /** Steps that build an index — the ones that can take minutes or hours */
-const BUILD_STEPS = new Set(['createIndex', 'rebuild']);
+const BUILD_STEPS = new Set(['createIndexes', 'rebuild']);
 const STARTING = {
   create: 'Creating',
   modify: 'Modifying',
@@ -311,11 +380,24 @@ async function runConverge(deps, options, signal) {
     rebuildUnique: options.rebuildUnique === true,
   });
 
-  const plans = [];
-  for (const definition of definitions) {
-    plans.push(
-      planCollection(definition, await readLiveState(db, definition.name), planOptions(definition)),
-    );
+  const live = await readLiveStates(
+    db,
+    definitions.map((definition) => definition.name),
+  );
+  const plans = definitions.map((definition, position) =>
+    planCollection(definition, live[position], planOptions(definition)),
+  );
+  // `indexes: []` with prune reads as "no indexes here" — every one but _id
+  // goes. Legitimate, and easy to write by accident: say it out loud.
+  for (const [position, definition] of definitions.entries()) {
+    const drops = plans[position].actions.filter((action) => action.action === 'drop');
+    if (definition.indexes?.length === 0 && pruneFor(definition) && drops.length > 0) {
+      logger.warn(
+        `⚠ ${definition.name}: indexes: [] with prune drops every index but _id ` +
+          `(${drops.map((action) => action.name).join(', ')})`,
+        deps.fields({ collection: definition.name, drops: drops.length }),
+      );
+    }
   }
   const result = {
     dryRun,
@@ -417,18 +499,20 @@ async function runConverge(deps, options, signal) {
         announce(deps, plan.name, step);
         const failure = await runStep(db, plan.name, step, settle);
         if (failure) {
-          const { error, action, extra } = failure;
-          action.status = 'failed';
-          deps.emit('converge:action', {
-            collection: plan.name,
-            target: action.target,
-            name: action.name,
-            action: action.action,
-            status: 'failed',
-            error: errorText(error),
-          });
+          const { error, actions, extra } = failure;
+          for (const action of actions) {
+            action.status = 'failed';
+            deps.emit('converge:action', {
+              collection: plan.name,
+              target: action.target,
+              name: action.name,
+              action: action.action,
+              status: 'failed',
+              error: errorText(error),
+            });
+          }
           settleRest(result);
-          throw wrapFailure(error, plan.name, action, result, extra);
+          throw wrapFailure(error, plan.name, actions, result, extra);
         }
       }
 
@@ -507,4 +591,4 @@ async function runConverge(deps, options, signal) {
   }
 }
 
-module.exports = { READ_OPTIONS, readLiveState, runConverge };
+module.exports = { READ_OPTIONS, readLiveState, readLiveStates, runConverge };

@@ -95,6 +95,34 @@ describe('planUpJobs', () => {
     });
   });
 
+  it("should carry each file's plan-time checksum, so a worker runs only that version", async () => {
+    const digest = 'a'.repeat(64);
+    const kit = stubKit({
+      dryRun: mock.fn(async () => [
+        { ...pendingRow('0001-a.js'), checksum: digest },
+        pendingRow('0002-b.js'),
+      ]),
+    });
+    const plan = await planUpJobs(kit);
+    assert.strictEqual(plan.jobs[0].data.checksum, digest);
+    assert.ok(!('checksum' in plan.jobs[1].data), 'none known, none claimed');
+  });
+
+  it('should let an empty group be waited for without QueueEvents', async () => {
+    const kit = stubKit({ dryRun: mock.fn(async () => []) });
+    const queue = { addBulk: mock.fn(async () => []), getJob: async () => undefined };
+    let built = 0;
+    const group = await enqueueUp(
+      queue,
+      kit,
+      {},
+      { getQueueEvents: () => (built += 1) && undefined },
+    );
+    assert.strictEqual(group.upToDate, true);
+    assert.deepStrictEqual((await group.wait()).results, []);
+    assert.strictEqual(built, 0, 'no QueueEvents connection for nothing to wait on');
+  });
+
   it('should mint a new group id for every plan, through the kit', async () => {
     const kit = stubKit({ dryRun: mock.fn(async () => [pendingRow('0001-a.js')]) });
     const first = await planUpJobs(kit);
@@ -222,7 +250,7 @@ describe('planDownJobs', () => {
     assert.strictEqual(plan.batch, null);
     assert.strictEqual(plan.jobs[0].data.batch, 2, 'the record batch rides along for information');
     assert.deepStrictEqual(plan.jobs[0].opts.deduplication, { id: 'down-0001-a.js' });
-    assert.deepStrictEqual(kit.list.mock.calls[0].arguments, ['applied']);
+    assert.deepStrictEqual(kit.list.mock.calls[0].arguments, ['applied', { checksums: false }]);
   });
 
   it('should break appliedAt ties by name, descending', async () => {
@@ -596,6 +624,50 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
       for (const timeoutMs of [0, -5, Number.NaN, Number.POSITIVE_INFINITY, '50']) {
         await assert.rejects(group.wait({ timeoutMs }), ConfigInvalidError);
       }
+    });
+
+    it('should hold every await to the one budget — a QueueEvents that never connects too', async () => {
+      const queue = { getJob: async () => ({ waitUntilFinished: async () => 'never reached' }) };
+      const started = Date.now();
+      await assert.rejects(
+        waitForGroup({
+          queue,
+          queueEvents: { waitUntilReady: () => new Promise(() => {}) },
+          groupId: 'g',
+          direction: 'up',
+          batch: 1,
+          jobs: [{ id: '1', migration: 'a.js' }],
+          timeoutMs: 30,
+        }),
+        (error) => {
+          assert.strictEqual(error.context.timedOut, true);
+          assert.match(error.context.failedReason, /timed out after 30ms/);
+          return true;
+        },
+      );
+      assert.ok(Date.now() - started < 1000);
+    });
+
+    it("should carry a failed job's typed code, so callers need not parse the reason", async () => {
+      const queue = {
+        getJob: async () => ({
+          progress: { phase: 'failed', code: 'MIGRATION_BLOCKED' },
+          waitUntilFinished: async () => {
+            throw new Error('0002-b.js is blocked');
+          },
+        }),
+      };
+      await assert.rejects(
+        waitForGroup({
+          queue,
+          queueEvents: {},
+          groupId: 'g',
+          direction: 'up',
+          batch: 1,
+          jobs: [{ id: '2', migration: '0002-b.js' }],
+        }),
+        (error) => error.context.code === 'MIGRATION_BLOCKED' && error.context.timedOut === false,
+      );
     });
 
     it('should describe a rejection that is not an Error', async () => {

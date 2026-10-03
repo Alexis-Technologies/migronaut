@@ -1,11 +1,7 @@
-const { ConfigInvalidError } = require('../errors/index.js');
-const {
-  DEFAULT_LOCK_POLL_INTERVAL_MS,
-  DEFAULT_LOCK_WAIT_TIMEOUT_MS,
-  assertLockWaitOptions,
-  withLockWait,
-} = require('./lock-wait.js');
-const { MigratorKit } = require('./migrator.js');
+const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
+const { errorText } = require('../utils/error.js');
+const { assertLockWaitOptions, withLockWait } = require('./lock-wait.js');
+const { MigratorKit, RECORD_LOCK_WAIT } = require('./migrator.js');
 
 /**
  * Run all pending migrations and return a summary — the blessed one-call entry
@@ -21,7 +17,9 @@ const { MigratorKit } = require('./migrator.js');
  *
  * For multi-instance deploys, set `onLockHeld: 'wait'` so instances that lose
  * the race to acquire the lock block until the migrating peer finishes, then
- * confirm there is nothing left to apply.
+ * confirm there is nothing left to apply. Pass a `signal` (wired to SIGTERM)
+ * so a pod being shut down stops waiting — and stops between migrations if it
+ * already holds the lock — instead of taking the lock just before SIGKILL.
  *
  * Running several kits against several databases in ONE process: pass
  * `envFile: false` and supply `uri`/`dbName` directly. `.env` loading mutates
@@ -44,18 +42,23 @@ async function runMigrations(config = {}, options = {}) {
   const {
     noLock,
     onLockHeld = 'throw',
-    lockWaitTimeoutMs = DEFAULT_LOCK_WAIT_TIMEOUT_MS,
-    lockPollIntervalMs = DEFAULT_LOCK_POLL_INTERVAL_MS,
+    // Left undefined unless given: the default then follows the holder's TTL.
+    lockWaitTimeoutMs,
+    lockPollIntervalMs,
     onKit,
+    signal,
     ...kitOptions
   } = options;
 
   if (onKit !== undefined && typeof onKit !== 'function') {
     throw new ConfigInvalidError('onKit must be a function', { onKit: typeof onKit });
   }
+  if (signal !== undefined && !(signal instanceof AbortSignal)) {
+    throw new ConfigInvalidError('signal must be an AbortSignal', { signal: typeof signal });
+  }
 
   // Validated before anything connects — see assertLockWaitOptions.
-  assertLockWaitOptions({ lockWaitTimeoutMs, lockPollIntervalMs });
+  assertLockWaitOptions({ onLockHeld, lockWaitTimeoutMs, lockPollIntervalMs });
 
   const kit = new MigratorKit(config, kitOptions);
   // Handed out before connect so listeners catch every lifecycle event —
@@ -69,7 +72,18 @@ async function runMigrations(config = {}, options = {}) {
     if (event.trigger === 'up' && event.success) converge = event.result;
   });
 
+  // An abort reaches the run wherever it is: the wait loop sees the signal
+  // between polls, and kit.stop() stops a run that is setting up or between
+  // migrations (one already executing finishes — as stop() always has).
+  const onAbort = () => kit.stop(errorText(signal.reason ?? 'Aborted'));
+  signal?.addEventListener('abort', onAbort, { once: true });
   try {
+    if (signal?.aborted) {
+      throw new RunAbortedError('Aborted before the run started', {
+        reason: errorText(signal.reason ?? 'aborted'),
+        results: [],
+      });
+    }
     await kit.connect();
     const {
       result: applied,
@@ -78,12 +92,14 @@ async function runMigrations(config = {}, options = {}) {
       attempts,
     } = await withLockWait(() => kit.up(undefined, noLock ? { noLock: true } : {}), {
       onLockHeld,
-      lockWaitTimeoutMs,
-      lockPollIntervalMs,
+      ...(lockWaitTimeoutMs !== undefined ? { lockWaitTimeoutMs } : {}),
+      ...(lockPollIntervalMs !== undefined ? { lockPollIntervalMs } : {}),
       // Resolved AFTER connect, from the kit's own merged config: a `logger:
       // null` in the config file must silence the wait lines too, not only
       // the kit's own.
       logger: kit.logger,
+      ...(signal ? { signal } : {}),
+      onSettle: (wait) => kit[RECORD_LOCK_WAIT](wait),
     });
     return {
       applied,
@@ -94,6 +110,7 @@ async function runMigrations(config = {}, options = {}) {
       ...(converge ? { converge } : {}),
     };
   } finally {
+    signal?.removeEventListener('abort', onAbort);
     await kit.disconnect().catch(() => undefined);
   }
 }

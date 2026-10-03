@@ -11,6 +11,7 @@ const {
   restoreSpec,
   sameDeclaredSignature,
   sameSignature,
+  SEMANTIC_OPTIONS,
 } = require('../../src/core/index-spec.js');
 
 // What MongoDB 7.0 returns from listIndexes for these declarations — taken
@@ -525,4 +526,43 @@ describe('normalizeLiveIndex / restoreSpec', () => {
       { key: { a: 1 }, name: 'a_1', unique: true },
     );
   });
+});
+
+describe('compareIndex — every semantic option is compared', () => {
+  // An option added to SEMANTIC_OPTIONS is validated and sent; this pins that
+  // it is compared too — otherwise a change to it would read as in sync forever.
+  const samples = {
+    unique: [{ key: { a: 1 } }, { unique: true }],
+    sparse: [{ key: { a: 1 } }, { sparse: true }],
+    hidden: [{ key: { a: 1 } }, { hidden: true }],
+    expireAfterSeconds: [{ key: { a: 1 } }, { expireAfterSeconds: 60 }],
+    partialFilterExpression: [{ key: { a: 1 } }, { partialFilterExpression: { a: { $gt: 1 } } }],
+    collation: [{ key: { a: 1 } }, { collation: { locale: 'fr' } }],
+    wildcardProjection: [{ key: { '$**': 1 } }, { wildcardProjection: { secret: 0 } }],
+    weights: [{ key: { t: 'text' } }, { weights: { t: 5 } }],
+    default_language: [{ key: { t: 'text' } }, { default_language: 'french' }],
+    language_override: [{ key: { t: 'text' } }, { language_override: 'lang' }],
+  };
+
+  it('should have a sample for every option', () => {
+    assert.deepStrictEqual(Object.keys(samples).sort(), [...SEMANTIC_OPTIONS].sort());
+  });
+
+  for (const option of SEMANTIC_OPTIONS) {
+    it(`should see a change to ${option}`, () => {
+      const [base, change] = samples[option];
+      const before = declared(base);
+      // What the server reports for the declaration without the option.
+      const raw = { key: Object.fromEntries(before.serverKey), name: before.name };
+      if (before.isText) {
+        Object.assign(raw, {
+          weights: { t: 1 },
+          default_language: 'english',
+          language_override: 'language',
+        });
+      }
+      const { diffs } = compareIndex(declared({ ...base, ...change }), live(raw));
+      assert.ok(diffs.includes(option), `${option}: ${JSON.stringify(diffs)}`);
+    });
+  }
 });
