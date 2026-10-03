@@ -440,7 +440,8 @@ describe('runWithLock', () => {
     const lock = new MigrationLock(db, '_migronaut_locks', 0.2);
     let held;
     let renewCalls = 0;
-    let releaseRenewal;
+    let stuck = true;
+    const pending = [];
     collection.updateOne.mock.mockImplementation((_filter, update) => {
       const taken = heldFromUpdate(update);
       if (taken) {
@@ -448,27 +449,30 @@ describe('runWithLock', () => {
         return Promise.resolve({ matchedCount: 1 });
       }
       renewCalls += 1;
+      if (!stuck) return Promise.resolve({ matchedCount: 1 });
       // A renewal slower than the whole interval — the exact condition the
       // heartbeat exists to survive.
-      return new Promise((resolve) => {
-        releaseRenewal = () => resolve({ matchedCount: 1 });
-      });
+      return new Promise((resolve) => pending.push(() => resolve({ matchedCount: 1 })));
     });
     collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, ...held }));
+    let callsWhileStuck;
     await runWithLock(
       lock,
       { logger: silentLogger },
       () =>
         new Promise((resolve) => {
-          // Ticks land at ~100/200/300ms; the renewal started at ~100ms stays
-          // stuck through the 200/300 ticks, then the run ends at ~325ms —
-          // comfortably before the 400ms tick could start a second renewal.
+          // Long enough for at least three ticks (~100/200/300ms, later on a
+          // coarse timer like Windows') while the first renewal stays stuck.
+          // Then every renewal is let go — one started by a late tick too, or
+          // the release would wait on it forever.
           setTimeout(() => {
-            releaseRenewal?.();
+            callsWhileStuck = renewCalls;
+            stuck = false;
+            for (const release of pending.splice(0)) release();
             setTimeout(resolve, 5);
-          }, 320);
+          }, 350);
         }),
     );
-    assert.strictEqual(renewCalls, 1);
+    assert.strictEqual(callsWhileStuck, 1);
   });
 });
