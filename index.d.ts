@@ -144,6 +144,16 @@ export interface MigrationHooks {
 export type MigrationExtension = 'ts' | 'js';
 
 /**
+ * Mints one identifier. Called with **no arguments** and no `this`, so a
+ * third-party generator passes straight through (`generateId: ulid`,
+ * `generateId: createId`, `generateId: nanoid`). It must be **synchronous** and
+ * return a non-empty string of at most 128 characters, different on every
+ * call; anything else — a throw and a returned promise included — fails the
+ * run with a {@link ConfigInvalidError}.
+ */
+export type IdGenerator = () => string;
+
+/**
  * Every **scalar** option below is also settable from the environment as
  * `MIGRONAUT_<SCREAMING_SNAKE>` (`migrationsDir` → `MIGRONAUT_MIGRATIONS_DIR`,
  * with `dbName` → `MIGRONAUT_DB`, `migrationsCollection` → `MIGRONAUT_COLLECTION`
@@ -152,9 +162,9 @@ export type MigrationExtension = 'ts' | 'js';
  * file and are outranked by CLI flags. A value that does not parse is rejected
  * with a {@link ConfigInvalidError} naming the variable — never coerced.
  *
- * `fileExtensions`, `clientOptions` and the live handles (`client`, `mongoose`,
- * `hooks`, `logger`) are config-file/API only: a single environment string
- * cannot express them.
+ * `fileExtensions`, `clientOptions`, `collections`, `generateId` and the live
+ * handles (`client`, `mongoose`, `hooks`, `logger`, `telemetry`) are
+ * config-file/API only: a single environment string cannot express them.
  */
 export interface MigronautConfig {
   /** MongoDB connection URI. Not required when `client` is supplied */
@@ -179,6 +189,12 @@ export interface MigronautConfig {
   migrationsCollection: string;
   /** Collection name for distributed lock. Default: '_migronaut_locks' */
   lockCollection: string;
+  /**
+   * Collection holding the converge history — one entry per converge that
+   * changed something or failed. Created by the first such converge, never
+   * before. Default: '_migronaut_converge'
+   */
+  convergeLogCollection: string;
   /** How long (seconds) a lock is considered stale. Default: 60 */
   lockTTLSeconds: number;
   /**
@@ -255,11 +271,52 @@ export interface MigronautConfig {
    * A single-file `up` (an explicit, deliberate target) is never checked.
    */
   onOutOfOrder?: 'warn' | 'error' | 'allow';
+  /**
+   * Declared collections: their indexes and validator, as the end state you
+   * want. `converge()` (`migronaut converge`) compares them with the live
+   * database and makes the difference — no migration file per change, and
+   * nothing recorded. Combined with the files in `collectionsDir`; a
+   * collection declared twice is a {@link ConfigInvalidError}. Experimental.
+   */
+  collections?: CollectionDefinition[];
+  /**
+   * Directory of collection definition files, one collection per file (a
+   * `.ts`/`.js` default export or a `.json` document; the collection name
+   * defaults to the file name). Opt-in — nothing is read unless this is set.
+   * Files are loaded when a converge runs, not at config resolution.
+   */
+  collectionsDir?: string;
+  /**
+   * End every bulk `up` — no file, no `to` — by converging the declared
+   * collections, under the same lock and even when no migration was pending.
+   * Default: false
+   */
+  convergeAfterUp?: boolean;
   /** Mongoose instance — required only if your migrations use Mongoose models */
   mongoose?: MongooseLike;
   hooks?: MigrationHooks;
   /** Custom logger — set to null to silence all output (useful in tests) */
   logger?: MigronautLogger | null;
+  /**
+   * Your own identifier format (ULID, CUID, UUIDv7, …) for every id migronaut
+   * mints: the run id — stamped on changelog records, events and log lines,
+   * and stored as the lock's owner token — and, through
+   * `@alexify/migronaut/bullmq`, the group id of an enqueue call.
+   * Default: `crypto.randomUUID()`.
+   *
+   * Ids are for correlation. The lock adds a token of its own, so a generator
+   * that repeats a value blurs which run wrote what but never lets two runs
+   * hold the lock at once.
+   */
+  generateId?: IdGenerator;
+  /**
+   * OpenTelemetry, from your own `@opentelemetry/api`: a tracer, a meter, or
+   * both. Every run and every migration becomes a span — the migration's span
+   * is the active one while its `up`/`down` runs, so an instrumented MongoDB
+   * driver nests its command spans under it — and their durations are
+   * recorded as histograms. Absent, `null` or empty turns it off.
+   */
+  telemetry?: MigronautTelemetry | null;
 }
 
 /**
@@ -274,6 +331,237 @@ export interface MigronautConfig {
 export type MigronautConfigInput =
   | Partial<MigronautConfig>
   | (() => Partial<MigronautConfig> | Promise<Partial<MigronautConfig>>);
+
+// ─── Collections (converge) ───────────────────────────────────────────────────
+
+/** An index key direction: ascending, descending, or a special index type */
+export type IndexKeyDirection = 1 | -1 | 'text' | 'hashed' | '2d' | '2dsphere';
+
+/** Collation of an index — `locale` required, the rest as MongoDB defines them */
+export interface IndexCollation {
+  locale: string;
+  caseLevel?: boolean;
+  caseFirst?: 'upper' | 'lower' | 'off';
+  strength?: 1 | 2 | 3 | 4 | 5;
+  numericOrdering?: boolean;
+  alternate?: 'non-ignorable' | 'shifted';
+  maxVariable?: 'punct' | 'space';
+  backwards?: boolean;
+  normalization?: boolean;
+}
+
+/**
+ * One declared index, in the driver's own flat `createIndexes` shape. Every
+ * option is checked: an unknown one is a {@link ConfigInvalidError} rather
+ * than dropped, because the driver drops it silently and the index would be
+ * built without it.
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface IndexDefinition {
+  /**
+   * Field → direction, in index order. A compound key with an integer-like
+   * field name must be a `Map` (a plain object reorders such names), with that
+   * field first — the live key is read back as a plain object.
+   */
+  key: Record<string, IndexKeyDirection> | Map<string, IndexKeyDirection>;
+  /** Defaults to the name MongoDB generates: `email_1`, `a_1_b_-1` */
+  name?: string;
+  unique?: boolean;
+  sparse?: boolean;
+  /** Changed in place (`collMod`) — no rebuild */
+  hidden?: boolean;
+  /** TTL in seconds. Changed in place when the live index already has one */
+  expireAfterSeconds?: number;
+  partialFilterExpression?: Record<string, unknown>;
+  collation?: IndexCollation;
+  /** For a wildcard (`$**`) index */
+  wildcardProjection?: Record<string, 0 | 1 | boolean>;
+  /** Text index field weights (default 1) */
+  weights?: Record<string, number>;
+  default_language?: string;
+  language_override?: string;
+  textIndexVersion?: number;
+  '2dsphereIndexVersion'?: number;
+  bits?: number;
+  min?: number;
+  max?: number;
+  storageEngine?: Record<string, unknown>;
+  /** Accepted and ignored — a no-op since MongoDB 4.2 */
+  background?: boolean;
+}
+
+export type ValidationLevel = 'off' | 'strict' | 'moderate';
+export type ValidationAction = 'error' | 'warn' | 'errorAndLog';
+
+/**
+ * A declared collection: the end state `converge()` keeps it in. Leave
+ * `indexes` or `validator` out to leave that part unmanaged.
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface CollectionDefinition {
+  name: string;
+  /**
+   * Every index besides `_id`. Undeclared live indexes are kept (and reported)
+   * unless `prune` is on.
+   */
+  indexes?: IndexDefinition[];
+  /** A query or `{ $jsonSchema }` document; `null` (or `{}`) for no validator */
+  validator?: Record<string, unknown> | null;
+  /** Default: 'strict'. Only with a validator */
+  validationLevel?: ValidationLevel;
+  /** Default: 'error'. Only with a validator */
+  validationAction?: ValidationAction;
+  /** Drop live indexes this definition does not declare. Default: the call's `prune`, else false */
+  prune?: boolean;
+}
+
+/** What a `collectionsDir` file exports: a definition whose name defaults to the file name */
+export type CollectionDefinitionFile = Omit<CollectionDefinition, 'name'> & { name?: string };
+
+/**
+ * Options for {@link MigratorKit.converge}
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface ConvergeOptions {
+  /** Plan without writing: no lock, no events. The result's rows are `'planned'` */
+  dryRun?: boolean;
+  /** Drop undeclared indexes in collections whose definition does not set `prune` */
+  prune?: boolean;
+  /** Skip lock acquisition (dev only) */
+  noLock?: boolean;
+  /**
+   * Refuse ({@link MigrationBlockedError}) while any migration is still
+   * pending — checked under the lock. How the queue adapter runs a converge
+   * as the tail of a deploy.
+   */
+  ordered?: boolean;
+  /**
+   * Allow a rebuild that drops a unique index and builds a unique one back.
+   * Without it such a rebuild plans as a `conflict`: the constraint is gone
+   * until the new index is built, and a duplicate written in between leaves
+   * neither index buildable. The after-up hook and queue jobs never set it.
+   * CLI: `--rebuild-unique`.
+   */
+  rebuildUnique?: boolean;
+  /** Who asked for this converge — recorded in the converge history */
+  requestedBy?: string;
+  /** Why — recorded in the converge history */
+  reason?: string;
+}
+
+export type ConvergeTarget = 'collection' | 'validator' | 'index';
+
+/**
+ * What converge does to one target. `keep` is an undeclared index left alone
+ * (prune off); `conflict` refuses the run — an undeclared index covers the
+ * declared one's key under another name, a unique index would be rebuilt
+ * without {@link ConvergeOptions.rebuildUnique}, or the collection is a view
+ * or a time-series collection.
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export type ConvergeActionKind =
+  | 'create'
+  | 'modify'
+  | 'recreate'
+  | 'drop'
+  | 'keep'
+  | 'unchanged'
+  | 'conflict';
+
+/**
+ * `planned` in a dry run; otherwise `applied`, `failed`, or `skipped` — no
+ * change was needed, or the run stopped before reaching it.
+ */
+export type ConvergeActionStatus = 'planned' | 'applied' | 'failed' | 'skipped';
+
+/**
+ * One row of a converge result
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface ConvergeAction {
+  target: ConvergeTarget;
+  /** The index name; the collection name for a `collection` or `validator` row */
+  name: string;
+  action: ConvergeActionKind;
+  status: ConvergeActionStatus;
+  /** What differs (`'unique, expireAfterSeconds'`), or why a row is what it is */
+  reason?: string;
+  /** The live index the row refers to when its name differs from the declared one */
+  liveName?: string;
+  durationMs?: number;
+  /**
+   * What is there now — the live index (`{ key, name, ...options }`) or
+   * validator (`{ validator, validationLevel, validationAction }`) — on rows
+   * that change or drop it, and on `keep` rows. Plain JSON.
+   */
+  from?: Record<string, unknown>;
+  /** What the row puts there — the declared index or validator — on rows that create or change it */
+  to?: Record<string, unknown>;
+}
+
+/**
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface CollectionConvergeResult {
+  name: string;
+  actions: ConvergeAction[];
+}
+
+/**
+ * One entry of the converge history (`convergeLogCollection`): a converge that
+ * changed something or failed.
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface ConvergeHistoryEntry {
+  runId?: string;
+  /** `'converge'`, or `'up'` for the converge that ended a bulk `up` */
+  trigger: ConvergeTrigger;
+  startedAt: Date;
+  finishedAt: Date;
+  durationMs: number;
+  success: boolean;
+  /** Redacted failure message (`success: false` only) */
+  error?: string;
+  executedBy: string;
+  host: string;
+  environment: string;
+  requestedBy?: string;
+  reason?: string;
+  /** Changes applied */
+  changed: number;
+  /** The rows that changed, failed or refused the run — each with its collection and `from` / `to` */
+  actions: Array<ConvergeAction & { collection: string }>;
+  unstable?: ConvergeUnstable[];
+}
+
+/**
+ * Something applied that still compares as changed — reported, never rebuilt in a loop
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface ConvergeUnstable {
+  collection: string;
+  target: ConvergeTarget;
+  name: string;
+  action: ConvergeActionKind;
+  reason?: string;
+}
+
+/**
+ * Outcome of {@link MigratorKit.converge}
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface ConvergeResult {
+  dryRun: boolean;
+  /** Changes applied — or, in a dry run, changes the run would make */
+  changed: number;
+  /**
+   * True when the database matches the declarations: nothing left to do and
+   * no conflict. Undeclared indexes kept with prune off do not count against it.
+   */
+  inSync: boolean;
+  collections: CollectionConvergeResult[];
+  unstable?: ConvergeUnstable[];
+}
 
 // ─── Logger ───────────────────────────────────────────────────────────────────
 
@@ -302,6 +590,92 @@ export interface MigronautLogger {
  * remains valid: the extra argument is simply ignored.
  */
 export type LogMethod = (msg: string, fields?: Record<string, unknown>) => void;
+
+// ─── Telemetry ────────────────────────────────────────────────────────────────
+
+/** A span or metric attribute value — the scalar subset migronaut sets */
+export type MigronautAttributes = Record<string, string | number | boolean>;
+
+/**
+ * The slice of an OpenTelemetry `Span` migronaut calls. Declared structurally —
+ * `@opentelemetry/api` is deliberately not imported, so the package's types
+ * resolve for users who never installed it. A real `Span` satisfies it.
+ */
+export interface MigronautSpan {
+  setAttribute(key: string, value: string | number | boolean): unknown;
+  /** `code` is OpenTelemetry's `SpanStatusCode` — migronaut only ever sets ERROR (2) */
+  setStatus(status: { code: number; message?: string }): unknown;
+  end(): void;
+}
+
+/**
+ * The slice of an OpenTelemetry `Tracer` migronaut calls — what
+ * `trace.getTracer('@alexify/migronaut')` returns. Only `startActiveSpan` is
+ * used: it is what makes a span the active context for the migration's own
+ * code, and so for any instrumentation running underneath it.
+ */
+export interface MigronautTracer {
+  startActiveSpan<T>(
+    name: string,
+    options: { attributes?: MigronautAttributes },
+    fn: (span: MigronautSpan) => T,
+  ): T;
+}
+
+/** An OpenTelemetry `Histogram`, as far as migronaut uses one */
+export interface MigronautHistogram {
+  record(value: number, attributes?: MigronautAttributes): void;
+}
+
+/** An OpenTelemetry `Counter`, as far as migronaut uses one */
+export interface MigronautCounter {
+  add(value: number, attributes?: MigronautAttributes): void;
+}
+
+/** Options migronaut passes when it creates an instrument */
+export interface MigronautMetricOptions {
+  description?: string;
+  unit?: string;
+  /** Histogram bucket boundaries, in the instrument's unit (seconds) */
+  advice?: { explicitBucketBoundaries?: number[] };
+}
+
+/**
+ * The slice of an OpenTelemetry `Meter` migronaut calls — what
+ * `metrics.getMeter('@alexify/migronaut')` returns.
+ */
+export interface MigronautMeter {
+  createHistogram(name: string, options?: MigronautMetricOptions): MigronautHistogram;
+  createCounter(name: string, options?: MigronautMetricOptions): MigronautCounter;
+}
+
+/**
+ * The `telemetry` config option. Both parts are optional and independent:
+ * a tracer alone gives spans, a meter alone gives metrics.
+ *
+ * Spans: `migronaut.run` (one per run that held the lock) and
+ * `migronaut.migration` (one per migration executed, a child of the run).
+ * Metrics: `migronaut.run.duration`, `migronaut.migration.duration` and
+ * `migronaut.lock.acquire.duration` (histograms, seconds), plus the counters
+ * `migronaut.lock.refused` and `migronaut.lock.lost`. A failure sets the span's
+ * status to ERROR with a redacted message, and `error.type` — on the span and
+ * the metric point — to the {@link MigronautErrorCode}, or for an error that is
+ * not migronaut's to its class name (`_OTHER` when it has none).
+ *
+ * A tracer or meter that throws never fails a run.
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface MigronautTelemetry {
+  tracer?: MigronautTracer | null;
+  meter?: MigronautMeter | null;
+  /**
+   * Static attributes added to every span and every metric point — your own
+   * low-cardinality dimensions (`{ tenant: 'acme' }`). At most 20. They cannot
+   * replace migronaut's own: `db.namespace` (the database name, always
+   * present) and the `migronaut.*` attributes win.
+   */
+  attributes?: Record<string, string | number | boolean>;
+}
 
 // ─── Progress Reporter ─────────────────────────────────────────────────────────
 
@@ -375,6 +749,20 @@ export interface StatusRow {
    * the whole status/audit call.
    */
   invalid?: true;
+  /**
+   * The file's current checksum (SHA-256 hex) — on `dryRun('up')` rows, so a
+   * caller that applies them later can insist on exactly this version
+   * (`up(file, { checksum })`).
+   */
+  checksum?: string;
+  /** Who asked for the apply, and why — when the run said (`requestedBy` / `reason` options) */
+  requestedBy?: string;
+  reason?: string;
+  /** Who asked for the revert, and why — on reverted history rows */
+  revertRequestedBy?: string;
+  revertReason?: string;
+  /** The checksum of the file version that failed (status `'failed'` only) */
+  failedChecksum?: string;
 }
 
 // ─── Import (migrate-mongo adoption) ────────────────────────────────────────────
@@ -432,6 +820,13 @@ export interface LockInfo {
   host: string;
   /** Username of the holder */
   executedBy: string;
+  /**
+   * The holder's run id — the `runId` of its events, log lines and changelog
+   * records. Absent for a document written by hand.
+   */
+  runId?: string;
+  /** The holder's lock TTL (ms), which paces its heartbeat. Absent before 2.1 */
+  ttlMs?: number;
 }
 
 // ─── Error Codes ──────────────────────────────────────────────────────────────
@@ -456,7 +851,11 @@ export type MigronautErrorCode =
   | 'NOT_APPLIED'
   | 'IMPORT_TARGET_NOT_EMPTY'
   | 'MIGRATION_IRREVERSIBLE'
-  | 'MIGRATION_OUT_OF_ORDER';
+  | 'MIGRATION_OUT_OF_ORDER'
+  | 'MIGRATION_BLOCKED'
+  | 'QUEUE_JOB_INVALID'
+  | 'QUEUE_JOB_FAILED'
+  | 'CONVERGE_FAILED';
 
 // ─── Config file format ─────────────────────────────────────────────────────────
 
@@ -488,6 +887,44 @@ export interface UpOptions {
    * Mutually exclusive with a filename and `steps`.
    */
   to?: string;
+  /**
+   * Stamp this batch number on what the run applies, instead of the next free
+   * one ({@link MigratorKit.nextBatch}). A label, not a reservation: it may
+   * equal a batch already in use, which is how several single-file runs become
+   * one rollback unit — the queue adapter gives every job of an enqueue group
+   * the same value. Positive integer; mutually exclusive with `step`.
+   */
+  batch?: number;
+  /**
+   * Refuse ({@link MigrationBlockedError}) to apply the named file while an
+   * earlier file on disk is still pending — the invariant a bulk `up` gets by
+   * construction, enforced from the changelog rather than from the caller's
+   * memory. Also makes the single-file run honour `strict` drift checks and
+   * `onOutOfOrder` like a bulk run. Requires a filename.
+   */
+  ordered?: boolean;
+  /**
+   * The SHA-256 (hex) the named file must have — refuse ({@link
+   * ChecksumMismatchError}, `context.planned: true`) to apply any other
+   * version of it. A queue job carries the checksum its plan saw, so a worker
+   * from another deploy never applies a different file under the same name.
+   * Requires a filename; an already-applied file is skipped as usual.
+   */
+  checksum?: string;
+  /**
+   * Converge the declared collections after the migrations, under the same
+   * lock — overrides `convergeAfterUp` for this call. Bulk runs only: refused
+   * with a filename or `to`.
+   */
+  converge?: boolean;
+  /**
+   * Who asked for this run (≤ 128 characters) — stamped on the changelog
+   * records it writes. `executedBy` is the OS user that ran it; on a queue
+   * worker that is the container's, which is why the requester is separate.
+   */
+  requestedBy?: string;
+  /** Why (≤ 512 characters) — a ticket, a sentence; stamped like `requestedBy` */
+  reason?: string;
 }
 
 /** Options for {@link MigratorKit.down} */
@@ -508,6 +945,20 @@ export interface DownOptions {
    * to the same state. Mutually exclusive with `batch`, `steps` and a filename.
    */
   to?: string;
+  /**
+   * Refuse ({@link MigrationBlockedError}) to revert the named file while a
+   * migration applied *after* it is still applied — reverts must go newest
+   * first (by `appliedAt`, the order `steps` uses). Requires a filename.
+   */
+  ordered?: boolean;
+  /**
+   * Who asked for this run (≤ 128 characters) — stamped on the records it
+   * reverts (`revertRequestedBy`). `executedBy` is the OS user that ran it; on a queue
+   * worker that is the container's, which is why the requester is separate.
+   */
+  requestedBy?: string;
+  /** Why (≤ 512 characters) — a ticket, a sentence; stamped as `revertReason` */
+  reason?: string;
 }
 
 /** Payload common to every lifecycle event */
@@ -531,7 +982,7 @@ export interface MigrationEvent extends MigronautEventBase {
 }
 
 export interface RunStartEvent extends MigronautEventBase {
-  /** Which command started the run: 'up' | 'down' | 'redo' | 'import' | 'baseline' */
+  /** Which command started the run: 'up' | 'down' | 'redo' | 'import' | 'baseline' | 'converge' */
   command?: string;
   direction?: 'up' | 'down';
 }
@@ -565,10 +1016,62 @@ export interface LockEvent extends MigronautEventBase {
   acquireMs?: number;
 }
 
+/** Who started a converge: the `converge` call itself, or a bulk `up` (`convergeAfterUp`) */
+export type ConvergeTrigger = 'converge' | 'up';
+
+/**
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface ConvergeStartEvent extends MigronautEventBase {
+  trigger: ConvergeTrigger;
+  /** Declared collections being converged */
+  collections: number;
+}
+
+/**
+ * One step a converge carried out (or failed)
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface ConvergeActionEvent extends MigronautEventBase {
+  collection: string;
+  target: ConvergeTarget;
+  name: string;
+  action: ConvergeActionKind;
+  /**
+   * `'started'` fires before the step runs — an index build can take hours,
+   * and this is how a subscriber sees which one is in progress; `'applied'`
+   * or `'failed'` follows when it ends.
+   */
+  status: 'started' | 'applied' | 'failed';
+  /** `'applied'` only */
+  durationMs?: number;
+  reason?: string;
+  /** Redacted failure message (status `'failed'` only) */
+  error?: string;
+}
+
+/**
+ * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export interface ConvergeEndEvent extends MigronautEventBase {
+  trigger: ConvergeTrigger;
+  success: boolean;
+  durationMs: number;
+  changed: number;
+  inSync: boolean;
+  /** Rows per action kind */
+  counts: Partial<Record<ConvergeActionKind, number>>;
+  /** The full result — partial on the failure path */
+  result: ConvergeResult;
+  /** Redacted failure message */
+  error?: string;
+}
+
 /**
  * Lifecycle events emitted by {@link MigratorKit}. Subscribe to feed metrics or
  * alerting without parsing log lines; a listener that throws is contained and
- * never fails the run.
+ * never fails the run. The `converge:*` events fire for real converge runs
+ * only, not for a dry run.
  */
 export interface MigronautEvents {
   'run:start': (event: RunStartEvent) => void;
@@ -580,6 +1083,9 @@ export interface MigronautEvents {
   'lock:acquired': (event: LockEvent) => void;
   'lock:released': (event: LockEvent) => void;
   'lock:lost': (event: LockEvent) => void;
+  'converge:start': (event: ConvergeStartEvent) => void;
+  'converge:action': (event: ConvergeActionEvent) => void;
+  'converge:end': (event: ConvergeEndEvent) => void;
 }
 
 /** One check performed by {@link MigratorKit.audit} */
@@ -599,10 +1105,20 @@ export interface AuditReport {
   checks: AuditCheck[];
 }
 
+/** Options for {@link MigratorKit.status} and {@link MigratorKit.list} */
+export interface StatusOptions {
+  /** Hash applied files to fill `checksumOk`. Default true */
+  checksums?: boolean;
+}
+
 /** Options for {@link MigratorKit.redo} */
 export interface RedoOptions {
   /** Skip lock acquisition (dev only) */
   noLock?: boolean;
+  /** Who asked — stamped on the revert and on the re-apply */
+  requestedBy?: string;
+  /** Why — stamped like `requestedBy` */
+  reason?: string;
 }
 
 /** Options for {@link MigratorKit.create} */
@@ -720,6 +1236,19 @@ export class MigratorKit extends EventEmitter {
    * removed, or null if no lock was held.
    */
   forceUnlock(): Promise<LockInfo | null>;
+  /**
+   * The batch number the next `up` would use (highest recorded batch + 1,
+   * reverted and failed records included). A peek, not a reservation — pair it
+   * with `up(name, { batch })` to stamp several single-file runs as one batch.
+   * Connects if needed.
+   */
+  nextBatch(): Promise<number>;
+  /**
+   * A new id in this kit's configured format — the `generateId` option, else a
+   * random UUID. The same source every run id comes from, for code that wants
+   * its own ids to match. Resolves the config; does not connect.
+   */
+  generateId(): Promise<string>;
   /** Run all pending migrations, or a specific named file */
   up(filename?: string, options?: UpOptions): Promise<RunResult[]>;
   /** Rollback the last batch, a specific batch, a specific file, or the last N steps */
@@ -749,16 +1278,22 @@ export class MigratorKit extends EventEmitter {
     filename?: string,
     options?: { steps?: number; batch?: number; to?: string },
   ): Promise<StatusRow[]>;
-  /** Full migration status for all known files and records */
-  status(): Promise<StatusRow[]>;
+  /**
+   * Full migration status for all known files and records. `checksums: false`
+   * skips hashing the applied files (`checksumOk` stays null).
+   */
+  status(options?: StatusOptions): Promise<StatusRow[]>;
   /**
    * Read-only health check: configuration, connectivity, transaction support,
    * changelog indexes, lock state, checksum drift and runtime. Reports
    * problems; fixes none of them.
    */
   audit(): Promise<AuditReport>;
-  /** Filtered list of migrations. Default: 'all' */
-  list(filter?: 'all' | 'pending' | 'applied'): Promise<StatusRow[]>;
+  /**
+   * Filtered list of migrations. Default: 'all'. `checksums: false` skips
+   * hashing the applied files — for a caller that needs names and dates only.
+   */
+  list(filter?: 'all' | 'pending' | 'applied', options?: StatusOptions): Promise<StatusRow[]>;
   /** Create a new migration file and return its absolute path */
   create(name: string, options?: CreateOptions): Promise<string>;
   /** Create a migronaut config file in the working directory and return its path */
@@ -776,6 +1311,25 @@ export class MigratorKit extends EventEmitter {
    * are skipped, so a partial baseline can simply be re-run.
    */
   baseline(options?: BaselineOptions): Promise<BaselineSummary>;
+  /**
+   * Bring the declared collections (`collections`, `collectionsDir`) to their
+   * declared indexes and validators. Stateless: the live database is read and
+   * compared on every call; what a run changed is appended to the converge
+   * history ({@link MigratorKit.convergeHistory}), which no run reads back. A
+   * real run holds the migration lock; a plan with a conflict is refused before
+   * any write, and a failed step throws {@link ConvergeFailedError}. Experimental.
+   */
+  converge(options?: ConvergeOptions): Promise<ConvergeResult>;
+  /**
+   * Whether a bulk `up` on this kit ends by converging: `convergeAfterUp` is
+   * on and something is declared. Resolves the config; does not connect.
+   */
+  convergesAfterUp(): Promise<boolean>;
+  /**
+   * The converge history, newest first (`limit` 1–1000, default 20): one entry
+   * per converge that changed something or failed. Read-only.
+   */
+  convergeHistory(options?: { limit?: number }): Promise<ConvergeHistoryEntry[]>;
 }
 
 // ─── Programmatic entry points ─────────────────────────────────────────────────
@@ -799,11 +1353,24 @@ export interface RunMigrationsOptions extends MigratorKitOptions {
    * progress**. While the holder's heartbeat visibly advances its lock, the
    * deadline is re-armed — a healthy peer working through a long backlog never
    * times its waiting peers out; only a stalled holder runs this budget down.
-   * Default: 90000.
+   * Default: 90000, or 1.5× the holder's lock TTL when that is longer — its
+   * heartbeat only moves the lock every TTL/2, and a crashed holder's lock is
+   * reclaimable only after a full TTL. An explicit value is used as given.
    */
   lockWaitTimeoutMs?: number;
-  /** Poll interval (ms) while waiting for the lock. Default: 500 */
+  /**
+   * First poll interval (ms) while waiting for the lock. Polls back off from
+   * it, doubling, up to 5 s (and never more than a quarter of the wait budget).
+   * Default: 500
+   */
   lockPollIntervalMs?: number;
+  /**
+   * Abort the call: a wait for the lock stops between polls, and a run that
+   * holds it stops between migrations (one already executing finishes), with
+   * a {@link RunAbortedError}. Wire it to SIGTERM so a pod being shut down
+   * does not take the lock just before it is killed.
+   */
+  signal?: AbortSignal;
   /**
    * Receives the internally-constructed {@link MigratorKit} right after
    * construction (before connect), so an embedding application can subscribe
@@ -822,10 +1389,12 @@ export interface MigrationSummary {
   upToDate: boolean;
   /** True when this instance waited for a peer to release the lock before running */
   waited: boolean;
-  /** Total time (ms) spent waiting for a peer's lock. 0 when the lock was free */
+  /** Time (ms) from the first refusal to the run, by the clock. 0 when the lock was free */
   waitedMs: number;
   /** Number of `up` attempts made — 1 when the lock was free on the first try */
   attempts: number;
+  /** The converge that ended the run — present only when `convergeAfterUp` converged */
+  converge?: ConvergeResult;
 }
 
 /**
@@ -849,14 +1418,17 @@ export function pendingMigrations(
 ): Promise<StatusRow[]>;
 
 /**
- * The CLI's exit-code map: one entry per {@link MigronautErrorCode}, plus two
+ * The CLI's exit-code map: one entry per {@link MigronautErrorCode}, plus three
  * CLI-condition codes with no error class — `PENDING_MIGRATIONS` (from
- * `status --check`) and `AUDIT_FAILED`. Lets a wrapper script mirror the
- * CLI's exit semantics without hardcoding numbers. Anything unmapped exits 1;
- * success is 0.
+ * `status --check`), `AUDIT_FAILED` and `COLLECTIONS_DRIFT` (from
+ * `converge --check`). Lets a wrapper script mirror the CLI's exit semantics
+ * without hardcoding numbers. Anything unmapped exits 1; success is 0.
  */
 export const EXIT_CODES: Readonly<
-  Record<MigronautErrorCode | 'PENDING_MIGRATIONS' | 'AUDIT_FAILED', number>
+  Record<
+    MigronautErrorCode | 'PENDING_MIGRATIONS' | 'AUDIT_FAILED' | 'COLLECTIONS_DRIFT',
+    number
+  >
 >;
 
 // ─── Logger factory ───────────────────────────────────────────────────────────
@@ -1011,5 +1583,49 @@ export class IrreversibleMigrationError extends MigronautError {
  * branch. `context.names` lists the late arrivals.
  */
 export class OutOfOrderMigrationError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by an `ordered` single-file `up`/`down` that would run out of
+ * sequence: an earlier migration is still pending (`up`), or one applied later
+ * is still applied (`down`). `context.name`, `context.direction` and
+ * `context.blockedBy` (the migrations that must go first).
+ */
+export class MigrationBlockedError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by the queue adapter (`@alexify/migronaut/bullmq`) when a job's
+ * payload fails the contract check — an unknown job name or data version, a
+ * migration name that is not a bare filename, malformed group fields. Job data
+ * is untrusted input. `context.jobId`, `context.issue`.
+ */
+export class QueueJobInvalidError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by a queue group's `wait()` when one of its jobs failed or the wait
+ * timed out (one budget for the whole call). `context.failedReason` is the
+ * worker's (redacted) message, `context.code` the job's own typed error code
+ * when it reported one (`MIGRATION_BLOCKED`, `CHECKSUM_MISMATCH`, …),
+ * `context.results` the jobs that finished before it, plus `groupId`, `jobId`,
+ * `migration`, `direction` and `timedOut`.
+ */
+export class QueueJobFailedError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by {@link MigratorKit.converge} when the database cannot be brought
+ * to the declared state. `context.phase` is `'plan'` for a refused plan
+ * (`context.conflicts` lists why; nothing was written) or `'apply'` for a
+ * failed step (`collection`, `target`, `name`, `action`, `cause`, and
+ * `mongoCode`, `hint` and — after a failed rebuild — `restored` when they
+ * apply). `context.converge` is the {@link ConvergeResult} so far.
+ */
+export class ConvergeFailedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }

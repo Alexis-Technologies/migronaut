@@ -7,7 +7,7 @@ const { errorText } = require('./error.js');
 /** TypeScript source extensions that require a TS-capable runtime to import */
 const TS_EXTENSIONS = new Set(['.ts', '.mts', '.cts']);
 
-/** Distinguishes reload URLs; see the reload comment in loadMigrationFile */
+/** Distinguishes reload URLs; see importUserFile */
 let reloadCounter = 0;
 
 /** Narrow an unknown value to a function */
@@ -36,9 +36,10 @@ function isUnsupportedTsSyntaxError(error) {
 }
 
 /**
- * Translate a dynamic-import failure into a clear MigrationInvalidExportError
- * when the cause is a `.ts`/`.mts`/`.cts` file the current runtime refused, or
- * return null to let the original error propagate.
+ * An actionable message for a dynamic-import failure whose cause is a
+ * `.ts`/`.mts`/`.cts` file the current runtime refused, or null to let the
+ * original error speak for itself. `noun` names what the file is ("migration",
+ * "collection definition").
  *
  * The shipped CLI runs as plain Node, whose type stripping (always present on
  * the supported Node >= 22.18 range) handles erasable TypeScript only. Two
@@ -47,18 +48,29 @@ function isUnsupportedTsSyntaxError(error) {
  * `--no-experimental-strip-types`), and non-erasable syntax such as `enum` or
  * `namespace` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`).
  */
-function tsLoadErrorOrNull(filepath, error) {
+function tsLoadMessageOrNull(filepath, error, noun) {
   const ext = path.extname(filepath).toLowerCase();
   if (!TS_EXTENSIONS.has(ext)) {
     return null;
   }
   const name = path.basename(filepath);
-  let message;
   if (isUnknownExtensionError(error)) {
-    message = `Cannot load TypeScript migration "${name}" — type stripping is disabled in this Node process. Re-enable it, run migronaut under a TypeScript loader (e.g. tsx), or author the migration as .js.`;
-  } else if (isUnsupportedTsSyntaxError(error)) {
-    message = `Cannot load TypeScript migration "${name}" — it uses syntax Node's type stripping cannot erase (e.g. enum, namespace). Rewrite with erasable-only syntax, or run migronaut under a TypeScript loader (e.g. tsx).`;
-  } else {
+    return `Cannot load TypeScript ${noun} "${name}" — type stripping is disabled in this Node process. Re-enable it, run migronaut under a TypeScript loader (e.g. tsx), or author the ${noun} as .js.`;
+  }
+  if (isUnsupportedTsSyntaxError(error)) {
+    return `Cannot load TypeScript ${noun} "${name}" — it uses syntax Node's type stripping cannot erase (e.g. enum, namespace). Rewrite with erasable-only syntax, or run migronaut under a TypeScript loader (e.g. tsx).`;
+  }
+  return null;
+}
+
+/**
+ * Translate a dynamic-import failure of a migration into a clear
+ * MigrationInvalidExportError (see {@link tsLoadMessageOrNull}), or return
+ * null to let the original error propagate.
+ */
+function tsLoadErrorOrNull(filepath, error) {
+  const message = tsLoadMessageOrNull(filepath, error, 'migration');
+  if (message === null) {
     return null;
   }
   return new MigrationInvalidExportError(
@@ -66,6 +78,21 @@ function tsLoadErrorOrNull(filepath, error) {
     { filepath, cause: errorText(error) },
     { cause: error },
   );
+}
+
+/**
+ * Import a user-authored module (a migration, a collection definition).
+ *
+ * Node caches ESM modules by URL forever. A one-shot CLI never notices, but a
+ * long-lived process (a test runner, a dev server re-running migrations, a
+ * queue worker) would keep evaluating the version it first imported; with
+ * `reload` a unique query string forces a fresh evaluation. Off by default —
+ * it leaks a module per load. A monotonic counter, not Date.now(): two
+ * reloads in one millisecond must still get distinct URLs.
+ */
+function importUserFile(filepath, options = {}) {
+  const url = pathToFileURL(filepath).href;
+  return import(options.reload ? `${url}?migronaut=${++reloadCounter}` : url);
 }
 
 /**
@@ -85,18 +112,9 @@ async function loadMigrationFile(filepath, options = {}) {
     throw new MigrationFileNotFoundError('Migration file not found', { filepath });
   }
 
-  // Node caches ESM modules by URL forever. A one-shot CLI never notices, but a
-  // long-lived process (a test runner, a dev server re-running migrations)
-  // would keep executing the version it first imported; a unique query string
-  // forces a fresh evaluation. Off by default — it leaks a module per load.
-  // A monotonic counter, not Date.now(): two reloads in one millisecond must
-  // still get distinct URLs.
-  const url = pathToFileURL(filepath).href;
-  const href = options.reload ? `${url}?migronaut=${++reloadCounter}` : url;
-
   let imported;
   try {
-    imported = await import(href);
+    imported = await importUserFile(filepath, { reload: options.reload });
   } catch (error) {
     const tsError = tsLoadErrorOrNull(filepath, error);
     if (tsError) {
@@ -128,4 +146,4 @@ async function loadMigrationFile(filepath, options = {}) {
   return migration;
 }
 
-module.exports = { tsLoadErrorOrNull, loadMigrationFile };
+module.exports = { importUserFile, loadMigrationFile, tsLoadErrorOrNull, tsLoadMessageOrNull };

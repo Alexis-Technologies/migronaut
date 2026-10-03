@@ -56,6 +56,22 @@ Combined short flags are not supported: write `-f -y`, not `-fy`.
 | [`migronaut redo`](/commands/redo) | Down + up the last applied migration |
 | `migronaut redo <file>` | Down + up a specific migration |
 | `migronaut redo --no-lock` | Skip the lock (dev only) |
+| `migronaut up --converge` / `--no-converge` | Converge the declared collections afterwards — or not, whatever `convergeAfterUp` says |
+
+## Declared collections
+
+| Command | Description |
+|---|---|
+| [`migronaut converge`](/commands/converge) | Bring declared collections (indexes, validators) to their declared state — asks before a drop or rebuild |
+| `migronaut converge --dry-run` | Show the plan, change nothing |
+| `migronaut converge --check` | Exit 28 if anything would change (CI gate) |
+| `migronaut converge --prune` | Also drop indexes a definition does not declare |
+| `migronaut converge --ordered` | Refuse while a migration is still pending (exit 24) |
+| `migronaut converge --history` | Show what converge has changed (`--limit n`, `--json`) |
+| `migronaut up` / `down` / `redo` / `converge` `--reason <text>` | Why — recorded with the run (changelog / converge history) |
+| `migronaut converge --yes` | Apply drops and rebuilds without asking (required for them with `--json`) |
+| `migronaut converge --rebuild-unique` | Allow rebuilding a unique index (a `conflict` otherwise) |
+| `migronaut converge --no-lock` | Skip the lock (dev only) |
 
 ## Inspecting
 
@@ -137,4 +153,10 @@ working unchanged. The full map is also exported from the package root as
 | `20` | `MIGRATION_INVALID_EXPORT` — a migration file without valid `up`/`down` |
 | `21` | `LOCK_RELEASE_FAILED` — the lock could not be released |
 | `22` | `AUDIT_FAILED` — an `audit` check failed (warnings stay `0`) |
+| `23` | `MIGRATION_OUT_OF_ORDER` — a late-merged file, under `onOutOfOrder: 'error'` |
+| `24` | `MIGRATION_BLOCKED` — an ordered single-file run would go out of sequence |
+| `25` | `QUEUE_JOB_INVALID` — a [queue job](/guide/bullmq) payload failed validation |
+| `26` | `QUEUE_JOB_FAILED` — a queue group's `wait()` saw a job fail or time out |
+| `27` | `CONVERGE_FAILED` — [`converge`](/commands/converge) refused a conflicting plan, or a step failed |
+| `28` | `COLLECTIONS_DRIFT` — `converge --check` found the database out of step with the declarations |
 | `130` / `143` | Killed by a second SIGINT / SIGTERM |

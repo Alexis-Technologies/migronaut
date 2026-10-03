@@ -84,6 +84,24 @@ describe('Command routing and options', () => {
     assert.strictEqual(seen.lock, false);
   });
 
+  it('should leave a --x / --no-x pair unset until one of them is passed', async () => {
+    let seen;
+    const program = new Command();
+    program
+      .command('up')
+      .option('--converge', 'Converge after')
+      .option('--no-converge', 'Do not converge after')
+      .action((opts) => {
+        seen = opts;
+      });
+    await parse(program, ['up']);
+    assert.strictEqual(seen.converge, undefined);
+    await parse(program, ['up', '--converge']);
+    assert.strictEqual(seen.converge, true);
+    await parse(program, ['up', '--no-converge']);
+    assert.strictEqual(seen.converge, false);
+  });
+
   it('should resolve short aliases', async () => {
     let seen;
     const program = buildFixture((_, payload) => {

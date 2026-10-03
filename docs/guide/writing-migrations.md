@@ -4,6 +4,12 @@ A migration file exports an `up` function (apply the change) and a `down` functi
 receive a typed [`MigrationContext`](#the-migration-context). All three module formats are
 first-class.
 
+::: tip Indexes and validators
+A migration is the right tool when a change must run once, in order, against your data. When all
+that matters is the end state of a collection's indexes and validator, [declare
+it](/guide/collections) and run `migronaut converge` instead.
+:::
+
 ## The three supported formats
 
 ::: code-group

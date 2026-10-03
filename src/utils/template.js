@@ -332,6 +332,8 @@ function configBody(values, createExtension) {
   // ── Bookkeeping collections ─────────────────────────────────
   migrationsCollection: '_migronaut_migrations',
   lockCollection: '_migronaut_locks',
+  // What each \`migronaut converge\` changed — see \`converge --history\`.
+  convergeLogCollection: '_migronaut_converge',
   // Seconds before a held lock is considered stale and reclaimable.
   lockTTLSeconds: 60,
 
@@ -342,6 +344,21 @@ function configBody(values, createExtension) {
   // \`export const useTransaction = true\`.
   useTransaction: false,
 
+  // ── Declared collections (experimental) ─────────────────────
+  // Indexes and validators as the end state you want: \`migronaut converge\`
+  // compares them with the database and makes the difference — no migration
+  // file per change. Here, in a directory of one file per collection, or both.
+  // collections: [
+  //   {
+  //     name: 'users',
+  //     indexes: [{ key: { email: 1 }, unique: true }],
+  //     validator: { $jsonSchema: { bsonType: 'object', required: ['email'] } },
+  //   },
+  // ],
+  // collectionsDir: './collections',
+  // Converge at the end of every bulk \`migronaut up\`.
+  // convergeAfterUp: false,
+
   // ── Lifecycle hooks (code only — not available in JSON config) ──
   // hooks: {
   //   beforeAll: async (ctx) => {},
@@ -349,6 +366,21 @@ function configBody(values, createExtension) {
   //   beforeEach: async (name, ctx, info) => {},    // info: { direction, index, total }
   //   afterEach: async (name, duration, ctx, info) => {},
   //   onError: async (name, error, ctx) => {},
+  // },
+
+  // ── Identifiers (code only — not available in JSON config) ──
+  // Run ids are random UUIDs. Pass a generator for another format (ULID,
+  // CUID, …): called with no arguments, it must return a unique string
+  // synchronously — so \`generateId: ulid\` works as is.
+  // generateId: () => crypto.randomUUID(),
+
+  // ── OpenTelemetry (code only — not available in JSON config) ──
+  // Pass a tracer and/or a meter from your own @opentelemetry/api: every run
+  // and every migration becomes a span, and their durations become metrics.
+  // (\`trace\` and \`metrics\` come from '@opentelemetry/api' — import them at the top)
+  // telemetry: {
+  //   tracer: trace.getTracer('@alexify/migronaut'),
+  //   meter: metrics.getMeter('@alexify/migronaut'),
   // },`;
 }
 
@@ -388,8 +420,8 @@ ${exportStatement(esm, 'config')}
 
 /**
  * The built-in JSON config template. JSON cannot hold comments or functions, so
- * the `hooks`, `mongoose`, and `logger` options are unavailable here — use a
- * `.ts`/`.js` config if you need them.
+ * the `hooks`, `mongoose`, `logger`, `generateId` and `telemetry` options are
+ * unavailable here — use a `.ts`/`.js` config if you need them.
  */
 function defaultConfigJson(values = {}) {
   const { uri, dbName, migrationsDir } = configFields(values);
@@ -404,6 +436,7 @@ function defaultConfigJson(values = {}) {
     sequential: false,
     migrationsCollection: '_migronaut_migrations',
     lockCollection: '_migronaut_locks',
+    convergeLogCollection: '_migronaut_converge',
     lockTTLSeconds: 60,
     strict: false,
     useTransaction: false,
@@ -453,6 +486,7 @@ function secretConfigOptions(createExtension, migrationsDir) {
     // ── Bookkeeping collections ─────────────────────────────
     migrationsCollection: '_migronaut_migrations',
     lockCollection: '_migronaut_locks',
+    convergeLogCollection: '_migronaut_converge',
     lockTTLSeconds: 60,
 
     // ── Behavior ────────────────────────────────────────────

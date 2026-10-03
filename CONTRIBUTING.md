@@ -20,7 +20,10 @@ There is no build step, ever. What you edit in `src/` and `bin/` is what ships.
 stays that way. `.env` parsing, colors, the spinner, the argument parser, the
 table renderer and config validation are all hand-rolled in `src/utils` and
 `src/cli` for exactly this reason. Third-party integrations are *injected* by
-the user instead — a pino instance passes straight into `config.logger`.
+the user instead — a pino instance passes straight into `config.logger`, the
+BullMQ classes into `createMigrationQueue({ bullmq })`, and an OpenTelemetry
+tracer and meter into `config.telemetry`. Nothing under `src/` may
+`require('bullmq')` or an `@opentelemetry/*` package; unit tests grep for both.
 devDependencies are fine.
 
 **2. Plain CommonJS in `src/` and `bin/`.** `require`/`module.exports`, no
@@ -28,10 +31,12 @@ devDependencies are fine.
 not a type-checked contract. (User *migration* files are unrestricted — they may
 be `.ts`, ESM or CJS.)
 
-**3. A public API change touches two files together.** `src/index.js` (the
-runtime export) and `index.d.ts` (the hand-written types) are maintained in
-lockstep — neither is generated from the other. Add a `tests/types` assertion
-for anything new. `pnpm run check:dts` compiles the declaration file on its own.
+**3. A public API change touches two files together** — an entry point's runtime
+barrel and its hand-written types: `src/index.js` + `index.d.ts` for the package
+root, `src/bullmq/index.js` + `bullmq.d.ts` for the `./bullmq` subpath. Each pair
+is maintained in lockstep — neither file is generated from the other. Add a
+`tests/types` assertion for anything new. `pnpm run check:dts` compiles both
+declaration files on their own.
 
 **4. Never `throw new Error`, never `console.*` in core.** Every failure is a
 `MigronautError` subclass with a typed `code` (see `src/errors/index.js`), so
@@ -49,7 +54,17 @@ Node's built-in `node:test` — no external framework.
   transactions are genuinely exercised. Run serially (`--test-concurrency=1`):
   each file boots its own replica set, and running them at once collides on
   ports and starves the timing-sensitive lock tests.
-- `tests/types/` — `tsd` assertions against `index.d.ts`.
+- `tests/types/` — `tsd` assertions against `index.d.ts` and `bullmq.d.ts`.
+
+The queue adapter (`src/bullmq/`) is tested without Redis:
+[tests/helpers/fake-bullmq.js](tests/helpers/fake-bullmq.js) is an in-memory
+double of the part of BullMQ it uses. Its end-to-end behaviour is written once,
+in [tests/helpers/bullmq-scenarios.js](tests/helpers/bullmq-scenarios.js), and
+run twice — against the fake (`tests/integration/bullmq.test.js`, always) and
+against the real `bullmq` package on a real Redis
+(`tests/integration/bullmq-redis.test.js`, when `MIGRONAUT_TEST_REDIS_URL` is
+set; CI sets it). New adapter behaviour goes into the scenario module. If the
+two runs disagree, fix the fake — it is the model, the library is the fact.
 
 The integration suite goes through [scripts/node-test.js](scripts/node-test.js)
 rather than calling `node --test` directly. It feature-detects
@@ -61,15 +76,19 @@ promise can only settle from an `unref()`ed timer passes on 24 and is cancelled
 on 22; see [tests/helpers/event-loop.js](tests/helpers/event-loop.js).
 
 Use `before`/`after`, not `beforeAll`/`afterAll` (those are Jest/Vitest names).
-Silence the logger with `logger: null`. No committed `.only` or `.skip`.
+Silence the logger with `logger: null`. No committed `.only` or `.skip` — the
+one sanctioned exception is `bullmq-redis.test.js` skipping itself, with a
+reason, when there is no Redis to run against. The coverage gate must pass
+without it.
 
-Three environment variables control the test run:
+Four environment variables control the test run:
 
 | Env var | Effect |
 |---|---|
 | `MIGRONAUT_TEST_MONGO_URI` | Set by `tests/helpers/global-setup.js` so every integration file shares one replica set. Export it yourself to run against an existing MongoDB instead of booting one. |
 | `MONGOMS_VERSION` | `mongodb-memory-server`'s own variable — which server version to download. CI pins `7.0.14`; an explicit value always wins. |
 | `MONGOMS_DOWNLOAD_DIR` | `mongodb-memory-server`'s binary cache directory. CI points it at a cached path. |
+| `MIGRONAUT_TEST_REDIS_URL` | Opt-in: run the queue adapter's scenarios against the real `bullmq` on this Redis (`docker run --rm -d -p 6379:6379 redis:7-alpine`, then `redis://127.0.0.1:6379`). Unset → that one file is skipped. |
 
 The two `MONGOMS_*` names belong to `mongodb-memory-server`, so they keep their
 prefix. Everything migronaut itself reads is `MIGRONAUT_*` — including
@@ -105,4 +124,6 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 Before "fixing" one of these, read [ARCHITECTURE.md §8](ARCHITECTURE.md):
 `markApplied` upserts rather than inserts; `markReverted` never deletes;
 migrate-mongo imports are forward-only and refused by `down`/`redo`; `--json` on
-`init` selects the config *format* rather than machine output.
+`init` selects the config *format* rather than machine output; queue jobs get a
+single attempt, and a job behind a failed migration fails as `MIGRATION_BLOCKED`
+instead of waiting.

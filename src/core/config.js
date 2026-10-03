@@ -2,10 +2,13 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { ConfigInvalidError } = require('../errors/index.js');
+const { isCollectionName } = require('../utils/collection-name.js');
+const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
 const { applyEnvFile } = require('../utils/env.js');
 const { errorText } = require('../utils/error.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { redactDeep } = require('../utils/redact.js');
+const { collectionsIssues } = require('./collections.js');
 
 /**
  * Default values applied when no flag, env var, or config-file value is
@@ -17,6 +20,7 @@ const DEFAULT_CONFIG = {
   migrationsDir: './migrations',
   migrationsCollection: '_migronaut_migrations',
   lockCollection: '_migronaut_locks',
+  convergeLogCollection: '_migronaut_converge',
   lockTTLSeconds: 60,
   strict: false,
   useTransaction: false,
@@ -27,6 +31,7 @@ const DEFAULT_CONFIG = {
   onLockLost: 'abort',
   onOutOfOrder: 'warn',
   reloadMigrations: false,
+  convergeAfterUp: false,
 };
 
 /** Candidate config file names, checked in priority order within the cwd */
@@ -37,20 +42,6 @@ const isBoolean = (value) => typeof value === 'boolean';
 const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
 const isExtension = (value) => value === 'ts' || value === 'js';
 
-/**
- * Collection names we accept for the changelog/lock collections and
- * `import --from/--to`: non-empty, no `$` or NUL (invalid server-side), and
- * outside the reserved `system.` namespace — so a flag can never point a
- * read or write at a system collection.
- */
-function isCollectionName(value) {
-  return (
-    isNonEmptyString(value) &&
-    !value.includes('$') &&
-    !value.includes('\0') &&
-    !value.startsWith('system.')
-  );
-}
 function isStringList(value) {
   if (!Array.isArray(value) || value.length === 0) return false;
   for (const item of value) {
@@ -62,8 +53,13 @@ function isStringList(value) {
 /**
  * Validation spec for every checked config key: predicate + failure message.
  * `mongoose`, `hooks`, `logger` and `client` are deliberately unchecked —
- * they hold live instances the validator has nothing to say about. Unknown
- * keys are allowed, matching the previous zod (non-strict object) behavior.
+ * they hold live instances the validator has nothing to say about.
+ * `generateId` and `telemetry` are code-only too, but each has exactly one
+ * valid shape, so validateConfig checks them on their own rather than through
+ * this table (which a test pins against the JSON schema — and a function or a
+ * tracer has no place there).
+ * Unknown keys are allowed, matching the previous zod (non-strict object)
+ * behavior.
  */
 const CONFIG_KEYS = [
   { path: 'uri', check: isNonEmptyString, message: 'uri is required' },
@@ -76,6 +72,11 @@ const CONFIG_KEYS = [
   },
   {
     path: 'lockCollection',
+    check: isCollectionName,
+    message: "must be a valid collection name (no '$'/NUL, not system.*)",
+  },
+  {
+    path: 'convergeLogCollection',
     check: isCollectionName,
     message: "must be a valid collection name (no '$'/NUL, not system.*)",
   },
@@ -133,15 +134,39 @@ const CONFIG_KEYS = [
     optional: true,
   },
   { path: 'reloadMigrations', check: isBoolean, message: 'must be a boolean', optional: true },
+  // Only the outer shape here — each definition is checked by
+  // collectionsIssues (core/collections.js), which reports nested paths
+  // (`collections[2].indexes[0].key`) instead of one opaque message.
+  {
+    path: 'collections',
+    check: Array.isArray,
+    message: 'must be an array of collection definitions',
+    optional: true,
+  },
+  {
+    path: 'collectionsDir',
+    check: isNonEmptyString,
+    message: 'must be a non-empty string',
+    optional: true,
+  },
+  { path: 'convergeAfterUp', check: isBoolean, message: 'must be a boolean', optional: true },
 ];
 
 /**
  * Every key the merged config legitimately carries: the validated ones plus
- * the deliberately-unchecked live instances. Used only to *mention* typos
- * (`migrationsDirectory`, `useTransactions`) at debug level — unknown keys
- * stay allowed, matching the documented non-strict contract.
+ * the code-only ones (the live instances, `generateId` and `telemetry`). Used
+ * only to *mention* typos (`migrationsDirectory`, `useTransactions`) at debug
+ * level — unknown keys stay allowed, matching the documented non-strict
+ * contract.
  */
-const KNOWN_CONFIG_KEYS = new Set(['logger', 'hooks', 'mongoose', 'client']);
+const KNOWN_CONFIG_KEYS = new Set([
+  'logger',
+  'hooks',
+  'mongoose',
+  'client',
+  'generateId',
+  'telemetry',
+]);
 for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
 
 /**
@@ -164,6 +189,34 @@ function validateConfig(config, options = {}) {
       continue;
     }
     if (!spec.check(value)) issues.push({ path: spec.path, message: spec.message });
+  }
+  // What it returns is checked on every call (utils/id.js); that it is callable
+  // at all is a config mistake — a JSON config's `"generateId": "ulid"` — and
+  // belongs with the others, before a run is started.
+  if (config.generateId !== undefined && typeof config.generateId !== 'function') {
+    issues.push({ path: 'generateId', message: 'must be a function' });
+  }
+  for (const issue of telemetryIssues(config.telemetry)) issues.push(issue);
+  // Inline definitions are checked with the rest of the config — they are
+  // pure data, so this costs nothing. Definition *files* are loaded only when
+  // a converge runs: importing them here would make one broken file block
+  // every command, an emergency `down` included.
+  // Three bookkeeping collections, three jobs: sharing one would mix records.
+  const bookkeeping = ['migrationsCollection', 'lockCollection', 'convergeLogCollection'];
+  for (const [position, key] of bookkeeping.entries()) {
+    for (const other of bookkeeping.slice(0, position)) {
+      if (config[key] !== undefined && config[key] === config[other]) {
+        issues.push({ path: key, message: `must differ from ${other}` });
+      }
+    }
+  }
+  if (Array.isArray(config.collections)) {
+    const reserved = [
+      config.migrationsCollection,
+      config.lockCollection,
+      config.convergeLogCollection,
+    ];
+    for (const issue of collectionsIssues(config.collections, { reserved })) issues.push(issue);
   }
   return issues;
 }
@@ -242,8 +295,9 @@ const parseString = (value) => value;
  *
  * Every *scalar* config option has an entry here, which is what makes the
  * documented "a config file is never required" promise literally true. Options
- * holding non-scalars — `fileExtensions`, `clientOptions`, `client`, `mongoose`,
- * `hooks`, `logger` — are config-file/API only; an env var cannot express them.
+ * holding non-scalars — `fileExtensions`, `clientOptions`, `collections`,
+ * `client`, `mongoose`, `hooks`, `logger`, `generateId`, `telemetry` — are
+ * config-file/API only; an env var cannot express them.
  *
  * MIGRONAUT_ENV_FILE is deliberately absent: it selects which .env file to load,
  * so it has to be read before this table can run (see loadConfig).
@@ -254,6 +308,11 @@ const ENV_KEYS = [
   { env: 'MIGRONAUT_MIGRATIONS_DIR', path: 'migrationsDir', parse: parseString },
   { env: 'MIGRONAUT_COLLECTION', path: 'migrationsCollection', parse: parseString },
   { env: 'MIGRONAUT_LOCK_COLLECTION', path: 'lockCollection', parse: parseString },
+  {
+    env: 'MIGRONAUT_CONVERGE_LOG_COLLECTION',
+    path: 'convergeLogCollection',
+    parse: parseString,
+  },
   { env: 'MIGRONAUT_LOCK_TTL', path: 'lockTTLSeconds', parse: parsePositiveInteger },
   { env: 'MIGRONAUT_STRICT', path: 'strict', parse: parseBoolean },
   { env: 'MIGRONAUT_USE_TRANSACTION', path: 'useTransaction', parse: parseBoolean },
@@ -270,6 +329,8 @@ const ENV_KEYS = [
   },
   { env: 'MIGRONAUT_ENSURE_INDEXES', path: 'ensureIndexes', parse: parseBoolean },
   { env: 'MIGRONAUT_RELOAD_MIGRATIONS', path: 'reloadMigrations', parse: parseBoolean },
+  { env: 'MIGRONAUT_COLLECTIONS_DIR', path: 'collectionsDir', parse: parseString },
+  { env: 'MIGRONAUT_CONVERGE_AFTER_UP', path: 'convergeAfterUp', parse: parseBoolean },
 ];
 
 /** Build a partial config from the MIGRONAUT_* environment variables */
@@ -458,6 +519,13 @@ async function loadConfig(options = {}) {
   for (const key in config) {
     if (!KNOWN_CONFIG_KEYS.has(key)) (unknown ??= []).push(key);
   }
+  // Same for `telemetry`: handing over the whole `@opentelemetry/api` module
+  // (`trace`, `metrics`) instead of a tracer and a meter turns it off silently.
+  if (config.telemetry) {
+    for (const key in config.telemetry) {
+      if (!TELEMETRY_KEYS.includes(key)) (unknown ??= []).push(`telemetry.${key}`);
+    }
+  }
   if (unknown) {
     effectiveLogger(config.logger).debug(
       `Unrecognized config key(s), ignored: ${unknown.join(', ')}`,
@@ -470,18 +538,23 @@ async function loadConfig(options = {}) {
   }
 
   // "Which config did it actually pick up?" — the merged result, once, at
-  // debug level. Live instances (client, mongoose, hooks, logger) are elided:
-  // they are not serializable and redactDeep rightly refuses to clone them.
+  // debug level. Live instances (client, mongoose, hooks, logger, telemetry)
+  // and the generateId function are elided: they are not serializable and
+  // redactDeep rightly refuses to clone them. Declared collections show as
+  // names only — validators can run to hundreds of lines.
   {
-    const { client, mongoose, hooks, logger, ...rest } = config;
+    const { client, mongoose, hooks, logger, generateId, telemetry, collections, ...rest } = config;
     effectiveLogger(config.logger).debug(
       `Resolved config (source: ${configFilePath ? path.basename(configFilePath) : 'env/flags/defaults'})`,
       redactDeep({
         ...rest,
+        ...(collections ? { collections: collections.map((definition) => definition.name) } : {}),
         ...(client ? { client: '[injected]' } : {}),
         ...(mongoose ? { mongoose: '[injected]' } : {}),
         ...(hooks ? { hooks: Object.keys(hooks) } : {}),
         ...(logger !== undefined ? { logger: logger === null ? null : '[injected]' } : {}),
+        ...(generateId ? { generateId: '[injected]' } : {}),
+        ...(telemetry ? { telemetry: '[injected]' } : {}),
       }),
     );
   }
@@ -496,6 +569,8 @@ module.exports = {
   CONFIG_KEYS,
   DEFAULT_CONFIG,
   ENV_KEYS,
+  // Re-exported from utils/collection-name.js, where it moved so that
+  // core/collections.js can use it without a require cycle through here.
   isCollectionName,
   loadConfig,
   validateConfig,

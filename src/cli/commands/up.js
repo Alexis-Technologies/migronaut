@@ -13,6 +13,9 @@ function registerUp(program) {
       ['-f, --force', 'Re-run an already-applied migration (requires a file)'],
       ['-y, --yes', 'Confirm --force non-interactively (required with --json)'],
       ['--step', 'Apply each migration as its own batch (revert individually later)'],
+      ['--converge', 'Converge the declared collections afterwards (overrides convergeAfterUp)'],
+      ['--no-converge', 'Do not converge afterwards, whatever convergeAfterUp says'],
+      ['--reason <text>', 'Why — recorded on the changelog with the run (who: the OS user)'],
     ],
     lockable: true,
     mutating: true,
@@ -22,6 +25,11 @@ function registerUp(program) {
     preflight: async (opts, [file], { logger }) => {
       if (opts.force && !file) {
         throw new ConfigInvalidError('--force requires a specific migration file');
+      }
+      if (opts.converge === true && (file || opts.to)) {
+        throw new ConfigInvalidError(
+          '--converge needs a bulk up — it cannot follow a single file or --to',
+        );
       }
       if (opts.force && file && !opts.yes) {
         // --json is non-interactive: refuse rather than silently re-running or
@@ -45,8 +53,13 @@ function registerUp(program) {
         ...(opts.force ? { force: true } : {}),
         ...(opts.step ? { step: true } : {}),
         ...(opts.to ? { to: opts.to } : {}),
+        ...(typeof opts.converge === 'boolean' ? { converge: opts.converge } : {}),
+        ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
       }),
-    // No render: core logs every ✔ Applied line itself.
+    // No render: core logs every ✔ Applied line itself — and, after a bulk run
+    // that converges, every converge line too. `--json` stays the migration
+    // rows: an array cannot carry the converge result without breaking its
+    // consumers (that is what `migronaut converge --json` is for).
   });
 }
 

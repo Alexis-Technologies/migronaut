@@ -1,0 +1,20 @@
+# MongoDB + Redis for the example, and a Jaeger for the optional tracing. A standalone MongoDB is enough here; switch
+# to a replica set only if your migrations use `useTransaction: true`.
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - '127.0.0.1:27017:27017'
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '127.0.0.1:6379:6379'
+    # BullMQ needs keys to stay put: never evict.
+    command: ['redis-server', '--maxmemory-policy', 'noeviction']
+  # Optional — only used when OTEL_EXPORTER_OTLP_ENDPOINT is set (see .env.example).
+  # Takes OTLP over HTTP on 4318 and serves the trace UI on 16686.
+  jaeger:
+    image: jaegertracing/jaeger:2.21.0
+    ports:
+      - '127.0.0.1:4318:4318'
+      - '127.0.0.1:16686:16686'

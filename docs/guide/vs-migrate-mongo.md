@@ -39,6 +39,7 @@ situations where a migration tool earns its place: under load, under failure, an
 | Changelog record written                        | as a separate write after the migration | inside the migration's own transaction |
 | History on rollback                             | record deleted   | updated to `status: 'reverted'` — never deleted |
 | Out-of-order detection                          |        ❌        | `onOutOfOrder`: `warn` (default) / `error` / `allow` |
+| Indexes & validators                            | hand-written in migration files | declared as an end state; `converge` applies the difference |
 | Machine output & exit codes                     |        —        | `--json` on every data command, typed errors mapped to `EXIT_CODES` |
 | Lifecycle hooks & events                        |        ❌        | 5 hooks + typed `EventEmitter` events |
 | Credentials masked in output                    |        ❌        | ✅ in errors, logs and `--json` |
@@ -96,6 +97,16 @@ is the classic way teams corrupt ordering assumptions. `migronaut` flags it: `wa
 `onOutOfOrder: 'error'` to refuse the run, `'allow'` to silence it. This safeguard is standard in
 tools like Flyway on the SQL side but absent from the Node.js MongoDB migration tools, including
 `migrate-mongo`.
+
+### Indexes and validators as an end state
+
+With `migrate-mongo`, every index change is a migration: an `up` that creates it, a `down` that
+drops it, and a new file the next time an option changes. `migronaut` keeps that path for changes
+that need ordering against data, and adds a second one for everything that only has a current
+value: declare the indexes and validator a collection should have, and
+[`migronaut converge`](/guide/collections) compares them with the live database and applies the
+difference — asking before it drops or rebuilds an index, never dropping one you did not declare
+unless you opt into `prune`, and gating CI with `converge --check`. It is experimental in 2.1.
 
 ## The honest trade-offs
 

@@ -6,8 +6,8 @@ Only the latest published version receives fixes.
 
 | Version | Supported |
 |---|---|
-| 2.0.x | ✅ |
-| < 2.0 | ❌ |
+| 2.1.x | ✅ |
+| < 2.1 | ❌ |
 
 ## Reporting a vulnerability
 
@@ -43,9 +43,19 @@ Some things are working as intended, and are not vulnerabilities:
   checksum. Protect the database, not just the files.
 - **`--no-lock` is unsafe by design.** It exists for local development and says
   so loudly at run time.
+- **Whoever can enqueue can migrate.** With the queue adapter
+  (`@alexify/migronaut/bullmq`), write access to the Redis queue — or to the API
+  you put in front of it — is the ability to apply and roll back migrations
+  *that exist in the worker's migrations directory*. Protect both as you would
+  the deploy pipeline. What a job can never do is name a file outside that
+  directory (or a file next to the migrations that is not one) or carry code:
+  payloads are validated as untrusted data, and a job that fails the check is
+  rejected (`QUEUE_JOB_INVALID`) before anything runs. A job also cannot
+  re-run an applied migration (`force`) or skip the order guard unless the
+  worker's `allow` option says so — both are off by default.
 
-Things that *are* in scope: leaking connection credentials into output, files or
-error context; executing code from a source that should be data (a migration
+Things that *are* in scope: leaking connection credentials into output, files,
+error context or queue jobs; executing code from a source that should be data (a migration
 *name*, a database value, a CLI flag); escaping the migrations directory; and
 anything that lets one run corrupt another's changelog.
 

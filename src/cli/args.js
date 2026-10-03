@@ -221,10 +221,20 @@ class Command {
     }
   }
 
-  /** Seed negatable options: declaring `--no-x` makes `x` default to true */
+  /**
+   * Seed negatable options: declaring `--no-x` makes `x` default to true —
+   * unless `--x` is declared too. Then, as in commander, the pair is
+   * tri-state: `true`, `false`, or unset (`undefined`) when neither was given,
+   * which is how a flag can override a config value only when actually passed.
+   */
   #seedNegatableDefaults() {
     for (const option of this.#options) {
-      if (option.negated) this.#values[option.key] = true;
+      if (!option.negated) continue;
+      let twin = false;
+      for (const other of this.#options) {
+        if (!other.negated && other.key === option.key) twin = true;
+      }
+      if (!twin) this.#values[option.key] = true;
     }
   }
 

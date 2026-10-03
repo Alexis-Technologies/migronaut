@@ -49,8 +49,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test:types
-      # Compiles index.d.ts on its own — the hand-written type surface has no
-      # other compiler pass over it.
+      # Compiles index.d.ts and bullmq.d.ts on their own — the hand-written
+      # type surface has no other compiler pass over it.
       - run: pnpm run check:dts
 
   # The engines floor (>=22.18) and Windows path handling both need real
@@ -81,6 +81,21 @@ jobs:
       fail-fast: false
       matrix:
         node-version: [22, 24]
+    # A real Redis for tests/integration/bullmq-redis.test.js, which replays the
+    # queue adapter's scenarios on the real bullmq package. Everything else —
+    # including the fake-BullMQ tests that carry the coverage gate — needs none.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      MIGRONAUT_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

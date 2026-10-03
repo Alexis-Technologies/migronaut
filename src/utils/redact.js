@@ -50,6 +50,26 @@ function redactUris(text) {
 }
 
 /**
+ * The document values a server error can quote: an E11000 duplicate-key
+ * message ends with the offending key's values — an email, a phone number —
+ * which is the database's data, not an error's. Everything from `dup key: {`
+ * to the last `}` on that line is masked; the index name before it still says
+ * which constraint was violated.
+ */
+const DUPLICATE_KEY_VALUES = /(dup key: )\{[^\n]*\}/g;
+
+/**
+ * For text that leaves the process for a third party — a tracing backend, a
+ * queue that keeps failed jobs and serves them to dashboards: credentials
+ * masked (as everywhere) and the data values a server error quotes, too.
+ * Local log lines keep the values; they are what a developer debugs with.
+ */
+function redactOutbound(text) {
+  if (typeof text !== 'string') return text;
+  return redactUris(text).replace(DUPLICATE_KEY_VALUES, '$1{ <redacted> }');
+}
+
+/**
  * Redact every string reachable from `value` (plain objects and arrays only —
  * class instances are left alone rather than cloned into broken shapes).
  * Returns a copy; never mutates the input.
@@ -69,4 +89,4 @@ function redactDeep(value) {
   return value;
 }
 
-module.exports = { redactUris, redactDeep };
+module.exports = { redactDeep, redactOutbound, redactUris };

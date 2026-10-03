@@ -26,7 +26,8 @@ function registerLock(program) {
       }
       logger.info(
         `Lock held by pid ${holder.pid} on ${holder.host} (${holder.executedBy}) ` +
-          `since ${lockedAtText(holder.lockedAt)}`,
+          `since ${lockedAtText(holder.lockedAt)}` +
+          (holder.runId ? ` — run ${holder.runId}` : ''),
       );
     },
   });

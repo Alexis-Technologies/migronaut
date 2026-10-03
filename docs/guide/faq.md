@@ -92,6 +92,29 @@ Run `migronaut up` as a deploy step, and gate deploys with `migronaut status --c
 migrations are pending). Every data command supports `--json` for machine-readable output. There are
 GitHub Actions and Docker recipes in [CI/CD & Deployment](/guide/ci-cd).
 
+## Do I need a migration for every index change?
+
+No. Migrations are right for changes with an order and a history — backfills, renames, a dedupe
+before a unique index. For indexes and validators whose end state is all that matters, declare
+them in `collections` (or one file per collection in `collectionsDir`) and run
+`migronaut converge`: it compares the declaration with the live database and applies the
+difference, stateless, under the migration lock. Undeclared indexes are kept unless you opt into
+`prune`. See [Declared Collections](/guide/collections).
+
+## Can I run migrations as background jobs, or as a service?
+
+Yes. `@alexify/migronaut/bullmq` enqueues each pending migration as its own BullMQ job and applies
+them in order with a single-concurrency worker — trigger it from an HTTP endpoint, a schedule, or a
+deploy hook that waits for the result. BullMQ is injected, so it adds no dependency. See
+[Migrations as a Queue](/guide/bullmq).
+
+## Can I trace migrations with OpenTelemetry?
+
+Yes. Pass a tracer and/or a meter from your own `@opentelemetry/api` as the `telemetry` option:
+every run and every migration becomes a span — active while the migration runs, so an instrumented
+MongoDB driver nests its command spans under it — and their durations are recorded as metrics.
+OpenTelemetry is injected, never a dependency. See [OpenTelemetry](/guide/opentelemetry).
+
 ## Does it work with Mongoose?
 
 Yes. Pass your Mongoose instance in config and it's available as `ctx.mongoose` inside migrations.
@@ -101,8 +124,8 @@ Mongoose is an optional peer dependency — you only need it if your migrations 
 
 Yes. Every scalar option has an `MIGRONAUT_*` environment variable, so exporting `MIGRONAUT_URI` and
 `MIGRONAUT_DB` is enough to run — no config file required. Only the non-scalar options
-(`fileExtensions`, `clientOptions`, and live handles like `client`, `mongoose`, `hooks` and
-`logger`) need a config file or the programmatic API. See [Configuration](/guide/configuration).
+(`fileExtensions`, `clientOptions`, `generateId`, and live handles like `client`, `mongoose`,
+`hooks`, `logger` and `telemetry`) need a config file or the programmatic API. See [Configuration](/guide/configuration).
 
 ## How does it prevent two deploys running migrations at once?
 

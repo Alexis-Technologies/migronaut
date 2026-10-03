@@ -5,7 +5,11 @@ const {
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
 } = require('../../src/errors/index.js');
-const { loadMigrationFile, tsLoadErrorOrNull } = require('../../src/utils/loader.js');
+const {
+  loadMigrationFile,
+  tsLoadErrorOrNull,
+  tsLoadMessageOrNull,
+} = require('../../src/utils/loader.js');
 
 const here = __dirname;
 const fixtures = path.join(here, '..', 'fixtures', 'migrations');
@@ -95,5 +99,32 @@ describe('tsLoadErrorOrNull', () => {
     const result = tsLoadErrorOrNull('/migrations/0001-x.ts', err);
     assert.ok(result instanceof MigrationInvalidExportError);
     assert.strictEqual(result.context?.cause, err.message);
+  });
+});
+
+describe('tsLoadMessageOrNull', () => {
+  it('should name what the file is', () => {
+    const message = tsLoadMessageOrNull(
+      '/collections/users.ts',
+      { code: 'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX' },
+      'collection definition',
+    );
+    assert.match(message, /^Cannot load TypeScript collection definition "users\.ts"/);
+    assert.match(
+      tsLoadMessageOrNull(
+        '/c/x.mts',
+        { code: 'ERR_UNKNOWN_FILE_EXTENSION' },
+        'collection definition',
+      ),
+      /author the collection definition as \.js/,
+    );
+  });
+
+  it('should stay silent for anything that is not a TypeScript load failure', () => {
+    assert.strictEqual(
+      tsLoadMessageOrNull('/c/x.js', { code: 'ERR_UNKNOWN_FILE_EXTENSION' }, 'x'),
+      null,
+    );
+    assert.strictEqual(tsLoadMessageOrNull('/c/x.ts', new Error('boom'), 'x'), null);
   });
 });
