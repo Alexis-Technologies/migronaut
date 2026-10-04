@@ -163,6 +163,14 @@
       "type": "boolean",
       "default": false,
       "description": "End every bulk `up` (no file, no --to) by converging the declared collections under the same lock"
+    },
+    "onSearchUnavailable": {
+      "enum": [
+        "fail",
+        "skip"
+      ],
+      "default": "fail",
+      "description": "What converge does with declared search indexes on a server without Atlas Search: refuse the run (fail), or converge everything else and skip them (skip)"
     }
   },
   "definitions": {

@@ -104,6 +104,7 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `collections` | `CollectionDefinition[]` | — | [Declared collections](/guide/collections): indexes and validators as an end state, applied by `converge` |
 | `collectionsDir` | `string` | — | Directory of collection definition files, one per collection. Opt-in: nothing is read unless it is set |
 | `convergeAfterUp` | `boolean` | `false` | End every bulk `up` — no file, no `to` — by converging the declared collections, under the same lock |
+| `onSearchUnavailable` | `'fail' \| 'skip'` | `'fail'` | What converge does with declared [search indexes](/guide/collections#search-indexes) on a server without Atlas Search: refuse the run, or converge everything else and skip them |
 | `mongoose` | `Mongoose` | — | Mongoose instance, if your migrations use it |
 | `hooks` | `MigrationHooks` | — | [Lifecycle hooks](/guide/hooks) |
 | `logger` | `MigronautLogger \| null` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` silences all output |
@@ -207,6 +208,7 @@ config file is never required" literally true, not just a slogan. These
 | `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` |
 | `MIGRONAUT_COLLECTIONS_DIR` | `collectionsDir` |
 | `MIGRONAUT_CONVERGE_AFTER_UP` | `convergeAfterUp` |
+| `MIGRONAUT_ON_SEARCH_UNAVAILABLE` | `onSearchUnavailable` |
 | `MIGRONAUT_ENV_FILE` | `envFile` |
 
 The remaining options — `fileExtensions`, `clientOptions`, `collections`,

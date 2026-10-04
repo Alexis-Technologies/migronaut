@@ -292,6 +292,14 @@ export interface MigronautConfig {
    * Default: false
    */
   convergeAfterUp?: boolean;
+  /**
+   * What converge does with declared search indexes on a server without
+   * Atlas Search: `'fail'` refuses the run before anything is written,
+   * `'skip'` converges everything else and reports them as `skip` rows.
+   * Default: 'fail'
+   * @experimental New in 2.2
+   */
+  onSearchUnavailable?: 'fail' | 'skip';
   /** Mongoose instance — required only if your migrations use Mongoose models */
   mongoose?: MongooseLike;
   hooks?: MigrationHooks;
@@ -527,14 +535,18 @@ export interface ConvergeOptions {
   reason?: string;
 }
 
-export type ConvergeTarget = 'collection' | 'validator' | 'index';
+export type ConvergeTarget = 'collection' | 'validator' | 'index' | 'searchIndex';
 
 /**
  * What converge does to one target. `keep` is an undeclared index left alone
  * (prune off); `conflict` refuses the run — an undeclared index covers the
  * declared one's key under another name, a unique index would be rebuilt
- * without {@link ConvergeOptions.rebuildUnique}, or the collection is a view
- * or a time-series collection.
+ * without {@link ConvergeOptions.rebuildUnique}, the collection is a view or a
+ * time-series collection, a search index would need a change no update can
+ * make (its type, an autoEmbed field's model or size), or the server has no
+ * Atlas Search; `skip` is a declared search index left alone on a server
+ * without Search (`onSearchUnavailable: 'skip'`). A search index is never
+ * `recreate`d: `modify` updates it in place.
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
 export type ConvergeActionKind =
@@ -544,7 +556,37 @@ export type ConvergeActionKind =
   | 'drop'
   | 'keep'
   | 'unchanged'
-  | 'conflict';
+  | 'conflict'
+  | 'skip';
+
+/**
+ * The status `$listSearchIndexes` reports for a search index — `'UNKNOWN'`
+ * when the server reports none
+ */
+export type SearchIndexStatus =
+  | 'PENDING'
+  | 'BUILDING'
+  | 'READY'
+  | 'FAILED'
+  | 'STALE'
+  | 'DELETING'
+  | 'DOES_NOT_EXIST'
+  | 'UNKNOWN'
+  | (string & {});
+
+/**
+ * Where the server is with a search index: it builds in the background, so a
+ * created or updated one is not queryable (with its new definition) at once
+ * @experimental New in 2.2
+ */
+export interface SearchIndexBuild {
+  status: SearchIndexStatus;
+  queryable: boolean;
+  /** The server's message — why a build FAILED, typically */
+  message?: string;
+  /** A newer definition is being built next to the one served */
+  updating?: true;
+}
 
 /**
  * `planned` in a dry run; otherwise `applied`, `failed`, or `skipped` — no
@@ -575,6 +617,12 @@ export interface ConvergeAction {
   from?: Record<string, unknown>;
   /** What the row puts there — the declared index or validator — on rows that create or change it */
   to?: Record<string, unknown>;
+  /**
+   * A search index row's build state on the server — as read before the run,
+   * and after it for a row the run applied
+   * @experimental New in 2.2
+   */
+  build?: SearchIndexBuild;
 }
 
 /**
@@ -625,6 +673,30 @@ export interface ConvergeUnstable {
 }
 
 /**
+ * A declared search index that exists but does not serve its declaration yet
+ * @experimental New in 2.2
+ */
+export interface SearchIndexNotReady extends SearchIndexBuild {
+  collection: string;
+  name: string;
+}
+
+/**
+ * What a converge saw of Atlas Search — present when a definition declares
+ * `searchIndexes`
+ * @experimental New in 2.2
+ */
+export interface ConvergeSearchSummary {
+  /** Whether the server has Atlas Search */
+  available: boolean;
+  /**
+   * Declared search indexes still building, updating, or failed. Does not
+   * count against `inSync`: a build is the server's work, not a difference.
+   */
+  notReady: SearchIndexNotReady[];
+}
+
+/**
  * Outcome of {@link MigratorKit.converge}
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
@@ -634,11 +706,15 @@ export interface ConvergeResult {
   changed: number;
   /**
    * True when the database matches the declarations: nothing left to do and
-   * no conflict. Undeclared indexes kept with prune off do not count against it.
+   * no conflict. Undeclared indexes kept with prune off, search indexes
+   * skipped on a server without Search, and search index builds still under
+   * way do not count against it.
    */
   inSync: boolean;
   collections: CollectionConvergeResult[];
   unstable?: ConvergeUnstable[];
+  /** @experimental New in 2.2 */
+  search?: ConvergeSearchSummary;
 }
 
 // ─── Logger ───────────────────────────────────────────────────────────────────
@@ -1698,11 +1774,18 @@ export class QueueJobFailedError extends MigronautError {
 
 /**
  * Thrown by {@link MigratorKit.converge} when the database cannot be brought
- * to the declared state. `context.phase` is `'plan'` for a refused plan
- * (`context.conflicts` lists why; nothing was written) or `'apply'` for a
- * failed step (`collection`, `target`, `name`, `action`, `cause`, and
- * `mongoCode`, `hint` and — after a failed rebuild — `restored` when they
- * apply). `context.converge` is the {@link ConvergeResult} so far.
+ * to the declared state. `context.phase` is:
+ * - `'plan'` for a refused plan (`context.conflicts` lists why, with a `hint`
+ *   when Atlas Search is missing; nothing was written) — or a search index
+ *   list that could not be read (`collection`, `cause`, `mongoCode`, `hint`);
+ * - `'replan'` when a collection changed while the run was under way
+ *   (`collection`, `introduced`: the new conflicts or drops; nothing of that
+ *   collection was written);
+ * - `'apply'` for a failed step (`collection`, `target`, `name`, `action`,
+ *   `cause`, and `mongoCode`, `hint` and — after a failed rebuild — `restored`
+ *   when they apply).
+ *
+ * `context.converge` is the {@link ConvergeResult} so far.
  */
 export class ConvergeFailedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);

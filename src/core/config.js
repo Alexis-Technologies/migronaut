@@ -32,6 +32,7 @@ const DEFAULT_CONFIG = {
   onOutOfOrder: 'warn',
   reloadMigrations: false,
   convergeAfterUp: false,
+  onSearchUnavailable: 'fail',
 };
 
 /** Candidate config file names, checked in priority order within the cwd */
@@ -150,6 +151,12 @@ const CONFIG_KEYS = [
     optional: true,
   },
   { path: 'convergeAfterUp', check: isBoolean, message: 'must be a boolean', optional: true },
+  {
+    path: 'onSearchUnavailable',
+    check: (value) => value === 'fail' || value === 'skip',
+    message: "must be 'fail' or 'skip'",
+    optional: true,
+  },
 ];
 
 /**
@@ -331,6 +338,11 @@ const ENV_KEYS = [
   { env: 'MIGRONAUT_RELOAD_MIGRATIONS', path: 'reloadMigrations', parse: parseBoolean },
   { env: 'MIGRONAUT_COLLECTIONS_DIR', path: 'collectionsDir', parse: parseString },
   { env: 'MIGRONAUT_CONVERGE_AFTER_UP', path: 'convergeAfterUp', parse: parseBoolean },
+  {
+    env: 'MIGRONAUT_ON_SEARCH_UNAVAILABLE',
+    path: 'onSearchUnavailable',
+    parse: parseEnum(['fail', 'skip']),
+  },
 ];
 
 /** Build a partial config from the MIGRONAUT_* environment variables */

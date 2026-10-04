@@ -14,8 +14,10 @@ import {
   type BaselineSummary,
   type CollectionDefinition,
   type CollectionDefinitionFile,
+  type ConvergeActionKind,
   ConvergeFailedError,
   type ConvergeResult,
+  type ConvergeSearchSummary,
   ChecksumMismatchError,
   EXIT_CODES,
   HookFailedError,
@@ -45,7 +47,9 @@ import {
   type RunEndEvent,
   type RunResult,
   type RunStartEvent,
+  type SearchIndexBuild,
   type SearchIndexDefinition,
+  type SearchIndexStatus,
   type SearchIndexType,
   type StatusRow,
   TransactionsUnsupportedError,
@@ -462,9 +466,17 @@ declare const converged: ConvergeResult;
 expectType<boolean>(converged.inSync);
 expectType<number>(converged.changed);
 const firstAction = converged.collections[0].actions[0];
-expectType<'collection' | 'validator' | 'index'>(firstAction.target);
+expectType<'collection' | 'validator' | 'index' | 'searchIndex'>(firstAction.target);
 expectType<'planned' | 'applied' | 'failed' | 'skipped'>(firstAction.status);
 expectType<string | undefined>(firstAction.liveName);
+expectAssignable<ConvergeActionKind>('skip');
+expectType<SearchIndexBuild | undefined>(firstAction.build);
+expectType<SearchIndexStatus>(firstAction.build!.status);
+expectType<ConvergeSearchSummary | undefined>(converged.search);
+expectType<boolean>(converged.search!.available);
+expectType<string>(converged.search!.notReady[0].collection);
+expectAssignable<Partial<MigronautConfig>>({ onSearchUnavailable: 'skip' });
+expectError<Partial<MigronautConfig>>({ onSearchUnavailable: 'ignore' });
 
 kit.on('converge:start', (event) => {
   expectType<'converge' | 'up'>(event.trigger);

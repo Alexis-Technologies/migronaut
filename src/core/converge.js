@@ -2,13 +2,29 @@ const { ConvergeFailedError, MigronautError } = require('../errors/index.js');
 const { pickActor } = require('../utils/actor.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
-const { CHANGE_ACTIONS, isDestructive, planCollection, summarize } = require('./converge-plan.js');
+const {
+  CHANGE_ACTIONS,
+  SEARCH_UNAVAILABLE_REASON,
+  isDestructive,
+  planCollection,
+  summarize,
+} = require('./converge-plan.js');
+const {
+  SEARCH_STEPS,
+  SEARCH_UNAVAILABLE_HINT,
+  isSearchUnavailable,
+  listSearchIndexes,
+  probeSearch,
+  runSearchStep,
+  searchHint,
+} = require('./converge-search.js');
 const { inPlaceCapabilities } = require('./index-spec.js');
 
 /**
- * Converge: bring the declared collections' indexes and validators to their
- * declared state. Stateless — every run reads `listCollections` and
- * `listIndexes`, plans against what it finds (converge-plan.js), and carries
+ * Converge: bring the declared collections' indexes, search indexes and
+ * validators to their declared state. Stateless — every run reads
+ * `listCollections`, `listIndexes` (and `$listSearchIndexes` where search
+ * indexes are declared), plans against what it finds (converge-plan.js), and carries
  * the plan out one operation at a time. The declaration is the only source of
  * truth, and the database is checked against it afresh each time: the history
  * a run appends (converge-log.js) is for people, and nothing reads it back to
@@ -16,7 +32,8 @@ const { inPlaceCapabilities } = require('./index-spec.js');
  *
  * Pure orchestration over capabilities the MigratorKit injects (`deps`):
  * `{db, logger, fields, emit, assertNotAborted}`, and optionally `audit` +
- * `record` (the history entry) and `shardKeyOf` (behind a mongos).
+ * `record` (the history entry), `shardKeyOf` (behind a mongos) and `sleep`
+ * (`(ms) => Promise`, the pause between search index re-reads — for tests).
  */
 
 /**
@@ -36,6 +53,16 @@ const READ_OPTIONS = Object.freeze({
 
 /** listIndexes calls in flight while reading many collections — a pace, not a pool */
 const READ_CONCURRENCY = 8;
+
+/**
+ * Pauses before the search indexes of a collection are read again, when the
+ * first read after a create or an update does not show it yet — the list is
+ * eventually consistent. A fixed, short budget: anything still differing
+ * after it is reported as unstable, as for regular indexes.
+ */
+const SEARCH_SETTLE_DELAYS_MS = [250, 500, 1000];
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const NAMESPACE_NOT_FOUND = 26;
 const INDEX_NOT_FOUND = 27;
@@ -73,8 +100,10 @@ async function readServer(db) {
   }
   try {
     const info = await db.admin().command({ buildInfo: 1 });
-    const [major, minor] = Array.isArray(info?.versionArray) ? info.versionArray : [];
-    if (Number.isInteger(major) && Number.isInteger(minor)) server.version = { major, minor };
+    const [major, minor, patch] = Array.isArray(info?.versionArray) ? info.versionArray : [];
+    if (Number.isInteger(major) && Number.isInteger(minor)) {
+      server.version = { major, minor, ...(Number.isInteger(patch) ? { patch } : {}) };
+    }
   } catch {
     // Unknown version: only the always-available in-place changes.
   }
@@ -108,6 +137,14 @@ const LABELS = {
   recreate: '✔ Rebuilt ',
   drop: '✔ Dropped ',
 };
+const TARGET_LABELS = { searchIndex: 'search index' };
+
+/** A row's target as a log line names it, and what it is on */
+function whatOf(action, collection) {
+  const target = TARGET_LABELS[action.target] ?? action.target;
+  const named = action.target === 'index' || action.target === 'searchIndex';
+  return `${target} ${named ? `${action.name} on ${collection}` : collection}`;
+}
 
 /**
  * Every named collection's live state, in order: one `listCollections` for
@@ -160,13 +197,15 @@ function attachConverge(error, result) {
 
 function describe(action) {
   if (action.target === 'index') return `index "${action.name}"`;
+  if (action.target === 'searchIndex') return `search index "${action.name}"`;
   return action.target === 'validator' ? 'the validator' : 'the collection';
 }
 
 /** What a failed step was doing — one row, or the indexes one command built together */
 function describeAll(actions) {
   if (actions.length === 1) return describe(actions[0]);
-  return `indexes ${actions.map((action) => `"${action.name}"`).join(', ')}`;
+  const names = actions.map((action) => `"${action.name}"`).join(', ');
+  return actions[0].target === 'searchIndex' ? `search indexes ${names}` : `indexes ${names}`;
 }
 
 /**
@@ -207,7 +246,12 @@ function wrapFailure(error, collection, actions, result, extra = {}) {
   const action = actions[0];
   if (error instanceof MigronautError) return attachConverge(error, result);
   const mongoCode = typeof error?.code === 'number' ? error.code : undefined;
-  const hint = mongoCode !== undefined ? HINTS[mongoCode] : undefined;
+  const hint =
+    action.target === 'searchIndex'
+      ? searchHint(error)
+      : mongoCode !== undefined
+        ? HINTS[mongoCode]
+        : undefined;
   const cause = errorText(error);
   return new ConvergeFailedError(
     `Could not ${VERBS[action.action] ?? action.action} ${describeAll(actions)} on ${collection}: ` +
@@ -314,12 +358,29 @@ async function convertToUnique(db, collection, step) {
   }
 }
 
-/** Carry out one planned step; returns `{ error, actions, extra }` on failure, else undefined */
-async function runStep(db, collection, step, settle) {
+/**
+ * Carry out one planned step; returns `{ error, actions, extra }` on failure,
+ * `{ kept }` / `{ skipped }` for a step the server turned down in a way the
+ * run can go on from, else undefined. `search` is the run's search state.
+ */
+async function runStep(db, collection, step, settle, search) {
   try {
     if (step.op === 'rebuild') return await runRebuild(db, collection, step, settle);
     const startedAt = Date.now();
-    if (step.op === 'createCollection') {
+    if (SEARCH_STEPS.has(step.op)) {
+      try {
+        await runSearchStep(db, collection, step);
+      } catch (error) {
+        // The probe said Search was there, the server says otherwise: with
+        // onSearchUnavailable 'skip' that is what the configuration expects.
+        if (search?.onUnavailable !== 'skip' || !isSearchUnavailable(error)) throw error;
+        for (const action of step.actions) {
+          action.action = 'skip';
+          action.reason = SEARCH_UNAVAILABLE_REASON;
+        }
+        return { skipped: true };
+      }
+    } else if (step.op === 'createCollection') {
       try {
         await db.createCollection(collection, step.options);
       } catch (error) {
@@ -353,11 +414,9 @@ async function runStep(db, collection, step, settle) {
     for (const action of step.actions) settle(action, durationMs);
     return undefined;
   } catch (error) {
-    return {
-      error,
-      actions: step.op === 'createIndexes' ? step.actions : [step.actions[0]],
-      extra: {},
-    };
+    // One command for several indexes fails (or succeeds) for all of them.
+    const together = step.op === 'createIndexes' || step.op === 'createSearchIndexes';
+    return { error, actions: together ? step.actions : [step.actions[0]], extra: {} };
   }
 }
 
@@ -371,7 +430,35 @@ function settleRest(result) {
   }
 }
 
-function finalize(result) {
+/** Whether a row's build state is a search index serving its latest definition */
+function buildReady(build) {
+  return (
+    build.queryable === true &&
+    build.updating !== true &&
+    (build.status === 'READY' || build.status === 'UNKNOWN')
+  );
+}
+
+/**
+ * The run's word on Search, when search indexes are declared: whether the
+ * server has it, and every declared index that exists but does not serve its
+ * latest definition yet — building, updating, or failed.
+ */
+function searchSummary(result, search) {
+  const notReady = [];
+  for (const collection of result.collections) {
+    for (const action of collection.actions) {
+      if (action.target !== 'searchIndex' || action.build === undefined) continue;
+      if (!['create', 'modify', 'unchanged'].includes(action.action)) continue;
+      if (buildReady(action.build)) continue;
+      notReady.push({ collection: collection.name, name: action.name, ...action.build });
+    }
+  }
+  return { available: search.available, notReady };
+}
+
+function finalize(result, search) {
+  if (search?.declared) result.search = searchSummary(result, search);
   const { changes, applied, conflicts } = summarize(result.collections);
   if (result.dryRun) {
     result.changed = changes;
@@ -421,8 +508,7 @@ function announce(deps, collection, step) {
       status: 'started',
       ...(action.reason !== undefined ? { reason: action.reason } : {}),
     });
-    const what = action.target === 'index' ? `${action.name} on ${collection}` : collection;
-    const line = `… ${STARTING[action.action] ?? action.action} ${action.target} ${what}`;
+    const line = `… ${STARTING[action.action] ?? action.action} ${whatOf(action, collection)}`;
     const fields = deps.fields({
       collection,
       target: action.target,
@@ -486,15 +572,17 @@ async function recordHistory(deps, options, result, { startedAt, error }) {
 }
 
 /**
- * Undeclared indexes left in place because prune was off — not the ones that
- * back a shard key, which stay under prune too: "converge with prune to drop
- * them" would be wrong advice for those.
+ * Undeclared indexes and search indexes left in place because prune was off —
+ * not the ones that back a shard key (or are being deleted), which stay under
+ * prune too: "converge with prune to drop them" would be wrong advice there.
  */
 function undeclaredKept(result) {
-  let kept = 0;
+  const kept = { indexes: 0, searchIndexes: 0 };
   for (const collection of result.collections) {
     for (const action of collection.actions) {
-      if (action.action === 'keep' && action.reason === 'not declared') kept += 1;
+      if (action.action !== 'keep' || action.reason !== 'not declared') continue;
+      if (action.target === 'searchIndex') kept.searchIndexes += 1;
+      else kept.indexes += 1;
     }
   }
   return kept;
@@ -523,11 +611,18 @@ async function readAndPlan(deps, options) {
   const pruneFor = (definition) => definition.prune ?? options.prune ?? false;
   const server = await readServer(db);
   const capabilities = inPlaceCapabilities(server.version);
+  const search = {
+    declared: definitions.some((definition) => definition.searchIndexes !== undefined),
+    available: true,
+    onUnavailable: options.search?.onUnavailable ?? 'fail',
+  };
+  // Reads `search` at call time: a skip at apply time turns Search off for the rest of the run.
   const planFor = (definition, live) =>
     planCollection(definition, live, {
       prune: pruneFor(definition),
       rebuildUnique: options.rebuildUnique === true,
       capabilities,
+      search: { available: search.available, onUnavailable: search.onUnavailable },
     });
 
   const names = definitions.map((definition) => definition.name);
@@ -538,25 +633,152 @@ async function readAndPlan(deps, options) {
       if (shardKeys.has(name)) live[position].shardKey = shardKeys.get(name);
     }
   }
+  if (search.declared) await readSearch(deps, server, definitions, live, search);
   const plans = definitions.map((definition, position) => planFor(definition, live[position]));
-  // `indexes: []` with prune reads as "no indexes here" — every one but _id
-  // goes. Legitimate, and easy to write by accident: say it out loud.
   for (const [position, definition] of definitions.entries()) {
-    const drops = plans[position].actions.filter((action) => action.action === 'drop');
-    if (definition.indexes?.length === 0 && pruneFor(definition) && drops.length > 0) {
-      deps.logger.warn(
-        `⚠ ${definition.name}: indexes: [] with prune drops every index but _id ` +
-          `(${drops.map((action) => action.name).join(', ')})`,
-        deps.fields({ collection: definition.name, drops: drops.length }),
-      );
-    }
+    warnDropEverything(deps, definition, plans[position], pruneFor(definition));
   }
-  return { planFor, live, plans };
+  return { planFor, live, plans, search };
+}
+
+/**
+ * `indexes: []` (or `searchIndexes: []`) with prune reads as "none here" —
+ * every index but _id goes. Legitimate, and easy to write by accident: say it
+ * out loud.
+ */
+function warnDropEverything(deps, definition, plan, prune) {
+  if (!prune) return;
+  for (const [key, target, what] of [
+    ['indexes', 'index', 'every index but _id'],
+    ['searchIndexes', 'searchIndex', 'every search index'],
+  ]) {
+    const drops = plan.actions.filter(
+      (action) => action.target === target && action.action === 'drop',
+    );
+    if (definition[key]?.length !== 0 || drops.length === 0) continue;
+    deps.logger.warn(
+      `⚠ ${definition.name}: ${key}: [] with prune drops ${what} ` +
+        `(${drops.map((action) => action.name).join(', ')})`,
+      deps.fields({ collection: definition.name, drops: drops.length }),
+    );
+  }
+}
+
+/** A search index read that failed for a reason other than "no Search here" */
+function searchReadFailure(error, collection) {
+  if (error instanceof MigronautError) return error;
+  const mongoCode = typeof error?.code === 'number' ? error.code : undefined;
+  const hint = searchHint(error);
+  const cause = errorText(error);
+  return new ConvergeFailedError(
+    `Could not read the search indexes of ${collection}: ${cause}${hint ? ` — ${hint}` : ''}`,
+    {
+      phase: 'plan',
+      collection,
+      target: 'searchIndex',
+      cause,
+      ...(mongoCode !== undefined ? { mongoCode } : {}),
+      ...(hint ? { hint } : {}),
+    },
+    { cause: error },
+  );
+}
+
+/**
+ * The search half of the read phase: whether the server has Atlas Search
+ * (one probe, cached in `search` for the run), and the live search indexes of
+ * every existing collection that declares some. Collections that declare
+ * none are never asked — a run without `searchIndexes` makes no search call.
+ */
+async function readSearch(deps, server, definitions, live, search) {
+  const declaring = [];
+  for (const [position, definition] of definitions.entries()) {
+    if (definition.searchIndexes !== undefined) declaring.push(position);
+  }
+  const isRegular = (position) => live[position].exists && live[position].type === 'collection';
+  const existing = declaring.filter(isRegular);
+  // A view or a time-series collection is refused by the planner anyway.
+  const target = existing[0] ?? declaring.find((position) => !live[position].exists);
+  if (target === undefined) return;
+  const targetName = definitions[target].name;
+  let probe;
+  try {
+    probe = await probeSearch(deps.db, server, {
+      collection: targetName,
+      readOptions: READ_OPTIONS,
+    });
+  } catch (error) {
+    throw searchReadFailure(error, targetName);
+  }
+  search.available = probe.available;
+  search.evidence = probe.evidence;
+  if (!probe.available) {
+    deps.logger.debug(
+      `Atlas Search is not available: ${probe.reason}`,
+      deps.fields({ evidence: probe.evidence }),
+    );
+    warnSkipping(deps, definitions, search);
+    return;
+  }
+  if (probe.evidence === 'assumed') {
+    deps.logger.debug(
+      'Atlas Search assumed available: the server listed no search index and would not say more',
+      deps.fields({ evidence: probe.evidence }),
+    );
+  }
+  await mapLimit(existing, READ_CONCURRENCY, async (position) => {
+    if (position === target) {
+      live[position].searchIndexes = probe.listed;
+      return;
+    }
+    live[position].searchIndexes = await readSearchIndexes(deps, definitions[position].name);
+  });
+}
+
+async function readSearchIndexes(deps, name) {
+  try {
+    return await listSearchIndexes(deps.db, name, READ_OPTIONS);
+  } catch (error) {
+    throw searchReadFailure(error, name);
+  }
+}
+
+/** In skip mode, one line for every declared search index the run will not touch */
+function warnSkipping(deps, definitions, search) {
+  if (search.onUnavailable !== 'skip') return;
+  let count = 0;
+  for (const definition of definitions) count += definition.searchIndexes?.length ?? 0;
+  if (count === 0) return;
+  deps.logger.warn(
+    `⚠ Atlas Search is not available on this server — skipping ${count} declared search ` +
+      "index(es) (onSearchUnavailable: 'skip')",
+    deps.fields({ skipped: count }),
+  );
+}
+
+/**
+ * One collection's live state read afresh — its search indexes too, when it
+ * declares any and the server has Search — for a re-plan or the verify phase.
+ */
+async function readFresh(run, position) {
+  const { deps, definitions, live, search } = run;
+  const definition = definitions[position];
+  const fresh = await readLiveState(deps.db, definition.name);
+  if (live[position].shardKey) fresh.shardKey = live[position].shardKey;
+  if (
+    search.available &&
+    definition.searchIndexes !== undefined &&
+    fresh.exists &&
+    fresh.type === 'collection'
+  ) {
+    fresh.searchIndexes = await readSearchIndexes(deps, definition.name);
+  }
+  return fresh;
 }
 
 /** A dry run's answer: the plan as the result, and one line about it */
-function reportPlan(deps, result) {
-  finalize(result);
+function reportPlan(deps, result, search) {
+  finalize(result, search);
   const total = result.collections.length;
   const line =
     `◎ Planned  ${result.changed} change(s) in ${touched(result)} of ${total} ` + 'collection(s)';
@@ -584,6 +806,7 @@ function refuseConflicts(result) {
   }
   if (conflicts.length === 0) return;
   settleRest(result);
+  const unavailable = conflicts.some((conflict) => conflict.reason === SEARCH_UNAVAILABLE_REASON);
   throw new ConvergeFailedError(
     `Converge refused: ${conflicts.length} conflict(s) — ` +
       conflicts
@@ -592,8 +815,14 @@ function refuseConflicts(result) {
             ? `${conflict.collection} ${conflict.reason}`
             : `${conflict.collection} ${describe(conflict)}: ${conflict.reason}`,
         )
-        .join('; '),
-    { phase: 'plan', conflicts, converge: result },
+        .join('; ') +
+      (unavailable ? ` — ${SEARCH_UNAVAILABLE_HINT}` : ''),
+    {
+      phase: 'plan',
+      conflicts,
+      ...(unavailable ? { hint: SEARCH_UNAVAILABLE_HINT } : {}),
+      converge: result,
+    },
   );
 }
 
@@ -605,11 +834,9 @@ function refuseConflicts(result) {
  * touched, rather than act on what nobody reviewed.
  */
 async function replan(run, position) {
-  const { deps, definitions, live, plans, result, planFor } = run;
+  const { definitions, plans, result, planFor } = run;
   const definition = definitions[position];
-  const fresh = await readLiveState(deps.db, definition.name);
-  if (live[position].shardKey) fresh.shardKey = live[position].shardKey;
-  const plan = planFor(definition, fresh);
+  const plan = planFor(definition, await readFresh(run, position));
   const known = new Set(
     plans[position].actions.map((action) => `${action.target}:${action.name}:${action.action}`),
   );
@@ -665,9 +892,13 @@ function settler(deps, collection) {
       durationMs,
       ...(action.reason !== undefined ? { reason: action.reason } : {}),
     });
-    const what = action.target === 'index' ? `${action.name} on ${collection}` : collection;
+    // A search index is only accepted here; the server builds it afterwards.
+    const building =
+      action.target === 'searchIndex' && action.action !== 'drop'
+        ? ' — building on the server'
+        : '';
     deps.logger.info(
-      `${LABELS[action.action]} ${action.target} ${what}   [${durationMs}ms]`,
+      `${LABELS[action.action]} ${whatOf(action, collection)}   [${durationMs}ms]${building}`,
       deps.fields({
         collection,
         target: action.target,
@@ -684,7 +915,7 @@ function settler(deps, collection) {
  * indexes the server would not let go of (a shard key's), which the verify
  * phase must not report as unstable. A failed step stops the run.
  */
-async function applyCollection(deps, plan, result, signal) {
+async function applyCollection(deps, plan, result, signal, search) {
   const kept = new Set();
   const settle = settler(deps, plan.name);
   for (const step of plan.steps) {
@@ -697,7 +928,18 @@ async function applyCollection(deps, plan, result, signal) {
       throw attachConverge(error, result);
     }
     announce(deps, plan.name, step);
-    const failure = await runStep(deps.db, plan.name, step, settle);
+    const failure = await runStep(deps.db, plan.name, step, settle, search);
+    if (failure?.skipped) {
+      // Search turned out to be missing after all: the rest of the run plans
+      // every search index as skipped instead of asking again.
+      search.available = false;
+      deps.logger.warn(
+        `⚠ ${plan.name}: Atlas Search refused ${describeAll(step.actions)} — skipped ` +
+          "(onSearchUnavailable: 'skip')",
+        deps.fields({ collection: plan.name }),
+      );
+      continue;
+    }
     if (failure?.kept) {
       for (const action of step.actions) {
         kept.add(action.name);
@@ -735,11 +977,22 @@ async function applyCollection(deps, plan, result, signal) {
  * it is reported in `result.unstable` instead of silently rebuilt forever.
  */
 async function verifyFixedPoint(run, position, kept) {
-  const { deps, definitions, live, result, planFor } = run;
+  const { deps, definitions, result, planFor } = run;
   const definition = definitions[position];
-  const afterLive = await readLiveState(deps.db, definition.name);
-  if (live[position].shardKey) afterLive.shardKey = live[position].shardKey;
-  const after = planFor(definition, afterLive);
+  let after = planFor(definition, await readFresh(run, position));
+  // The search index list catches up with a create or an update a moment
+  // later: read it again a few times before calling anything unstable.
+  const rows = result.collections[position].actions;
+  const submitted = rows.some((row) => row.target === 'searchIndex' && row.status === 'applied');
+  for (const delay of submitted ? SEARCH_SETTLE_DELAYS_MS : []) {
+    const pending = after.actions.some(
+      (action) => action.target === 'searchIndex' && CHANGE_ACTIONS.has(action.action),
+    );
+    if (!pending) break;
+    await (deps.sleep ?? pause)(delay);
+    after = planFor(definition, await readFresh(run, position));
+  }
+  refreshBuilds(rows, after.actions);
   for (const action of after.actions) {
     if (!CHANGE_ACTIONS.has(action.action)) continue;
     if (action.action === 'drop' && kept.has(action.name)) continue;
@@ -758,12 +1011,57 @@ async function verifyFixedPoint(run, position, kept) {
   }
 }
 
+/** The build state each search index row now has, from the verify phase's read */
+function refreshBuilds(rows, fresh) {
+  const builds = new Map();
+  for (const action of fresh) {
+    if (action.target === 'searchIndex' && action.build !== undefined) {
+      builds.set(action.name, action.build);
+    }
+  }
+  for (const row of rows) {
+    if (row.target === 'searchIndex' && builds.has(row.name)) row.build = builds.get(row.name);
+  }
+}
+
+/** Closing lines about search indexes that do not serve their declaration yet */
+function reportNotReady(deps, result) {
+  const notReady = result.search?.notReady ?? [];
+  const building = notReady.filter((index) => index.status !== 'FAILED');
+  if (building.length > 0) {
+    deps.logger.info(
+      `• ${building.length} search index(es) still building on the server: ` +
+        building.map((index) => `${index.collection}.${index.name}`).join(', '),
+      deps.fields({ building: building.length }),
+    );
+  }
+  for (const index of notReady) {
+    if (index.status !== 'FAILED') continue;
+    deps.logger.warn(
+      `⚠ ${index.collection}: search index "${index.name}" failed to build` +
+        `${index.message ? `: ${index.message}` : ''} — converge does not resubmit an unchanged ` +
+        'definition; fix the definition or the data',
+      deps.fields({ collection: index.collection, searchIndex: index.name }),
+    );
+  }
+}
+
+/** "Kept 2 undeclared index(es) and 1 search index(es)" — the parts there are */
+function keptLine(kept) {
+  const parts = [];
+  if (kept.indexes > 0) parts.push(`${kept.indexes} undeclared index(es)`);
+  if (kept.searchIndexes > 0) {
+    parts.push(`${kept.searchIndexes} ${kept.indexes > 0 ? '' : 'undeclared '}search index(es)`);
+  }
+  return parts.length > 0 ? `• Kept ${parts.join(' and ')} — converge with prune to drop them` : '';
+}
+
 /** A converge that ran to the end: its closing lines, its history entry, `converge:end` */
-async function reportSuccess(deps, options, result, startedAt) {
+async function reportSuccess(deps, options, result, startedAt, search) {
   const { logger } = deps;
   const total = result.collections.length;
   settleRest(result);
-  finalize(result);
+  finalize(result, search);
   const durationMs = Date.now() - startedAt;
   const kept = undeclaredKept(result);
   if (result.changed > 0) {
@@ -778,12 +1076,11 @@ async function reportSuccess(deps, options, result, startedAt) {
       deps.fields({ collections: total, durationMs }),
     );
   }
-  if (kept > 0) {
-    logger.info(
-      `• Kept ${kept} undeclared index(es) — converge with prune to drop them`,
-      deps.fields({ kept }),
-    );
+  const line = keptLine(kept);
+  if (line) {
+    logger.info(line, deps.fields({ kept: kept.indexes + kept.searchIndexes }));
   }
+  reportNotReady(deps, result);
   await recordHistory(deps, options, result, { startedAt });
   deps.emit('converge:end', {
     trigger: options.trigger ?? 'converge',
@@ -797,8 +1094,8 @@ async function reportSuccess(deps, options, result, startedAt) {
 }
 
 /** A converge that stopped: its history entry and `converge:end` — the error is the caller's */
-async function reportFailure(deps, options, result, startedAt, error) {
-  finalize(result);
+async function reportFailure(deps, options, result, startedAt, error, search) {
+  finalize(result, search);
   await recordHistory(deps, options, result, { startedAt, error });
   deps.emit('converge:end', {
     trigger: options.trigger ?? 'converge',
@@ -817,11 +1114,13 @@ async function reportFailure(deps, options, result, startedAt, error) {
  * read → plan → guard → (per collection: re-plan → apply → verify) → report.
  *
  * `options`: `{ definitions, prune?, rebuildUnique?, dryRun?, trigger?, requestedBy?,
- * reason? }` —
+ * reason?, search? }` —
  * `definitions` normalized (collections.js); `prune` the default for
  * definitions that do not set their own; `rebuildUnique` lets a rebuild drop a
  * unique index it builds back (a conflict otherwise); `trigger` is
- * `'converge'` or `'up'` (the after-up hook), for events and logs.
+ * `'converge'` or `'up'` (the after-up hook), for events and logs; `search`
+ * is `{ onUnavailable }` — `'fail'` (the default) refuses declared search
+ * indexes on a server without Atlas Search, `'skip'` converges without them.
  *
  * A plan with any conflict refuses the whole run before the first write. A
  * failed step stops the run (`ConvergeFailedError`); an abort between steps
@@ -831,16 +1130,22 @@ async function reportFailure(deps, options, result, startedAt, error) {
 async function runConverge(deps, options, signal) {
   const { definitions, dryRun = false, trigger = 'converge' } = options;
   const startedAt = Date.now();
-  const { planFor, live, plans } = await readAndPlan(deps, options);
+  let planned;
+  try {
+    planned = await readAndPlan(deps, options);
+  } catch (error) {
+    throw attachConverge(error, { dryRun, changed: 0, inSync: false, collections: [] });
+  }
+  const { planFor, live, plans, search } = planned;
   const result = {
     dryRun,
     changed: 0,
     inSync: true,
     collections: plans.map(({ name, actions }) => ({ name, actions })),
   };
-  if (dryRun) return reportPlan(deps, result);
+  if (dryRun) return reportPlan(deps, result, search);
 
-  const run = { deps, definitions, live, plans, result, planFor };
+  const run = { deps, definitions, live, plans, result, planFor, search };
   deps.emit('converge:start', { trigger, collections: definitions.length });
   try {
     refuseConflicts(result);
@@ -853,15 +1158,15 @@ async function runConverge(deps, options, signal) {
       result.collections[position].actions = plan.actions;
       warnRenamed(deps, plan);
       if (plan.steps.length === 0) continue;
-      const kept = await applyCollection(deps, plan, result, signal);
+      const kept = await applyCollection(deps, plan, result, signal, search);
       await verifyFixedPoint(run, position, kept);
     }
-    await reportSuccess(deps, options, result, startedAt);
+    await reportSuccess(deps, options, result, startedAt, search);
     return result;
   } catch (error) {
-    await reportFailure(deps, options, result, startedAt, error);
+    await reportFailure(deps, options, result, startedAt, error, search);
     throw error;
   }
 }
 
-module.exports = { READ_OPTIONS, readLiveState, readLiveStates, runConverge };
+module.exports = { READ_OPTIONS, readLiveState, readLiveStates, readServer, runConverge };

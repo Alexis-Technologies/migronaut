@@ -358,6 +358,9 @@ function configBody(values, createExtension) {
   // collectionsDir: './collections',
   // Converge at the end of every bulk \`migronaut up\`.
   // convergeAfterUp: false,
+  // Search indexes declared for a server without Atlas Search: refuse the
+  // converge ('fail'), or converge everything else and skip them ('skip').
+  // onSearchUnavailable: 'fail',
 
   // ── Lifecycle hooks (code only — not available in JSON config) ──
   // hooks: {

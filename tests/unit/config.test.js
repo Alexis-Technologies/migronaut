@@ -293,6 +293,7 @@ describe('loadConfig', () => {
     for (const [key, value] of [
       ['MIGRONAUT_CREATE_EXTENSION', 'tsx'],
       ['MIGRONAUT_ON_LOCK_LOST', 'ignore'],
+      ['MIGRONAUT_ON_SEARCH_UNAVAILABLE', 'ignore'],
     ]) {
       process.env[key] = value;
       await assert.rejects(
@@ -317,6 +318,7 @@ describe('loadConfig', () => {
     process.env.MIGRONAUT_ENVIRONMENT = 'staging';
     process.env.MIGRONAUT_COLLECTIONS_DIR = './db/collections';
     process.env.MIGRONAUT_CONVERGE_AFTER_UP = 'yes';
+    process.env.MIGRONAUT_ON_SEARCH_UNAVAILABLE = ' skip ';
     const config = await loadConfig({
       cwd: tmp,
       flags: { uri: 'mongodb://x:27017', dbName: 'x' },
@@ -329,11 +331,13 @@ describe('loadConfig', () => {
     assert.strictEqual(config.environment, 'staging');
     assert.strictEqual(config.collectionsDir, './db/collections');
     assert.strictEqual(config.convergeAfterUp, true);
+    assert.strictEqual(config.onSearchUnavailable, 'skip');
   });
 
   it('should default convergeAfterUp to false and leave collections unset', async () => {
     const config = await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } });
     assert.strictEqual(config.convergeAfterUp, false);
+    assert.strictEqual(config.onSearchUnavailable, 'fail');
     assert.strictEqual(config.collections, undefined);
     assert.strictEqual(config.collectionsDir, undefined);
   });

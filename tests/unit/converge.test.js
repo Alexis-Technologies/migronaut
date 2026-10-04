@@ -7,20 +7,138 @@ const { ConvergeFailedError, RunAbortedError } = require('../../src/errors/index
 const serverError = (code, message = `server error ${code}`) =>
   Object.assign(new Error(message), { code });
 
+/** A search index as the fake stores it: what `$listSearchIndexes` is built from */
+const searchIndex = (name, definition, fields = {}) => ({
+  name,
+  type: Array.isArray(definition.fields) ? 'vectorSearch' : 'search',
+  definition,
+  status: 'READY',
+  queryable: true,
+  version: 0,
+  ...fields,
+});
+
 /**
  * An in-memory stand-in for the few database calls converge makes. It stores
  * indexes the way the server reports them (`v`, a plain key object, options
  * as given), records every write in `ops`, and lets a test make any call fail.
+ *
+ * Search, when `search` is set: `'atlas'` (the commands work; `parameter`
+ * answers getParameter), `{ unavailable: code }` (every search call fails
+ * like a plain mongod), or `'empty'` (lists answer `[]`, commands fail — a
+ * plain mongod of 7.0). `lag` makes the first read after a search write stale,
+ * `normalize` is what the server does to a stored definition, `readyAfter`
+ * how many list reads a created or updated index takes to become READY.
  */
-function fakeDb(collections = {}, { fail = {}, reads = [], server } = {}) {
+function fakeDb(
+  collections = {},
+  {
+    fail = {},
+    reads = [],
+    server,
+    search,
+    parameter = 'localhost:27027',
+    lag = 0,
+    normalize = (definition) => definition,
+    readyAfter,
+  } = {},
+) {
   const state = {};
   for (const [name, spec] of Object.entries(collections)) {
     state[name] = {
       type: spec.type ?? 'collection',
       options: spec.options ?? {},
       indexes: [{ v: 2, key: { _id: 1 }, name: '_id_' }, ...(spec.indexes ?? [])],
+      searchIndexes: (spec.searchIndexes ?? []).map((index) => ({ ...index })),
     };
   }
+  const unavailable = () =>
+    search === 'empty'
+      ? serverError(59, "no such command: 'createSearchIndexes'")
+      : serverError(search.unavailable, search.message ?? 'Search is not enabled');
+  const listed = (index) => ({
+    id: `id-${index.name}`,
+    name: index.name,
+    ...(index.hideType ? {} : { type: index.type }),
+    status: index.status,
+    queryable: index.queryable,
+    latestDefinitionVersion: { version: index.version },
+    latestDefinition: index.definition,
+    ...(index.message ? { message: index.message } : {}),
+  });
+  // Stale reads: the list a collection showed before its last search write.
+  const stale = new Map();
+  const searchWrite = (name) => {
+    if (lag > 0) stale.set(name, { left: lag, snapshot: state[name].searchIndexes.map(listed) });
+  };
+  const listSearch = (name) => {
+    const entry = stale.get(name);
+    if (entry && entry.left > 0) {
+      entry.left -= 1;
+      return entry.snapshot;
+    }
+    const indexes = state[name]?.searchIndexes ?? [];
+    for (const index of indexes) {
+      if (index.pendingReads === undefined) continue;
+      index.pendingReads -= 1;
+      if (index.pendingReads <= 0) {
+        index.status = 'READY';
+        index.queryable = true;
+        delete index.pendingReads;
+      }
+    }
+    return indexes.map(listed);
+  };
+  const building = () => ({
+    status: 'PENDING',
+    queryable: false,
+    ...(readyAfter !== undefined ? { pendingReads: readyAfter } : {}),
+  });
+  const searchCommand = (command) => {
+    if (search !== 'atlas') throw unavailable();
+    if (command.createSearchIndexes !== undefined) {
+      const name = command.createSearchIndexes;
+      for (const spec of command.indexes) ops.push(`createSearchIndex ${name}.${spec.name}`);
+      maybeFail('createSearchIndexes');
+      if (!state[name]) throw serverError(26, `Collection ${name} does not exist`);
+      searchWrite(name);
+      for (const spec of command.indexes) {
+        state[name].searchIndexes.push({
+          name: spec.name,
+          type: spec.type ?? 'search',
+          definition: normalize(spec.definition),
+          version: 0,
+          ...building(),
+        });
+      }
+      return { ok: 1, indexesCreated: command.indexes.map((spec) => ({ name: spec.name })) };
+    }
+    if (command.updateSearchIndex !== undefined) {
+      const name = command.updateSearchIndex;
+      ops.push(
+        `updateSearchIndex ${name}.${command.name}${command.type ? ` (${command.type})` : ''}`,
+      );
+      maybeFail('updateSearchIndex');
+      const index = state[name].searchIndexes.find((candidate) => candidate.name === command.name);
+      searchWrite(name);
+      index.definition = normalize(command.definition);
+      index.version += 1;
+      if (readyAfter !== undefined) {
+        index.status = 'BUILDING';
+        index.pendingReads = readyAfter;
+      }
+      return { ok: 1 };
+    }
+    const name = command.dropSearchIndex;
+    ops.push(`dropSearchIndex ${name}.${command.name}`);
+    maybeFail('dropSearchIndex');
+    const indexes = state[name]?.searchIndexes ?? [];
+    const position = indexes.findIndex((index) => index.name === command.name);
+    if (position === -1) throw serverError(27, 'index not found');
+    searchWrite(name);
+    indexes.splice(position, 1);
+    return { ok: 1 };
+  };
   const ops = [];
   const maybeFail = (op) => {
     const failure = fail[op];
@@ -35,10 +153,16 @@ function fakeDb(collections = {}, { fail = {}, reads = [], server } = {}) {
     state,
     ops,
     // `server`: { version: [major, minor], mongos } — absent, the fake says nothing.
-    ...(server
+    ...(server || search
       ? {
           admin: () => ({
             command: async (command) => {
+              if (command.getParameter) {
+                reads.push(['getParameter']);
+                if (typeof parameter === 'number') throw serverError(parameter, 'getParameter');
+                return { searchIndexManagementHostAndPort: parameter, ok: 1 };
+              }
+              if (!server) throw serverError(13, 'not authorized');
               if (command.hello) return server.mongos ? { msg: 'isdbgrid' } : {};
               return { versionArray: [...server.version, 0, 0] };
             },
@@ -64,9 +188,17 @@ function fakeDb(collections = {}, { fail = {}, reads = [], server } = {}) {
         type: 'collection',
         options: { ...options },
         indexes: [{ v: 2, key: { _id: 1 }, name: '_id_' }],
+        searchIndexes: [],
       };
     },
     command: async (command) => {
+      if (
+        command.createSearchIndexes !== undefined ||
+        command.updateSearchIndex !== undefined ||
+        command.dropSearchIndex !== undefined
+      ) {
+        return searchCommand(command);
+      }
       const { collMod, ...rest } = command;
       ops.push(`collMod ${collMod} ${rest.index ? rest.index.name : 'validator'}`);
       maybeFail('collMod');
@@ -91,6 +223,17 @@ function fakeDb(collections = {}, { fail = {}, reads = [], server } = {}) {
       return { ok: 1 };
     },
     collection: (name) => ({
+      aggregate: (pipeline, options) => ({
+        toArray: async () => {
+          reads.push(['aggregate', name, options]);
+          assert.deepStrictEqual(pipeline, [{ $listSearchIndexes: {} }]);
+          maybeFail('listSearchIndexes');
+          if (search === undefined) throw new Error('this fake has no search');
+          if (search === 'empty') return [];
+          if (search !== 'atlas') throw unavailable();
+          return listSearch(name);
+        },
+      }),
       listIndexes: (options) => ({
         toArray: async () => {
           reads.push(['listIndexes', options]);
@@ -107,6 +250,7 @@ function fakeDb(collections = {}, { fail = {}, reads = [], server } = {}) {
           type: 'collection',
           options: {},
           indexes: [{ v: 2, key: { _id: 1 }, name: '_id_' }],
+          searchIndexes: [],
         };
         for (const spec of specs) {
           const { key, ...options } = spec;
@@ -141,6 +285,7 @@ function makeDeps(db, overrides = {}) {
       fields: (extra) => ({ runId: 'run-1', ...extra }),
       emit: (event, payload) => events.push([event, payload]),
       assertNotAborted: overrides.assertNotAborted ?? (() => undefined),
+      sleep: overrides.sleep ?? (async () => undefined),
     },
   };
 }
@@ -1071,5 +1216,498 @@ describe('runConverge — the fixed-point check', () => {
         (line) => line.level === 'warn' && /would change again on every run/.test(line.message),
       ),
     );
+  });
+});
+
+describe('runConverge — search indexes', () => {
+  const DYNAMIC = { mappings: { dynamic: true } };
+  const VECTOR = {
+    fields: [{ type: 'vector', path: 'embedding', numDimensions: 3, similarity: 'cosine' }],
+  };
+  const run = (deps, list, options = {}) =>
+    runConverge(deps, { definitions: definitions(...list), ...options }, undefined);
+  const rowsOf = (result) =>
+    result.collections.flatMap((collection) =>
+      collection.actions.map(
+        (action) => `${collection.name}:${action.target}:${action.name}:${action.action}`,
+      ),
+    );
+
+  it('should make no search call at all when no definition declares search indexes', async () => {
+    const reads = [];
+    const db = fakeDb({ c: { indexes: [] } }, { reads, search: 'atlas' });
+    const { deps } = makeDeps(db);
+    const result = await run(deps, [{ name: 'c', indexes: [{ key: { a: 1 } }] }]);
+    assert.ok(!reads.some(([kind]) => kind === 'aggregate' || kind === 'getParameter'));
+    assert.ok(!('search' in result), 'no search summary without declared search indexes');
+  });
+
+  it('should create search indexes — on a missing collection too — and say they are building', async () => {
+    const db = fakeDb({ movies: {} }, { search: 'atlas' });
+    const { deps, events, lines } = makeDeps(db);
+    const result = await run(deps, [
+      {
+        name: 'movies',
+        searchIndexes: [
+          { definition: DYNAMIC },
+          { name: 'plot', type: 'vectorSearch', definition: VECTOR },
+        ],
+      },
+      { name: 'shows', searchIndexes: [{ definition: DYNAMIC }] },
+    ]);
+    assert.deepStrictEqual(db.ops, [
+      'createSearchIndex movies.default',
+      'createSearchIndex movies.plot',
+      'createCollection shows',
+      'createSearchIndex shows.default',
+    ]);
+    assert.strictEqual(db.state.movies.searchIndexes[1].type, 'vectorSearch');
+    assert.strictEqual(result.changed, 4);
+    assert.strictEqual(result.inSync, true, 'a build under way is not drift');
+    assert.deepStrictEqual(result.collections[0].actions[0].build, {
+      status: 'PENDING',
+      queryable: false,
+    });
+    assert.deepStrictEqual(result.search, {
+      available: true,
+      notReady: [
+        { collection: 'movies', name: 'default', status: 'PENDING', queryable: false },
+        { collection: 'movies', name: 'plot', status: 'PENDING', queryable: false },
+        { collection: 'shows', name: 'default', status: 'PENDING', queryable: false },
+      ],
+    });
+    const applied = events.filter(
+      ([event, payload]) => event === 'converge:action' && payload.status === 'applied',
+    );
+    assert.deepStrictEqual(
+      applied.map(([, payload]) => `${payload.target}:${payload.name}`),
+      ['searchIndex:default', 'searchIndex:plot', 'collection:shows', 'searchIndex:default'],
+    );
+    assert.ok(
+      lines.some((line) =>
+        /Created {2}search index default on movies .*building on the server/.test(line.message),
+      ),
+    );
+    assert.ok(lines.some((line) => /3 search index\(es\) still building/.test(line.message)));
+  });
+
+  it('should update in place without a type, and restate the type only when the server asks', async () => {
+    const db = fakeDb(
+      {
+        movies: {
+          searchIndexes: [
+            searchIndex('default', { mappings: { dynamic: false } }, { version: 2 }),
+            searchIndex('plot', VECTOR),
+          ],
+        },
+      },
+      {
+        search: 'atlas',
+        fail: {
+          updateSearchIndex: () =>
+            db.ops.at(-1) === 'updateSearchIndex movies.plot'
+              ? serverError(8, '"userCommand.mappings" is required')
+              : undefined,
+        },
+      },
+    );
+    const { deps } = makeDeps(db);
+    const result = await run(deps, [
+      {
+        name: 'movies',
+        searchIndexes: [
+          { definition: DYNAMIC },
+          {
+            name: 'plot',
+            type: 'vectorSearch',
+            definition: { fields: [{ ...VECTOR.fields[0], similarity: 'dotProduct' }] },
+          },
+        ],
+      },
+    ]);
+    assert.deepStrictEqual(db.ops, [
+      'updateSearchIndex movies.default',
+      'updateSearchIndex movies.plot',
+      'updateSearchIndex movies.plot (vectorSearch)',
+    ]);
+    assert.deepStrictEqual(rowsOf(result), [
+      'movies:searchIndex:default:modify',
+      'movies:searchIndex:plot:modify',
+    ]);
+    assert.strictEqual(result.collections[0].actions[0].reason, 'mappings');
+    assert.strictEqual(db.state.movies.searchIndexes[0].version, 3);
+  });
+
+  it('should drop an undeclared search index under prune, last, and keep it otherwise', async () => {
+    const collections = () => ({
+      movies: {
+        indexes: [{ v: 2, key: { old: 1 }, name: 'old_1' }],
+        searchIndexes: [searchIndex('legacy', DYNAMIC)],
+      },
+    });
+    const pruned = fakeDb(collections(), { search: 'atlas' });
+    await run(makeDeps(pruned).deps, [
+      { name: 'movies', indexes: [{ key: { a: 1 } }], searchIndexes: [], prune: true },
+    ]);
+    assert.deepStrictEqual(pruned.ops, [
+      'createIndex movies.a_1',
+      'dropIndex movies.old_1',
+      'dropSearchIndex movies.legacy',
+    ]);
+
+    const kept = fakeDb(collections(), { search: 'atlas' });
+    const { deps, lines } = makeDeps(kept);
+    const result = await run(deps, [
+      { name: 'movies', indexes: [{ key: { a: 1 } }], searchIndexes: [] },
+    ]);
+    assert.deepStrictEqual(kept.ops, ['createIndex movies.a_1']);
+    assert.ok(rowsOf(result).includes('movies:searchIndex:legacy:keep'));
+    assert.ok(
+      lines.some(
+        (line) =>
+          line.message ===
+          '• Kept 1 undeclared index(es) and 1 search index(es) — converge with prune to drop them',
+      ),
+    );
+  });
+
+  it('should say out loud that searchIndexes: [] with prune drops every search index', async () => {
+    const db = fakeDb(
+      { movies: { searchIndexes: [searchIndex('a', DYNAMIC), searchIndex('b', DYNAMIC)] } },
+      { search: 'atlas' },
+    );
+    const { deps, lines } = makeDeps(db);
+    await run(deps, [{ name: 'movies', searchIndexes: [], prune: true }], { dryRun: true });
+    const warning = lines.find((line) => line.level === 'warn');
+    assert.match(
+      warning.message,
+      /searchIndexes: \[\] with prune drops every search index \(a, b\)/,
+    );
+  });
+
+  it('should refuse the whole run before any write where Search is unavailable', async () => {
+    const db = fakeDb({ users: { indexes: [] }, movies: {} }, { search: { unavailable: 31082 } });
+    const { deps } = makeDeps(db);
+    await assert.rejects(
+      run(deps, [
+        { name: 'users', indexes: [{ key: { email: 1 } }] },
+        { name: 'movies', searchIndexes: [{ definition: DYNAMIC }] },
+      ]),
+      (error) => {
+        assert.ok(error instanceof ConvergeFailedError);
+        assert.strictEqual(error.context.phase, 'plan');
+        assert.deepStrictEqual(
+          error.context.conflicts.map((conflict) => [conflict.collection, conflict.target]),
+          [['movies', 'searchIndex']],
+        );
+        assert.match(error.context.hint, /mongodb-atlas-local.*onSearchUnavailable: 'skip'/);
+        assert.match(error.message, /Atlas Search is not available on this server — use Atlas/);
+        assert.strictEqual(error.context.converge.search.available, false);
+        return true;
+      },
+    );
+    assert.deepStrictEqual(db.ops, [], 'nothing written, in any collection');
+  });
+
+  it('should show the refusal in a dry run without throwing', async () => {
+    const db = fakeDb({ movies: {} }, { search: { unavailable: 115 } });
+    const result = await run(
+      makeDeps(db).deps,
+      [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }],
+      {
+        dryRun: true,
+      },
+    );
+    assert.deepStrictEqual(rowsOf(result), ['movies:searchIndex:default:conflict']);
+    assert.strictEqual(result.inSync, false);
+    assert.deepStrictEqual(result.search, { available: false, notReady: [] });
+  });
+
+  it("should converge everything else and skip search indexes with onSearchUnavailable: 'skip'", async () => {
+    const db = fakeDb({ movies: { indexes: [] } }, { search: { unavailable: 31082 } });
+    const { deps, lines } = makeDeps(db);
+    const result = await run(
+      deps,
+      [
+        {
+          name: 'movies',
+          indexes: [{ key: { title: 1 } }],
+          searchIndexes: [
+            { definition: DYNAMIC },
+            { name: 'plot', type: 'vectorSearch', definition: VECTOR },
+          ],
+        },
+      ],
+      { search: { onUnavailable: 'skip' } },
+    );
+    assert.deepStrictEqual(db.ops, ['createIndex movies.title_1']);
+    assert.deepStrictEqual(rowsOf(result), [
+      'movies:index:title_1:create',
+      'movies:searchIndex:default:skip',
+      'movies:searchIndex:plot:skip',
+    ]);
+    assert.strictEqual(result.collections[0].actions[1].status, 'skipped');
+    assert.strictEqual(result.inSync, true);
+    assert.ok(
+      lines.some(
+        (line) =>
+          line.level === 'warn' &&
+          /not available on this server — skipping 2 declared search index\(es\)/.test(
+            line.message,
+          ),
+      ),
+    );
+  });
+
+  it('should skip at apply time when Search turns out to be missing after all', async () => {
+    // An empty list from an old server, and a server that will not say more:
+    // Search is assumed — until the create is refused.
+    const db = fakeDb({ movies: {}, shows: {} }, { search: 'empty', parameter: 13 });
+    const { deps, lines } = makeDeps(db);
+    const result = await run(
+      deps,
+      [
+        { name: 'movies', searchIndexes: [{ definition: DYNAMIC }] },
+        { name: 'shows', indexes: [{ key: { a: 1 } }], searchIndexes: [{ definition: DYNAMIC }] },
+      ],
+      { search: { onUnavailable: 'skip' } },
+    );
+    assert.deepStrictEqual(rowsOf(result), [
+      'movies:searchIndex:default:skip',
+      'shows:index:a_1:create',
+      'shows:searchIndex:default:skip',
+    ]);
+    assert.deepStrictEqual(
+      db.ops,
+      ['createIndex shows.a_1'],
+      'the second collection is not asked again',
+    );
+    assert.strictEqual(result.search.available, false);
+    assert.ok(
+      lines.some((line) =>
+        /Atlas Search refused search index "default" — skipped/.test(line.message),
+      ),
+    );
+  });
+
+  it('should fail with the hint when the server refuses a search index in fail mode', async () => {
+    const db = fakeDb({ movies: {} }, { search: 'empty', parameter: 13 });
+    await assert.rejects(
+      run(makeDeps(db).deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }]),
+      (error) => {
+        assert.strictEqual(error.context.phase, 'apply');
+        assert.strictEqual(error.context.target, 'searchIndex');
+        assert.strictEqual(error.context.mongoCode, 59);
+        assert.match(error.message, /Could not create search index "default" on movies/);
+        assert.match(error.context.hint, /onSearchUnavailable: 'skip'/);
+        return true;
+      },
+    );
+  });
+
+  it('should leave a FAILED build with the declared definition alone, and say why', async () => {
+    const db = fakeDb(
+      {
+        movies: {
+          searchIndexes: [
+            searchIndex('default', DYNAMIC, {
+              status: 'FAILED',
+              queryable: false,
+              message: 'too many fields',
+            }),
+          ],
+        },
+      },
+      { search: 'atlas' },
+    );
+    const { deps, lines } = makeDeps(db);
+    const result = await run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }]);
+    assert.deepStrictEqual(db.ops, []);
+    assert.deepStrictEqual(rowsOf(result), ['movies:searchIndex:default:unchanged']);
+    assert.strictEqual(result.inSync, true);
+    assert.deepStrictEqual(result.search.notReady, [
+      {
+        collection: 'movies',
+        name: 'default',
+        status: 'FAILED',
+        queryable: false,
+        message: 'too many fields',
+      },
+    ]);
+    assert.ok(
+      lines.some(
+        (line) =>
+          line.level === 'warn' &&
+          /search index "default" failed to build: too many fields — converge does not resubmit/.test(
+            line.message,
+          ),
+      ),
+    );
+  });
+
+  it('should read a lagging list again before calling anything unstable', async () => {
+    const pauses = [];
+    const db = fakeDb({ movies: {} }, { search: 'atlas', lag: 2 });
+    const { deps } = makeDeps(db, { sleep: async (ms) => pauses.push(ms) });
+    const result = await run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }]);
+    assert.strictEqual(result.unstable, undefined);
+    assert.deepStrictEqual(pauses, [250, 500]);
+  });
+
+  it('should report a definition the server keeps differently as unstable, not loop', async () => {
+    const db = fakeDb(
+      { movies: {} },
+      { search: 'atlas', normalize: (definition) => ({ ...definition, numPartitions: 2 }) },
+    );
+    const pauses = [];
+    const { deps, lines } = makeDeps(db, { sleep: async (ms) => pauses.push(ms) });
+    const result = await run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }]);
+    assert.deepStrictEqual(result.unstable, [
+      {
+        collection: 'movies',
+        target: 'searchIndex',
+        name: 'default',
+        action: 'modify',
+        reason: 'numPartitions',
+      },
+    ]);
+    assert.deepStrictEqual(pauses, [250, 500, 1000], 'a bounded number of re-reads');
+    assert.strictEqual(result.inSync, false);
+    assert.ok(lines.some((line) => /search index "default" still differs/.test(line.message)));
+  });
+
+  it('should stop before a collection that gained an undeclared search index meanwhile', async () => {
+    const db = fakeDb({ a: { indexes: [] }, b: { searchIndexes: [] } }, { search: 'atlas' });
+    const collection = db.collection;
+    db.collection = (name) => {
+      const handle = collection(name);
+      if (name !== 'a') return handle;
+      return {
+        ...handle,
+        createIndexes: async (specs) => {
+          db.state.b.searchIndexes.push(searchIndex('surprise', DYNAMIC));
+          return handle.createIndexes(specs);
+        },
+      };
+    };
+    await assert.rejects(
+      run(makeDeps(db).deps, [
+        { name: 'a', indexes: [{ key: { x: 1 } }] },
+        { name: 'b', searchIndexes: [], prune: true },
+      ]),
+      (error) => {
+        assert.strictEqual(error.context.phase, 'replan');
+        assert.deepStrictEqual(error.context.introduced, [
+          { target: 'searchIndex', name: 'surprise', action: 'drop', reason: 'not declared' },
+        ]);
+        return true;
+      },
+    );
+    assert.deepStrictEqual(db.ops, ['createIndex a.x_1']);
+  });
+
+  it('should record search index changes with their from and to', async () => {
+    const entries = [];
+    const db = fakeDb(
+      { movies: { searchIndexes: [searchIndex('default', { mappings: { dynamic: false } })] } },
+      { search: 'atlas' },
+    );
+    const { deps } = makeDeps(db);
+    deps.record = async (entry) => entries.push(entry);
+    deps.audit = () => ({ runId: 'run-1' });
+    await run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }]);
+    const [entry] = entries;
+    assert.strictEqual(entry.changed, 1);
+    assert.deepStrictEqual(entry.actions[0].from, {
+      name: 'default',
+      type: 'search',
+      definition: { mappings: { dynamic: false } },
+    });
+    assert.deepStrictEqual(entry.actions[0].to, {
+      name: 'default',
+      type: 'search',
+      definition: DYNAMIC,
+    });
+  });
+
+  it('should wrap a search index list that cannot be read, with what usually fixes it', async () => {
+    const db = fakeDb(
+      { movies: {}, shows: {} },
+      {
+        search: 'atlas',
+        fail: {
+          listSearchIndexes: () =>
+            db.ops.length === 0 && probes++ > 0
+              ? serverError(13, 'not authorized on app')
+              : undefined,
+        },
+      },
+    );
+    let probes = 0;
+    await assert.rejects(
+      run(makeDeps(db).deps, [
+        { name: 'movies', searchIndexes: [{ definition: DYNAMIC }] },
+        { name: 'shows', searchIndexes: [{ definition: DYNAMIC }] },
+      ]),
+      (error) => {
+        assert.ok(error instanceof ConvergeFailedError);
+        assert.strictEqual(error.context.phase, 'plan');
+        assert.strictEqual(error.context.collection, 'shows');
+        assert.strictEqual(error.context.mongoCode, 13);
+        assert.match(error.context.hint, /listSearchIndexes/);
+        assert.deepStrictEqual(error.context.converge.collections, []);
+        return true;
+      },
+    );
+  });
+
+  it('should wrap a probe that fails for a reason other than "no Search here"', async () => {
+    const db = fakeDb(
+      { movies: {} },
+      { search: 'atlas', fail: { listSearchIndexes: serverError(13, 'not authorized on app') } },
+    );
+    await assert.rejects(
+      run(makeDeps(db).deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], {
+        dryRun: true,
+      }),
+      (error) => {
+        assert.ok(error instanceof ConvergeFailedError);
+        assert.strictEqual(error.context.phase, 'plan');
+        assert.strictEqual(error.context.collection, 'movies');
+        assert.strictEqual(error.context.converge.dryRun, true);
+        return true;
+      },
+    );
+  });
+
+  it('should not probe for collections the planner refuses anyway', async () => {
+    const reads = [];
+    const db = fakeDb({ recent: { type: 'view' } }, { reads, search: 'atlas' });
+    const result = await run(
+      makeDeps(db).deps,
+      [{ name: 'recent', searchIndexes: [{ definition: DYNAMIC }] }],
+      { dryRun: true },
+    );
+    assert.ok(!reads.some(([kind]) => kind === 'aggregate'));
+    assert.deepStrictEqual(rowsOf(result), ['recent:collection:recent:conflict']);
+  });
+
+  it('should infer the type of a live index the server reports without one', async () => {
+    const db = fakeDb(
+      { movies: { searchIndexes: [searchIndex('plot', VECTOR, { hideType: true })] } },
+      { search: 'atlas' },
+    );
+    const result = await run(
+      makeDeps(db).deps,
+      [
+        {
+          name: 'movies',
+          searchIndexes: [{ name: 'plot', type: 'vectorSearch', definition: VECTOR }],
+        },
+      ],
+      { dryRun: true },
+    );
+    assert.deepStrictEqual(rowsOf(result), ['movies:searchIndex:plot:unchanged']);
+    assert.strictEqual(result.inSync, true);
   });
 });

@@ -969,7 +969,12 @@ class MigratorKit extends EventEmitter {
             try {
               await runConverge(
                 this.#convergeDeps(),
-                { definitions, trigger: 'up', ...pickActor(options) },
+                {
+                  definitions,
+                  trigger: 'up',
+                  search: this.#convergeSearchOptions(),
+                  ...pickActor(options),
+                },
                 signal,
               );
             } catch (error) {
@@ -1855,7 +1860,13 @@ class MigratorKit extends EventEmitter {
       await this.connect();
       return runConverge(
         this.#convergeDeps(),
-        { definitions, prune: options.prune, rebuildUnique: options.rebuildUnique, dryRun: true },
+        {
+          definitions,
+          prune: options.prune,
+          rebuildUnique: options.rebuildUnique,
+          dryRun: true,
+          search: this.#convergeSearchOptions(),
+        },
         undefined,
       );
     }
@@ -1876,7 +1887,13 @@ class MigratorKit extends EventEmitter {
         if (options.ordered) await this.#assertNothingPending();
         return runConverge(
           this.#convergeDeps(),
-          { definitions, prune: options.prune, rebuildUnique: options.rebuildUnique, ...actor },
+          {
+            definitions,
+            prune: options.prune,
+            rebuildUnique: options.rebuildUnique,
+            search: this.#convergeSearchOptions(),
+            ...actor,
+          },
           signal,
         );
       });
@@ -1910,6 +1927,11 @@ class MigratorKit extends EventEmitter {
       reload: config.reloadMigrations,
       reserved: [config.migrationsCollection, config.lockCollection, config.convergeLogCollection],
     });
+  }
+
+  /** How converge treats search indexes, from the config */
+  #convergeSearchOptions() {
+    return { onUnavailable: this.#config.onSearchUnavailable };
   }
 
   #convergeDeps() {
