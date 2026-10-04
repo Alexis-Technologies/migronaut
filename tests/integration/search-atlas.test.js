@@ -80,6 +80,12 @@ describe(
       const replan = await kitWith(collections).converge({ dryRun: true });
       assert.strictEqual(replan.changed, 0, JSON.stringify(rows(replan)));
       assert.strictEqual(replan.inSync, true);
+      // Production tolerates an option only the server reports; this suite must not: one here
+      // is a default the tables in search-index-spec.js are missing.
+      const ignored = replan.collections.flatMap((collection) =>
+        collection.actions.filter((action) => action.ignored).map((action) => action.ignored),
+      );
+      assert.deepStrictEqual(ignored, [], 'add these defaults to search-index-spec.js');
       return { result, replan };
     }
 
