@@ -1271,6 +1271,7 @@ describe('runConverge — search indexes', () => {
     });
     assert.deepStrictEqual(result.search, {
       available: true,
+      evidence: 'parameter',
       notReady: [
         { collection: 'movies', name: 'default', status: 'PENDING', queryable: false },
         { collection: 'movies', name: 'plot', status: 'PENDING', queryable: false },
@@ -1421,7 +1422,7 @@ describe('runConverge — search indexes', () => {
     );
     assert.deepStrictEqual(rowsOf(result), ['movies:searchIndex:default:conflict']);
     assert.strictEqual(result.inSync, false);
-    assert.deepStrictEqual(result.search, { available: false, notReady: [] });
+    assert.deepStrictEqual(result.search, { available: false, evidence: 'error', notReady: [] });
   });
 
   it("should converge everything else and skip search indexes with onSearchUnavailable: 'skip'", async () => {
@@ -2212,6 +2213,102 @@ describe('runConverge — waiting for search indexes', () => {
       search: { onUnavailable: 'skip', wait: true, waitTimeoutMs: 60_000 },
     });
     assert.deepStrictEqual(released, []);
+  });
+
+  it('should tell the wait through events, the result, the history and one metric point', async () => {
+    const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 30 });
+    const time = clock();
+    const { deps, events } = makeDeps(db, time);
+    const entries = [];
+    const points = [];
+    deps.record = async (entry) => entries.push(entry);
+    deps.audit = () => ({});
+    deps.releaseLock = async () => true;
+    deps.recordSearchWait = (waitedMs, outcome) => points.push([waitedMs, outcome]);
+    const result = await run(
+      deps,
+      [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }],
+      waiting(600_000),
+    );
+    const waits = events.filter(([name]) => name === 'converge:wait').map(([, event]) => event);
+    assert.deepStrictEqual(waits[0], {
+      status: 'started',
+      searchIndexes: 1,
+      lockReleased: true,
+      timeoutMs: 600_000,
+    });
+    assert.ok(waits.some((event) => event.status === 'progress' && event.waitedMs >= 30_000));
+    const last = waits.at(-1);
+    assert.strictEqual(last.status, 'ready');
+    assert.strictEqual(last.waitedMs, result.search.wait.waitedMs);
+    assert.deepStrictEqual(result.search.wait.outcome, 'ready');
+    assert.deepStrictEqual(points, [[result.search.wait.waitedMs, 'ready']]);
+    assert.deepStrictEqual(entries[0].search, result.search);
+    const order = events.map(([name]) => name);
+    assert.ok(order.lastIndexOf('converge:wait') < order.indexOf('converge:end'));
+  });
+
+  it('should record how a wait that failed ended — timeout, unreadable, aborted', async () => {
+    const cases = [
+      ['timeout', {}, waiting(5000)],
+      [
+        'unreadable',
+        {
+          fail: {
+            listSearchIndexes: (() => {
+              let reads = 0;
+              return () => ((reads += 1) > 2 ? serverError(13, 'not authorized') : undefined);
+            })(),
+          },
+        },
+        waiting(),
+      ],
+    ];
+    for (const [outcome, extra, options] of cases) {
+      const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 1000, ...extra });
+      const { deps, events } = makeDeps(db, clock());
+      const points = [];
+      deps.recordSearchWait = (waitedMs, ended) => points.push(ended);
+      await assert.rejects(
+        run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], options),
+        (error) => {
+          assert.strictEqual(error.context.converge.search.wait.outcome, outcome);
+          return true;
+        },
+      );
+      assert.deepStrictEqual(points, [outcome]);
+      const last = events.filter(([name]) => name === 'converge:wait').at(-1)[1];
+      assert.strictEqual(last.status, outcome);
+    }
+
+    const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 1000 });
+    let aborted = false;
+    const time = clock();
+    const { deps } = makeDeps(db, {
+      ...time,
+      sleep: async (ms) => {
+        await time.sleep(ms);
+        aborted = true;
+      },
+      assertNotAborted: () => {
+        if (aborted) throw new RunAbortedError('Stopped', { reason: 'Stopped' });
+      },
+    });
+    const points = [];
+    deps.recordSearchWait = (waitedMs, ended) => points.push([waitedMs, ended]);
+    await assert.rejects(
+      run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], waiting()),
+      RunAbortedError,
+    );
+    assert.deepStrictEqual(points, [[1000, 'aborted']]);
+  });
+
+  it('should say at info, not debug, that Search was assumed when it is about to wait on it', async () => {
+    const db = fakeDb({ movies: {} }, { search: 'atlas', parameter: 8000, readyAfter: 1 });
+    const { deps, lines } = makeDeps(db, clock());
+    await run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], waiting());
+    const assumed = lines.find((line) => /Atlas Search assumed available/.test(line.message));
+    assert.strictEqual(assumed?.level, 'info');
   });
 
   it('should say how long it has been waiting, every 30 seconds', async () => {

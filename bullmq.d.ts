@@ -255,7 +255,8 @@ export interface ConvergeJobResult {
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
 export interface MigrationJobProgress {
-  phase: 'lock-wait' | 'running' | 'completed' | 'failed';
+  /** `search-wait` (New in 2.2): a converge job waiting for search index builds */
+  phase: 'lock-wait' | 'running' | 'search-wait' | 'completed' | 'failed';
   migration?: string;
   direction?: 'up' | 'down';
   groupId?: string;
@@ -264,7 +265,13 @@ export interface MigrationJobProgress {
   kind?: 'sync' | 'converge';
   /** `lock-wait` only */
   attempts?: number;
+  /** `lock-wait` and `search-wait` */
   waitedMs?: number;
+  /**
+   * `search-wait` only — how many search indexes the wait is for
+   * @experimental New in 2.2
+   */
+  searchIndexes?: number;
   /**
    * `failed` only — the typed error code, so nobody has to parse
    * `failedReason`; `'UNKNOWN'` for an error that is not migronaut's.

@@ -692,6 +692,12 @@ export interface ConvergeHistoryEntry {
   /** The rows that changed, failed or refused the run — each with its collection and `from` / `to` */
   actions: Array<ConvergeAction & { collection: string }>;
   unstable?: ConvergeUnstable[];
+  /**
+   * What the run saw of Atlas Search, and how a wait for its builds ended —
+   * when a definition declares `searchIndexes`
+   * @experimental New in 2.2
+   */
+  search?: ConvergeSearchSummary;
 }
 
 /**
@@ -724,11 +730,23 @@ export interface ConvergeSearchSummary {
   /** Whether the server has Atlas Search */
   available: boolean;
   /**
-   * Declared search indexes still building, updating, or failed. Does not
-   * count against `inSync`: a build is the server's work, not a difference.
+   * How that was told: `'listed'` (the server listed search indexes),
+   * `'parameter'` (its search index manager setting), `'error'` (it refused
+   * a search command), `'version'` (older than 6.0, not asked) or
+   * `'assumed'` (it would not say — a refusal at apply time reports it)
+   */
+  evidence?: 'listed' | 'parameter' | 'error' | 'version' | 'assumed';
+  /**
+   * Declared search indexes still building, updating, stale or failed. Does
+   * not count against `inSync`: a build is the server's work, not a difference.
    */
   notReady: SearchIndexNotReady[];
+  /** How a wait for the builds (`waitForSearchIndexes`) ended, when there was one */
+  wait?: { outcome: ConvergeWaitOutcome; waitedMs: number };
 }
+
+/** How a wait for search index builds ended */
+export type ConvergeWaitOutcome = 'ready' | 'failed' | 'timeout' | 'unreadable' | 'aborted';
 
 /**
  * Outcome of {@link MigratorKit.converge}
@@ -1247,6 +1265,26 @@ export interface ConvergeActionEvent extends MigronautEventBase {
 /**
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
+/**
+ * A converge's wait for search index builds (`waitForSearchIndexes`):
+ * `started` once, `progress` every 30 seconds, then how it ended — one of
+ * {@link ConvergeWaitOutcome}.
+ * @experimental New in 2.2
+ */
+export interface ConvergeWaitEvent extends MigronautEventBase {
+  status: 'started' | 'progress' | ConvergeWaitOutcome;
+  /** How many search indexes the wait is for */
+  searchIndexes: number;
+  /** `started` only — whether the migration lock was released for the wait */
+  lockReleased?: boolean;
+  /** `started` only — the budget (`searchIndexWaitTimeoutMs`) */
+  timeoutMs?: number;
+  /** Every status but `started` */
+  waitedMs?: number;
+  /** `failed` and `timeout` — the indexes that did not get there */
+  notReady?: SearchIndexNotReady[];
+}
+
 export interface ConvergeEndEvent extends MigronautEventBase {
   trigger: ConvergeTrigger;
   success: boolean;
@@ -1279,6 +1317,7 @@ export interface MigronautEvents {
   'lock:lost': (event: LockEvent) => void;
   'converge:start': (event: ConvergeStartEvent) => void;
   'converge:action': (event: ConvergeActionEvent) => void;
+  'converge:wait': (event: ConvergeWaitEvent) => void;
   'converge:end': (event: ConvergeEndEvent) => void;
 }
 

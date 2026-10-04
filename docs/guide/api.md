@@ -176,7 +176,7 @@ returns its migration rows, and the converge outcome arrives as the `converge:en
 ::: tip `MigratorKit` is an `EventEmitter`
 Subscribe to `run:start`, `run:end`, `migration:start`, `migration:success`, `migration:skipped`,
 `migration:error`, `lock:acquired`, `lock:released`, `lock:lost` and — for a real converge run —
-`converge:start`, `converge:action` and `converge:end` to feed metrics or alerting without
+`converge:start`, `converge:action`, `converge:wait` and `converge:end` to feed metrics or alerting without
 parsing log lines. See [Lifecycle Hooks → Events](/guide/hooks#events) for the payloads. For traces — spans that the
 MongoDB driver's own spans nest under — and ready-made OpenTelemetry metrics, pass
 [`telemetry`](/guide/opentelemetry) in the config instead.

@@ -311,7 +311,7 @@ on the lock. One is the honest setting.
 
 ## Observing
 
-- **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'completed' | 'failed', migration, direction, groupId, index, total, code?, runId? }` — `code` is the typed error code of a failed job (`'UNKNOWN'` for one that is not migronaut's), and `runId` the run's correlation id: the join key to the changelog record and the kit's log lines. A failed job has no return value, so its `runId` is found here and on the error's `context`. A `sync` or `converge` job reports `{ phase, kind }` instead of the migration fields.
+- **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'search-wait' | 'completed' | 'failed', migration, direction, groupId, index, total, code?, runId? }` — `code` is the typed error code of a failed job (`'UNKNOWN'` for one that is not migronaut's), and `runId` the run's correlation id: the join key to the changelog record and the kit's log lines. A failed job has no return value, so its `runId` is found here and on the error's `context`. A `sync` or `converge` job reports `{ phase, kind }` instead of the migration fields — and, while it waits for search index builds, `{ phase: 'search-wait', kind, searchIndexes, waitedMs }` (updated every 30 s, with a job log line).
 - **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step (as it starts, and as it ends), and the failure line with its run id.
 - **Kit events**: `mq.kit.on('migration:success', …)` — the same [lifecycle events](/guide/api) as everywhere else.
 - **Worker events**: `mq.worker.on('failed', …)`.

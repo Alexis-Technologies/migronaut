@@ -221,6 +221,17 @@ function isUpdating(raw, version) {
   });
 }
 
+/**
+ * The longest build message kept — mongot's reasons are a line or two, and a
+ * longer one would go whole into every log line, table cell and history entry
+ */
+const MAX_BUILD_MESSAGE_LENGTH = 500;
+
+const shortMessage = (message) =>
+  message.length > MAX_BUILD_MESSAGE_LENGTH
+    ? `${message.slice(0, MAX_BUILD_MESSAGE_LENGTH - 1)}…`
+    : message;
+
 /** A `$listSearchIndexes` document in comparable form */
 function normalizeLiveSearchIndex(raw) {
   const definition = isPlainObject(raw.latestDefinition) ? raw.latestDefinition : {};
@@ -232,7 +243,9 @@ function normalizeLiveSearchIndex(raw) {
     definition,
     status: typeof raw.status === 'string' ? raw.status : undefined,
     queryable: raw.queryable === true,
-    ...(typeof raw.message === 'string' && raw.message !== '' ? { message: raw.message } : {}),
+    ...(typeof raw.message === 'string' && raw.message !== ''
+      ? { message: shortMessage(raw.message) }
+      : {}),
     ...(typeof version === 'number' ? { version } : {}),
     updating: isUpdating(raw, typeof version === 'number' ? version : undefined),
     raw,
@@ -689,6 +702,7 @@ module.exports = {
   AUTO_EMBED_IMMUTABLE,
   DEFAULT_SEARCH_INDEX_NAME,
   FIELD_DEFAULTS,
+  MAX_BUILD_MESSAGE_LENGTH,
   SEARCH_DEFAULTS,
   SEARCH_INDEX_KEYS,
   SEARCH_INDEX_TYPES,

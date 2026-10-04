@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { Int32 } = require('mongodb');
 const {
+  MAX_BUILD_MESSAGE_LENGTH,
   SEARCH_INDEX_KEYS,
   compareSearchIndex,
   effectiveDefinition,
@@ -152,6 +153,14 @@ describe('searchIndexIssues', () => {
 });
 
 describe('normalizing search indexes', () => {
+  it('should keep a long build message short', () => {
+    const message = 'x'.repeat(5000);
+    const kept = live({ status: 'FAILED', message }).message;
+    assert.strictEqual(kept.length, MAX_BUILD_MESSAGE_LENGTH);
+    assert.ok(kept.endsWith('…'));
+    assert.strictEqual(live({ status: 'FAILED', message: 'short' }).message, 'short');
+  });
+
   it("should give a declaration the server's default name and type", () => {
     assert.deepStrictEqual(declared({ definition: { mappings: { dynamic: true } } }), {
       name: 'default',

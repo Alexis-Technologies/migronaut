@@ -1948,6 +1948,7 @@ class MigratorKit extends EventEmitter {
     return {
       db,
       ...(lock ? { releaseLock: () => lock.release() } : {}),
+      recordSearchWait: (waitedMs, outcome) => this.#telemetry.searchWaited({ waitedMs, outcome }),
       logger: this.#logger,
       fields: (extra) => this.#fields(extra),
       emit: (event, payload) => this.#emit(event, payload),

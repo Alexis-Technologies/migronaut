@@ -37,7 +37,8 @@ const { searchBuild, searchBuildState } = require('./search-index-spec.js');
  * `{db, logger, fields, emit, assertNotAborted}`, and optionally `audit` +
  * `record` (the history entry), `shardKeyOf` (behind a mongos), `releaseLock`
  * (`() => Promise<boolean>`: give the run's lock up before waiting for search
- * index builds), and `sleep` (`(ms, signal) => Promise`, cut short by an
+ * index builds), `recordSearchWait` (`(waitedMs, outcome)`: the wait's
+ * metric point), and `sleep` (`(ms, signal) => Promise`, cut short by an
  * abort) and `now` (`() => ms`) — the pause between search index reads and
  * the clock that times a wait for them, for tests.
  */
@@ -445,8 +446,9 @@ function settleRest(result) {
 
 /**
  * The run's word on Search, when search indexes are declared: whether the
- * server has it, and every declared index that exists but does not serve its
- * latest definition yet — building, updating, or failed.
+ * server has it (and how that was told — `evidence`), every declared index
+ * that exists but does not serve its latest definition yet — building,
+ * updating, stale or failed — and how a wait for them ended (`wait`).
  */
 function searchSummary(result, search) {
   const notReady = [];
@@ -458,7 +460,12 @@ function searchSummary(result, search) {
       notReady.push({ collection: collection.name, name: action.name, ...action.build });
     }
   }
-  return { available: search.available, notReady };
+  return {
+    available: search.available,
+    ...(search.evidence !== undefined ? { evidence: search.evidence } : {}),
+    notReady,
+    ...(search.wait !== undefined ? { wait: search.wait } : {}),
+  };
 }
 
 function finalize(result, search) {
@@ -566,6 +573,7 @@ async function recordHistory(deps, options, result, { startedAt, error }) {
       changed: result.changed,
       actions: historyActions(result),
       ...(result.unstable ? { unstable: result.unstable } : {}),
+      ...(result.search ? { search: result.search } : {}),
     });
   } catch (recordError) {
     deps.logger.warn(
@@ -619,6 +627,7 @@ async function readAndPlan(deps, options) {
     declared: definitions.some((definition) => definition.searchIndexes !== undefined),
     available: true,
     onUnavailable: options.search?.onUnavailable ?? 'fail',
+    waitRequested: options.search?.wait === true && !options.dryRun,
   };
   // Reads `search` at call time: a skip at apply time turns Search off for the rest of the run.
   const planFor = (definition, live) =>
@@ -753,7 +762,8 @@ async function readSearch(deps, server, definitions, live, search) {
     return;
   }
   if (probe.evidence === 'assumed') {
-    deps.logger.debug(
+    // Worth seeing when the run is about to wait on what it assumed.
+    deps.logger[search.waitRequested ? 'info' : 'debug'](
       'Atlas Search assumed available: the server listed no search index and would not say more',
       deps.fields({ evidence: probe.evidence }),
     );
@@ -1156,43 +1166,77 @@ async function waitPhase(run, signal) {
       (lockReleased ? ' — the migration lock is released meanwhile' : ''),
     deps.fields({ searchIndexes: targets.length, timeoutMs: wait.timeoutMs, lockReleased }),
   );
-  let reportedAt = startedAt;
-  const sleep = deps.sleep ?? pause;
-  const outcome = await awaitSearchIndexes({
-    targets,
-    read: (collection) => readSearchIndexes(deps, collection, 'wait'),
-    timeoutMs: wait.timeoutMs,
-    sleep: (ms) => sleep(ms, signal),
-    now,
-    beforePoll: () => {
-      try {
-        deps.assertNotAborted(signal);
-      } catch (error) {
-        throw attachConverge(error, result);
-      }
-    },
-    onReadError: (error, inARow) => {
-      deps.logger.warn(
-        `⚠ Could not read the search indexes (${inARow} in a row) — trying again: ` +
-          errorText(error),
-        deps.fields({ error: errorText(error), consecutiveFailures: inARow }),
-      );
-    },
-    onPoll: (live) => {
-      for (const collection of result.collections) {
-        for (const row of collection.actions) {
-          const index = live.get(`${collection.name}\u0000${row.name}`);
-          if (row.target === 'searchIndex' && index) row.build = searchBuild(index);
-        }
-      }
-      if (now() - reportedAt < WAIT_PROGRESS_MS) return;
-      reportedAt = now();
-      deps.logger.info(
-        `… Still waiting for search indexes [${Math.round((reportedAt - startedAt) / 1000)}s]`,
-        deps.fields({ waitedMs: reportedAt - startedAt }),
-      );
-    },
+  deps.emit('converge:wait', {
+    status: 'started',
+    searchIndexes: targets.length,
+    lockReleased,
+    ...(wait.timeoutMs !== undefined ? { timeoutMs: wait.timeoutMs } : {}),
   });
+  let reportedAt = startedAt;
+  let ended = 'aborted';
+  let notReady = [];
+  const sleep = deps.sleep ?? pause;
+  try {
+    const outcome = await awaitSearchIndexes({
+      targets,
+      read: (collection) => readSearchIndexes(deps, collection, 'wait'),
+      timeoutMs: wait.timeoutMs,
+      sleep: (ms) => sleep(ms, signal),
+      now,
+      beforePoll: () => {
+        try {
+          deps.assertNotAborted(signal);
+        } catch (error) {
+          throw attachConverge(error, result);
+        }
+      },
+      onReadError: (error, inARow) => {
+        deps.logger.warn(
+          `⚠ Could not read the search indexes (${inARow} in a row) — trying again: ` +
+            errorText(error),
+          deps.fields({ error: errorText(error), consecutiveFailures: inARow }),
+        );
+      },
+      onPoll: (live) => {
+        for (const collection of result.collections) {
+          for (const row of collection.actions) {
+            const index = live.get(`${collection.name}\u0000${row.name}`);
+            if (row.target === 'searchIndex' && index) row.build = searchBuild(index);
+          }
+        }
+        if (now() - reportedAt < WAIT_PROGRESS_MS) return;
+        reportedAt = now();
+        const waitedMs = reportedAt - startedAt;
+        deps.logger.info(
+          `… Still waiting for search indexes [${Math.round(waitedMs / 1000)}s]`,
+          deps.fields({ waitedMs }),
+        );
+        deps.emit('converge:wait', { status: 'progress', searchIndexes: targets.length, waitedMs });
+      },
+    });
+    ended = outcome.outcome;
+    notReady = outcome.notReady;
+    settleWait(deps, targets, outcome, wait, result);
+  } catch (error) {
+    if (error instanceof ConvergeFailedError && error.context?.reason === 'unreadable') {
+      ended = 'unreadable';
+    }
+    throw error;
+  } finally {
+    const waitedMs = now() - startedAt;
+    search.wait = { outcome: ended, waitedMs };
+    deps.recordSearchWait?.(waitedMs, ended);
+    deps.emit('converge:wait', {
+      status: ended,
+      searchIndexes: targets.length,
+      waitedMs,
+      ...(notReady.length > 0 ? { notReady } : {}),
+    });
+  }
+}
+
+/** A wait that ended: its closing lines — or, unless every index is ready, the error */
+function settleWait(deps, targets, outcome, wait, result) {
   if (outcome.preexisting.length > 0) {
     deps.logger.info(
       `• Not waiting for ${outcome.preexisting.length} search index(es) this run did not ` +

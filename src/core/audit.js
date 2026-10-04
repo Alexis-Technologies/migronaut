@@ -1,3 +1,4 @@
+const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { READ_OPTIONS, readServer } = require('./converge.js');
 const { SEARCH_UNAVAILABLE_HINT, listSearchIndexes, probeSearch } = require('./converge-search.js');
@@ -160,6 +161,9 @@ async function runAudit(deps) {
   return auditReport(checks);
 }
 
+/** Search index lists the audit reads at once */
+const AUDIT_READ_CONCURRENCY = 8;
+
 /**
  * Whether the server has the Atlas Search that declared search indexes need,
  * and whether any of them failed to build. Records nothing when none is
@@ -198,9 +202,13 @@ async function auditSearch(deps, db, config, record) {
     }
     const failed = [];
     const stale = [];
-    for (const definition of declaring) {
+    // One list per collection, a few at a time; reported in declaration order.
+    const lists = await mapLimit(declaring, AUDIT_READ_CONCURRENCY, (definition) =>
+      listSearchIndexes(db, definition.name, READ_OPTIONS),
+    );
+    for (const [position, definition] of declaring.entries()) {
       const names = new Set(definition.searchIndexes.map((index) => index.name));
-      for (const raw of await listSearchIndexes(db, definition.name, READ_OPTIONS)) {
+      for (const raw of lists[position]) {
         const index = normalizeLiveSearchIndex(raw);
         if (!names.has(index.name)) continue;
         const state = searchBuildState(index);

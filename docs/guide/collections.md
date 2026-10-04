@@ -310,7 +310,10 @@ does not hold the wait: converge cannot fix it, so it is named and warned about 
 ready as soon as it finishes. The wait only reads, so converge releases the migration lock when it
 starts (`lock:released` with `early: true`): the next deploy, or a queue's next job, does not wait
 out a long build. Meanwhile a newer converge may change the index — the wait accepts its newer
-definition — or drop it, and then the wait runs out. On Atlas an update needs no wait — the old
+definition — or drop it, and then the wait runs out. The wait is reported as `converge:wait` events
+(started, every 30 s, how it ended), in `result.search.wait` (`{ outcome, waitedMs }`) and the
+converge history, and — with [`telemetry`](/guide/opentelemetry) — as
+`migronaut.converge.search.wait.duration`. On Atlas an update needs no wait — the old
 definition serves meanwhile; a local deployment reports the index not queryable for the moment
 its new definition builds.
 

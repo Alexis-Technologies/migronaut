@@ -892,6 +892,9 @@ describe('createMigrationProcessor', () => {
             status: 'applied',
             durationMs: 2,
           });
+          kit.emit('converge:wait', { status: 'started', searchIndexes: 1, lockReleased: true });
+          kit.emit('converge:wait', { status: 'progress', searchIndexes: 1, waitedMs: 30_400 });
+          kit.emit('converge:wait', { status: 'ready', searchIndexes: 1, waitedMs: 41_000 });
           kit.emit('converge:end', { success: true, changed: 2 });
           return {
             ...converged,
@@ -923,6 +926,21 @@ describe('createMigrationProcessor', () => {
       assert.ok(job.logs.includes('… create index a_1 on c'), job.logs.join(' | '));
       assert.ok(job.logs.includes('✔ create index a_1 on c [4ms]'), job.logs.join(' | '));
       assert.ok(job.logs.includes('✖ modify validator on c: failed'), job.logs.join(' | '));
+      assert.ok(
+        job.logs.includes(
+          '… Waiting for 1 search index(es) to become queryable — the migration lock is released meanwhile',
+        ),
+        job.logs.join(' | '),
+      );
+      assert.ok(job.logs.includes('… Still waiting for search indexes [30s]'));
+      assert.ok(job.logs.includes('✔ Search index(es) queryable [41000ms]'));
+      assert.deepStrictEqual(
+        job.progressUpdates.filter((update) => update.phase === 'search-wait'),
+        [
+          { phase: 'search-wait', kind: 'converge', searchIndexes: 1, waitedMs: 0 },
+          { phase: 'search-wait', kind: 'converge', searchIndexes: 1, waitedMs: 30_400 },
+        ],
+      );
       assert.ok(
         job.logs.includes('✔ create search index default on c [2ms]'),
         job.logs.join(' | '),

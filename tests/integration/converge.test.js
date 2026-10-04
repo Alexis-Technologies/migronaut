@@ -693,7 +693,7 @@ describe('converge (integration) — search indexes on a server without Atlas Se
       'movies/searchIndex:default:skip',
     ]);
     assert.strictEqual(result.inSync, true);
-    assert.deepStrictEqual(result.search, { available: false, notReady: [] });
+    assert.deepStrictEqual(result.search, { available: false, evidence: 'error', notReady: [] });
     assert.deepStrictEqual(await indexNames('movies'), ['title_1']);
   });
 

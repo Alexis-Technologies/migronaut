@@ -479,6 +479,12 @@ expectType<SearchIndexStatus>(firstAction.build!.status);
 expectType<ConvergeSearchSummary | undefined>(converged.search);
 expectType<boolean>(converged.search!.available);
 expectType<string>(converged.search!.notReady[0].collection);
+expectType<'listed' | 'parameter' | 'error' | 'version' | 'assumed' | undefined>(
+  converged.search!.evidence,
+);
+expectType<'ready' | 'failed' | 'timeout' | 'unreadable' | 'aborted' | undefined>(
+  converged.search!.wait?.outcome,
+);
 expectAssignable<Partial<MigronautConfig>>({ onSearchUnavailable: 'skip' });
 expectAssignable<Partial<MigronautConfig>>({
   waitForSearchIndexes: true,
@@ -498,6 +504,14 @@ kit.on('converge:action', (event) => {
 kit.on('converge:end', (event) => {
   expectType<ConvergeResult>(event.result);
   expectType<boolean>(event.success);
+});
+kit.on('converge:wait', (event) => {
+  expectType<'started' | 'progress' | 'ready' | 'failed' | 'timeout' | 'unreadable' | 'aborted'>(
+    event.status,
+  );
+  expectType<number>(event.searchIndexes);
+  expectType<boolean | undefined>(event.lockReleased);
+  expectType<number | undefined>(event.waitedMs);
 });
 
 expectAssignable<MigronautErrorCode>('CONVERGE_FAILED');
