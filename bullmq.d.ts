@@ -1,6 +1,7 @@
 import type {
   AuditReport,
   CollectionConvergeResult,
+  ConvergeSearchSummary,
   ConvergeUnstable,
   LockInfo,
   MigratorKit,
@@ -237,6 +238,13 @@ export interface ConvergeJobResult {
   inSync: boolean;
   collections: CollectionConvergeResult[];
   unstable?: ConvergeUnstable[];
+  /**
+   * Atlas Search availability and the declared search indexes still building
+   * — when the worker's definitions declare search indexes. Whether the job
+   * waits for them is the worker kit's `waitForSearchIndexes`.
+   * @experimental New in 2.2
+   */
+  search?: ConvergeSearchSummary;
   runId?: string;
   /** Time (ms) spent waiting for the MongoDB migration lock */
   lockWaitMs: number;

@@ -1,3 +1,4 @@
+const { isDestructive } = require('../core/converge-plan.js');
 const { createColors, stripAnsi } = require('../utils/colors.js');
 const { formatDateTime } = require('../utils/date.js');
 // Shared with the logger and spinner — cell values come from the changelog and
@@ -270,13 +271,37 @@ function convergeActionCell(colors, action) {
   }
 }
 
-/** The detail column: what differs, or why the row is what it is */
+/** Where the server is with a search index, when it is not simply serving it */
+function searchBuildDetail(build) {
+  if (build === undefined) return '';
+  if (build.status === 'FAILED') return `FAILED${build.message ? `: ${build.message}` : ''}`;
+  if (build.updating) return 'updating';
+  return build.status === 'READY' ? '' : build.status;
+}
+
+/** Whether a search index row is one worth showing even when nothing changes: not serving yet */
+function searchNotServing(action) {
+  return action.target === 'searchIndex' && searchBuildDetail(action.build) !== '';
+}
+
+/** The detail column: what differs, or why the row is what it is — and a search index's build */
 function convergeDetail(action) {
   if (action.reason === 'name' && action.liveName !== undefined) {
     return `renamed from "${action.liveName}"`;
   }
-  return action.reason ?? '';
+  if (action.target !== 'searchIndex') return action.reason ?? '';
+  const parts = [];
+  const type = action.to?.type ?? action.from?.type;
+  if (type === 'vectorSearch' && (action.action === 'create' || action.action === 'modify')) {
+    parts.push('vectorSearch');
+  }
+  if (action.reason) parts.push(action.reason);
+  const build = searchBuildDetail(action.build);
+  if (build) parts.push(build);
+  return parts.join(' · ');
 }
+
+const TARGET_LABELS = { searchIndex: 'search index' };
 
 /**
  * Render a converge plan (or result) as a table plus a one-line summary.
@@ -286,22 +311,32 @@ function convergeDetail(action) {
 function renderConvergeTable(result, { all = false } = {}) {
   const colors = palette();
   const cells = [];
-  const counts = { change: 0, destructive: 0, conflict: 0, keep: 0, unchanged: 0, touched: 0 };
+  const counts = {
+    change: 0,
+    destructive: 0,
+    conflict: 0,
+    keep: 0,
+    searchKeep: 0,
+    skip: 0,
+    unchanged: 0,
+    touched: 0,
+  };
   for (const collection of result.collections) {
     let changes = 0;
     for (const action of collection.actions) {
       if (action.action === 'unchanged') counts.unchanged += 1;
+      else if (action.action === 'keep' && action.target === 'searchIndex') counts.searchKeep += 1;
       else if (action.action === 'keep') counts.keep += 1;
       else if (action.action === 'conflict') counts.conflict += 1;
+      else if (action.action === 'skip') counts.skip += 1;
       else changes += 1;
-      if (action.target === 'index' && (action.action === 'drop' || action.action === 'recreate')) {
-        counts.destructive += 1;
-      }
-      if (action.action === 'unchanged' && !all) continue;
+      if (isDestructive(action)) counts.destructive += 1;
+      if (action.action === 'unchanged' && !all && !searchNotServing(action)) continue;
+      const named = action.target === 'index' || action.target === 'searchIndex';
       cells.push([
         truncate(sanitize(collection.name), MAX_NAME_WIDTH),
-        action.target,
-        action.target === 'index' ? truncate(sanitize(action.name), MAX_NAME_WIDTH) : '',
+        TARGET_LABELS[action.target] ?? action.target,
+        named ? truncate(sanitize(action.name), MAX_NAME_WIDTH) : '',
         convergeActionCell(colors, action.action),
         truncate(sanitize(convergeDetail(action)), MAX_DETAIL_WIDTH),
       ]);
@@ -323,6 +358,14 @@ function renderConvergeTable(result, { all = false } = {}) {
   if (counts.destructive > 0) parts.push(`${counts.destructive} drop/rebuild`);
   if (counts.conflict > 0) parts.push(colors.red(`${counts.conflict} conflict(s)`));
   if (counts.keep > 0) parts.push(`${counts.keep} undeclared index(es) kept`);
+  if (counts.searchKeep > 0) parts.push(`${counts.searchKeep} undeclared search index(es) kept`);
+  if (counts.skip > 0) {
+    parts.push(colors.yellow(`${counts.skip} search index(es) skipped — Search unavailable`));
+  }
+  const notReady = result.search?.notReady ?? [];
+  const failed = notReady.filter((index) => index.status === 'FAILED').length;
+  if (notReady.length > failed) parts.push(`${notReady.length - failed} search index(es) building`);
+  if (failed > 0) parts.push(colors.red(`${failed} search index(es) failed`));
   if (counts.unchanged > 0 && !all) parts.push(`${counts.unchanged} unchanged`);
   const line = parts.join(' · ');
   if (cells.length === 0) return line;

@@ -258,6 +258,8 @@ expectType<ConvergeJobSpec | undefined>(convergePlan.converge);
 declare const convergeResult: ConvergeJobResult;
 expectType<boolean>(convergeResult.inSync);
 expectType<number>(convergeResult.lockWaitMs);
+expectType<boolean | undefined>(convergeResult.search?.available);
+expectAssignable<string | undefined>(convergeResult.search?.notReady[0]?.status);
 declare const syncResult: SyncJobResult;
 expectType<{ jobId: string; deduplicated: boolean } | undefined>(syncResult.converge);
 // A payload carries no prune — the worker's own definitions decide.

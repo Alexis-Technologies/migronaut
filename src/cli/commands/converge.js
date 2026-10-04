@@ -5,7 +5,8 @@ const { renderConvergeHistory, renderConvergeTable } = require('../table.js');
 
 /**
  * Every row the operator must confirm, across all collections: a dropped or
- * rebuilt index, or a validator change on a collection that holds data.
+ * rebuilt index, a dropped search index, or a validator change on a
+ * collection that holds data.
  */
 function actionsToConfirm(plan) {
   const found = [];
@@ -36,14 +37,18 @@ function assertNotStopped(stopRequested) {
 function registerConverge(program) {
   defineCommand(program, {
     name: 'converge',
-    description: 'Bring declared collections (indexes, validators) to their declared state',
+    description:
+      'Bring declared collections (indexes, search indexes, validators) to their declared state',
     options: [
       ['--dry-run', 'Show what would change without changing anything'],
       [
         '--check',
         `Exit with code ${EXIT_CODES.COLLECTIONS_DRIFT} if anything would change (CI gate; implies --dry-run)`,
       ],
-      ['--prune', 'Drop undeclared indexes (in collections whose definition does not decide)'],
+      [
+        '--prune',
+        'Drop undeclared indexes and search indexes (in collections whose definition does not decide)',
+      ],
       ['--ordered', 'Refuse while any migration is still pending'],
       ['--reason <text>', 'Why — recorded in the converge history (who: the OS user)'],
       ['--history', 'Show the converge history instead of converging (read-only)'],
@@ -110,7 +115,7 @@ function registerConverge(program) {
           // applies without one.
           if (json) {
             throw new ConfigInvalidError(
-              `converge would drop or rebuild an index, or change a validator ` +
+              `converge would drop or rebuild an index, drop a search index, or change a validator ` +
                 `(${destructive.length} change(s)) — pass --yes to confirm in --json mode`,
               { destructive },
             );
@@ -160,9 +165,19 @@ function registerConverge(program) {
       logger.info(renderConvergeTable(result, { all: Boolean(opts.verbose) }));
     },
     after: (result, { logger, opts }) => {
-      if (!opts.check || result === undefined || result.inSync) return;
+      if (!opts.check || result === undefined) return;
+      // A search index that failed to build serves nothing, whatever its
+      // definition says — the gate fails on it too, though converge cannot fix it.
+      const failed = (result.search?.notReady ?? []).filter((index) => index.status === 'FAILED');
+      if (result.inSync && failed.length === 0) return;
       // .error writes to stderr, so JSON stdout stays a single clean document.
-      logger.error('✖ The database differs from the declared collections');
+      for (const index of failed) {
+        logger.error(
+          `✖ Search index ${index.collection} "${index.name}" failed to build` +
+            `${index.message ? `: ${index.message}` : ''}`,
+        );
+      }
+      if (!result.inSync) logger.error('✖ The database differs from the declared collections');
       // A dedicated code: a CI gate must tell "out of step" (act: converge)
       // from "the check itself crashed" (act: page).
       process.exitCode = EXIT_CODES.COLLECTIONS_DRIFT;

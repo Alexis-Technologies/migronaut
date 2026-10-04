@@ -1266,7 +1266,11 @@ export interface MigronautEvents {
 
 /** One check performed by {@link MigratorKit.audit} */
 export interface AuditCheck {
-  /** e.g. 'config', 'connection', 'transactions', 'indexes', 'lock', 'checksums' */
+  /**
+   * e.g. 'config', 'connection', 'transactions', 'indexes', 'lock', 'checksums',
+   * 'pending', 'ordering', 'runtime' — and 'search' when declared collections
+   * hold search indexes
+   */
   name: string;
   status: 'pass' | 'warn' | 'fail';
   detail: string;

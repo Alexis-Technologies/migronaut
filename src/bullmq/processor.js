@@ -253,7 +253,12 @@ function createMigrationProcessor(options = {}) {
     },
     'converge:action': (event) => {
       if (!current) return;
-      const target = event.target === 'index' ? `index ${event.name}` : event.target;
+      const target =
+        event.target === 'index'
+          ? `index ${event.name}`
+          : event.target === 'searchIndex'
+            ? `search index ${event.name}`
+            : event.target;
       const what = `${event.action} ${target} on ${event.collection}`;
       if (event.status === 'started') log(current, `… ${what}`);
       else if (event.status === 'applied') log(current, `✔ ${what} [${event.durationMs ?? 0}ms]`);
@@ -362,6 +367,7 @@ function createMigrationProcessor(options = {}) {
       inSync: result.inSync,
       collections: result.collections,
       ...(result.unstable ? { unstable: result.unstable } : {}),
+      ...(result.search ? { search: result.search } : {}),
       ...(ctx.runId ? { runId: ctx.runId } : {}),
       lockWaitMs: waitedMs,
     });

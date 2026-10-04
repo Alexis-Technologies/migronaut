@@ -1221,6 +1221,23 @@ describe('converge CLI (integration)', () => {
     assert.strictEqual(JSON.parse(result.stdout).changed, 2);
   });
 
+  it('should refuse declared search indexes on a server without Atlas Search', async () => {
+    declare([{ name: 'movies', searchIndexes: [{ definition: { mappings: { dynamic: true } } }] }]);
+    const plan = await runCli(baseArgs(['converge', '--dry-run']));
+    assert.strictEqual(plan.code, 0);
+    assert.match(plan.stdout, /movies .*│ search index .*│ default .*│ conflict/);
+    const refused = await runCli(baseArgs(['converge']));
+    assert.strictEqual(refused.code, 27);
+    assert.match(refused.stderr, /Atlas Search is not available on this server/);
+    const skipped = await runCli(baseArgs(['converge', '--json']), {
+      MIGRONAUT_ON_SEARCH_UNAVAILABLE: 'skip',
+    });
+    assert.strictEqual(skipped.code, 0, skipped.stderr);
+    const result = JSON.parse(skipped.stdout);
+    assert.strictEqual(result.collections[0].actions[0].action, 'skip');
+    assert.strictEqual(result.search.available, false);
+  });
+
   it('should ask before dropping or rebuilding an index', async () => {
     await mongo.db.collection('users').createIndex({ email: 1 });
     // unique + sparse: a rebuild (making an index unique alone is in place on 6.0+).

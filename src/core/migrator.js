@@ -1555,6 +1555,7 @@ class MigratorKit extends EventEmitter {
       getDb: () => this.#requireDb(),
       inspectLock: () => this.#buildLock().inspect(),
       status: () => this.status(),
+      definitions: () => this.#resolveCollections(),
     });
   }
 

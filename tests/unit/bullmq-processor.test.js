@@ -884,10 +884,19 @@ describe('createMigrationProcessor', () => {
             action: 'modify',
             status: 'failed',
           });
+          kit.emit('converge:action', {
+            collection: 'c',
+            target: 'searchIndex',
+            name: 'default',
+            action: 'create',
+            status: 'applied',
+            durationMs: 2,
+          });
           kit.emit('converge:end', { success: true, changed: 2 });
           return {
             ...converged,
             unstable: [{ collection: 'c', target: 'index', name: 'a_1', action: 'modify' }],
+            search: { available: true, notReady: [] },
           };
         }),
       });
@@ -901,6 +910,7 @@ describe('createMigrationProcessor', () => {
         inSync: true,
         collections: [{ name: 'c', actions: [] }],
         unstable: [{ collection: 'c', target: 'index', name: 'a_1', action: 'modify' }],
+        search: { available: true, notReady: [] },
         runId: 'run-9',
         lockWaitMs: 0,
       });
@@ -913,6 +923,10 @@ describe('createMigrationProcessor', () => {
       assert.ok(job.logs.includes('… create index a_1 on c'), job.logs.join(' | '));
       assert.ok(job.logs.includes('✔ create index a_1 on c [4ms]'), job.logs.join(' | '));
       assert.ok(job.logs.includes('✖ modify validator on c: failed'), job.logs.join(' | '));
+      assert.ok(
+        job.logs.includes('✔ create search index default on c [2ms]'),
+        job.logs.join(' | '),
+      );
       assert.ok(job.logs.includes('✔ Converged 2 change(s)'));
     });
 
