@@ -3,6 +3,78 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
+## v2.2.0 — Unreleased
+
+Atlas Search and Vector Search indexes in declared collections. Additive: a definition without
+`searchIndexes` behaves exactly as in 2.1 — converge never even asks the server about Search for
+it.
+
+### Added
+
+- **Declared search indexes** — a collection definition takes `searchIndexes: [{ name?, type?,
+  definition }]`: Atlas Search (`type: 'search'`, the default) and Atlas Vector Search
+  (`'vectorSearch'`) indexes, with the definition exactly as Atlas documents it — automated
+  embedding (`autoEmbed`) fields included. `converge` keeps them in step with the same lock,
+  history, events, re-plan and fixed-point check as regular indexes. Experimental.
+  - **Rows**: a new target, `searchIndex`. A missing index is created (one `createSearchIndexes`
+    per collection), a changed definition is updated **in place** (`modify` — the old definition
+    serves until the new one is built), an undeclared one is kept, or dropped last under
+    `prune`. A definition that declares only `searchIndexes` is valid, and its collection is
+    created when missing.
+  - **Never a rebuild**: a `$search` against a missing index returns nothing rather than fail, so
+    converge never drops a search index to build it again. A change no update can make — the
+    type, or an `autoEmbed` field's path, model, `numDimensions`, quantization or modality — is a
+    `conflict` naming the new-name recipe, and so is a declared index the server is still
+    deleting.
+  - **Comparison**: definitions compare whole, key order ignored, with Atlas's documented
+    defaults filled in on both sides (`analyzer`, `searchAnalyzer`, `dynamic`, `storedSource`,
+    `numPartitions`; vector `quantization`, `indexingMethod`, `hnswOptions`; `autoEmbed`
+    `numDimensions` and `quantization`), and vector `fields` as a set. A server that reports no
+    `type` (a self-managed `mongot`) has it inferred from the definition.
+  - **Raw commands** (`createSearchIndexes`, `updateSearchIndex`, `dropSearchIndex`,
+    `$listSearchIndexes`), so every driver in the peer range works — the driver's helpers start
+    at 5.6. A vector index update is retried once with its type when a self-managed `mongot`
+    asks for it.
+  - **Build state**: rows carry `build` (`{ status, queryable, message?, updating? }`), and the
+    result `search` (`{ available, notReady }`) — the declared indexes still building, updating
+    or failed. A build under way does not count against `inSync`; a FAILED one fails
+    `converge --check` (exit 28).
+- **`waitForSearchIndexes`** (config, `MIGRONAUT_WAIT_FOR_SEARCH_INDEXES`, `converge({
+  waitForSearchIndexes })`, `converge --wait-search` / `--no-wait-search`) — hold the converge,
+  under the lock, until every declared search index serves its declaration; a FAILED build or
+  `searchIndexWaitTimeoutMs` (`MIGRONAUT_SEARCH_INDEX_WAIT_TIMEOUT_MS`, default 10 minutes) fails
+  it with `ConvergeFailedError` `phase: 'wait'`. Off by default.
+- **`onSearchUnavailable`** (`MIGRONAUT_ON_SEARCH_UNAVAILABLE`) — declared search indexes on a
+  server without Atlas Search: `'fail'` (default) refuses the run before any write, with a hint;
+  `'skip'` converges everything else and reports `skip` rows. Detected once per run from the
+  server's own answer (checked against MongoDB 5.0, 6.0, 7.0, 8.0 and 8.2).
+- **`migronaut audit`** — a `search` check, when the definitions declare search indexes: whether
+  the server has Atlas Search, and whether a declared index failed to build.
+- **Types** — `SearchIndexDefinition`, `SearchDefinition`, `VectorSearchDefinition`,
+  `VectorSearchField`, `SearchIndexType`, `SearchIndexStatus`, `SearchIndexBuild`,
+  `SearchIndexNotReady`, `ConvergeSearchSummary`; `ConvergeTarget` gains `'searchIndex'`,
+  `ConvergeActionKind` `'skip'`; `ConvergeJobResult.search` in `bullmq.d.ts`.
+- **Queue** — a converge job's result carries `search`, and its log lines name search indexes.
+  Whether a job waits for builds is the worker kit's `waitForSearchIndexes`; the job payload is
+  unchanged.
+
+### Changed
+
+- A definition with none of `indexes`, `searchIndexes` and `validator` is refused with "declares
+  no indexes, searchIndexes or validator — nothing to manage" (was "declares neither indexes nor
+  a validator").
+- The converge table's drop/rebuild count includes dropped search indexes, and `converge --yes`
+  is required for them in `--json` mode, like an index drop.
+- `ConvergeFailedError`'s documentation names every phase: `plan`, `replan` (already thrown by
+  2.1, undocumented), `apply` and the new `wait`.
+
+### Tooling
+
+- `tests/integration/search-atlas.test.js` — an opt-in, manual suite against
+  `mongodb/mongodb-atlas-local` (`MIGRONAUT_TEST_ATLAS_URI`): every scenario ends at a fixed
+  point. CI does not run it; the coverage gate comes from the unit tier's fake, which answers the
+  search commands with lag, normalization and build progress on demand.
+
 ## v2.1.0 — 2026-10-04
 
 Migrations as a queue, ids in your own format, OpenTelemetry, and declared collections. Additive:

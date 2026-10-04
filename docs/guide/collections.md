@@ -2,18 +2,20 @@
 
 Some changes have a history worth keeping — a backfill, a field rename, a data fix that must run
 exactly once. Those are [migrations](/guide/writing-migrations). Others only ever have a *current
-value*: which indexes a collection has, and which validator guards it. For those, a migration
+value*: which indexes a collection has, which Atlas Search indexes, and which validator guards it.
+For those, a migration
 file per change is ceremony — an `up` that creates the index, a `down` that drops it, a new file
 every time an option changes — when all anyone cares about is the end state.
 
-Declared collections are migronaut's answer for the second kind. You declare the indexes and the
-validator you want; [`migronaut converge`](/commands/converge) compares that with the live
+Declared collections are migronaut's answer for the second kind. You declare the indexes, the
+[search indexes](#search-indexes) and the validator you want;
+[`migronaut converge`](/commands/converge) compares that with the live
 database and makes the difference. No history, no state stored anywhere: every run reads the
 database afresh and plans against what it finds.
 
 ::: warning Experimental
-New in 2.1. The definition shape, the result shape and the queue job contract may still change
-in a minor release.
+New in 2.1 — search indexes in 2.2. The definition shape, the result shape and the queue job
+contract may still change in a minor release.
 :::
 
 ## Declaring a collection
@@ -65,10 +67,12 @@ Leave a part out to leave it alone:
 
 - **No `indexes`** — the collection's indexes are not managed at all (a validator-only definition
   never touches an index).
+- **No `searchIndexes`** — its search indexes are not managed, and converge never even asks the
+  server about Search for it.
 - **No `validator`** — the validator is not managed. `validator: null` (or `{}`) means *there must
   be none*.
 
-A definition that declares neither is refused: it would manage nothing.
+A definition that declares none of the three is refused: it would manage nothing.
 
 ## One file per collection
 
@@ -192,6 +196,114 @@ one text index per collection. When a declared index would collide with an undec
 With `prune` on, both cases are resolved by replacing the live index. A view or a time-series
 collection is a conflict too: converge manages regular collections only.
 
+## Search indexes
+
+[Atlas Search](https://www.mongodb.com/docs/atlas/atlas-search/) and
+[Atlas Vector Search](https://www.mongodb.com/docs/atlas/atlas-vector-search/) indexes are
+declared next to the regular ones, and the same `converge` keeps them in step — same lock, same
+history, same plan-then-apply:
+
+```js
+{
+  name: 'movies',
+  indexes: [{ key: { year: 1 } }],
+  searchIndexes: [
+    { definition: { mappings: { dynamic: true } } }, // "default", a search index
+    {
+      name: 'plot_vectors',
+      type: 'vectorSearch',
+      definition: {
+        fields: [
+          { type: 'vector', path: 'embedding', numDimensions: 1536, similarity: 'cosine' },
+          { type: 'filter', path: 'year' },
+        ],
+      },
+    },
+  ],
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | Defaults to `default`, as on the server |
+| `type` | `'search'` (the default) or `'vectorSearch'` |
+| `definition` | The definition exactly as Atlas documents it: `{ mappings, analyzer, … }` for search, `{ fields: [...] }` for vector search — automated-embedding (`autoEmbed`) fields included |
+
+The definition is Atlas's own document, so it is checked lightly — the shape that tells the two
+types apart, no repeated field, vector and `autoEmbed` fields not mixed — and compared whole.
+Comparisons ignore key order and fill in the documented defaults on both sides (`analyzer:
+'lucene.standard'`, `searchAnalyzer` the same as `analyzer`, `dynamic: false`, `storedSource:
+false`, `numPartitions: 1`; for a vector field `quantization: 'none'`, `indexingMethod: 'hnsw'`,
+`hnswOptions: { maxEdges: 16, numEdgeCandidates: 100 }`), and vector `fields` compare as a set —
+so a definition that leaves a default out matches a server that spells it out. Removing an option
+you had declared is a change, like any other.
+
+**Where it works:** Atlas (every tier — the free tier holds at most 3 search and vector indexes,
+Flex 10), an [Atlas CLI local deployment](https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-deploy-local/)
+or its `mongodb/mongodb-atlas-local` Docker image, and MongoDB 8.3+ with `mongot`. A plain
+`mongod` has no Search — see [below](#a-server-without-atlas-search).
+
+| Action | When | How |
+|---|---|---|
+| `create` | A declared search index is missing | `createSearchIndexes` — one command per collection |
+| `modify` | Its definition differs | `updateSearchIndex`, **in place**: the old definition keeps serving queries until the new one is built |
+| `drop` | A live search index is not declared, and `prune` is on | `dropSearchIndex` — **destructive**, asked for like an index drop |
+| `keep` | Not declared, `prune` off — or already being deleted | Nothing — reported only |
+| `conflict` | A change no update can make, a name the server is still deleting, or no Search on the server | The whole run is refused before the first write |
+| `skip` | No Search on the server and `onSearchUnavailable: 'skip'` | Nothing — reported only |
+
+`prune` covers search indexes only in a definition that declares `searchIndexes` — `searchIndexes:
+[]` with prune drops every one (converge says so out loud).
+
+### Never a rebuild
+
+A `$search` against an index that does not exist returns no results — not an error. Dropping a
+search index to build it again would be a silent outage for as long as the build takes, so
+converge never does: what an update can change is updated in place, and what it cannot — the
+**type** (`search` ↔ `vectorSearch`), or an `autoEmbed` field's **path, model, numDimensions,
+quantization or modality** — is a `conflict`. The way through is a new index under a **new name**:
+declare it next to the old one, converge (with `--wait-search`), move your queries to it, then
+remove the old declaration and converge with `prune`.
+
+### Builds happen in the background
+
+The server accepts a created or updated search index at once and builds it afterwards — seconds on
+a small collection, longer on a large one. converge reports where each build is: in the plan's
+Detail column (`PENDING`, `BUILDING`, `updating`, `FAILED: …`), in a closing line, and as
+`result.search.notReady`. A build under way is not drift: `inSync` stays `true` and
+`converge --check` passes. A **FAILED** build fails `--check` — but converge never resubmits a
+definition that has not changed, so it stays failed until you change the definition (or the data
+behind the failure).
+
+```bash
+migronaut converge --wait-search
+```
+
+With `waitForSearchIndexes: true` (`--wait-search` for one run) converge holds — under the lock —
+until every declared search index is queryable with its declared definition, and fails with
+[`CONVERGE_FAILED`](/reference/error-codes) (`phase: 'wait'`) on a FAILED build or after
+`searchIndexWaitTimeoutMs` (10 minutes by default; the server goes on building). Turn it on when a
+deploy needs a *new* index ready as soon as it finishes; an update needs no wait, since the old
+definition serves meanwhile.
+
+### A server without Atlas Search
+
+Declared search indexes need Search. On a server without it, converge refuses the run before
+writing anything — in every collection — and says how to get Search. When that server is
+expected (a plain `mongo` container in development while production runs on Atlas), set
+`onSearchUnavailable: 'skip'`: everything else converges, and the search indexes are reported as
+`skip`. A converge with no `searchIndexes` declared anywhere never asks the server about Search.
+
+```js
+export default {
+  // …
+  onSearchUnavailable: process.env.NODE_ENV === 'development' ? 'skip' : 'fail',
+};
+```
+
+`migronaut audit` checks the same thing ahead of time: its `search` check fails where converge
+would refuse, and warns about a FAILED build.
+
 ## After every deploy
 
 ```js
@@ -259,7 +371,13 @@ Use a migration when the change needs **ordering against data**:
   shows what the server finished. Give the client used for converge timeouts that outlast your
   largest build.
 - **Permissions.** Creating and dropping indexes needs `readWrite`; `collMod` — validators, TTL
-  and `hidden` changes — needs `dbAdmin`. A missing privilege fails with a hint.
+  and `hidden` changes — needs `dbAdmin`; search indexes need the `createSearchIndexes`,
+  `updateSearchIndex`, `dropSearchIndex` and `listSearchIndexes` actions (`readWrite` on Atlas). A
+  missing privilege fails with a hint.
+- **Mongoose `autoSearchIndex`.** Leave it off (the default) for collections converge manages —
+  it creates search indexes without comparing, and the two would fight over the definition.
+- **Search indexes on views** (Atlas 8.0+) are not managed: converge manages regular collections
+  only.
 - **Some changes need no rebuild.** Where the server can, converge changes an index in place
   instead of dropping it: `hidden`, a TTL's value, **making an index unique** (MongoDB 7.0+:
   `collMod` with `prepareUnique`, then `unique` — duplicates make it fail and the index is left as
@@ -279,9 +397,10 @@ Use a migration when the change needs **ordering against data**:
   cannot be read and the server refuses the drop, the index is kept with a warning. Index builds
   go through `mongos` as usual. CI proves replica sets, not sharded clusters — try a converge
   with `--dry-run` there first.
-- **Tested on MongoDB 5.0, 6.0, 7.0 and 8.0.** The comparison rules follow what the server
-  reports; on another version, anything that does not settle shows up under `unstable` rather
-  than looping.
+- **Tested on MongoDB 5.0, 6.0, 7.0 and 8.0** — search indexes against
+  `mongodb/mongodb-atlas-local` 8.0. The comparison rules follow what the server reports; on
+  another version (or as Atlas adds to the definition format), anything that does not settle shows
+  up under `unstable` rather than looping.
 
 ## Programmatic use
 
@@ -295,5 +414,5 @@ await kit.disconnect();
 ```
 
 `converge()` resolves with `{ dryRun, changed, inSync, collections: [{ name, actions }],
-unstable? }`. See the [Programmatic API](/guide/api#declared-collections) for the full shape and
+unstable?, search? }`. See the [Programmatic API](/guide/api#declared-collections) for the full shape and
 the events, and [Migrations as a Queue](/guide/bullmq#converge-jobs) to run it as a job.

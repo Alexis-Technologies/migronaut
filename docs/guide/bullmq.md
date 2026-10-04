@@ -232,6 +232,12 @@ A converge job is `{ v: 1, kind: 'converge', groupId?, ordered? }` — deliberat
 definition), never by a payload sitting in Redis. A failed converge job is not retried; with a
 schedule or `convergeAfterUp`, the next tick or deploy tries again.
 
+**Search indexes** converge in the job like everything else. Whether the job waits for their builds
+is the worker kit's `waitForSearchIndexes` — never the payload — and the wait holds the MongoDB lock
+(not the job's own `lockDuration`, which BullMQ renews). The job result carries `search` (`{
+available, notReady }`), and a sync tick never enqueues a converge for a build under way: builds
+do not count against `inSync`.
+
 ::: warning Roll the workers first
 A worker running old code converges to the old definitions — with `prune`, it can drop an index the
 new deploy just declared. Deploy the workers before you rely on a changed definition.

@@ -1,8 +1,13 @@
-# MongoDB + Redis for the example, and a Jaeger for the optional tracing. A standalone MongoDB is enough here; switch
-# to a replica set only if your migrations use `useTransaction: true`.
+# MongoDB + Redis for the example, and a Jaeger for the optional tracing. The MongoDB is the Atlas
+# local image — a single-node replica set with mongot, so the declared search index in
+# collections/plans.js converges too (connect with directConnection=true, see .env.example). It
+# takes about a minute to report healthy. A plain `mongo:7` works as well with
+# MIGRONAUT_ON_SEARCH_UNAVAILABLE=skip: everything but the search index converges.
 services:
   mongo:
-    image: mongo:7
+    image: mongodb/mongodb-atlas-local:8.0
+    environment:
+      DO_NOT_TRACK: '1'
     ports:
       - '127.0.0.1:27017:27017'
   redis:

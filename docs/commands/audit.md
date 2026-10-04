@@ -47,6 +47,7 @@ No problems found (1 warning(s))
 | `lock` | No lock, or a lock that's still within its TTL | Warns when a lock is past its TTL — likely a crashed run |
 | `checksums` | No applied migration was edited afterwards | **Fails**, and names each drifted file |
 | `pending` | Nothing is waiting to be applied | Warns with the count |
+| `search` | Only when a [declared collection](/guide/collections#search-indexes) has `searchIndexes`: the server has Atlas Search, and no declared search index failed to build | **Fails** where Search is missing and `converge` would refuse; warns where it is missing with `onSearchUnavailable: 'skip'`, or a build FAILED |
 | `runtime` | Node can load your migration files | Warns when `.ts` files need Node ≥ 22.18 or a loader |
 
 `config` and `connection` are fatal because everything after them depends on a live database. Every

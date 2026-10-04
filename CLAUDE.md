@@ -139,7 +139,8 @@ src/
 ├── errors/index.js          # MigronautError base + one subclass per error code
 ├── core/                     # The engine (config, lock, lock-wait, changelog, runner, context, import, migrator, run,
 │                             #   options, sequence, run-recorder, and declared collections: collections,
-│                             #   index-spec, converge-plan, converge, converge-log)
+│                             #   index-spec, search-index-spec, converge-plan, converge, converge-search,
+│                             #   converge-log)
 ├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id, telemetry,
 │                             #   canonical, collection-name, actor, error, redact — pure-ish helpers
 ├── cli/                        # own arg parser (args.js) + spinner + table + one file per command
@@ -198,6 +199,10 @@ pnpm run size                            # esbuild bundle-size report (library, 
 # The real-BullMQ suite is opt-in (CI runs it; everything else needs no Redis):
 #   docker run --rm -d -p 6379:6379 redis:7-alpine
 #   MIGRONAUT_TEST_REDIS_URL=redis://127.0.0.1:6379 node --test tests/integration/bullmq-redis.test.js
+# The Atlas Search suite is opt-in and manual (CI never runs it) — after search index changes:
+#   docker run --rm -d -p 27018:27017 -e DO_NOT_TRACK=1 mongodb/mongodb-atlas-local:8.0
+#   MIGRONAUT_TEST_ATLAS_URI="mongodb://127.0.0.1:27018/?directConnection=true" \
+#     node --test tests/integration/search-atlas.test.js
 pnpm run bench                           # ops/sec micro-benchmarks (bench/bench.js), manual only, not in CI
 pnpm run docs:dev                        # vitepress dev docs
 ```
@@ -234,9 +239,12 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
   transactions work).
 - `node:test` uses `before`/`after`, not `beforeAll`/`afterAll` (those are Vitest/Jest names —
   don't reintroduce them).
-- Silence the logger (`logger: null`) in tests. No committed `.only`/`.skip` — with one
-  sanctioned exception: `tests/integration/bullmq-redis.test.js` skips itself, with a reason,
-  when `MIGRONAUT_TEST_REDIS_URL` is unset (an environment-capability skip, not a disabled test).
+- Silence the logger (`logger: null`) in tests. No committed `.only`/`.skip` — with two
+  sanctioned exceptions, both environment-capability skips with a reason, not disabled tests:
+  `tests/integration/bullmq-redis.test.js` when `MIGRONAUT_TEST_REDIS_URL` is unset (CI sets it),
+  and `tests/integration/search-atlas.test.js` when `MIGRONAUT_TEST_ATLAS_URI` is unset (CI never
+  does — run it by hand after changing `search-index-spec.js`, `converge-search.js` or the search
+  planner; the unit fake carries the coverage, but only a real `mongot` proves the fixed point).
 - The queue adapter is tested against `tests/helpers/fake-bullmq.js`, an in-memory double — that
   is where its coverage comes from, so the gate passes with no Redis. The scenarios live once, in
   `tests/helpers/bullmq-scenarios.js`, and run against both the fake and (in the opt-in file) the
@@ -289,7 +297,14 @@ converge result travels as `converge:end`, `summary.converge` and `converge --js
 never previews a converge; `ConvergeFailedError` keeps its progress in `context.converge`, never
 `context.results` (the kit and the CLI read `results` as migration rows); the CLI confirms *after*
 planning, inside `run`, like `unlock`; a converge job carries no `prune` and is ordered by default;
-and a converge run adds no third telemetry wrap site. Names already taken, so not to reuse for
-anything else: `sync` (the queue job), `ensureIndexes` and the audit check `indexes` (the
-changelog's own indexes), `schema` (`migronaut.schema.json`).
+and a converge run adds no third telemetry wrap site. For search indexes (§6.7 too): a search
+index is never `recreate`d (a `$search` on a missing index returns nothing — a type or immutable
+`autoEmbed` change is a `conflict`); a FAILED build with the declared definition stays `unchanged`,
+and builds never count against `inSync`; `type` is sent to `createSearchIndexes` only for a vector
+index, and `updateSearchIndex` is retried with it only on a self-managed `mongot`'s "mappings is
+required"; the availability probe trusts an empty list only from 7.2.1+ (older servers go through
+`getParameter`); and nothing reads search indexes for a definition without `searchIndexes`. Names
+already taken, so not to reuse for anything else: `sync` (the queue job), `ensureIndexes` and the
+audit check `indexes` (the changelog's own indexes), the audit check `search`, `schema`
+(`migronaut.schema.json`).
 Don't "fix" these without checking the doc first.

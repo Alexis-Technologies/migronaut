@@ -62,10 +62,11 @@ Combined short flags are not supported: write `-f -y`, not `-fy`.
 
 | Command | Description |
 |---|---|
-| [`migronaut converge`](/commands/converge) | Bring declared collections (indexes, validators) to their declared state — asks before a drop or rebuild |
+| [`migronaut converge`](/commands/converge) | Bring declared collections (indexes, search indexes, validators) to their declared state — asks before a drop or rebuild |
 | `migronaut converge --dry-run` | Show the plan, change nothing |
 | `migronaut converge --check` | Exit 28 if anything would change (CI gate) |
-| `migronaut converge --prune` | Also drop indexes a definition does not declare |
+| `migronaut converge --prune` | Also drop indexes (and search indexes) a definition does not declare |
+| `migronaut converge --wait-search` / `--no-wait-search` | Wait until every declared search index is queryable — or not, whatever `waitForSearchIndexes` says |
 | `migronaut converge --ordered` | Refuse while a migration is still pending (exit 24) |
 | `migronaut converge --history` | Show what converge has changed (`--limit n`, `--json`) |
 | `migronaut up` / `down` / `redo` / `converge` `--reason <text>` | Why — recorded with the run (changelog / converge history) |
@@ -157,6 +158,6 @@ working unchanged. The full map is also exported from the package root as
 | `24` | `MIGRATION_BLOCKED` — an ordered single-file run would go out of sequence |
 | `25` | `QUEUE_JOB_INVALID` — a [queue job](/guide/bullmq) payload failed validation |
 | `26` | `QUEUE_JOB_FAILED` — a queue group's `wait()` saw a job fail or time out |
-| `27` | `CONVERGE_FAILED` — [`converge`](/commands/converge) refused a conflicting plan, or a step failed |
-| `28` | `COLLECTIONS_DRIFT` — `converge --check` found the database out of step with the declarations |
+| `27` | `CONVERGE_FAILED` — [`converge`](/commands/converge) refused a conflicting plan, a step failed, or `--wait-search` gave up |
+| `28` | `COLLECTIONS_DRIFT` — `converge --check` found the database out of step with the declarations, or a search index that failed to build |
 | `130` / `143` | Killed by a second SIGINT / SIGTERM |
