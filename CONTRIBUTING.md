@@ -83,13 +83,22 @@ to run against. The coverage gate must pass without either.
 
 `search-atlas.test.js` is manual: CI does not run it. Run it locally after a
 change to how search indexes are compared, planned or applied
-(`src/core/search-index-spec.js`, `src/core/converge-search.js`, the search
-part of `src/core/converge-plan.js`) — the unit tests carry the coverage, but
-only a real `mongot` shows what the server reports back:
+(`src/core/search-index-spec.js`, `src/core/converge-search.js`,
+`src/core/converge-search-run.js`, the search part of `src/core/converge-plan.js`)
+— the unit tests carry the coverage, but only a real `mongot` shows what the
+server reports back. Run it on `mongodb/mongodb-atlas-local:8.0` and `:latest`:
 
 ```bash
 docker run --rm -d --name migronaut-atlas -p 27018:27017 -e DO_NOT_TRACK=1 mongodb/mongodb-atlas-local:8.0
 MIGRONAUT_TEST_ATLAS_URI="mongodb://127.0.0.1:27018/?directConnection=true" node --test tests/integration/search-atlas.test.js
+```
+
+After a change to the availability probe (`probeSearch`), also run the converge
+integration file once against a plain `mongod` newer than CI's 7.0 — the probe
+treats servers from 7.2.1 differently, and CI never boots one:
+
+```bash
+MONGOMS_VERSION=8.0.32 node --test tests/integration/converge.test.js
 ```
 
 Five environment variables control the test run:

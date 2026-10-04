@@ -306,7 +306,18 @@ required"; the availability probe trusts an empty list only from 7.2.1+ (older s
 `getParameter`); defaults are filled per field mapping too (`FIELD_DEFAULTS` — mongot writes them
 into what it reports) and a field's list of types compares as a set; an Atlas CLI local deployment
 cannot update a vector index at all (the step fails with the new-name hint — not a migronaut bug);
-and nothing reads search indexes for a definition without `searchIndexes`. Names
+and nothing reads search indexes for a definition without `searchIndexes`. An option only the
+server reports, with no default in those tables, is **ignored** in the comparison (`ignored` on the
+row, one warning) — otherwise a new mongot default would update and rebuild the index on every
+run; the opt-in Atlas suite still fails on one, since that means a table is missing a default. The
+wait for builds (`waitForSearchIndexes`) runs **without the migration lock** — released via
+`runWithLock`'s `control.release()` once every step is applied — so `lock:released` (`early: true`)
+can precede `run:end`, and a newer converge may change the index under it; it fails only on a
+FAILED build of an index the run created or changed (an untouched FAILED/STALE one is warned about,
+and `--check` still fails on FAILED); STALE never ends a wait early; up to three network or
+failover blips in a row are ridden out; and `migronaut.converge.search.wait.duration` is a metric
+point, not a third wrap site. A search index list that cannot be read reports the phase that read
+it (`plan` only before the first write). Names
 already taken, so not to reuse for anything else: `sync` (the queue job), `ensureIndexes` and the
 audit check `indexes` (the changelog's own indexes), the audit check `search`, `schema`
 (`migronaut.schema.json`).
