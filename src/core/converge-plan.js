@@ -1,5 +1,13 @@
 const { deepEqual } = require('../utils/canonical.js');
 const { compareIndex, normalizeLiveIndex, restoreSpec, sameSignature } = require('./index-spec.js');
+const {
+  compareSearchIndex,
+  isBeingRemoved,
+  normalizeLiveSearchIndex,
+  searchBuild,
+  searchIndexSpec,
+  searchIndexValue,
+} = require('./search-index-spec.js');
 
 /**
  * The converge planner: one declared collection against its live state, as
@@ -17,7 +25,11 @@ const { compareIndex, normalizeLiveIndex, restoreSpec, sameSignature } = require
  * - undeclared indexes are kept (and reported) unless `prune` is on;
  * - a rebuild that drops a unique index to build a unique one back is a
  *   conflict unless `rebuildUnique` is on — see UNIQUE_REBUILD_REASON;
- * - `_id_` and a clustered index are the collection's own and never listed.
+ * - `_id_` and a clustered index are the collection's own and never listed;
+ * - a search index is created or updated in place — never dropped to be built
+ *   again: a search against a missing index returns nothing rather than fail,
+ *   so a rebuild would be a silent outage. What no update can change (the
+ *   type, an autoEmbed field's model or size) is a conflict instead.
  */
 
 /** Actions that change the database — what a plan "would do" and a run "did" */
@@ -26,8 +38,13 @@ const CHANGE_ACTIONS = new Set(['create', 'modify', 'recreate', 'drop']);
 /** Server defaults for a collection that has a validator but did not say how to apply it */
 const VALIDATOR_DEFAULTS = { validationLevel: 'strict', validationAction: 'error' };
 
-/** Whether a row drops or rebuilds an index */
+/**
+ * Whether a row drops or rebuilds an index — or drops a search index (a
+ * search index is updated in place, never rebuilt: the old one serves until
+ * the new definition is built).
+ */
 function isDestructive(action) {
+  if (action.target === 'searchIndex') return action.action === 'drop';
   return action.target === 'index' && (action.action === 'drop' || action.action === 'recreate');
 }
 
@@ -358,12 +375,165 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities
   }
 }
 
+/** The way out of a change a search index cannot make in place */
+const NEW_NAME_RECIPE =
+  'declare it under a new name, converge, then remove the old declaration and converge with prune';
+
+/** Why a declared search index is not planned on a server without Atlas Search */
+const SEARCH_UNAVAILABLE_REASON = 'Atlas Search is not available on this server';
+
+function typeChangeReason(from, to) {
+  return `the type cannot change in place (${from} → ${to}) — ${NEW_NAME_RECIPE}`;
+}
+
+function autoEmbedReason(changes) {
+  return `autoEmbed ${changes.join(', ')} cannot change in place — ${NEW_NAME_RECIPE}`;
+}
+
+function deletingReason(status) {
+  return `is being deleted on the server (${status}) — converge again once it is gone`;
+}
+
+/**
+ * Plan the search indexes of one collection. Submissions (creates, then
+ * updates) go to `submit`, drops to `drops` — converge.js sends submissions
+ * before the regular index builds (the server builds a search index in the
+ * background) and drops last of all.
+ */
+function planSearchIndexes(declaredList, live, { prune, search }, row, submit, drops) {
+  if (!search.available) {
+    // Nothing to compare with: every declaration is refused, or skipped when
+    // the configuration says a server without Search is expected.
+    for (const declared of declaredList) {
+      row({
+        target: 'searchIndex',
+        name: declared.name,
+        action: search.onUnavailable === 'skip' ? 'skip' : 'conflict',
+        reason: SEARCH_UNAVAILABLE_REASON,
+        to: searchIndexValue(declared),
+      });
+    }
+    return;
+  }
+  const liveIndexes = (live.searchIndexes ?? []).map((raw) => normalizeLiveSearchIndex(raw));
+  const byName = new Map();
+  for (const index of liveIndexes) byName.set(index.name, index);
+  const declaredNames = new Set();
+  for (const declared of declaredList) declaredNames.add(declared.name);
+
+  const creates = [];
+  const updates = [];
+  for (const declared of declaredList) {
+    const current = byName.get(declared.name);
+    const to = searchIndexValue(declared);
+    if (!current) {
+      creates.push({
+        declared,
+        action: row({ target: 'searchIndex', name: declared.name, action: 'create', to }),
+      });
+      continue;
+    }
+    const from = searchIndexValue(current);
+    const build = searchBuild(current);
+    if (isBeingRemoved(current)) {
+      row({
+        target: 'searchIndex',
+        name: declared.name,
+        action: 'conflict',
+        reason: deletingReason(current.status),
+        build,
+      });
+      continue;
+    }
+    const { diffs, typeChange, immutable } = compareSearchIndex(declared, current);
+    if (diffs.length === 0) {
+      row({ target: 'searchIndex', name: declared.name, action: 'unchanged', build });
+    } else if (typeChange || immutable.length > 0) {
+      row({
+        target: 'searchIndex',
+        name: declared.name,
+        action: 'conflict',
+        reason: typeChange
+          ? typeChangeReason(current.type, declared.type)
+          : autoEmbedReason(immutable),
+        from,
+        to,
+        build,
+      });
+    } else {
+      const action = row({
+        target: 'searchIndex',
+        name: declared.name,
+        action: 'modify',
+        reason: diffs.join(', '),
+        from,
+        to,
+        build,
+      });
+      updates.push({
+        op: 'updateSearchIndex',
+        name: declared.name,
+        type: declared.type,
+        definition: declared.definition,
+        ...(current.version !== undefined ? { sinceVersion: current.version } : {}),
+        actions: [action],
+      });
+    }
+  }
+  if (creates.length > 0) {
+    submit.push({
+      op: 'createSearchIndexes',
+      specs: creates.map(({ declared }) => searchIndexSpec(declared)),
+      actions: creates.map(({ action }) => action),
+    });
+  }
+  submit.push(...updates);
+
+  for (const index of liveIndexes) {
+    if (declaredNames.has(index.name)) continue;
+    const from = searchIndexValue(index);
+    const build = searchBuild(index);
+    if (isBeingRemoved(index)) {
+      // On its way out already — dropping it again would only fail.
+      row({
+        target: 'searchIndex',
+        name: index.name,
+        action: 'keep',
+        reason: 'being deleted',
+        from,
+        build,
+      });
+    } else if (prune) {
+      const action = row({
+        target: 'searchIndex',
+        name: index.name,
+        action: 'drop',
+        reason: 'not declared',
+        from,
+        build,
+      });
+      drops.push({ op: 'dropSearchIndex', name: index.name, actions: [action] });
+    } else {
+      row({
+        target: 'searchIndex',
+        name: index.name,
+        action: 'keep',
+        reason: 'not declared',
+        from,
+        build,
+      });
+    }
+  }
+}
+
 /**
  * Plan one collection. `definition` is a normalized definition (see
- * collections.js); `live` is `{ exists, type?, options?, indexes }` as
- * converge.js reads it. Returns `{ name, actions, steps }`: `actions` are the
- * result rows (status `'planned'`), `steps` the operations that carry them
- * out, in execution order, each pointing at the rows it settles.
+ * collections.js); `live` is `{ exists, type?, options?, indexes,
+ * searchIndexes? }` as converge.js reads it. Returns `{ name, actions, steps }`:
+ * `actions` are the result rows (status `'planned'`), `steps` the operations
+ * that carry them out, in execution order, each pointing at the rows it
+ * settles. `search` is `{ available, onUnavailable }` — whether the server has
+ * Atlas Search, and what a declared search index becomes when it does not.
  */
 /**
  * Fold every run of consecutive `createIndex` steps into one `createIndexes`:
@@ -393,10 +563,12 @@ function planCollection(definition, live, options = {}) {
   return { ...plan, steps: batchCreates(plan.steps) };
 }
 
+const SEARCH_AVAILABLE = Object.freeze({ available: true, onUnavailable: 'fail' });
+
 function planCollectionSteps(
   definition,
   live,
-  { prune = false, rebuildUnique = false, capabilities = {} } = {},
+  { prune = false, rebuildUnique = false, capabilities = {}, search = SEARCH_AVAILABLE } = {},
 ) {
   const name = definition.name;
   const actions = [];
@@ -419,16 +591,27 @@ function planCollectionSteps(
 
   const desired = desiredValidator(definition);
   const declaredIndexes = definition.indexes;
+  const declaredSearch = definition.searchIndexes;
+  const indexSteps = [];
+  const searchSubmit = [];
+  const searchDrops = [];
 
   if (!live.exists) {
     // Nothing worth creating an empty collection for — a definition that only
-    // says "no validator" is already true of a collection that does not exist.
-    if (!desired && !(declaredIndexes?.length > 0)) return { name, actions, steps };
-    const linked = [row({ target: 'collection', name, action: 'create' })];
-    if (desired) {
-      linked.push(row({ target: 'validator', name, action: 'create', to: desired }));
+    // says "no validator" is already true of a collection that does not exist,
+    // and so is "no search indexes" (or any, on a server without Search).
+    const wantsSearch = search.available && declaredSearch?.length > 0;
+    if (desired || declaredIndexes?.length > 0 || wantsSearch) {
+      const linked = [row({ target: 'collection', name, action: 'create' })];
+      if (desired) {
+        linked.push(row({ target: 'validator', name, action: 'create', to: desired }));
+      }
+      steps.push({
+        op: 'createCollection',
+        options: desired ? { ...desired } : {},
+        actions: linked,
+      });
     }
-    steps.push({ op: 'createCollection', options: desired ? { ...desired } : {}, actions: linked });
     for (const declared of declaredIndexes ?? []) {
       const action = row({
         target: 'index',
@@ -436,8 +619,13 @@ function planCollectionSteps(
         action: 'create',
         to: indexValue(declared.spec),
       });
-      steps.push({ op: 'createIndex', spec: declared.spec, actions: [action] });
+      indexSteps.push({ op: 'createIndex', spec: declared.spec, actions: [action] });
     }
+    if (declaredSearch !== undefined) {
+      const none = { searchIndexes: [] };
+      planSearchIndexes(declaredSearch, none, { prune, search }, row, searchSubmit, searchDrops);
+    }
+    steps.push(...searchSubmit, ...indexSteps);
     return { name, actions, steps };
   }
 
@@ -445,8 +633,14 @@ function planCollectionSteps(
     planValidator(name, desired, liveValidator(live.options), row, steps);
   }
   if (declaredIndexes !== undefined) {
-    planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities }, row, steps);
+    planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities }, row, indexSteps);
   }
+  if (declaredSearch !== undefined) {
+    planSearchIndexes(declaredSearch, live, { prune, search }, row, searchSubmit, searchDrops);
+  }
+  // Search submissions return at once and build in the background, so they go
+  // before the regular index builds; every drop still comes last.
+  steps.push(...searchSubmit, ...indexSteps, ...searchDrops);
   return { name, actions, steps };
 }
 
@@ -470,6 +664,7 @@ function summarize(collections) {
 
 module.exports = {
   CHANGE_ACTIONS,
+  SEARCH_UNAVAILABLE_REASON,
   UNIQUE_REBUILD_REASON,
   VALIDATOR_DEFAULTS,
   desiredValidator,

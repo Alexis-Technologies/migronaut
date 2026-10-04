@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { normalizeDefinition } = require('../../src/core/collections.js');
 const {
+  SEARCH_UNAVAILABLE_REASON,
   UNIQUE_REBUILD_REASON,
   desiredValidator,
   isDestructive,
@@ -38,6 +39,11 @@ const steps = (plan) =>
       return `create ${step.specs.map((spec) => spec.name).join(',')}`;
     }
     if (step.op === 'dropIndex') return `drop ${step.name}`;
+    if (step.op === 'createSearchIndexes') {
+      return `searchCreate ${step.specs.map((spec) => spec.name).join(',')}`;
+    }
+    if (step.op === 'updateSearchIndex') return `searchUpdate ${step.name}`;
+    if (step.op === 'dropSearchIndex') return `searchDrop ${step.name}`;
     if (step.op === 'createCollection') return 'createCollection';
     if (step.op === 'collMod') {
       return step.command.index ? `collMod ${step.command.index.name}` : 'collMod validator';
@@ -446,6 +452,330 @@ describe('planCollection — what a row says changed (from / to)', () => {
   });
 });
 
+describe('planCollection — search indexes', () => {
+  const VECTOR = {
+    fields: [{ type: 'vector', path: 'embedding', numDimensions: 3, similarity: 'cosine' }],
+  };
+  const AUTO = {
+    fields: [{ type: 'autoEmbed', modality: 'text', path: 'plot', model: 'voyage-4' }],
+  };
+  /** A `$listSearchIndexes` document */
+  const listed = (name, latestDefinition, fields = {}) => ({
+    id: `id-${name}`,
+    name,
+    type: Array.isArray(latestDefinition.fields) ? 'vectorSearch' : 'search',
+    status: 'READY',
+    queryable: true,
+    latestDefinitionVersion: { version: 1 },
+    latestDefinition,
+    ...fields,
+  });
+  const withSearch = (searchIndexes, indexes = []) => ({ ...existing(indexes), searchIndexes });
+  const UNAVAILABLE = { available: false, onUnavailable: 'fail' };
+  const SKIPPED = { available: false, onUnavailable: 'skip' };
+
+  const cases = [
+    {
+      label: 'a missing search index as a batched create',
+      declared: [
+        { definition: { mappings: { dynamic: true } } },
+        { name: 'v', type: 'vectorSearch', definition: VECTOR },
+      ],
+      live: [],
+      rows: ['searchIndex:default:create', 'searchIndex:v:create'],
+      steps: ['searchCreate default,v'],
+    },
+    {
+      label: 'a matching index as unchanged',
+      declared: [{ definition: { mappings: { dynamic: true } } }],
+      live: [listed('default', { mappings: { dynamic: true, fields: {} } })],
+      rows: ['searchIndex:default:unchanged'],
+      steps: [],
+    },
+    {
+      label:
+        'a FAILED index with the declared definition as unchanged — resubmitting changes nothing',
+      declared: [{ definition: { mappings: { dynamic: true } } }],
+      live: [listed('default', { mappings: { dynamic: true } }, { status: 'FAILED' })],
+      rows: ['searchIndex:default:unchanged'],
+      steps: [],
+    },
+    {
+      label: 'a changed definition as an in-place update',
+      declared: [
+        { definition: { mappings: { dynamic: false, fields: { t: { type: 'string' } } } } },
+      ],
+      live: [listed('default', { mappings: { dynamic: true } })],
+      rows: ['searchIndex:default:modify:mappings'],
+      steps: ['searchUpdate default'],
+    },
+    {
+      label: 'a change of type as a conflict — never a rebuild',
+      declared: [{ type: 'vectorSearch', definition: VECTOR }],
+      live: [listed('default', { mappings: { dynamic: true } })],
+      rows: [
+        'searchIndex:default:conflict:the type cannot change in place (search → vectorSearch) — ' +
+          'declare it under a new name, converge, then remove the old declaration and converge ' +
+          'with prune',
+      ],
+      steps: [],
+    },
+    {
+      label: 'a new autoEmbed model as a conflict',
+      declared: [
+        {
+          name: 'auto',
+          type: 'vectorSearch',
+          definition: { fields: [{ ...AUTO.fields[0], model: 'voyage-4-large' }] },
+        },
+      ],
+      live: [listed('auto', AUTO)],
+      rows: [
+        'searchIndex:auto:conflict:autoEmbed plot.model cannot change in place — declare it ' +
+          'under a new name, converge, then remove the old declaration and converge with prune',
+      ],
+      steps: [],
+    },
+    {
+      label: 'a declared index the server is still deleting as a conflict',
+      declared: [{ definition: { mappings: { dynamic: true } } }],
+      live: [listed('default', { mappings: { dynamic: true } }, { status: 'DELETING' })],
+      rows: [
+        'searchIndex:default:conflict:is being deleted on the server (DELETING) — converge again ' +
+          'once it is gone',
+      ],
+      steps: [],
+    },
+    {
+      label: 'an undeclared index as kept',
+      declared: [],
+      live: [listed('legacy', { mappings: { dynamic: true } })],
+      rows: ['searchIndex:legacy:keep:not declared'],
+      steps: [],
+    },
+    {
+      label: 'an undeclared index under prune as a drop',
+      declared: [],
+      live: [listed('legacy', { mappings: { dynamic: true } })],
+      prune: true,
+      rows: ['searchIndex:legacy:drop:not declared'],
+      steps: ['searchDrop legacy'],
+    },
+    {
+      label: 'an undeclared index on its way out as kept, even under prune',
+      declared: [],
+      live: [listed('legacy', { mappings: {} }, { status: 'DOES_NOT_EXIST', queryable: false })],
+      prune: true,
+      rows: ['searchIndex:legacy:keep:being deleted'],
+      steps: [],
+    },
+    {
+      label: 'creates, then updates, and drops last',
+      declared: [
+        { name: 'new', definition: { mappings: { dynamic: true } } },
+        { name: 'old', definition: { mappings: { dynamic: false } } },
+      ],
+      live: [
+        listed('old', { mappings: { dynamic: true } }),
+        listed('gone', { mappings: { dynamic: true } }),
+      ],
+      prune: true,
+      rows: [
+        'searchIndex:new:create',
+        'searchIndex:old:modify:mappings',
+        'searchIndex:gone:drop:not declared',
+      ],
+      steps: ['searchCreate new', 'searchUpdate old', 'searchDrop gone'],
+    },
+    {
+      label: 'every declared index as a conflict where Search is unavailable',
+      declared: [
+        { definition: { mappings: {} } },
+        { name: 'v', type: 'vectorSearch', definition: VECTOR },
+      ],
+      live: undefined,
+      search: UNAVAILABLE,
+      rows: [
+        `searchIndex:default:conflict:${SEARCH_UNAVAILABLE_REASON}`,
+        `searchIndex:v:conflict:${SEARCH_UNAVAILABLE_REASON}`,
+      ],
+      steps: [],
+    },
+    {
+      label: 'every declared index as skipped where Search is unavailable and that is expected',
+      declared: [{ definition: { mappings: {} } }],
+      live: undefined,
+      search: SKIPPED,
+      rows: [`searchIndex:default:skip:${SEARCH_UNAVAILABLE_REASON}`],
+      steps: [],
+    },
+    {
+      label: 'nothing for searchIndexes: [] where Search is unavailable — none is already true',
+      declared: [],
+      live: undefined,
+      search: UNAVAILABLE,
+      prune: true,
+      rows: [],
+      steps: [],
+    },
+  ];
+  for (const testCase of cases) {
+    it(`should plan ${testCase.label}`, () => {
+      const plan = planCollection(
+        definition({ searchIndexes: testCase.declared }),
+        testCase.live === undefined ? existing() : withSearch(testCase.live),
+        { prune: testCase.prune ?? false, ...(testCase.search ? { search: testCase.search } : {}) },
+      );
+      assert.deepStrictEqual(rows(plan), testCase.rows);
+      assert.deepStrictEqual(steps(plan), testCase.steps);
+    });
+  }
+
+  it('should leave search indexes alone when the definition does not manage them', () => {
+    const plan = planCollection(
+      definition({ indexes: [] }),
+      withSearch([listed('legacy', { mappings: { dynamic: true } })]),
+      { prune: true },
+    );
+    assert.deepStrictEqual(rows(plan), []);
+  });
+
+  it('should create a missing collection for its search indexes alone', () => {
+    const plan = planCollection(
+      definition({ searchIndexes: [{ definition: { mappings: { dynamic: true } } }] }),
+      MISSING,
+    );
+    assert.deepStrictEqual(rows(plan), ['collection:c:create', 'searchIndex:default:create']);
+    assert.deepStrictEqual(steps(plan), ['createCollection', 'searchCreate default']);
+  });
+
+  it('should not create a collection for search indexes the server cannot hold', () => {
+    for (const search of [UNAVAILABLE, SKIPPED]) {
+      const plan = planCollection(
+        definition({ searchIndexes: [{ definition: { mappings: {} } }] }),
+        MISSING,
+        { search },
+      );
+      assert.deepStrictEqual(steps(plan), []);
+      assert.deepStrictEqual(
+        rows(plan).map((line) => line.split(':').slice(0, 3).join(':')),
+        [`searchIndex:default:${search.onUnavailable === 'skip' ? 'skip' : 'conflict'}`],
+      );
+    }
+  });
+
+  it('should order a whole collection: validator, search submissions, index work, search drops', () => {
+    const plan = planCollection(
+      definition({
+        validator: { a: { $type: 'int' } },
+        indexes: [
+          { key: { a: 1 }, unique: true },
+          { key: { n: 1 } },
+          { key: { t: 1 }, expireAfterSeconds: 9 },
+        ],
+        searchIndexes: [
+          { name: 'new', definition: { mappings: { dynamic: true } } },
+          { name: 'old', definition: { mappings: { dynamic: false } } },
+        ],
+      }),
+      withSearch(
+        [listed('old', { mappings: { dynamic: true } }), listed('gone', { mappings: {} })],
+        [
+          { key: { a: 1 }, name: 'a_1' },
+          { key: { t: 1 }, name: 't_1', expireAfterSeconds: 1 },
+          { key: { x: 1 }, name: 'x_1' },
+        ],
+      ),
+      { prune: true },
+    );
+    assert.deepStrictEqual(steps(plan), [
+      'collMod validator',
+      'searchCreate new',
+      'searchUpdate old',
+      'create n_1',
+      'collMod t_1',
+      'rebuild [a_1] → [a_1]',
+      'drop x_1',
+      'searchDrop gone',
+    ]);
+    // Rows keep the reading order: validator, indexes, then search indexes.
+    assert.deepStrictEqual(
+      plan.actions.map((action) => action.target),
+      [
+        'validator',
+        'index',
+        'index',
+        'index',
+        'index',
+        'searchIndex',
+        'searchIndex',
+        'searchIndex',
+      ],
+    );
+  });
+
+  it('should carry what changed and the build state of every live index it matched', () => {
+    const plan = planCollection(
+      definition({
+        searchIndexes: [
+          { name: 'a', definition: { mappings: { dynamic: false } } },
+          { name: 'b', definition: { mappings: { dynamic: true } } },
+          { name: 'c', definition: { mappings: { dynamic: true } } },
+        ],
+      }),
+      withSearch([
+        listed('a', { mappings: { dynamic: true } }, { latestDefinitionVersion: { version: 7 } }),
+        listed('b', { mappings: { dynamic: true } }, { status: 'BUILDING', queryable: false }),
+        listed('legacy', { mappings: {} }, { status: 'FAILED', queryable: false, message: 'boom' }),
+      ]),
+    );
+    const byName = Object.fromEntries(plan.actions.map((action) => [action.name, action]));
+    assert.deepStrictEqual(byName.a.from, {
+      name: 'a',
+      type: 'search',
+      definition: { mappings: { dynamic: true } },
+    });
+    assert.deepStrictEqual(byName.a.to, {
+      name: 'a',
+      type: 'search',
+      definition: { mappings: { dynamic: false } },
+    });
+    assert.deepStrictEqual(byName.a.build, { status: 'READY', queryable: true });
+    assert.deepStrictEqual(byName.b.build, { status: 'BUILDING', queryable: false });
+    assert.strictEqual(byName.c.build, undefined);
+    assert.deepStrictEqual(byName.c.to.definition, { mappings: { dynamic: true } });
+    assert.deepStrictEqual(byName.legacy.build, {
+      status: 'FAILED',
+      queryable: false,
+      message: 'boom',
+    });
+    const update = plan.steps.find((step) => step.op === 'updateSearchIndex');
+    assert.deepStrictEqual(update, {
+      op: 'updateSearchIndex',
+      name: 'a',
+      type: 'search',
+      definition: { mappings: { dynamic: false } },
+      sinceVersion: 7,
+      actions: [byName.a],
+    });
+    const create = plan.steps.find((step) => step.op === 'createSearchIndexes');
+    assert.deepStrictEqual(create.specs, [
+      { name: 'c', definition: { mappings: { dynamic: true } } },
+    ]);
+    assert.doesNotThrow(() => JSON.stringify(plan.actions));
+  });
+
+  it('should send a vector index with its type', () => {
+    const plan = planCollection(
+      definition({ searchIndexes: [{ name: 'v', type: 'vectorSearch', definition: VECTOR }] }),
+      withSearch([]),
+    );
+    assert.deepStrictEqual(plan.steps[0].specs, [
+      { name: 'v', type: 'vectorSearch', definition: VECTOR },
+    ]);
+  });
+});
+
 describe('needsConfirmation', () => {
   it('should ask for index drops and rebuilds, and for validator changes on existing data', () => {
     assert.ok(needsConfirmation({ target: 'index', action: 'drop' }));
@@ -455,6 +785,11 @@ describe('needsConfirmation', () => {
       assert.ok(needsConfirmation({ target: 'validator', action }, []), action);
     }
     assert.ok(!needsConfirmation({ target: 'validator', action: 'unchanged' }, []));
+    // A search index is updated in place — only dropping one is asked about.
+    assert.ok(needsConfirmation({ target: 'searchIndex', action: 'drop' }));
+    for (const action of ['create', 'modify', 'skip', 'keep', 'conflict']) {
+      assert.ok(!needsConfirmation({ target: 'searchIndex', action }), action);
+    }
     // A validator born with its collection guards no existing writes.
     const fresh = [
       { target: 'collection', action: 'create' },
@@ -475,15 +810,21 @@ describe('summarize / isDestructive', () => {
           { target: 'validator', action: 'drop', status: 'planned' },
           { target: 'index', action: 'keep', status: 'planned' },
           { target: 'index', action: 'conflict', status: 'planned' },
+          { target: 'searchIndex', action: 'modify', status: 'planned' },
+          { target: 'searchIndex', action: 'drop', status: 'planned' },
+          { target: 'searchIndex', action: 'skip', status: 'planned' },
+          { target: 'searchIndex', action: 'conflict', status: 'planned' },
         ],
       },
     ];
     assert.deepStrictEqual(summarize(collections), {
-      changes: 4,
+      changes: 6,
       applied: 1,
-      conflicts: 1,
-      destructive: 2,
+      conflicts: 2,
+      destructive: 3,
     });
+    assert.ok(isDestructive({ target: 'searchIndex', action: 'drop' }));
+    assert.ok(!isDestructive({ target: 'searchIndex', action: 'modify' }));
     assert.ok(isDestructive({ target: 'index', action: 'recreate' }));
     // Removing a validator was declared outright and loses no data.
     assert.ok(!isDestructive({ target: 'validator', action: 'drop' }));
