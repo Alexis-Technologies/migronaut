@@ -1740,6 +1740,71 @@ describe('runConverge — search indexes', () => {
     );
   });
 
+  it('should say in which phase a later search index read failed', async () => {
+    // Reads, in order: the probe (movies), shows; the verify of movies; the replan of shows.
+    const failAt = (failing) => {
+      let reads = 0;
+      return () => {
+        reads += 1;
+        return reads === failing ? serverError(13, 'not authorized on app') : undefined;
+      };
+    };
+    const list = [
+      { name: 'movies', searchIndexes: [{ definition: DYNAMIC }] },
+      { name: 'shows', searchIndexes: [{ definition: DYNAMIC }] },
+    ];
+    for (const [failing, phase, collection] of [
+      [3, 'apply', 'movies'],
+      [4, 'replan', 'shows'],
+    ]) {
+      const db = fakeDb(
+        { movies: {}, shows: {} },
+        { search: 'atlas', fail: { listSearchIndexes: failAt(failing) } },
+      );
+      await assert.rejects(run(makeDeps(db).deps, list), (error) => {
+        assert.ok(error instanceof ConvergeFailedError);
+        assert.strictEqual(error.context.phase, phase);
+        assert.strictEqual(error.context.collection, collection);
+        assert.strictEqual(error.context.converge.collections[0].actions[0].status, 'applied');
+        const statuses = error.context.converge.collections.flatMap((entry) =>
+          entry.actions.map((action) => action.status),
+        );
+        assert.ok(!statuses.includes('planned'), 'no row is left planned');
+        return true;
+      });
+    }
+  });
+
+  it('should fail the wait as unreadable when the server refuses the list', async () => {
+    let reads = 0;
+    const db = fakeDb(
+      { movies: {} },
+      {
+        search: 'atlas',
+        readyAfter: 1000,
+        fail: {
+          listSearchIndexes: () => {
+            reads += 1;
+            return reads > 2 ? serverError(13, 'not authorized on app') : undefined;
+          },
+        },
+      },
+    );
+    await assert.rejects(
+      run(makeDeps(db).deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], {
+        search: { onUnavailable: 'fail', wait: true, waitTimeoutMs: 60_000 },
+      }),
+      (error) => {
+        assert.strictEqual(error.context.phase, 'wait');
+        assert.strictEqual(error.context.reason, 'unreadable');
+        assert.strictEqual(error.context.mongoCode, 13);
+        assert.match(error.context.hint, /listSearchIndexes actions/);
+        assert.strictEqual(error.context.converge.collections[0].actions[0].status, 'applied');
+        return true;
+      },
+    );
+  });
+
   it('should not probe for collections the planner refuses anyway', async () => {
     const reads = [];
     const db = fakeDb({ recent: { type: 'view' } }, { reads, search: 'atlas' });

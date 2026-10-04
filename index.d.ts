@@ -1805,17 +1805,22 @@ export class QueueJobFailedError extends MigronautError {
  * to the declared state. `context.phase` is:
  * - `'plan'` for a refused plan (`context.conflicts` lists why, with a `hint`
  *   when Atlas Search is missing; nothing was written) — or a search index
- *   list that could not be read (`collection`, `cause`, `mongoCode`, `hint`);
+ *   list that could not be read before the first write (`collection`,
+ *   `target: 'searchIndex'`, `cause`, `mongoCode`, `hint`);
  * - `'replan'` when a collection changed while the run was under way
  *   (`collection`, `introduced`: the new conflicts or drops; nothing of that
- *   collection was written);
+ *   collection was written) — or its search index list could not be read
+ *   again (as for `'plan'`);
  * - `'apply'` for a failed step (`collection`, `target`, `name`, `action`,
  *   `cause`, and `mongoCode`, `hint` and — after a failed rebuild — `restored`
- *   when they apply);
+ *   when they apply) — or a search index list that could not be read to check
+ *   the steps just applied (as for `'plan'`);
  * - `'wait'` when `waitForSearchIndexes` gave up: `reason` is `'failed'` (the
- *   build of a search index this run created or changed FAILED) or `'timeout'`, `notReady` the indexes not
- *   serving their declaration, `waitedMs`, `timeoutMs`. Everything was
- *   applied — only the builds were not finished.
+ *   build of a search index this run created or changed FAILED) or `'timeout'`,
+ *   with `notReady` the indexes not serving their declaration, `waitedMs`,
+ *   `timeoutMs` — or `'unreadable'`: a search index list that could not be
+ *   read (as for `'plan'`), after up to three network or failover blips in a
+ *   row. Everything was applied — only the builds were not finished.
  *
  * `context.converge` is the {@link ConvergeResult} so far.
  */

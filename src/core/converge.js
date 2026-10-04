@@ -667,8 +667,12 @@ function warnDropEverything(deps, definition, plan, prune) {
   }
 }
 
-/** A search index read that failed for a reason other than "no Search here" */
-function searchReadFailure(error, collection) {
+/**
+ * A search index read that failed for a reason other than "no Search here",
+ * in the phase it happened in: `'plan'` (nothing written yet), `'replan'`,
+ * `'apply'` (the verify phase after a collection's steps) or `'wait'`.
+ */
+function searchReadFailure(error, collection, phase) {
   if (error instanceof MigronautError) return error;
   const mongoCode = typeof error?.code === 'number' ? error.code : undefined;
   const hint = searchHint(error);
@@ -676,7 +680,8 @@ function searchReadFailure(error, collection) {
   return new ConvergeFailedError(
     `Could not read the search indexes of ${collection}: ${cause}${hint ? ` — ${hint}` : ''}`,
     {
-      phase: 'plan',
+      phase,
+      ...(phase === 'wait' ? { reason: 'unreadable' } : {}),
       collection,
       target: 'searchIndex',
       cause,
@@ -711,7 +716,7 @@ async function readSearch(deps, server, definitions, live, search) {
       readOptions: READ_OPTIONS,
     });
   } catch (error) {
-    throw searchReadFailure(error, targetName);
+    throw searchReadFailure(error, targetName, 'plan');
   }
   search.available = probe.available;
   search.evidence = probe.evidence;
@@ -734,15 +739,19 @@ async function readSearch(deps, server, definitions, live, search) {
       live[position].searchIndexes = probe.listed;
       return;
     }
-    live[position].searchIndexes = await readSearchIndexes(deps, definitions[position].name);
+    live[position].searchIndexes = await readSearchIndexes(
+      deps,
+      definitions[position].name,
+      'plan',
+    );
   });
 }
 
-async function readSearchIndexes(deps, name) {
+async function readSearchIndexes(deps, name, phase) {
   try {
     return await listSearchIndexes(deps.db, name, READ_OPTIONS);
   } catch (error) {
-    throw searchReadFailure(error, name);
+    throw searchReadFailure(error, name, phase);
   }
 }
 
@@ -761,9 +770,10 @@ function warnSkipping(deps, definitions, search) {
 
 /**
  * One collection's live state read afresh — its search indexes too, when it
- * declares any and the server has Search — for a re-plan or the verify phase.
+ * declares any and the server has Search — for a re-plan (`phase: 'replan'`)
+ * or the verify phase (`'apply'`): what a failed read is reported as.
  */
-async function readFresh(run, position) {
+async function readFresh(run, position, phase) {
   const { deps, definitions, live, search } = run;
   const definition = definitions[position];
   const fresh = await readLiveState(deps.db, definition.name);
@@ -774,7 +784,7 @@ async function readFresh(run, position) {
     fresh.exists &&
     fresh.type === 'collection'
   ) {
-    fresh.searchIndexes = await readSearchIndexes(deps, definition.name);
+    fresh.searchIndexes = await readSearchIndexes(deps, definition.name, phase);
   }
   return fresh;
 }
@@ -839,7 +849,7 @@ function refuseConflicts(result) {
 async function replan(run, position) {
   const { definitions, plans, result, planFor } = run;
   const definition = definitions[position];
-  const plan = planFor(definition, await readFresh(run, position));
+  const plan = planFor(definition, await readFresh(run, position, 'replan'));
   const known = new Set(
     plans[position].actions.map((action) => `${action.target}:${action.name}:${action.action}`),
   );
@@ -987,7 +997,7 @@ async function applyCollection(deps, plan, result, signal, search) {
 async function verifyFixedPoint(run, position, kept, signal) {
   const { deps, definitions, result, planFor } = run;
   const definition = definitions[position];
-  let after = planFor(definition, await readFresh(run, position));
+  let after = planFor(definition, await readFresh(run, position, 'apply'));
   // The search index list catches up with a create or an update a moment
   // later: read it again a few times before calling anything unstable.
   const rows = result.collections[position].actions;
@@ -999,7 +1009,7 @@ async function verifyFixedPoint(run, position, kept, signal) {
     if (!pending) break;
     await (deps.sleep ?? pause)(delay, signal);
     stopIfAborted(deps, signal, result);
-    after = planFor(definition, await readFresh(run, position));
+    after = planFor(definition, await readFresh(run, position, 'apply'));
   }
   refreshBuilds(rows, after.actions);
   for (const action of after.actions) {
@@ -1115,7 +1125,7 @@ async function waitPhase(run, signal) {
   const sleep = deps.sleep ?? pause;
   const outcome = await awaitSearchIndexes({
     targets,
-    read: (collection) => readSearchIndexes(deps, collection),
+    read: (collection) => readSearchIndexes(deps, collection, 'wait'),
     timeoutMs: wait.timeoutMs,
     sleep: (ms) => sleep(ms, signal),
     now,
@@ -1339,8 +1349,11 @@ async function runConverge(deps, options, signal) {
     await reportSuccess(deps, options, result, startedAt, search);
     return result;
   } catch (error) {
+    // Whatever stopped the run, no row is left `planned`, and the error
+    // carries the result so far — a failed read included.
+    settleRest(result);
     await reportFailure(deps, options, result, startedAt, error, search);
-    throw error;
+    throw attachConverge(error, result);
   }
 }
 

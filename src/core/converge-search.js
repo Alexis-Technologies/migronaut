@@ -157,6 +157,9 @@ async function probeSearch(db, server, { collection, readOptions }) {
   }
   let listed;
   try {
+    // Asked of a collection that does not exist yet too: a plain mongod
+    // (checked: 7.0, 8.0, 8.2) refuses $listSearchIndexes for want of Search
+    // before it looks for the namespace, so an empty list is still an answer.
     listed = await listSearchIndexes(db, collection, readOptions);
   } catch (error) {
     if (!isSearchUnavailable(error)) throw error;
