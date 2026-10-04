@@ -1335,7 +1335,7 @@ describe('runConverge — search indexes', () => {
       'movies:searchIndex:default:modify',
       'movies:searchIndex:plot:modify',
     ]);
-    assert.strictEqual(result.collections[0].actions[0].reason, 'mappings');
+    assert.strictEqual(result.collections[0].actions[0].reason, 'mappings.dynamic');
     assert.strictEqual(db.state.movies.searchIndexes[0].version, 3);
   });
 
@@ -1614,6 +1614,26 @@ describe('runConverge — search indexes', () => {
     assert.ok(!lines.some((line) => /still building/.test(line.message)));
   });
 
+  it('should not update for an option only the server reports — and say it left it out', async () => {
+    const db = fakeDb(
+      {
+        movies: {
+          searchIndexes: [
+            searchIndex('default', { mappings: { dynamic: true }, sortOrder: 'new' }),
+          ],
+        },
+      },
+      { search: 'atlas' },
+    );
+    const { deps, lines } = makeDeps(db);
+    const result = await run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }]);
+    assert.deepStrictEqual(db.ops, []);
+    assert.deepStrictEqual(result.collections[0].actions[0].ignored, ['sortOrder']);
+    const warned = lines.filter((line) => /left out of the comparison/.test(line.message));
+    assert.strictEqual(warned.length, 1);
+    assert.match(warned[0].message, /movies\.default \(sortOrder\)/);
+  });
+
   it('should report a definition the server keeps differently as unstable, not loop', async () => {
     const db = fakeDb(
       { movies: {} },
@@ -1633,7 +1653,13 @@ describe('runConverge — search indexes', () => {
     ]);
     assert.deepStrictEqual(pauses, [250, 500, 1000], 'a bounded number of re-reads');
     assert.strictEqual(result.inSync, false);
-    assert.ok(lines.some((line) => /search index "default" still differs/.test(line.message)));
+    assert.ok(
+      lines.some((line) =>
+        /search index "default" still differs after converge \(numPartitions\) — .*every update builds the search index again/.test(
+          line.message,
+        ),
+      ),
+    );
   });
 
   it('should stop before a collection that gained an undeclared search index meanwhile', async () => {

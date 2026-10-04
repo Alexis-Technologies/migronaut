@@ -451,10 +451,19 @@ Each entry: **responsibility · key exports · nuances you must know.**
   `normalizeDeclaredSearchIndex` (default name `default`, type `search`),
   `normalizeLiveSearchIndex` (a `$listSearchIndexes` document — type inferred where a self-managed
   `mongot` reports none, `updating` from a staged index or an older served version),
-  `effectiveDefinition` (`SEARCH_DEFAULTS` & co. filled in), `compareSearchIndex` (`{ diffs,
-  typeChange, immutable }`), `isSearchIndexReady`, `searchBuild`, `searchIndexSpec`.
+  `effectiveDefinition` (`SEARCH_DEFAULTS` & co. filled in), `tolerateServerOptions`,
+  `compareSearchIndex` (`{ diffs, paths, more, typeChange, immutable, ignored }`),
+  `searchBuildState` (`serving`/`updating`/`building`/`stale`/`failed`/`removing` — the one word
+  every reporter uses), `isSearchIndexReady`, `searchBuild`, `searchIndexSpec`.
 - **The invariant** is index-spec.js's: what the server reports for a declaration must compare as
-  unchanged against it — hence defaults filled on *both* sides, from one table.
+  unchanged against it — hence defaults filled on *both* sides, from one table. What the tables do
+  not know, `tolerateServerOptions` drops: after the fill, an option the live side has and the
+  declared side lacks can only be one whose default migronaut does not know, so it is left out
+  (and named in `ignored`) rather than turned into an update — and a rebuild — on every run. Only
+  option objects are trimmed (definition, `mappings`, field mappings with their `fields`/`multi`,
+  vector fields and `hnswOptions`); a field, a mapping type or a vector field only the server has
+  stays a difference. Keys are written with `canonical.js`'s `assign`, so a field named
+  `__proto__` stays a field.
 
 ### `src/core/converge-search.js` — Atlas Search, the mechanism
 - **Responsibility:** the raw search commands (`runSearchStep`: create, update — retried once with
@@ -962,7 +971,10 @@ steps; a conflict or a destructive row the initial plan lacked stops the run (`p
   `number` its representation, `document` `dynamic`, …, recursively through `fields` and `multi`)
   and per vector field — and a field indexed as several types in the server's own order. Both
   sides are filled from the same tables and those lists sorted; the opt-in Atlas suite is what
-  proves the tables (atlas-local 8.0 and 8.3). A self-managed `mongot` reports `latestVersion`
+  proves the tables (atlas-local 8.0 and 8.3). A default the tables lack is tolerated (see
+  `tolerateServerOptions`) and warned about once per run; a *value* the server changes for a
+  known default still shows as `unstable`, with the paths and a warning that every update builds
+  the index again. A self-managed `mongot` reports `latestVersion`
   instead of `latestDefinitionVersion.version`, and an Atlas CLI local deployment refuses every
   `updateSearchIndex` of a vector index (with or without `type`): the step fails with the
   new-name recipe as its hint.

@@ -201,4 +201,12 @@ function toWire(value) {
   return out;
 }
 
-module.exports = { canonical, deepEqual, isPlainObject, regExpIssue, toWire, unsendable };
+module.exports = {
+  assign,
+  canonical,
+  deepEqual,
+  isPlainObject,
+  regExpIssue,
+  toWire,
+  unsendable,
+};

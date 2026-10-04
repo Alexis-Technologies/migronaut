@@ -648,6 +648,15 @@ export interface ConvergeAction {
    * @experimental New in 2.2
    */
   build?: SearchIndexBuild;
+  /**
+   * On a search index row: the options the server reports that the
+   * declaration does not set and migronaut knows no default for
+   * (`mappings.fields.title.similarity`) — left out of the comparison, so a
+   * new server default does not make every converge update the index.
+   * Declare one to manage it.
+   * @experimental New in 2.2
+   */
+  ignored?: string[];
 }
 
 /**

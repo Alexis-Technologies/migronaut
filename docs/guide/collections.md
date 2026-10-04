@@ -239,7 +239,18 @@ grams and tokenization, a `document` field's `dynamic` — nested fields and `mu
 too), and on vector fields (`quantization: 'none'`, `indexingMethod: 'hnsw'`, `hnswOptions: {
 maxEdges: 16, numEdgeCandidates: 100 }`). Vector `fields`, and a field indexed as several types,
 compare as sets. So a definition that leaves a default out matches a server that spells it out. Removing an option
-you had declared is a change, like any other.
+you had declared is a change, like any other — when migronaut knows its default.
+
+An option the server reports that the declaration does not set, and whose default migronaut does
+**not** know — a newer `mongot` writing a new one into every definition — is left out of the
+comparison: compared, it would make every converge update the index, and the server builds a search
+index again on every update. converge names such options in a warning and on the row
+(`ignored: ['mappings.fields.title.similarity']`). The cost: removing such an option from a
+declaration goes unnoticed — to change it, declare the value you want. A *field* only the server has
+is still a difference, and so is a field mapped as another type.
+
+The plan's Detail column names what differs down to the option (`mappings.fields.title.norms`),
+the first five paths and how many more.
 
 **Where it works:** Atlas (every tier — the free tier holds at most 3 search and vector indexes,
 Flex 10), an [Atlas CLI local deployment](https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-deploy-local/)

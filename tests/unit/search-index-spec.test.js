@@ -523,12 +523,179 @@ describe('compareSearchIndex', () => {
     );
   });
 
+  describe('options only the server reports', () => {
+    const compare = (declaredIndex, liveFields) =>
+      compareSearchIndex(declared(declaredIndex), live(liveFields));
+    const SEARCH = {
+      mappings: {
+        dynamic: false,
+        fields: {
+          title: {
+            type: 'string',
+            multi: { english: { type: 'string', analyzer: 'lucene.english' } },
+          },
+          sub: { type: 'document', fields: { a: { type: 'token' } } },
+          tags: [{ type: 'token' }, { type: 'stringFacet' }],
+        },
+      },
+    };
+
+    it('should ignore them at every option level of a search definition, and name them', () => {
+      const outcome = compare(
+        { definition: SEARCH },
+        {
+          latestDefinition: {
+            sortOrder: 'new',
+            mappings: {
+              dynamic: false,
+              fieldLimit: 1000,
+              fields: {
+                title: {
+                  type: 'string',
+                  similarity: { type: 'bm25' },
+                  multi: {
+                    english: { type: 'string', analyzer: 'lucene.english', ignoreAbove: 99 },
+                  },
+                },
+                sub: { type: 'document', fields: { a: { type: 'token', newDefault: 1 } } },
+                tags: [{ type: 'stringFacet', x: true }, { type: 'token' }],
+              },
+            },
+          },
+        },
+      );
+      assert.deepStrictEqual(outcome.diffs, []);
+      assert.deepStrictEqual(outcome.ignored.sort(), [
+        'mappings.fieldLimit',
+        'mappings.fields.sub.fields.a.newDefault',
+        'mappings.fields.tags[stringFacet].x',
+        'mappings.fields.title.multi.english.ignoreAbove',
+        'mappings.fields.title.similarity',
+        'sortOrder',
+      ]);
+    });
+
+    it('should ignore them on a vector definition, its fields and their hnswOptions', () => {
+      const outcome = compare(
+        { type: 'vectorSearch', definition: VECTOR },
+        {
+          type: 'vectorSearch',
+          latestDefinition: {
+            nested: [],
+            fields: [
+              { ...VECTOR.fields[1], newOption: 'x' },
+              {
+                ...VECTOR.fields[0],
+                hnswOptions: { maxEdges: 16, numEdgeCandidates: 100, ef: 3 },
+              },
+            ],
+          },
+        },
+      );
+      assert.deepStrictEqual(outcome.diffs, []);
+      assert.deepStrictEqual(outcome.ignored.sort(), [
+        'fields[filter:year].newOption',
+        'fields[vector:embedding].hnswOptions.ef',
+        'nested',
+      ]);
+    });
+
+    it('should still see a field, a mapping type or a vector field only the server has', () => {
+      assert.deepStrictEqual(
+        compare(
+          { definition: SEARCH },
+          {
+            latestDefinition: {
+              mappings: {
+                ...SEARCH.mappings,
+                fields: { ...SEARCH.mappings.fields, extra: { type: 'token' } },
+              },
+            },
+          },
+        ).paths,
+        ['mappings.fields.extra'],
+      );
+      assert.deepStrictEqual(
+        compare(
+          { definition: SEARCH },
+          {
+            latestDefinition: {
+              mappings: {
+                ...SEARCH.mappings,
+                fields: { ...SEARCH.mappings.fields, sub: { type: 'embeddedDocuments' } },
+              },
+            },
+          },
+        ).diffs,
+        ['mappings'],
+      );
+      const vector = compare(
+        { type: 'vectorSearch', definition: VECTOR },
+        {
+          type: 'vectorSearch',
+          latestDefinition: { fields: [...VECTOR.fields, { type: 'filter', path: 'genre' }] },
+        },
+      );
+      assert.deepStrictEqual(vector.diffs, ['fields']);
+      assert.deepStrictEqual(vector.ignored, []);
+    });
+
+    it('should name the differing paths — a few, and how many more', () => {
+      const fields = {};
+      for (const name of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) fields[name] = { type: 'token' };
+      const outcome = compare(
+        { definition: { mappings: { fields } } },
+        {
+          latestDefinition: {
+            mappings: {
+              fields: Object.fromEntries(
+                Object.keys(fields).map((name) => [
+                  name,
+                  { type: 'token', normalization: 'lowercase' },
+                ]),
+              ),
+            },
+          },
+        },
+      );
+      assert.deepStrictEqual(outcome.paths, [
+        'mappings.fields.a.normalization',
+        'mappings.fields.b.normalization',
+        'mappings.fields.c.normalization',
+        'mappings.fields.d.normalization',
+        'mappings.fields.e.normalization',
+      ]);
+      assert.strictEqual(outcome.more, 2);
+    });
+
+    it('should keep a field named __proto__ a field', () => {
+      const definition = JSON.parse(
+        '{"mappings":{"dynamic":false,"fields":{"__proto__":{"type":"token"}}}}',
+      );
+      const same = compare({ definition }, { latestDefinition: definition });
+      assert.deepStrictEqual(same.diffs, []);
+      const other = JSON.parse(
+        '{"mappings":{"dynamic":false,"fields":{"__proto__":{"type":"string"}}}}',
+      );
+      assert.deepStrictEqual(compare({ definition }, { latestDefinition: other }).diffs, [
+        'mappings',
+      ]);
+    });
+  });
+
   it('should report a change of type, which no update can make', () => {
     const outcome = compareSearchIndex(
       declared({ type: 'vectorSearch', definition: VECTOR }),
       live({}),
     );
-    assert.deepStrictEqual(outcome, { diffs: ['type'], typeChange: true, immutable: [] });
+    assert.deepStrictEqual(outcome, {
+      diffs: ['type'],
+      paths: ['type'],
+      more: 0,
+      typeChange: true,
+      immutable: [],
+      ignored: [],
+    });
   });
 
   it('should leave a plain vector index update to the server', () => {
@@ -539,7 +706,14 @@ describe('compareSearchIndex', () => {
       }),
       live({ type: 'vectorSearch', latestDefinition: VECTOR }),
     );
-    assert.deepStrictEqual(outcome, { diffs: ['fields'], typeChange: false, immutable: [] });
+    assert.deepStrictEqual(outcome, {
+      diffs: ['fields'],
+      paths: ['fields[1].numDimensions'],
+      more: 0,
+      typeChange: false,
+      immutable: [],
+      ignored: [],
+    });
   });
 
   for (const [label, declaredFields, immutable] of [

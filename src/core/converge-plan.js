@@ -390,6 +390,11 @@ function autoEmbedReason(changes) {
   return `autoEmbed ${changes.join(', ')} cannot change in place — ${NEW_NAME_RECIPE}`;
 }
 
+/** `mappings.fields.title.norms, storedSource (+2 more)` */
+function diffReason(paths, more) {
+  return `${paths.join(', ')}${more > 0 ? ` (+${more} more)` : ''}`;
+}
+
 function deletingReason(status) {
   return `is being deleted on the server (${status}) — converge again once it is gone`;
 }
@@ -445,9 +450,14 @@ function planSearchIndexes(declaredList, live, { prune, search }, row, submit, d
       });
       continue;
     }
-    const { diffs, typeChange, immutable } = compareSearchIndex(declared, current);
+    const { diffs, paths, more, typeChange, immutable, ignored } = compareSearchIndex(
+      declared,
+      current,
+    );
+    // Options only the server reports, left out of the comparison: named on the row.
+    const tolerated = ignored.length > 0 ? { ignored } : {};
     if (diffs.length === 0) {
-      row({ target: 'searchIndex', name: declared.name, action: 'unchanged', build });
+      row({ target: 'searchIndex', name: declared.name, action: 'unchanged', build, ...tolerated });
     } else if (typeChange || immutable.length > 0) {
       row({
         target: 'searchIndex',
@@ -459,16 +469,18 @@ function planSearchIndexes(declaredList, live, { prune, search }, row, submit, d
         from,
         to,
         build,
+        ...tolerated,
       });
     } else {
       const action = row({
         target: 'searchIndex',
         name: declared.name,
         action: 'modify',
-        reason: diffs.join(', '),
+        reason: diffReason(paths, more),
         from,
         to,
         build,
+        ...tolerated,
       });
       updates.push({
         op: 'updateSearchIndex',

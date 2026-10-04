@@ -1,4 +1,5 @@
 const {
+  assign,
   canonical,
   deepEqual,
   isPlainObject,
@@ -18,7 +19,10 @@ const {
  * compare as unchanged against that same declaration once the server reports
  * it — hence the documented defaults, filled in on both sides before
  * comparing, so a definition that leaves one out matches a server that spells
- * it out (and the other way round).
+ * it out (and the other way round). An option the server reports that the
+ * declaration does not set, and whose default is not among those, is ignored
+ * (see {@link tolerateServerOptions}): a newer mongot writing a new default
+ * must not make every converge update — and Atlas rebuild — the index.
  */
 
 /** Every key a search index declaration may carry */
@@ -240,11 +244,14 @@ function isBeingRemoved(live) {
   return ABSENT_STATUSES.has(live.status);
 }
 
-/** `defaults` under `value`: what `value` leaves out takes the default */
+/**
+ * `defaults` under `value`: what `value` leaves out takes the default. Keys
+ * are assigned, not set — a `__proto__` key must stay a key.
+ */
 function withDefaults(value, defaults) {
   const out = { ...defaults };
   for (const [key, item] of Object.entries(value)) {
-    if (item !== undefined) out[key] = item;
+    if (item !== undefined) assign(out, key, item);
   }
   return out;
 }
@@ -293,11 +300,7 @@ const compareText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
  */
 function effectiveFieldMapping(mapping) {
   if (Array.isArray(mapping)) {
-    return mapping
-      .map((item) => effectiveFieldMapping(item))
-      .map((item) => ({ item, text: JSON.stringify(canonical(item)) }))
-      .sort((a, b) => compareText(a.text, b.text))
-      .map(({ item }) => item);
+    return sortMappings(mapping.map((item) => effectiveFieldMapping(item)));
   }
   if (!isPlainObject(mapping)) return mapping;
   const defaults = FIELD_DEFAULTS[mapping.type];
@@ -307,10 +310,20 @@ function effectiveFieldMapping(mapping) {
   return filled;
 }
 
+/** The mappings of one field, in one order — the server reports them in its own */
+function sortMappings(mappings) {
+  return mappings
+    .map((item) => ({ item, text: JSON.stringify(canonical(item)) }))
+    .sort((a, b) => compareText(a.text, b.text))
+    .map(({ item }) => item);
+}
+
 /** `{ name: mapping }` with every mapping's defaults filled in */
 function effectiveFields(fields) {
   const out = {};
-  for (const [name, mapping] of Object.entries(fields)) out[name] = effectiveFieldMapping(mapping);
+  for (const [name, mapping] of Object.entries(fields)) {
+    assign(out, name, effectiveFieldMapping(mapping));
+  }
   return out;
 }
 
@@ -391,27 +404,216 @@ function immutableChanges(declared, live) {
   return changes;
 }
 
+/** `base.key`, or `key` at the top */
+const joinPath = (base, key) => (base ? `${base}.${key}` : key);
+
+/**
+ * `have` without the keys `want` does not have — the dotted paths of which go
+ * to `ignored`. Only where both are option objects.
+ */
+function trimOptions(want, have, path, ignored) {
+  if (!isPlainObject(want) || !isPlainObject(have)) return have;
+  const out = {};
+  for (const [key, value] of Object.entries(have)) {
+    if (Object.hasOwn(want, key)) assign(out, key, value);
+    else ignored.push(joinPath(path, key));
+  }
+  return out;
+}
+
+/**
+ * A `{ name: mapping }` map trimmed mapping by mapping. A name only the
+ * server has is a field the declaration does not index — a real difference,
+ * left in place.
+ */
+function trimFieldMap(want, have, path, ignored) {
+  if (!isPlainObject(want) || !isPlainObject(have)) return have;
+  const out = {};
+  for (const [name, mapping] of Object.entries(have)) {
+    const trimmed = Object.hasOwn(want, name)
+      ? trimFieldMapping(want[name], mapping, joinPath(path, name), ignored)
+      : mapping;
+    assign(out, name, trimmed);
+  }
+  return out;
+}
+
+/**
+ * One field mapping trimmed, its nested `fields` and `multi` too — or a list
+ * of them, paired by type and put back in order. A mapping of another type
+ * is a real difference, left as it is.
+ */
+function trimFieldMapping(want, have, path, ignored) {
+  if (Array.isArray(want) && Array.isArray(have)) {
+    const paired = have.map((item) => {
+      const match = want.find(
+        (candidate) =>
+          isPlainObject(candidate) && isPlainObject(item) && candidate.type === item.type,
+      );
+      return match ? trimFieldMapping(match, item, `${path}[${item.type}]`, ignored) : item;
+    });
+    return sortMappings(paired);
+  }
+  if (!isPlainObject(want) || !isPlainObject(have) || want.type !== have.type) return have;
+  const out = trimOptions(want, have, path, ignored);
+  for (const key of ['fields', 'multi']) {
+    if (isPlainObject(out[key])) {
+      out[key] = trimFieldMap(want[key], out[key], joinPath(path, key), ignored);
+    }
+  }
+  return out;
+}
+
+/** A vector definition trimmed: its own options, and each field's — paired by type and path */
+function trimVectorDefinition(want, have, ignored) {
+  const out = trimOptions(want, have, '', ignored);
+  if (!Array.isArray(out.fields) || !Array.isArray(want.fields)) return out;
+  const fields = out.fields.map((field) => {
+    const match = want.fields.find(
+      (candidate) =>
+        isPlainObject(candidate) &&
+        isPlainObject(field) &&
+        candidate.type === field.type &&
+        candidate.path === field.path,
+    );
+    if (!match) return field;
+    const path = `fields[${field.type}:${field.path}]`;
+    const trimmed = trimOptions(match, field, path, ignored);
+    if (isPlainObject(trimmed.hnswOptions)) {
+      trimmed.hnswOptions = trimOptions(
+        match.hnswOptions,
+        trimmed.hnswOptions,
+        `${path}.hnswOptions`,
+        ignored,
+      );
+    }
+    return trimmed;
+  });
+  out.fields = sortFields(fields);
+  return out;
+}
+
+/** A search definition trimmed: its own options, `mappings`, and every field mapping */
+function trimSearchDefinition(want, have, ignored) {
+  const out = trimOptions(want, have, '', ignored);
+  if (isPlainObject(out.mappings) && isPlainObject(want.mappings)) {
+    const mappings = trimOptions(want.mappings, out.mappings, 'mappings', ignored);
+    if (isPlainObject(mappings.fields)) {
+      mappings.fields = trimFieldMap(
+        want.mappings.fields,
+        mappings.fields,
+        'mappings.fields',
+        ignored,
+      );
+    }
+    out.mappings = mappings;
+  }
+  return out;
+}
+
+/**
+ * The live definition without the options the server reports that the
+ * declaration does not set. Both sides have their documented defaults filled
+ * in first ({@link effectiveDefinition}), so these are exactly the options
+ * whose default migronaut does not know — a newer mongot writing one into
+ * every definition it reports. Compared, they would make every converge
+ * "update" the index, and Atlas rebuilds a search index on every update.
+ *
+ * Only option objects are trimmed — the definition, `mappings`, a field
+ * mapping (nested `fields` and `multi` included), a vector field and its
+ * `hnswOptions`. A field, a mapping type or a vector field only the server
+ * has is a real difference, and so is any list (`analyzers`, `synonyms`).
+ * The cost: removing such an option from a declaration is not noticed —
+ * declare the value wanted instead.
+ *
+ * Returns `{ have, ignored }`, `ignored` the dotted paths left out.
+ */
+function tolerateServerOptions(type, want, have) {
+  const ignored = [];
+  if (!isPlainObject(want) || !isPlainObject(have)) return { have, ignored };
+  const trimmed =
+    type === 'vectorSearch'
+      ? trimVectorDefinition(want, have, ignored)
+      : trimSearchDefinition(want, have, ignored);
+  return { have: trimmed, ignored };
+}
+
+/** How many differing paths a comparison names — enough to tell what differs */
+const MAX_DIFF_PATHS = 5;
+
+/**
+ * The dotted paths at which `want` and `have` differ, depth first, into
+ * `out` (at most {@link MAX_DIFF_PATHS} — `total` counts them all). Objects
+ * are walked key by key, lists of the same length item by item; anything
+ * else that differs is a path of its own.
+ */
+function diffPaths(want, have, path, out) {
+  if (deepEqual(want, have)) return;
+  const walk = (keys, at) => {
+    for (const key of keys) diffPaths(at(want, key), at(have, key), joinPath(path, key), out);
+  };
+  if (isPlainObject(want) && isPlainObject(have)) {
+    walk([...new Set([...Object.keys(want), ...Object.keys(have)])].sort(), (value, key) =>
+      Object.hasOwn(value, key) ? value[key] : undefined,
+    );
+    return;
+  }
+  if (Array.isArray(want) && Array.isArray(have) && want.length === have.length && path) {
+    for (const [position] of want.entries()) {
+      diffPaths(want[position], have[position], `${path}[${position}]`, out);
+    }
+    return;
+  }
+  out.total += 1;
+  if (out.paths.length < MAX_DIFF_PATHS) out.paths.push(path);
+}
+
 /**
  * Compare a declaration with the live index of the same name.
  *
- * Returns `{ diffs, typeChange, immutable }`: `diffs` the top-level
- * definition keys that differ (`['type']` when the type does); `typeChange`
- * whether the type differs — which no update can change; `immutable` the
- * automated-embedding attributes an update would have to change (see
- * {@link AUTO_EMBED_IMMUTABLE}). An empty `diffs` means unchanged.
+ * Returns `{ diffs, paths, more, typeChange, immutable, ignored }`: `diffs`
+ * the top-level definition keys that differ (`['type']` when the type does),
+ * `paths` the first few dotted paths that do (`mappings.fields.title.norms`)
+ * and `more` how many others; `typeChange` whether the type differs — which
+ * no update can change; `immutable` the automated-embedding attributes an
+ * update would have to change (see {@link AUTO_EMBED_IMMUTABLE}); `ignored`
+ * the options only the server reports (see {@link tolerateServerOptions}).
+ * An empty `diffs` means unchanged.
  */
 function compareSearchIndex(declared, live) {
-  if (declared.type !== live.type) return { diffs: ['type'], typeChange: true, immutable: [] };
+  if (declared.type !== live.type) {
+    return {
+      diffs: ['type'],
+      paths: ['type'],
+      more: 0,
+      typeChange: true,
+      immutable: [],
+      ignored: [],
+    };
+  }
   const want = effectiveDefinition(declared.type, declared.definition);
-  const have = effectiveDefinition(live.type, live.definition);
+  const { have, ignored } = tolerateServerOptions(
+    declared.type,
+    want,
+    effectiveDefinition(live.type, live.definition),
+  );
   const keys = new Set([...Object.keys(want), ...Object.keys(have)]);
   const diffs = [];
   for (const key of [...keys].sort()) {
     if (!deepEqual(want[key], have[key])) diffs.push(key);
   }
+  const found = { paths: [], total: 0 };
+  if (diffs.length > 0) diffPaths(want, have, '', found);
   const immutable =
     diffs.length > 0 && declared.type === 'vectorSearch' ? immutableChanges(want, have) : [];
-  return { diffs, typeChange: false, immutable };
+  return {
+    diffs,
+    paths: found.paths,
+    more: found.total - found.paths.length,
+    typeChange: false,
+    immutable,
+    ignored,
+  };
 }
 
 /**
@@ -502,4 +704,5 @@ module.exports = {
   searchIndexIssues,
   searchIndexSpec,
   searchIndexValue,
+  tolerateServerOptions,
 };

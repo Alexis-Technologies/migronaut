@@ -642,7 +642,30 @@ async function readAndPlan(deps, options) {
   for (const [position, definition] of definitions.entries()) {
     warnDropEverything(deps, definition, plans[position], pruneFor(definition));
   }
+  warnIgnored(deps, plans);
   return { planFor, live, plans, search };
+}
+
+/**
+ * One line for every search index whose server-reported options the
+ * comparison left out — the declarations do not set them, and migronaut knows
+ * no default for them (a newer mongot's). Not a problem; worth knowing.
+ */
+function warnIgnored(deps, plans) {
+  const found = [];
+  for (const plan of plans) {
+    for (const action of plan.actions) {
+      if (action.target !== 'searchIndex' || !action.ignored) continue;
+      found.push(`${plan.name}.${action.name} (${action.ignored.join(', ')})`);
+    }
+  }
+  if (found.length === 0) return;
+  deps.logger.warn(
+    `⚠ The server reports search index options the declarations do not set, with no default ` +
+      `migronaut knows — left out of the comparison: ${found.join('; ')} — declare them to ` +
+      'manage them',
+    deps.fields({ searchIndexes: found.length }),
+  );
 }
 
 /**
@@ -1023,9 +1046,16 @@ async function verifyFixedPoint(run, position, kept, signal) {
       action: action.action,
       ...(action.reason !== undefined ? { reason: action.reason } : {}),
     });
+    // Every update of a search index has the server build it again: say what that costs.
+    const rebuilds =
+      action.target === 'searchIndex'
+        ? ', and every update builds the search index again on the server — declare the value ' +
+          'the server reports'
+        : '';
     deps.logger.warn(
       `⚠ ${definition.name}: ${describe(action)} still differs after converge` +
-        `${action.reason ? ` (${action.reason})` : ''} — it would change again on every run`,
+        `${action.reason ? ` (${action.reason})` : ''} — it would change again on every run` +
+        rebuilds,
       deps.fields({ collection: definition.name, target: action.target, name: action.name }),
     );
   }

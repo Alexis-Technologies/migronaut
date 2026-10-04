@@ -474,6 +474,7 @@ expectType<'planned' | 'applied' | 'failed' | 'skipped'>(firstAction.status);
 expectType<string | undefined>(firstAction.liveName);
 expectAssignable<ConvergeActionKind>('skip');
 expectType<SearchIndexBuild | undefined>(firstAction.build);
+expectType<string[] | undefined>(firstAction.ignored);
 expectType<SearchIndexStatus>(firstAction.build!.status);
 expectType<ConvergeSearchSummary | undefined>(converged.search);
 expectType<boolean>(converged.search!.available);

@@ -506,7 +506,7 @@ describe('planCollection — search indexes', () => {
         { definition: { mappings: { dynamic: false, fields: { t: { type: 'string' } } } } },
       ],
       live: [listed('default', { mappings: { dynamic: true } })],
-      rows: ['searchIndex:default:modify:mappings'],
+      rows: ['searchIndex:default:modify:mappings.dynamic, mappings.fields.t'],
       steps: ['searchUpdate default'],
     },
     {
@@ -582,7 +582,7 @@ describe('planCollection — search indexes', () => {
       prune: true,
       rows: [
         'searchIndex:new:create',
-        'searchIndex:old:modify:mappings',
+        'searchIndex:old:modify:mappings.dynamic',
         'searchIndex:gone:drop:not declared',
       ],
       steps: ['searchCreate new', 'searchUpdate old', 'searchDrop gone'],
@@ -630,6 +630,39 @@ describe('planCollection — search indexes', () => {
       assert.deepStrictEqual(steps(plan), testCase.steps);
     });
   }
+
+  it('should name the options only the server reports, on the row, and not update for them', () => {
+    const plan = planCollection(
+      definition({
+        searchIndexes: [
+          { definition: { mappings: { dynamic: true } } },
+          { name: 'other', definition: { mappings: { dynamic: false } } },
+        ],
+      }),
+      withSearch([
+        listed('default', { mappings: { dynamic: true, fieldLimit: 1000 } }),
+        listed('other', { mappings: { dynamic: true, fieldLimit: 1000 } }),
+      ]),
+    );
+    assert.deepStrictEqual(
+      plan.actions.map(({ name, action, reason, ignored }) => ({ name, action, reason, ignored })),
+      [
+        {
+          name: 'default',
+          action: 'unchanged',
+          reason: undefined,
+          ignored: ['mappings.fieldLimit'],
+        },
+        {
+          name: 'other',
+          action: 'modify',
+          reason: 'mappings.dynamic',
+          ignored: ['mappings.fieldLimit'],
+        },
+      ],
+    );
+    assert.deepStrictEqual(steps(plan), ['searchUpdate other']);
+  });
 
   it('should leave search indexes alone when the definition does not manage them', () => {
     const plan = planCollection(
