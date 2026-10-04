@@ -304,7 +304,9 @@ export interface MigronautConfig {
    * Hold every converge — the after-up one included — until each declared
    * search index is queryable with its declared definition. Search indexes
    * build in the background, so without it a new one is not queryable yet when
-   * converge returns. Default: false
+   * converge returns. An index that FAILED or went STALE before the run, its
+   * definition unchanged, does not hold it — it is warned about instead.
+   * Default: false
    * @experimental New in 2.2
    */
   waitForSearchIndexes?: boolean;
@@ -545,8 +547,8 @@ export interface ConvergeOptions {
   rebuildUnique?: boolean;
   /**
    * Hold the run (and the lock) until every declared search index serves its
-   * declaration — failing on a FAILED build or after
-   * `searchIndexWaitTimeoutMs`. Overrides the config's `waitForSearchIndexes`;
+   * declaration — failing on a FAILED build of an index this run created or
+   * changed, or after `searchIndexWaitTimeoutMs`. Overrides the config's `waitForSearchIndexes`;
    * not with `dryRun`. CLI: `--wait-search` / `--no-wait-search`.
    * @experimental New in 2.2
    */
@@ -1810,8 +1812,8 @@ export class QueueJobFailedError extends MigronautError {
  * - `'apply'` for a failed step (`collection`, `target`, `name`, `action`,
  *   `cause`, and `mongoCode`, `hint` and — after a failed rebuild — `restored`
  *   when they apply);
- * - `'wait'` when `waitForSearchIndexes` gave up: `reason` is `'failed'` (a
- *   search index build FAILED) or `'timeout'`, `notReady` the indexes not
+ * - `'wait'` when `waitForSearchIndexes` gave up: `reason` is `'failed'` (the
+ *   build of a search index this run created or changed FAILED) or `'timeout'`, `notReady` the indexes not
  *   serving their declaration, `waitedMs`, `timeoutMs`. Everything was
  *   applied — only the builds were not finished.
  *

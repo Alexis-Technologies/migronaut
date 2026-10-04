@@ -291,9 +291,12 @@ migronaut converge --wait-search
 
 With `waitForSearchIndexes: true` (`--wait-search` for one run) converge holds — under the lock —
 until every declared search index is queryable with its declared definition, and fails with
-[`CONVERGE_FAILED`](/reference/error-codes) (`phase: 'wait'`) on a FAILED build or after
-`searchIndexWaitTimeoutMs` (10 minutes by default; the server goes on building). Turn it on when a
-deploy needs a *new* index ready as soon as it finishes. On Atlas an update needs no wait — the old
+[`CONVERGE_FAILED`](/reference/error-codes) (`phase: 'wait'`) on a FAILED build of an index the
+run created or changed, or after `searchIndexWaitTimeoutMs` (10 minutes by default; the server goes
+on building). An index that failed — or went `STALE` — before the run, its definition unchanged,
+does not hold the wait: converge cannot fix it, so it is named and warned about instead, and
+`converge --check` still fails on a FAILED one. Turn the wait on when a deploy needs a *new* index
+ready as soon as it finishes. On Atlas an update needs no wait — the old
 definition serves meanwhile; a local deployment reports the index not queryable for the moment
 its new definition builds.
 

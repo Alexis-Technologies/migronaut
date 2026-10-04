@@ -1,4 +1,5 @@
 const { needsConfirmation } = require('../../core/converge-plan.js');
+const { searchBuildState } = require('../../core/search-index-spec.js');
 const { ConfigInvalidError, RunAbortedError } = require('../../errors/index.js');
 const { confirm, defineCommand, EXIT_CODES } = require('../shared.js');
 const { renderConvergeHistory, renderConvergeTable } = require('../table.js');
@@ -168,7 +169,9 @@ function registerConverge(program) {
       if (!opts.check || result === undefined) return;
       // A search index that failed to build serves nothing, whatever its
       // definition says — the gate fails on it too, though converge cannot fix it.
-      const failed = (result.search?.notReady ?? []).filter((index) => index.status === 'FAILED');
+      const failed = (result.search?.notReady ?? []).filter(
+        (index) => searchBuildState(index) === 'failed',
+      );
       if (result.inSync && failed.length === 0) return;
       // .error writes to stderr, so JSON stdout stays a single clean document.
       for (const index of failed) {

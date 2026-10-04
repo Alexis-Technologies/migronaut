@@ -1,3 +1,4 @@
+const { setTimeout: sleepFor } = require('node:timers/promises');
 const { ConvergeFailedError, MigronautError } = require('../errors/index.js');
 const { pickActor } = require('../utils/actor.js');
 const { mapLimit } = require('../utils/concurrency.js');
@@ -20,7 +21,7 @@ const {
   searchHint,
 } = require('./converge-search.js');
 const { inPlaceCapabilities } = require('./index-spec.js');
-const { searchBuild } = require('./search-index-spec.js');
+const { searchBuild, searchBuildState } = require('./search-index-spec.js');
 
 /**
  * Converge: bring the declared collections' indexes, search indexes and
@@ -35,8 +36,9 @@ const { searchBuild } = require('./search-index-spec.js');
  * Pure orchestration over capabilities the MigratorKit injects (`deps`):
  * `{db, logger, fields, emit, assertNotAborted}`, and optionally `audit` +
  * `record` (the history entry), `shardKeyOf` (behind a mongos), and `sleep`
- * (`(ms) => Promise`) and `now` (`() => ms`) — the pause between search index
- * reads and the clock that times a wait for them, for tests.
+ * (`(ms, signal) => Promise`, cut short by an abort) and `now` (`() => ms`) —
+ * the pause between search index reads and the clock that times a wait for
+ * them, for tests.
  */
 
 /**
@@ -65,7 +67,14 @@ const READ_CONCURRENCY = 8;
  */
 const SEARCH_SETTLE_DELAYS_MS = [250, 500, 1000];
 
-const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** Sleep `ms` — less, when `signal` aborts: the caller's next abort check says why */
+async function pause(ms, signal) {
+  try {
+    await sleepFor(ms, undefined, signal ? { signal } : undefined);
+  } catch (error) {
+    if (error?.name !== 'AbortError') throw error;
+  }
+}
 
 const NAMESPACE_NOT_FOUND = 26;
 const INDEX_NOT_FOUND = 27;
@@ -433,15 +442,6 @@ function settleRest(result) {
   }
 }
 
-/** Whether a row's build state is a search index serving its latest definition */
-function buildReady(build) {
-  return (
-    build.queryable === true &&
-    build.updating !== true &&
-    (build.status === 'READY' || build.status === 'UNKNOWN')
-  );
-}
-
 /**
  * The run's word on Search, when search indexes are declared: whether the
  * server has it, and every declared index that exists but does not serve its
@@ -453,7 +453,7 @@ function searchSummary(result, search) {
     for (const action of collection.actions) {
       if (action.target !== 'searchIndex' || action.build === undefined) continue;
       if (!['create', 'modify', 'unchanged'].includes(action.action)) continue;
-      if (buildReady(action.build)) continue;
+      if (searchBuildState(action.build) === 'serving') continue;
       notReady.push({ collection: collection.name, name: action.name, ...action.build });
     }
   }
@@ -913,6 +913,16 @@ function settler(deps, collection) {
   };
 }
 
+/** Stop here when the run was aborted: every row not reached is settled, the result attached */
+function stopIfAborted(deps, signal, result) {
+  try {
+    deps.assertNotAborted(signal);
+  } catch (error) {
+    settleRest(result);
+    throw attachConverge(error, result);
+  }
+}
+
 /**
  * The apply phase for one collection: its steps, in order. Returns the
  * indexes the server would not let go of (a shard key's), which the verify
@@ -924,12 +934,7 @@ async function applyCollection(deps, plan, result, signal, search) {
   for (const step of plan.steps) {
     // Between operations is the only safe place to stop — and never inside
     // a rebuild, which runs its drop and its create back to back.
-    try {
-      deps.assertNotAborted(signal);
-    } catch (error) {
-      settleRest(result);
-      throw attachConverge(error, result);
-    }
+    stopIfAborted(deps, signal, result);
     announce(deps, plan.name, step);
     const failure = await runStep(deps.db, plan.name, step, settle, search);
     if (failure?.skipped) {
@@ -979,7 +984,7 @@ async function applyCollection(deps, plan, result, signal, search) {
  * every run — a comparison rule that disagrees with this server version — so
  * it is reported in `result.unstable` instead of silently rebuilt forever.
  */
-async function verifyFixedPoint(run, position, kept) {
+async function verifyFixedPoint(run, position, kept, signal) {
   const { deps, definitions, result, planFor } = run;
   const definition = definitions[position];
   let after = planFor(definition, await readFresh(run, position));
@@ -992,7 +997,8 @@ async function verifyFixedPoint(run, position, kept) {
       (action) => action.target === 'searchIndex' && CHANGE_ACTIONS.has(action.action),
     );
     if (!pending) break;
-    await (deps.sleep ?? pause)(delay);
+    await (deps.sleep ?? pause)(delay, signal);
+    stopIfAborted(deps, signal, result);
     after = planFor(definition, await readFresh(run, position));
   }
   refreshBuilds(rows, after.actions);
@@ -1033,7 +1039,9 @@ const WAIT_PROGRESS_MS = 30_000;
 /**
  * Every declared search index a wait is for: the ones that exist (or were
  * just created) — with, for one this run updated, the definition version the
- * update started from, so the old definition reading READY does not count.
+ * update started from, so the old definition reading READY does not count —
+ * and whether this run created or changed it (`touched`): a FAILED or STALE
+ * index the run did not touch does not hold the wait (see awaitSearchIndexes).
  */
 function waitTargets(run) {
   const { definitions, plans, result } = run;
@@ -1052,6 +1060,7 @@ function waitTargets(run) {
         collection: definition.name,
         name: declared.name,
         ...(update?.sinceVersion !== undefined ? { sinceVersion: update.sinceVersion } : {}),
+        touched: row.action !== 'unchanged',
       });
     }
   }
@@ -1061,19 +1070,33 @@ function waitTargets(run) {
 /** `movies.default (BUILDING), shows.plot (FAILED: …)` */
 function describeNotReady(notReady) {
   return notReady
-    .map(
-      (index) =>
-        `${index.collection}.${index.name} (${index.status}` +
-        `${index.updating ? ', updating' : ''}${index.message ? `: ${index.message}` : ''})`,
-    )
+    .map((index) => {
+      const state = searchBuildState(index);
+      const note =
+        state === 'updating' ? ', updating' : state === 'stale' ? ', not replicating' : '';
+      return (
+        `${index.collection}.${index.name} (${index.status}${note}` +
+        `${index.message ? `: ${index.message}` : ''})`
+      );
+    })
     .join(', ');
+}
+
+/** Why a wait ran out, and what to do — a STALE index will not get there by waiting longer */
+function timeoutAdvice(notReady) {
+  const stale = notReady.filter((index) => searchBuildState(index) === 'stale');
+  if (stale.length === notReady.length) {
+    return 'a STALE index is queryable but no longer replicating from the collection — see troubleshooting';
+  }
+  return 'the server goes on building; converge again to wait more, or raise searchIndexWaitTimeoutMs';
 }
 
 /**
  * The wait phase (`waitForSearchIndexes`): after every collection's steps,
  * poll until each declared search index serves its declaration — or fail the
  * run on a FAILED build or when the budget runs out. The lock is held
- * throughout (its heartbeat keeps it); an abort stops the wait between polls.
+ * throughout (its heartbeat keeps it); an abort stops the wait between polls,
+ * and cuts the pause before the next one short.
  */
 async function waitPhase(run, signal) {
   const { deps, result, search, wait } = run;
@@ -1089,11 +1112,12 @@ async function waitPhase(run, signal) {
     deps.fields({ searchIndexes: targets.length, timeoutMs: wait.timeoutMs }),
   );
   let reportedAt = startedAt;
+  const sleep = deps.sleep ?? pause;
   const outcome = await awaitSearchIndexes({
     targets,
     read: (collection) => readSearchIndexes(deps, collection),
     timeoutMs: wait.timeoutMs,
-    sleep: deps.sleep ?? pause,
+    sleep: (ms) => sleep(ms, signal),
     now,
     beforePoll: () => {
       try {
@@ -1101,6 +1125,13 @@ async function waitPhase(run, signal) {
       } catch (error) {
         throw attachConverge(error, result);
       }
+    },
+    onReadError: (error, inARow) => {
+      deps.logger.warn(
+        `⚠ Could not read the search indexes (${inARow} in a row) — trying again: ` +
+          errorText(error),
+        deps.fields({ error: errorText(error), consecutiveFailures: inARow }),
+      );
     },
     onPoll: (live) => {
       for (const collection of result.collections) {
@@ -1117,10 +1148,18 @@ async function waitPhase(run, signal) {
       );
     },
   });
-  if (outcome.outcome === 'ready') {
+  if (outcome.preexisting.length > 0) {
     deps.logger.info(
-      `✔ Search index(es) queryable: ${targets.length}   [${outcome.waitedMs}ms]`,
-      deps.fields({ searchIndexes: targets.length, waitedMs: outcome.waitedMs }),
+      `• Not waiting for ${outcome.preexisting.length} search index(es) this run did not ` +
+        `change, which cannot get there by waiting: ${describeNotReady(outcome.preexisting)}`,
+      deps.fields({ preexisting: outcome.preexisting.length }),
+    );
+  }
+  if (outcome.outcome === 'ready') {
+    const ready = targets.length - outcome.preexisting.length;
+    deps.logger.info(
+      `✔ Search index(es) queryable: ${ready}   [${outcome.waitedMs}ms]`,
+      deps.fields({ searchIndexes: ready, waitedMs: outcome.waitedMs }),
     );
     return;
   }
@@ -1129,8 +1168,7 @@ async function waitPhase(run, signal) {
     failed
       ? `Search index build failed: ${describeNotReady(outcome.notReady.filter((index) => index.status === 'FAILED'))} — fix the definition or the data, then converge again`
       : `Search index(es) not queryable after ${Math.round(outcome.waitedMs / 1000)}s: ` +
-          `${describeNotReady(outcome.notReady)} — the server goes on building; converge ` +
-          'again to wait more, or raise searchIndexWaitTimeoutMs',
+          `${describeNotReady(outcome.notReady)} — ${timeoutAdvice(outcome.notReady)}`,
     {
       phase: 'wait',
       reason: failed ? 'failed' : 'timeout',
@@ -1145,7 +1183,9 @@ async function waitPhase(run, signal) {
 /** Closing lines about search indexes that do not serve their declaration yet */
 function reportNotReady(deps, result) {
   const notReady = result.search?.notReady ?? [];
-  const building = notReady.filter((index) => index.status !== 'FAILED');
+  const building = notReady.filter(
+    (index) => !['stale', 'failed'].includes(searchBuildState(index)),
+  );
   if (building.length > 0) {
     deps.logger.info(
       `• ${building.length} search index(es) still building on the server: ` +
@@ -1155,7 +1195,16 @@ function reportNotReady(deps, result) {
     );
   }
   for (const index of notReady) {
-    if (index.status !== 'FAILED') continue;
+    if (searchBuildState(index) === 'stale') {
+      deps.logger.warn(
+        `⚠ ${index.collection}: search index "${index.name}" is STALE — queryable, but no ` +
+          'longer replicating from the collection, so its results may be out of date' +
+          `${index.message ? `: ${index.message}` : ''}`,
+        deps.fields({ collection: index.collection, searchIndex: index.name }),
+      );
+      continue;
+    }
+    if (searchBuildState(index) !== 'failed') continue;
     deps.logger.warn(
       `⚠ ${index.collection}: search index "${index.name}" failed to build` +
         `${index.message ? `: ${index.message}` : ''} — converge does not resubmit an unchanged ` +
@@ -1284,7 +1333,7 @@ async function runConverge(deps, options, signal) {
       warnRenamed(deps, plan);
       if (plan.steps.length === 0) continue;
       const kept = await applyCollection(deps, plan, result, signal, search);
-      await verifyFixedPoint(run, position, kept);
+      await verifyFixedPoint(run, position, kept, signal);
     }
     await waitPhase(run, signal);
     await reportSuccess(deps, options, result, startedAt, search);

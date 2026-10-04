@@ -2,7 +2,7 @@ const { errorText } = require('../utils/error.js');
 const { READ_OPTIONS, readServer } = require('./converge.js');
 const { SEARCH_UNAVAILABLE_HINT, listSearchIndexes, probeSearch } = require('./converge-search.js');
 const { toLockInfo } = require('./lock.js');
-const { normalizeLiveSearchIndex } = require('./search-index-spec.js');
+const { normalizeLiveSearchIndex, searchBuildState } = require('./search-index-spec.js');
 
 /** Changelog indexes ensureIndexes() creates — audit warns when any is absent */
 const EXPECTED_INDEXES = [
@@ -197,19 +197,23 @@ async function auditSearch(deps, db, config, record) {
       return;
     }
     const failed = [];
+    const stale = [];
     for (const definition of declaring) {
       const names = new Set(definition.searchIndexes.map((index) => index.name));
       for (const raw of await listSearchIndexes(db, definition.name, READ_OPTIONS)) {
         const index = normalizeLiveSearchIndex(raw);
-        if (names.has(index.name) && index.status === 'FAILED') {
-          failed.push(
-            `${definition.name}.${index.name}${index.message ? ` (${index.message})` : ''}`,
-          );
-        }
+        if (!names.has(index.name)) continue;
+        const state = searchBuildState(index);
+        const label = `${definition.name}.${index.name}${index.message ? ` (${index.message})` : ''}`;
+        if (state === 'failed') failed.push(label);
+        else if (state === 'stale') stale.push(label);
       }
     }
-    if (failed.length > 0) {
-      record('search', 'warn', `Available — failed to build: ${failed.join(', ')}`);
+    if (failed.length > 0 || stale.length > 0) {
+      const parts = [];
+      if (failed.length > 0) parts.push(`failed to build: ${failed.join(', ')}`);
+      if (stale.length > 0) parts.push(`stale (not replicating): ${stale.join(', ')}`);
+      record('search', 'warn', `Available — ${parts.join('; ')}`);
     } else {
       record('search', 'pass', `Available — ${counted}`);
     }

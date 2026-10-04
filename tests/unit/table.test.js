@@ -376,6 +376,11 @@ describe('renderConvergeTable', () => {
             action: 'unchanged',
             build: { status: 'READY', queryable: true, updating: true },
           }),
+          search({
+            name: 'lagging',
+            action: 'unchanged',
+            build: { status: 'STALE', queryable: true },
+          }),
           search({ name: 'ok', action: 'unchanged', build: { status: 'READY', queryable: true } }),
           search({ name: 'legacy', action: 'drop', reason: 'not declared' }),
           search({ name: 'stray', action: 'keep', reason: 'not declared' }),
@@ -386,6 +391,7 @@ describe('renderConvergeTable', () => {
             notReady: [
               { collection: 'users', name: 'titles', status: 'BUILDING', queryable: false },
               { collection: 'users', name: 'broken', status: 'FAILED', queryable: false },
+              { collection: 'users', name: 'lagging', status: 'STALE', queryable: true },
             ],
           },
         },
@@ -398,12 +404,13 @@ describe('renderConvergeTable', () => {
     assert.match(plain, /│ titles +│ unchanged │ BUILDING/);
     assert.match(plain, /│ broken +│ unchanged │ FAILED: too many fields/);
     assert.match(plain, /│ busy +│ unchanged │ updating/);
+    assert.match(plain, /│ lagging +│ unchanged │ STALE — not replicating/);
     assert.ok(!/│ ok +│/.test(plain), 'a READY unchanged index stays folded');
     assert.strictEqual(
       plain.split('\n').pop(),
       'Would make 3 change(s) in 1 of 2 collection(s) · 1 drop/rebuild · ' +
         '1 undeclared search index(es) kept · 1 search index(es) building · ' +
-        '1 search index(es) failed · 4 unchanged',
+        '1 search index(es) stale · 1 search index(es) failed · 5 unchanged',
     );
   });
 

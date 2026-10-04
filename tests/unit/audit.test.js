@@ -292,6 +292,20 @@ describe('runAudit — Atlas Search', () => {
     );
   });
 
+  it('should warn about a declared search index that went stale', async () => {
+    const report = await runAudit(
+      searchDeps({
+        definitions: async () => declared('movies'),
+        listed: { movies: [{ name: 'default', status: 'STALE', queryable: true }] },
+      }),
+    );
+    assert.strictEqual(check(report, 'search').status, 'warn');
+    assert.strictEqual(
+      check(report, 'search').detail,
+      'Available — stale (not replicating): movies.default',
+    );
+  });
+
   it('should fail where Search is missing and converge would refuse', async () => {
     const report = await runAudit(
       searchDeps({

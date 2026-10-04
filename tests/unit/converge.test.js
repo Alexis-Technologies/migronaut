@@ -1555,6 +1555,65 @@ describe('runConverge — search indexes', () => {
     assert.deepStrictEqual(pauses, [250, 500]);
   });
 
+  it('should stop re-reading a lagging list when the run is aborted', async () => {
+    const db = fakeDb({ movies: {}, shows: {} }, { search: 'atlas', lag: 2 });
+    let aborted = false;
+    const { deps } = makeDeps(db, {
+      sleep: async (ms, signal) => {
+        assert.strictEqual(signal, 'the-signal', 'the pause is given the run signal');
+        aborted = true;
+      },
+      assertNotAborted: () => {
+        if (aborted) throw new RunAbortedError('Stopped', { reason: 'Stopped' });
+      },
+    });
+    await assert.rejects(
+      runConverge(
+        deps,
+        {
+          definitions: definitions(
+            { name: 'movies', searchIndexes: [{ definition: DYNAMIC }] },
+            { name: 'shows', indexes: [{ key: { a: 1 } }] },
+          ),
+        },
+        'the-signal',
+      ),
+      (error) => {
+        assert.ok(error instanceof RunAbortedError);
+        const rows = error.context.converge.collections;
+        assert.strictEqual(rows[0].actions[0].status, 'applied');
+        assert.strictEqual(rows[1].actions[0].status, 'skipped');
+        return true;
+      },
+    );
+    assert.deepStrictEqual(db.ops, ['createSearchIndex movies.default']);
+  });
+
+  it('should warn about a STALE index — queryable, but not replicating', async () => {
+    const db = fakeDb(
+      { movies: { searchIndexes: [searchIndex('default', DYNAMIC, { status: 'STALE' })] } },
+      { search: 'atlas' },
+    );
+    const { deps, lines } = makeDeps(db);
+    const result = await run(deps, [
+      { name: 'movies', indexes: [{ key: { a: 1 } }], searchIndexes: [{ definition: DYNAMIC }] },
+    ]);
+    assert.deepStrictEqual(
+      result.search.notReady.map((index) => `${index.name}:${index.status}`),
+      ['default:STALE'],
+    );
+    assert.ok(
+      lines.some(
+        (line) =>
+          line.level === 'warn' &&
+          /search index "default" is STALE — queryable, but no longer replicating/.test(
+            line.message,
+          ),
+      ),
+    );
+    assert.ok(!lines.some((line) => /still building/.test(line.message)));
+  });
+
   it('should report a definition the server keeps differently as unstable, not loop', async () => {
     const db = fakeDb(
       { movies: {} },
@@ -1789,7 +1848,33 @@ describe('runConverge — waiting for search indexes', () => {
     assert.strictEqual(entries[0].changed, 1, 'the create was applied all the same');
   });
 
-  it('should wait for a declared index that is still building even when nothing changed — and stop on FAILED', async () => {
+  it('should wait for a declared index that is still building even when nothing changed', async () => {
+    const db = fakeDb(
+      {
+        movies: {
+          searchIndexes: [
+            searchIndex('default', DYNAMIC, {
+              status: 'BUILDING',
+              queryable: false,
+              pendingReads: 3,
+            }),
+          ],
+        },
+      },
+      { search: 'atlas' },
+    );
+    const time = clock();
+    const result = await run(
+      makeDeps(db, time).deps,
+      [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }],
+      waiting(),
+    );
+    assert.deepStrictEqual(db.ops, []);
+    assert.deepStrictEqual(time.state.pauses, [1000]);
+    assert.deepStrictEqual(result.search.notReady, []);
+  });
+
+  it('should not hold the wait for a FAILED index the run did not change — only say so', async () => {
     const db = fakeDb(
       {
         movies: {
@@ -1802,15 +1887,56 @@ describe('runConverge — waiting for search indexes', () => {
           ],
         },
       },
-      { search: 'atlas' },
+      { search: 'atlas', readyAfter: 2 },
     );
     const time = clock();
-    await assert.rejects(
-      run(
-        makeDeps(db, time).deps,
-        [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }],
-        waiting(),
+    const { deps, lines } = makeDeps(db, time);
+    const result = await run(
+      deps,
+      [
+        {
+          name: 'movies',
+          searchIndexes: [{ definition: DYNAMIC }, { name: 'more', definition: DYNAMIC }],
+        },
+      ],
+      waiting(),
+    );
+    assert.deepStrictEqual(db.ops, ['createSearchIndex movies.more']);
+    assert.ok(
+      lines.some((line) =>
+        /Not waiting for 1 search index\(es\) this run did not change.*movies\.default \(FAILED: too many fields\)/.test(
+          line.message,
+        ),
       ),
+    );
+    assert.ok(lines.some((line) => /✔ Search index\(es\) queryable: 1 /.test(line.message)));
+    assert.ok(
+      lines.some(
+        (line) =>
+          line.level === 'warn' && /"default" failed to build: too many fields/.test(line.message),
+      ),
+    );
+    assert.deepStrictEqual(
+      result.search.notReady.map((index) => `${index.name}:${index.status}`),
+      ['default:FAILED'],
+      'still reported — the --check gate fails on it',
+    );
+  });
+
+  it('should stop at once when an index the run created fails to build', async () => {
+    const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 1000 });
+    const time = clock();
+    const { deps } = makeDeps(db, {
+      ...time,
+      sleep: async (ms) => {
+        await time.sleep(ms);
+        const index = db.state.movies.searchIndexes[0];
+        Object.assign(index, { status: 'FAILED', message: 'too many fields' });
+        delete index.pendingReads;
+      },
+    });
+    await assert.rejects(
+      run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], waiting()),
       (error) => {
         assert.strictEqual(error.context.phase, 'wait');
         assert.strictEqual(error.context.reason, 'failed');
@@ -1821,8 +1947,67 @@ describe('runConverge — waiting for search indexes', () => {
         return true;
       },
     );
-    assert.deepStrictEqual(time.state.pauses, [], 'a FAILED build ends the wait at once');
-    assert.deepStrictEqual(db.ops, []);
+    assert.deepStrictEqual(time.state.pauses, [1000], 'the poll that saw FAILED ended the wait');
+  });
+
+  it('should ride out a blip while reading, and say so', async () => {
+    let reads = 0;
+    const db = fakeDb(
+      { movies: {} },
+      {
+        search: 'atlas',
+        readyAfter: 3,
+        fail: {
+          listSearchIndexes: () => {
+            reads += 1;
+            // The read phase, the verify phase, then the first poll fails.
+            return reads === 3
+              ? Object.assign(new Error('connection reset'), { name: 'MongoNetworkError' })
+              : undefined;
+          },
+        },
+      },
+    );
+    const time = clock();
+    const { deps, lines } = makeDeps(db, time);
+    const result = await run(
+      deps,
+      [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }],
+      waiting(),
+    );
+    assert.deepStrictEqual(result.search.notReady, []);
+    assert.ok(
+      lines.some(
+        (line) =>
+          line.level === 'warn' &&
+          /Could not read the search indexes \(1 in a row\) — trying again/.test(line.message),
+      ),
+    );
+  });
+
+  it('should cut a pause short when the run is aborted', async () => {
+    const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 1000 });
+    const controller = new AbortController();
+    const { deps } = makeDeps(db, {
+      assertNotAborted: (signal) => {
+        if (signal?.aborted) throw signal.reason;
+      },
+    });
+    delete deps.sleep; // the real pause: a second before the second poll
+    setTimeout(() => controller.abort(new RunAbortedError('Stopped', { reason: 'Stopped' })), 20);
+    const startedAt = Date.now();
+    await assert.rejects(
+      runConverge(
+        deps,
+        {
+          definitions: definitions({ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }),
+          ...waiting(),
+        },
+        controller.signal,
+      ),
+      RunAbortedError,
+    );
+    assert.ok(Date.now() - startedAt < 500, 'the 1s pause was not waited out');
   });
 
   it('should not take the old definition reading READY for an update that has landed', async () => {

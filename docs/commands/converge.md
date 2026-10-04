@@ -59,7 +59,7 @@ Rows that need nothing are folded into the summary; `--verbose` lists them too.
 | `--dry-run` | Plan and print, change nothing. Takes no lock. |
 | `--check` | Like `--dry-run`, then exit `28` (`COLLECTIONS_DRIFT`) if anything would change or conflict — or a declared search index failed to build. An undeclared index kept with prune off is not drift, nor is a search index build under way. |
 | `--prune` | Drop indexes a definition does not declare — in collections whose definition does not set `prune` itself. With `indexes: []` that is every index but `_id`, and converge warns. Search indexes too, where the definition declares `searchIndexes`. |
-| `--wait-search` | Hold the run (and the lock) until every declared search index is queryable with its declared definition — `CONVERGE_FAILED` with `phase: 'wait'` on a FAILED build or after `searchIndexWaitTimeoutMs`. Overrides `waitForSearchIndexes`. Not with `--dry-run`, `--check` or `--history`. |
+| `--wait-search` | Hold the run (and the lock) until every declared search index is queryable with its declared definition — `CONVERGE_FAILED` with `phase: 'wait'` on a FAILED build of an index the run created or changed, or after `searchIndexWaitTimeoutMs`. Overrides `waitForSearchIndexes`. Not with `--dry-run`, `--check` or `--history`. |
 | `--no-wait-search` | Do not wait, whatever `waitForSearchIndexes` says. |
 | `--ordered` | Refuse (`MIGRATION_BLOCKED`, exit `24`) while any migration is still pending — checked under the lock. |
 | `--reason <text>` | Why — recorded in the [converge history](/guide/collections#history) with the run. |

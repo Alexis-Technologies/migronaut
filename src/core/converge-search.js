@@ -4,6 +4,7 @@ const {
   isSearchIndexReady,
   normalizeLiveSearchIndex,
   searchBuild,
+  searchBuildState,
 } = require('./search-index-spec.js');
 
 /**
@@ -231,12 +232,62 @@ async function runSearchStep(db, collection, step) {
 /** Search index lists read at once while waiting — one per collection */
 const WAIT_READ_CONCURRENCY = 8;
 
+/** Failed reads in a row a wait rides out — when each is a connection or failover blip */
+const WAIT_READ_ATTEMPTS = 3;
+
+/**
+ * Server codes of a read worth trying again: the retryable-read set of the
+ * drivers' specification (host unreachable, primary stepped down, shutdown,
+ * a time limit…).
+ */
+const TRANSIENT_CODES = new Set([
+  6, 7, 89, 91, 134, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436,
+]);
+const TRANSIENT_NAMES = new Set([
+  'MongoNetworkError',
+  'MongoNetworkTimeoutError',
+  'MongoServerSelectionError',
+  'MongoPoolClearedError',
+]);
+const TRANSIENT_LABELS = ['ResetPool', 'RetryableWriteError', 'PoolRequstedRetry'];
+
+/**
+ * Whether a failed read is a blip — a network error, a failover, a node
+ * shutting down — rather than an answer: the error itself, or what it wraps.
+ * Duck-typed on the driver's error names, codes and labels.
+ */
+function isTransientError(error) {
+  for (let current = error, depth = 0; current && depth < 3; depth += 1) {
+    if (TRANSIENT_NAMES.has(current.name) || TRANSIENT_CODES.has(current.code)) return true;
+    if (
+      typeof current.hasErrorLabel === 'function' &&
+      TRANSIENT_LABELS.some((label) => current.hasErrorLabel(label))
+    ) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
+
 /**
  * The pause before the next poll: from a second, half as long again each
  * time, never more than ten seconds — nor more than the budget has left.
  */
 function nextPollDelay(attempt, remainingMs) {
   return Math.max(0, Math.round(Math.min(1000 * 1.5 ** attempt, 10_000, remainingMs)));
+}
+
+/** Every target collection's search indexes, read once: `"collection\0name"` → live index */
+async function readAll(collections, read) {
+  const live = new Map();
+  await mapLimit(collections, WAIT_READ_CONCURRENCY, async (collection) => {
+    for (const raw of await read(collection)) {
+      const index = normalizeLiveSearchIndex(raw);
+      live.set(`${collection}\u0000${index.name}`, index);
+    }
+  });
+  return live;
 }
 
 /**
@@ -246,12 +297,23 @@ function nextPollDelay(attempt, remainingMs) {
  * out. A STALE or missing index keeps the wait going: only FAILED ends it
  * early.
  *
- * `targets`: `[{ collection, name, sinceVersion? }]`; `read(collection)` the
- * collection's `$listSearchIndexes` documents; `beforePoll()` may throw to
- * stop (an abort); `onPoll(live)` sees every poll's `Map` of
- * `"collection\0name"` → normalized live index. Returns `{ outcome: 'ready' |
- * 'timeout' | 'failed', notReady, waitedMs }`, `notReady` holding
- * `{ collection, name, ...build }` (the failed ones first).
+ * A target with `touched: false` (one the run did not create or change) that
+ * is FAILED or STALE does not hold the wait: converge does not resubmit an
+ * unchanged definition, so waiting on it could only time out. It is handed
+ * back in `preexisting` instead. One still building is waited for.
+ *
+ * A read that fails with a blip (see {@link isTransientError}) is retried at
+ * the next poll, up to {@link WAIT_READ_ATTEMPTS} in a row; any other failure
+ * — or the last of those — is thrown.
+ *
+ * `targets`: `[{ collection, name, sinceVersion?, touched? }]`;
+ * `read(collection)` the collection's `$listSearchIndexes` documents;
+ * `beforePoll()` may throw to stop (an abort); `onPoll(live)` sees every
+ * poll's `Map` of `"collection\0name"` → normalized live index;
+ * `onReadError(error, inARow)` every read failure ridden out. Returns
+ * `{ outcome: 'ready' | 'timeout' | 'failed', notReady, preexisting,
+ * waitedMs }`, `notReady` holding `{ collection, name, ...build }` (the
+ * failed ones first).
  */
 async function awaitSearchIndexes({
   targets,
@@ -261,21 +323,31 @@ async function awaitSearchIndexes({
   now = Date.now,
   beforePoll = () => undefined,
   onPoll = () => undefined,
+  onReadError = () => undefined,
 }) {
   const startedAt = now();
   const collections = [...new Set(targets.map((target) => target.collection))];
+  const remaining = () => (timeoutMs === undefined ? Infinity : timeoutMs - (now() - startedAt));
+  let failedReads = 0;
   for (let attempt = 0; ; attempt++) {
     beforePoll();
-    const live = new Map();
-    await mapLimit(collections, WAIT_READ_CONCURRENCY, async (collection) => {
-      for (const raw of await read(collection)) {
-        const index = normalizeLiveSearchIndex(raw);
-        live.set(`${collection}\u0000${index.name}`, index);
+    let live;
+    try {
+      live = await readAll(collections, read);
+      failedReads = 0;
+    } catch (error) {
+      failedReads += 1;
+      if (!isTransientError(error) || failedReads >= WAIT_READ_ATTEMPTS || remaining() <= 0) {
+        throw error;
       }
-    });
+      onReadError(error, failedReads);
+      await sleep(nextPollDelay(attempt, remaining()));
+      continue;
+    }
     onPoll(live);
     const failed = [];
     const notReady = [];
+    const preexisting = [];
     for (const target of targets) {
       const index = live.get(`${target.collection}\u0000${target.name}`);
       const entry = {
@@ -283,18 +355,22 @@ async function awaitSearchIndexes({
         name: target.name,
         ...(index ? searchBuild(index) : { status: 'UNKNOWN', queryable: false }),
       };
-      if (index?.status === 'FAILED') failed.push(entry);
-      else if (!index || !isSearchIndexReady(index, { sinceVersion: target.sinceVersion })) {
+      const state = index ? searchBuildState(index) : 'building';
+      if (target.touched === false && (state === 'failed' || state === 'stale')) {
+        preexisting.push(entry);
+      } else if (state === 'failed') {
+        failed.push(entry);
+      } else if (!index || !isSearchIndexReady(index, { sinceVersion: target.sinceVersion })) {
         notReady.push(entry);
       }
     }
     const waitedMs = now() - startedAt;
     if (failed.length > 0) {
-      return { outcome: 'failed', notReady: [...failed, ...notReady], waitedMs };
+      return { outcome: 'failed', notReady: [...failed, ...notReady], preexisting, waitedMs };
     }
-    if (notReady.length === 0) return { outcome: 'ready', notReady, waitedMs };
-    const remainingMs = timeoutMs === undefined ? Infinity : timeoutMs - waitedMs;
-    if (remainingMs <= 0) return { outcome: 'timeout', notReady, waitedMs };
+    if (notReady.length === 0) return { outcome: 'ready', notReady, preexisting, waitedMs };
+    const remainingMs = remaining();
+    if (remainingMs <= 0) return { outcome: 'timeout', notReady, preexisting, waitedMs };
     await sleep(nextPollDelay(attempt, remainingMs));
   }
 }
@@ -304,6 +380,7 @@ module.exports = {
   SEARCH_UNAVAILABLE_HINT,
   awaitSearchIndexes,
   isSearchUnavailable,
+  isTransientError,
   listSearchIndexes,
   nextPollDelay,
   probeSearch,

@@ -172,6 +172,20 @@ converge does not resubmit a definition that has not changed, so a failed build 
 and `converge --dry-run` shows where it is. For a failed one, change the definition (or the data
 behind the failure) and converge again; `converge --check` exits `28` until it builds.
 
+`--wait-search` fails on a `FAILED` build only for an index the same run created or changed. One
+that failed before — its definition unchanged, so converge cannot fix it — is named in a line and
+a warning, and the wait goes on without it: a deploy is not held up by a build it did not start.
+
+## A search index is `STALE`
+
+**Why:** the index still answers queries, but it has stopped replicating from the collection — its
+results may be out of date. It is not a build in progress, so waiting longer does not help:
+`--wait-search` keeps polling for an index the run created or changed until the budget runs out,
+and does not wait at all for one it did not touch. converge and `migronaut audit` warn about it.
+
+**Fix:** see the Atlas Search documentation on index statuses for your cluster. Once the index is
+`READY` again, nothing is left for converge to do.
+
 ## "Could not modify search index … "mappings" is required"
 
 **Why:** an Atlas CLI local deployment (the `mongodb/mongodb-atlas-local` image) cannot update a

@@ -1,4 +1,5 @@
 const { isDestructive } = require('../core/converge-plan.js');
+const { searchBuildState } = require('../core/search-index-spec.js');
 const { createColors, stripAnsi } = require('../utils/colors.js');
 const { formatDateTime } = require('../utils/date.js');
 // Shared with the logger and spinner — cell values come from the changelog and
@@ -274,9 +275,18 @@ function convergeActionCell(colors, action) {
 /** Where the server is with a search index, when it is not simply serving it */
 function searchBuildDetail(build) {
   if (build === undefined) return '';
-  if (build.status === 'FAILED') return `FAILED${build.message ? `: ${build.message}` : ''}`;
-  if (build.updating) return 'updating';
-  return build.status === 'READY' ? '' : build.status;
+  switch (searchBuildState(build)) {
+    case 'serving':
+      return '';
+    case 'failed':
+      return `FAILED${build.message ? `: ${build.message}` : ''}`;
+    case 'updating':
+      return 'updating';
+    case 'stale':
+      return 'STALE — not replicating';
+    default:
+      return build.status;
+  }
 }
 
 /** Whether a search index row is one worth showing even when nothing changes: not serving yet */
@@ -363,8 +373,12 @@ function renderConvergeTable(result, { all = false } = {}) {
     parts.push(colors.yellow(`${counts.skip} search index(es) skipped — Search unavailable`));
   }
   const notReady = result.search?.notReady ?? [];
-  const failed = notReady.filter((index) => index.status === 'FAILED').length;
-  if (notReady.length > failed) parts.push(`${notReady.length - failed} search index(es) building`);
+  const inState = (state) => notReady.filter((index) => searchBuildState(index) === state).length;
+  const failed = inState('failed');
+  const stale = inState('stale');
+  const building = notReady.length - failed - stale;
+  if (building > 0) parts.push(`${building} search index(es) building`);
+  if (stale > 0) parts.push(colors.yellow(`${stale} search index(es) stale`));
   if (failed > 0) parts.push(colors.red(`${failed} search index(es) failed`));
   if (counts.unchanged > 0 && !all) parts.push(`${counts.unchanged} unchanged`);
   const line = parts.join(' · ');

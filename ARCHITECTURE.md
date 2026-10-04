@@ -964,7 +964,11 @@ steps; a conflict or a destructive row the initial plan lacked stops the run (`p
   otherwise enqueue a converge per tick while an index builds), but `converge --check` fails on a
   FAILED one. `waitForSearchIndexes` adds a wait phase after the last collection: polls back off
   1 s → 10 s, never past `searchIndexWaitTimeoutMs`; an updated index must also report a definition
-  version past the one the update started from. FAILED or timeout → `phase: 'wait'`.
+  version past the one the update started from. FAILED (of an index the run created or changed)
+  or timeout → `phase: 'wait'`; a FAILED or STALE index the run did not touch does not hold the
+  wait (it is returned as `preexisting` and warned about). A read that fails with a blip (network,
+  failover — `isTransientError`) is retried at the next poll, up to three in a row; the pause
+  between polls is cut short by an abort.
 
 **After `up`.** The hook lives in `up()`, not `#runUp` (which `redo` reuses): bulk only, no `to`,
 definitions resolved before the lock, converge inside the same `#withLock` callback even with zero
@@ -1132,7 +1136,8 @@ The high-impact ones for code changes:
   `$search` silently returning nothing until the build ends.
 - **A FAILED search index with the declared definition is `unchanged`.** Resubmitting the same
   definition changes nothing; it is reported (`notReady`, a warning, `--check` exit 28), never
-  retried. Builds in progress or failed do not count against `inSync` — the sync tick would loop.
+  retried — and it does not hold `waitForSearchIndexes`, which only fails on a build the run
+  started. Builds in progress or failed do not count against `inSync` — the sync tick would loop.
 - **`type` goes to `createSearchIndexes` only for a vector index**, and `updateSearchIndex` is sent
   without one — retried with it only on a self-managed `mongot`'s "mappings is required". Atlas
   documents no `type` on update; an older server refuses a field it does not know.

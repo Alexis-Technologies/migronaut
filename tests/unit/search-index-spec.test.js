@@ -11,6 +11,7 @@ const {
   normalizeDeclaredSearchIndex,
   normalizeLiveSearchIndex,
   searchBuild,
+  searchBuildState,
   searchIndexIssues,
   searchIndexSpec,
   searchIndexValue,
@@ -593,6 +594,7 @@ describe('isSearchIndexReady', () => {
     ['a BUILDING index', { status: 'BUILDING', queryable: false }, {}, false],
     ['a queryable index still BUILDING', { status: 'BUILDING' }, {}, false],
     ['a FAILED index', { status: 'FAILED', queryable: true }, {}, false],
+    ['a STALE index, queryable as it is', { status: 'STALE' }, {}, false],
     [
       'an index building a newer definition',
       { statusDetail: [{ stagedIndex: { status: 'BUILDING' } }] },
@@ -622,4 +624,30 @@ describe('isSearchIndexReady', () => {
       assert.strictEqual(isSearchIndexReady(live(fields), options), ready);
     });
   }
+});
+
+describe('searchBuildState', () => {
+  for (const [build, state] of [
+    [{ status: 'READY', queryable: true }, 'serving'],
+    [{ status: 'UNKNOWN', queryable: true }, 'serving'],
+    [{ queryable: true }, 'serving'],
+    [{ status: 'READY', queryable: true, updating: true }, 'updating'],
+    [{ status: 'BUILDING', queryable: true }, 'building'],
+    [{ status: 'PENDING', queryable: false }, 'building'],
+    [{ status: 'READY', queryable: false }, 'building'],
+    [{ status: 'STALE', queryable: true }, 'stale'],
+    [{ status: 'FAILED', queryable: true, message: 'x' }, 'failed'],
+    [{ status: 'DELETING', queryable: false }, 'removing'],
+    [{ status: 'DOES_NOT_EXIST', queryable: false }, 'removing'],
+  ]) {
+    it(`should call ${JSON.stringify(build)} ${state}`, () => {
+      assert.strictEqual(searchBuildState(build), state);
+    });
+  }
+
+  it('should read a live index and the build of a row alike', () => {
+    const stale = live({ status: 'STALE' });
+    assert.strictEqual(searchBuildState(stale), 'stale');
+    assert.strictEqual(searchBuildState(searchBuild(stale)), 'stale');
+  });
 });

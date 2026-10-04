@@ -415,14 +415,39 @@ function compareSearchIndex(declared, live) {
 }
 
 /**
- * Whether a live index serves queries with its latest definition: READY,
- * queryable, nothing newer being built — and, after an update made at
- * `sinceVersion`, a definition version past it (right after an update the
- * old version can still read READY).
+ * Where the server is with a search index — from a live index or a row's
+ * build (see {@link searchBuild}) — in one word, for every place that reports
+ * it:
+ *
+ * - `serving`: queryable with its latest definition (READY, or a server that
+ *   reports no status);
+ * - `updating`: queryable, with a newer definition building next to it;
+ * - `building`: not queryable yet, or a status other than READY;
+ * - `stale`: queryable, but no longer replicating from the collection — its
+ *   results may be out of date (STALE);
+ * - `failed`: the build FAILED — the server does not retry an unchanged
+ *   definition;
+ * - `removing`: being deleted.
+ */
+function searchBuildState(build) {
+  const { status } = build;
+  if (status === 'FAILED') return 'failed';
+  if (status === 'STALE') return 'stale';
+  if (ABSENT_STATUSES.has(status)) return 'removing';
+  if (build.queryable !== true) return 'building';
+  if (build.updating) return 'updating';
+  const ready = status === undefined || status === 'READY' || status === 'UNKNOWN';
+  return ready ? 'serving' : 'building';
+}
+
+/**
+ * Whether a live index serves queries with its latest definition (see
+ * {@link searchBuildState}) — and, after an update made at `sinceVersion`,
+ * with a definition version past it (right after an update the old version
+ * can still read READY).
  */
 function isSearchIndexReady(live, { sinceVersion } = {}) {
-  if (!live.queryable || live.updating) return false;
-  if (live.status !== undefined && live.status !== 'READY') return false;
+  if (searchBuildState(live) !== 'serving') return false;
   if (sinceVersion !== undefined && live.version !== undefined && live.version <= sinceVersion) {
     return false;
   }
@@ -473,6 +498,7 @@ module.exports = {
   normalizeDeclaredSearchIndex,
   normalizeLiveSearchIndex,
   searchBuild,
+  searchBuildState,
   searchIndexIssues,
   searchIndexSpec,
   searchIndexValue,

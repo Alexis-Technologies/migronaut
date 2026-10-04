@@ -4,6 +4,7 @@ const {
   SEARCH_STEPS,
   awaitSearchIndexes,
   isSearchUnavailable,
+  isTransientError,
   listSearchIndexes,
   nextPollDelay,
   probeSearch,
@@ -383,6 +384,37 @@ describe('runSearchStep', () => {
   });
 });
 
+describe('isTransientError', () => {
+  const labelled = (label) =>
+    Object.assign(new Error('pool cleared'), { hasErrorLabel: (name) => name === label });
+  for (const [label, error] of [
+    ['a network error', Object.assign(new Error('reset'), { name: 'MongoNetworkError' })],
+    [
+      'a network timeout',
+      Object.assign(new Error('timeout'), { name: 'MongoNetworkTimeoutError' }),
+    ],
+    ['no server to select', Object.assign(new Error('x'), { name: 'MongoServerSelectionError' })],
+    ['a primary that stepped down', serverError(189, 'PrimarySteppedDown')],
+    ['a node shutting down', serverError(91, 'ShutdownInProgress')],
+    ['a pool reset', labelled('ResetPool')],
+    [
+      'a blip wrapped by converge',
+      Object.assign(new Error('Could not read'), { cause: serverError(10107, 'not primary') }),
+    ],
+  ]) {
+    it(`should take ${label} for a blip`, () => {
+      assert.strictEqual(isTransientError(error), true);
+    });
+  }
+
+  it('should not take an answer for a blip', () => {
+    assert.strictEqual(isTransientError(serverError(13, 'not authorized')), false);
+    assert.strictEqual(isTransientError(serverError(31082, 'SearchNotEnabled')), false);
+    assert.strictEqual(isTransientError(labelled('NoWritesPerformed')), false);
+    assert.strictEqual(isTransientError(undefined), false);
+  });
+});
+
 describe('nextPollDelay', () => {
   for (const [attempt, remaining, delay] of [
     [0, Infinity, 1000],
@@ -450,7 +482,12 @@ describe('awaitSearchIndexes', () => {
       timeoutMs: 1000,
       ...time,
     });
-    assert.deepStrictEqual(outcome, { outcome: 'ready', notReady: [], waitedMs: 0 });
+    assert.deepStrictEqual(outcome, {
+      outcome: 'ready',
+      notReady: [],
+      preexisting: [],
+      waitedMs: 0,
+    });
     assert.deepStrictEqual(source.seen.sort(), ['movies', 'shows']);
   });
 
@@ -504,6 +541,127 @@ describe('awaitSearchIndexes', () => {
       { collection: 'movies', name: 'broken', status: 'FAILED', queryable: false, message: 'x' },
       { collection: 'movies', name: 'gone', status: 'UNKNOWN', queryable: false },
     ]);
+  });
+
+  it('should not hold the wait for a FAILED or STALE index the run did not touch', async () => {
+    const time = clock();
+    const outcome = await awaitSearchIndexes({
+      targets: [
+        { collection: 'movies', name: 'broken', touched: false },
+        { collection: 'movies', name: 'lagging', touched: false },
+        { collection: 'movies', name: 'fresh', touched: true },
+      ],
+      read: polls(
+        {
+          movies: [
+            doc('broken', { status: 'FAILED', queryable: false, message: 'x' }),
+            doc('lagging', { status: 'STALE' }),
+            doc('fresh', { status: 'BUILDING', queryable: false }),
+          ],
+        },
+        {
+          movies: [
+            doc('broken', { status: 'FAILED', queryable: false, message: 'x' }),
+            doc('lagging', { status: 'STALE' }),
+            doc('fresh'),
+          ],
+        },
+      ).read,
+      timeoutMs: 60_000,
+      ...time,
+    });
+    assert.strictEqual(outcome.outcome, 'ready');
+    assert.deepStrictEqual(outcome.notReady, []);
+    assert.deepStrictEqual(
+      outcome.preexisting.map((index) => `${index.name}:${index.status}`),
+      ['broken:FAILED', 'lagging:STALE'],
+    );
+    assert.deepStrictEqual(time.pauses, [1000]);
+  });
+
+  it('should wait for an untouched index that is still building', async () => {
+    const time = clock();
+    const outcome = await awaitSearchIndexes({
+      targets: [{ collection: 'movies', name: 'a', touched: false }],
+      read: polls(
+        { movies: [doc('a', { status: 'BUILDING', queryable: false })] },
+        { movies: [doc('a')] },
+      ).read,
+      timeoutMs: 60_000,
+      ...time,
+    });
+    assert.strictEqual(outcome.outcome, 'ready');
+    assert.deepStrictEqual(time.pauses, [1000]);
+  });
+
+  it('should ride out a read that fails with a blip, and say so', async () => {
+    const time = clock();
+    const blips = [];
+    let reads = 0;
+    const outcome = await awaitSearchIndexes({
+      targets: [{ collection: 'movies', name: 'a' }],
+      read: async () => {
+        reads += 1;
+        if (reads > 2) return [doc('a')];
+        throw Object.assign(new Error('connection reset'), { name: 'MongoNetworkError' });
+      },
+      timeoutMs: 60_000,
+      onReadError: (error, inARow) => blips.push([error.message, inARow]),
+      ...time,
+    });
+    assert.strictEqual(outcome.outcome, 'ready');
+    assert.deepStrictEqual(blips, [
+      ['connection reset', 1],
+      ['connection reset', 2],
+    ]);
+    assert.deepStrictEqual(time.pauses, [1000, 1500]);
+  });
+
+  it('should give up after three blips in a row, and at once on anything else', async () => {
+    const time = clock();
+    const blip = Object.assign(new Error('primary stepped down'), { code: 189 });
+    await assert.rejects(
+      awaitSearchIndexes({
+        targets: [{ collection: 'movies', name: 'a' }],
+        read: async () => {
+          throw blip;
+        },
+        timeoutMs: 60_000,
+        ...time,
+      }),
+      /primary stepped down/,
+    );
+    assert.deepStrictEqual(time.pauses, [1000, 1500], 'two retries, then the third failure');
+
+    const other = clock();
+    await assert.rejects(
+      awaitSearchIndexes({
+        targets: [{ collection: 'movies', name: 'a' }],
+        read: async () => {
+          throw Object.assign(new Error('not authorized'), { code: 13 });
+        },
+        timeoutMs: 60_000,
+        ...other,
+      }),
+      /not authorized/,
+    );
+    assert.deepStrictEqual(other.pauses, []);
+  });
+
+  it('should not retry a blip once the budget is spent', async () => {
+    const time = clock();
+    await assert.rejects(
+      awaitSearchIndexes({
+        targets: [{ collection: 'movies', name: 'a' }],
+        read: async () => {
+          time.sleep(500);
+          throw Object.assign(new Error('timed out'), { name: 'MongoNetworkTimeoutError' });
+        },
+        timeoutMs: 400,
+        ...time,
+      }),
+      /timed out/,
+    );
   });
 
   it('should wait with no limit when no budget is given, and let beforePoll stop it', async () => {
