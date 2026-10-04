@@ -10,6 +10,24 @@ const repoRoot = path.join(__dirname, '..', '..');
 const binPath = path.join(repoRoot, 'bin', 'migronaut.js');
 
 /**
+ * The environment every CLI child starts from: this process's, minus the color
+ * variables. `node --test` itself sets FORCE_COLOR=1 for its test files when its
+ * own stdout is a color TTY, so an inherited environment colorizes the CLI's
+ * tables in an interactive `pnpm test` / `pnpm publish` but not on CI — and the
+ * assertions on plain table text then fail only locally. Tests that want color
+ * pass the variables explicitly.
+ */
+const COLOR_VARS = new Set([
+  'FORCE_COLOR',
+  'NO_COLOR',
+  'MIGRONAUT_FORCE_COLOR',
+  'MIGRONAUT_NO_COLOR',
+]);
+const baseEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => !COLOR_VARS.has(name)),
+);
+
+/**
  * Run the CLI as a plain Node child process and capture its result.
  *
  * `cwd` defaults to the isolated project dir, NOT the repo root: the repo has
@@ -21,7 +39,7 @@ function runCli(args, env = {}, cwd = project?.dir ?? repoRoot, input) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binPath, ...args], {
       cwd,
-      env: { ...process.env, ...env },
+      env: { ...baseEnv, ...env },
     });
     let stdout = '';
     let stderr = '';
@@ -176,9 +194,6 @@ describe('migronaut CLI (integration)', () => {
     assert.ok(hasAnsi(forcedOn.stdout), 'MIGRONAUT_FORCE_COLOR should beat NO_COLOR');
 
     const forcedOff = await runCli(baseArgs(['status']), {
-      // Cleared explicitly: the child inherits process.env, and this assertion
-      // must not depend on what the developer's shell exports.
-      MIGRONAUT_FORCE_COLOR: '',
       MIGRONAUT_NO_COLOR: '1',
       FORCE_COLOR: '1',
     });
