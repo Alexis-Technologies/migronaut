@@ -1,4 +1,4 @@
-const { isDestructive } = require('../core/converge-plan.js');
+const { TARGET_LABELS, isDestructive } = require('../core/converge-plan.js');
 const { searchBuildState } = require('../core/search-index-spec.js');
 const { createColors, stripAnsi } = require('../utils/colors.js');
 const { formatDateTime } = require('../utils/date.js');
@@ -310,8 +310,6 @@ function convergeDetail(action) {
   if (build) parts.push(build);
   return parts.join(' · ');
 }
-
-const TARGET_LABELS = { searchIndex: 'search index' };
 
 /**
  * Render a converge plan (or result) as a table plus a one-line summary.

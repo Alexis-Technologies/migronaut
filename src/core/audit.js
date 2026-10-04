@@ -1,9 +1,9 @@
 const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
-const { READ_OPTIONS, readServer } = require('./converge.js');
 const { SEARCH_UNAVAILABLE_HINT, listSearchIndexes, probeSearch } = require('./converge-search.js');
 const { toLockInfo } = require('./lock.js');
 const { normalizeLiveSearchIndex, searchBuildState } = require('./search-index-spec.js');
+const { READ_OPTIONS, readServer } = require('./server-info.js');
 
 /** Changelog indexes ensureIndexes() creates — audit warns when any is absent */
 const EXPECTED_INDEXES = [

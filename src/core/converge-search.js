@@ -6,6 +6,7 @@ const {
   searchBuild,
   searchBuildState,
 } = require('./search-index-spec.js');
+const { INDEX_NOT_FOUND, NAMESPACE_NOT_FOUND } = require('./server-info.js');
 
 /**
  * Atlas Search for converge: the commands that create, update, list and drop
@@ -19,8 +20,6 @@ const {
  * deployment and a self-managed `mongot`.
  */
 
-const NAMESPACE_NOT_FOUND = 26;
-const INDEX_NOT_FOUND = 27;
 const INVALID_OPTIONS = 72;
 const UNKNOWN_FIELD = 40415;
 

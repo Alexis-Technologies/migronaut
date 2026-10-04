@@ -95,6 +95,8 @@ src/
 │   ├── search-index-spec.js # PURE: one declared search index vs one live one (defaults, type, build)
 │   ├── converge-plan.js     # PURE: plan one collection — result rows + executable steps
 │   ├── converge-search.js   # Atlas Search: raw commands, the availability probe, error hints, the wait
+│   ├── converge-search-run.js # The search half of a converge run: read, report, wait for builds
+│   ├── server-info.js       # Read options, read pace, server version/topology, not-found codes
 │   ├── converge.js          # runConverge() — read live state, plan, carry the plan out
 │   ├── converge-log.js      # ConvergeLog — the append-only converge history (_migronaut_converge)
 │   ├── import.js            # PURE migrate-mongo → MigrationRecord mapping
@@ -470,8 +472,25 @@ Each entry: **responsibility · key exports · nuances you must know.**
   its type for a self-managed `mongot` — and drop, tolerating "already gone"),
   `listSearchIndexes`, `probeSearch` (does the server have Search at all — see
   [§6.7](#67-declared-collections-converge)), `isSearchUnavailable` / `searchHint` (what the
-  server's errors mean), and `awaitSearchIndexes` / `nextPollDelay` (the optional wait). Returns
-  outcomes; converge.js decides what they do to a run.
+  server's errors mean), `isTransientError` (a read worth trying again), and
+  `awaitSearchIndexes` / `nextPollDelay` (the optional wait). Returns outcomes; converge.js
+  decides what they do to a run.
+
+### `src/core/converge-search-run.js` — the search half of a converge run
+- **Responsibility:** what converge.js calls in at each phase when definitions declare search
+  indexes — `readSearch` (the probe, then every declaring collection's list), `readSearchIndexes`
+  (a failed read reported in the phase that read it), `warnIgnored` / `warnSkipping`,
+  `searchSummary` (`result.search`), `refreshBuilds` (the verify phase), `waitPhase` (release the
+  lock, poll, emit `converge:wait`, record the metric point, fail on a build the run started),
+  and `reportNotReady` (the closing lines). Orchestration over the same `deps` as converge.js;
+  split out so the main flow reads as one. `pause` (an abortable sleep) and
+  `SEARCH_SETTLE_DELAYS_MS` live here too.
+
+### `src/core/server-info.js` — what is read about the server, and how
+- **Responsibility:** `READ_OPTIONS` (primary, plain-JavaScript BSON — forced onto every converge
+  and audit read), `READ_CONCURRENCY`, `readServer` (mongos or not, version with patch) and the
+  `NAMESPACE_NOT_FOUND` / `INDEX_NOT_FOUND` codes — shared by converge, its search half and the
+  audit, so none of them reaches into another for it.
 
 ### `src/core/converge-plan.js` — the converge planner (pure)
 - **Responsibility:** `planCollection(definition, live, { prune, search })` → `{ name, actions,

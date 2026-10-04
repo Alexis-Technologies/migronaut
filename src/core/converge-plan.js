@@ -35,6 +35,15 @@ const {
 /** Actions that change the database — what a plan "would do" and a run "did" */
 const CHANGE_ACTIONS = new Set(['create', 'modify', 'recreate', 'drop']);
 
+/**
+ * Actions of a declared search index that leaves it on the server — the
+ * ones whose build is worth reporting, or waiting for
+ */
+const SERVED_ACTIONS = new Set(['create', 'modify', 'unchanged']);
+
+/** A row's target as people read it — where the code's name is not plain English */
+const TARGET_LABELS = Object.freeze({ searchIndex: 'search index' });
+
 /** Server defaults for a collection that has a validator but did not say how to apply it */
 const VALIDATOR_DEFAULTS = { validationLevel: 'strict', validationAction: 'error' };
 
@@ -677,6 +686,8 @@ function summarize(collections) {
 module.exports = {
   CHANGE_ACTIONS,
   SEARCH_UNAVAILABLE_REASON,
+  SERVED_ACTIONS,
+  TARGET_LABELS,
   UNIQUE_REBUILD_REASON,
   VALIDATOR_DEFAULTS,
   desiredValidator,
