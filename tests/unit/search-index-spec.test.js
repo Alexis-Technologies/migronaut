@@ -197,6 +197,17 @@ describe('normalizing search indexes', () => {
     });
   });
 
+  it('should read the version a self-managed mongot reports as latestVersion', () => {
+    const index = normalizeLiveSearchIndex({
+      name: 'default',
+      status: 'READY',
+      queryable: true,
+      latestVersion: 3,
+      latestDefinition: { mappings: {} },
+    });
+    assert.strictEqual(index.version, 3);
+  });
+
   it('should see a newer definition being built next to the one served', () => {
     const staged = live({
       statusDetail: [{ hostname: 'a', mainIndex: {}, stagedIndex: { status: 'BUILDING' } }],
@@ -289,6 +300,50 @@ describe('effectiveDefinition', () => {
     assert.ok(!('hnswOptions' in filled.fields[1]));
   });
 
+  it('should fill the defaults mongot writes into field mappings, nested ones too', () => {
+    const { mappings } = effectiveDefinition('search', {
+      mappings: {
+        fields: {
+          title: {
+            type: 'string',
+            multi: { english: { type: 'string', analyzer: 'lucene.english' } },
+          },
+          year: { type: 'number', indexIntegers: false },
+          name: { type: 'autocomplete' },
+          tag: { type: 'token' },
+          meta: { type: 'document', fields: { note: { type: 'string' } } },
+          when: { type: 'date' },
+        },
+      },
+    });
+    const STRING = { indexOptions: 'offsets', store: true, norms: 'include' };
+    assert.deepStrictEqual(mappings.fields.title, {
+      type: 'string',
+      ...STRING,
+      multi: { english: { type: 'string', analyzer: 'lucene.english', ...STRING } },
+    });
+    assert.deepStrictEqual(mappings.fields.year, {
+      type: 'number',
+      representation: 'double',
+      indexIntegers: false,
+      indexDoubles: true,
+    });
+    assert.deepStrictEqual(mappings.fields.name, {
+      type: 'autocomplete',
+      minGrams: 2,
+      maxGrams: 15,
+      foldDiacritics: true,
+      tokenization: 'edgeGram',
+    });
+    assert.deepStrictEqual(mappings.fields.tag, { type: 'token', normalization: 'none' });
+    assert.deepStrictEqual(mappings.fields.meta, {
+      type: 'document',
+      dynamic: false,
+      fields: { note: { type: 'string', ...STRING } },
+    });
+    assert.deepStrictEqual(mappings.fields.when, { type: 'date' });
+  });
+
   it('should leave a definition that is not an object alone', () => {
     assert.strictEqual(effectiveDefinition('search', undefined), undefined);
   });
@@ -331,6 +386,63 @@ describe('compareSearchIndex', () => {
           fields: [
             { type: 'vector', path: 'e', numDimensions: new Int32(3), similarity: 'cosine' },
           ],
+        },
+      },
+    ],
+    [
+      'field mappings with the defaults mongot writes into them',
+      {
+        definition: {
+          mappings: {
+            dynamic: false,
+            fields: {
+              title: { type: 'string' },
+              year: { type: 'number' },
+              sub: { type: 'document', fields: { a: { type: 'autocomplete' } } },
+            },
+          },
+        },
+      },
+      {
+        latestDefinition: {
+          mappings: {
+            dynamic: false,
+            fields: {
+              year: {
+                type: 'number',
+                representation: 'double',
+                indexDoubles: true,
+                indexIntegers: true,
+              },
+              title: { type: 'string', indexOptions: 'offsets', store: true, norms: 'include' },
+              sub: {
+                type: 'document',
+                dynamic: false,
+                fields: {
+                  a: {
+                    type: 'autocomplete',
+                    minGrams: 2,
+                    maxGrams: 15,
+                    foldDiacritics: true,
+                    tokenization: 'edgeGram',
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    ],
+    [
+      'a field indexed as several types, reported in another order',
+      {
+        definition: {
+          mappings: { fields: { tags: [{ type: 'token' }, { type: 'stringFacet' }] } },
+        },
+      },
+      {
+        latestDefinition: {
+          mappings: { fields: { tags: [{ type: 'stringFacet' }, { type: 'token' }] } },
         },
       },
     ],
@@ -383,6 +495,20 @@ describe('compareSearchIndex', () => {
         { latestDefinition: { mappings: { dynamic: true } } },
       ),
       ['analyzer', 'mappings', 'searchAnalyzer'],
+    );
+  });
+
+  it('should see a field option changed from its default as a change', () => {
+    assert.deepStrictEqual(
+      same(
+        { definition: { mappings: { fields: { title: { type: 'string' } } } } },
+        {
+          latestDefinition: {
+            mappings: { fields: { title: { type: 'string', store: false } } },
+          },
+        },
+      ),
+      ['mappings'],
     );
   });
 

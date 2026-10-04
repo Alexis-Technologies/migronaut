@@ -687,8 +687,8 @@ migronaut converge --check     # exit 28 on drift: a CI gate
   **kept and reported** — dropped only with `prune`. An identical index under another name is
   accepted as is, never silently rebuilt.
 - **Search indexes, too** — on Atlas, an Atlas CLI local deployment or MongoDB 8.3+ with `mongot`.
-  A changed definition is updated in place (the old one serves until the new one is built), never
-  dropped and rebuilt; `--wait-search` waits until the builds are queryable. On a server without
+  A changed definition is updated in place (on Atlas the old one serves until the new one is
+  built), never dropped and rebuilt; `--wait-search` waits until the builds are queryable. On a server without
   Search, converge refuses — or skips them with `onSearchUnavailable: 'skip'`.
 - **Locked like a migration**, and refused before the first write when the plan has a conflict.
 - **After every deploy** with `convergeAfterUp: true` — a bulk `up` then ends by converging,

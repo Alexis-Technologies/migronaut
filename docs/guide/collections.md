@@ -231,11 +231,14 @@ history, same plan-then-apply:
 
 The definition is Atlas's own document, so it is checked lightly — the shape that tells the two
 types apart, no repeated field, vector and `autoEmbed` fields not mixed — and compared whole.
-Comparisons ignore key order and fill in the documented defaults on both sides (`analyzer:
-'lucene.standard'`, `searchAnalyzer` the same as `analyzer`, `dynamic: false`, `storedSource:
-false`, `numPartitions: 1`; for a vector field `quantization: 'none'`, `indexingMethod: 'hnsw'`,
-`hnswOptions: { maxEdges: 16, numEdgeCandidates: 100 }`), and vector `fields` compare as a set —
-so a definition that leaves a default out matches a server that spells it out. Removing an option
+Comparisons ignore key order and fill in the defaults the server writes into what it reports, on
+both sides: at the top (`analyzer: 'lucene.standard'`, `searchAnalyzer` the same as `analyzer`,
+`dynamic: false`, `storedSource: false`, `numPartitions: 1`), in field mappings (a `string` field's
+`indexOptions`, `store` and `norms`, a `number` field's representation, an `autocomplete` field's
+grams and tokenization, a `document` field's `dynamic` — nested fields and `multi` analyzers
+too), and on vector fields (`quantization: 'none'`, `indexingMethod: 'hnsw'`, `hnswOptions: {
+maxEdges: 16, numEdgeCandidates: 100 }`). Vector `fields`, and a field indexed as several types,
+compare as sets. So a definition that leaves a default out matches a server that spells it out. Removing an option
 you had declared is a change, like any other.
 
 **Where it works:** Atlas (every tier — the free tier holds at most 3 search and vector indexes,
@@ -246,7 +249,7 @@ or its `mongodb/mongodb-atlas-local` Docker image, and MongoDB 8.3+ with `mongot
 | Action | When | How |
 |---|---|---|
 | `create` | A declared search index is missing | `createSearchIndexes` — one command per collection |
-| `modify` | Its definition differs | `updateSearchIndex`, **in place**: the old definition keeps serving queries until the new one is built |
+| `modify` | Its definition differs | `updateSearchIndex`, **in place** — on Atlas the old definition keeps serving queries until the new one is built |
 | `drop` | A live search index is not declared, and `prune` is on | `dropSearchIndex` — **destructive**, asked for like an index drop |
 | `keep` | Not declared, `prune` off — or already being deleted | Nothing — reported only |
 | `conflict` | A change no update can make, a name the server is still deleting, or no Search on the server | The whole run is refused before the first write |
@@ -264,6 +267,13 @@ converge never does: what an update can change is updated in place, and what it 
 quantization or modality** — is a `conflict`. The way through is a new index under a **new name**:
 declare it next to the old one, converge (with `--wait-search`), move your queries to it, then
 remove the old declaration and converge with `prune`.
+
+::: warning Vector index updates on a local deployment
+An Atlas CLI local deployment (the `mongodb/mongodb-atlas-local` image — MongoDB 8.0 and 8.3 in our
+tests) refuses every update of a **vector** index; Atlas updates one in place. converge stops at
+that step with `CONVERGE_FAILED` and the same new-name recipe as a hint. Search indexes update
+fine everywhere.
+:::
 
 ### Builds happen in the background
 
@@ -283,8 +293,9 @@ With `waitForSearchIndexes: true` (`--wait-search` for one run) converge holds �
 until every declared search index is queryable with its declared definition, and fails with
 [`CONVERGE_FAILED`](/reference/error-codes) (`phase: 'wait'`) on a FAILED build or after
 `searchIndexWaitTimeoutMs` (10 minutes by default; the server goes on building). Turn it on when a
-deploy needs a *new* index ready as soon as it finishes; an update needs no wait, since the old
-definition serves meanwhile.
+deploy needs a *new* index ready as soon as it finishes. On Atlas an update needs no wait — the old
+definition serves meanwhile; a local deployment reports the index not queryable for the moment
+its new definition builds.
 
 ### A server without Atlas Search
 
@@ -398,7 +409,7 @@ Use a migration when the change needs **ordering against data**:
   go through `mongos` as usual. CI proves replica sets, not sharded clusters — try a converge
   with `--dry-run` there first.
 - **Tested on MongoDB 5.0, 6.0, 7.0 and 8.0** — search indexes against
-  `mongodb/mongodb-atlas-local` 8.0. The comparison rules follow what the server reports; on
+  `mongodb/mongodb-atlas-local` 8.0 and 8.3. The comparison rules follow what the server reports; on
   another version (or as Atlas adds to the definition format), anything that does not settle shows
   up under `unstable` rather than looping.
 

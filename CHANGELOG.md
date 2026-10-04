@@ -26,15 +26,19 @@ it.
     type, or an `autoEmbed` field's path, model, `numDimensions`, quantization or modality — is a
     `conflict` naming the new-name recipe, and so is a declared index the server is still
     deleting.
-  - **Comparison**: definitions compare whole, key order ignored, with Atlas's documented
-    defaults filled in on both sides (`analyzer`, `searchAnalyzer`, `dynamic`, `storedSource`,
-    `numPartitions`; vector `quantization`, `indexingMethod`, `hnswOptions`; `autoEmbed`
-    `numDimensions` and `quantization`), and vector `fields` as a set. A server that reports no
-    `type` (a self-managed `mongot`) has it inferred from the definition.
+  - **Comparison**: definitions compare whole, key order ignored, with the defaults the server
+    writes into what it reports filled in on both sides — top-level (`analyzer`,
+    `searchAnalyzer`, `dynamic`, `storedSource`, `numPartitions`), per field mapping (`string`,
+    `number`, `autocomplete`, `token`, `geo`, `document`, nested fields and `multi` included) and
+    per vector field (`quantization`, `indexingMethod`, `hnswOptions`; `autoEmbed`
+    `numDimensions` and `quantization`). Vector `fields`, and a field indexed as several types,
+    compare as sets. A server that reports no `type` (a self-managed `mongot`) has it inferred
+    from the definition, and its `latestVersion` is read as the definition version.
   - **Raw commands** (`createSearchIndexes`, `updateSearchIndex`, `dropSearchIndex`,
     `$listSearchIndexes`), so every driver in the peer range works — the driver's helpers start
     at 5.6. A vector index update is retried once with its type when a self-managed `mongot`
-    asks for it.
+    asks for it; where the server refuses that too (an Atlas CLI local deployment on 8.0 and
+    8.3), the step fails with the new-name recipe as its hint.
   - **Build state**: rows carry `build` (`{ status, queryable, message?, updating? }`), and the
     result `search` (`{ available, notReady }`) — the declared indexes still building, updating
     or failed. A build under way does not count against `inSync`; a FAILED one fails
@@ -72,8 +76,9 @@ it.
 
 - `tests/integration/search-atlas.test.js` — an opt-in, manual suite against
   `mongodb/mongodb-atlas-local` (`MIGRONAUT_TEST_ATLAS_URI`): every scenario ends at a fixed
-  point. CI does not run it; the coverage gate comes from the unit tier's fake, which answers the
-  search commands with lag, normalization and build progress on demand.
+  point. Passes against `mongodb/mongodb-atlas-local` 8.0 (8.0.32) and `latest` (8.3.11). CI does
+  not run it; the coverage gate comes from the unit tier's fake, which answers the search
+  commands with lag, normalization and build progress on demand.
 
 ## v2.1.0 — 2026-10-04
 

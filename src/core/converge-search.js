@@ -21,6 +21,7 @@ const {
 const NAMESPACE_NOT_FOUND = 26;
 const INDEX_NOT_FOUND = 27;
 const INVALID_OPTIONS = 72;
+const UNKNOWN_FIELD = 40415;
 
 /**
  * The server saying it has no Atlas Search, by version: SearchNotEnabled
@@ -47,6 +48,15 @@ const SEARCH_UNAVAILABLE_HINT =
 /** The error a self-managed `mongot` gives for a vector index updated without its type */
 const NEEDS_TYPE = /\bmappings\b.*\brequired\b/i;
 
+/**
+ * Why a vector index could not be updated where `mongot` wants the type the
+ * server will not pass on (an Atlas CLI local deployment on MongoDB 8.0
+ * refuses `updateSearchIndex` either way) — and the way that works everywhere.
+ */
+const VECTOR_UPDATE_HINT =
+  'this server cannot update a vector search index in place (Atlas can) — declare the changed ' +
+  'index under a new name, converge, then remove the old declaration and converge with prune';
+
 /** Whether an error from a search command means the server has no Atlas Search */
 function isSearchUnavailable(error) {
   if (SEARCH_UNAVAILABLE_CODES.has(error?.code)) return true;
@@ -58,6 +68,7 @@ function isSearchUnavailable(error) {
 function searchHint(error) {
   if (isSearchUnavailable(error)) return SEARCH_UNAVAILABLE_HINT;
   const text = errorText(error);
+  if (NEEDS_TYPE.test(text)) return VECTOR_UPDATE_HINT;
   if (error?.code === 13) {
     return (
       'not authorized — search indexes need the createSearchIndexes, updateSearchIndex, ' +
@@ -175,7 +186,16 @@ async function updateSearchIndex(db, collection, step) {
     await db.command(command);
   } catch (error) {
     if (step.type !== 'vectorSearch' || !NEEDS_TYPE.test(errorText(error))) throw error;
-    await db.command({ ...command, type: step.type });
+    try {
+      await db.command({ ...command, type: step.type });
+    } catch (retryError) {
+      // A server that does not know the field at all (MongoDB 8.0): the
+      // first refusal is the one that says what is wrong.
+      if (retryError?.code === UNKNOWN_FIELD || /unknown field/i.test(errorText(retryError))) {
+        throw error;
+      }
+      throw retryError;
+    }
   }
 }
 

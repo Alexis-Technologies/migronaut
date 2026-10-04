@@ -303,7 +303,10 @@ index is never `recreate`d (a `$search` on a missing index returns nothing — a
 and builds never count against `inSync`; `type` is sent to `createSearchIndexes` only for a vector
 index, and `updateSearchIndex` is retried with it only on a self-managed `mongot`'s "mappings is
 required"; the availability probe trusts an empty list only from 7.2.1+ (older servers go through
-`getParameter`); and nothing reads search indexes for a definition without `searchIndexes`. Names
+`getParameter`); defaults are filled per field mapping too (`FIELD_DEFAULTS` — mongot writes them
+into what it reports) and a field's list of types compares as a set; an Atlas CLI local deployment
+cannot update a vector index at all (the step fails with the new-name hint — not a migronaut bug);
+and nothing reads search indexes for a definition without `searchIndexes`. Names
 already taken, so not to reuse for anything else: `sync` (the queue job), `ensureIndexes` and the
 audit check `indexes` (the changelog's own indexes), the audit check `search`, `schema`
 (`migronaut.schema.json`).

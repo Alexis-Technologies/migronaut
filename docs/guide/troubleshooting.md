@@ -172,6 +172,15 @@ converge does not resubmit a definition that has not changed, so a failed build 
 and `converge --dry-run` shows where it is. For a failed one, change the definition (or the data
 behind the failure) and converge again; `converge --check` exits `28` until it builds.
 
+## "Could not modify search index … "mappings" is required"
+
+**Why:** an Atlas CLI local deployment (the `mongodb/mongodb-atlas-local` image) cannot update a
+**vector** search index in place — it refuses the update with or without the index type. Atlas
+can.
+
+**Fix:** declare the changed vector index under a **new name**, converge, then remove the old
+declaration and converge with `--prune`. Against Atlas, the same definition updates in place.
+
 ## "the type cannot change in place" / "autoEmbed … cannot change in place"
 
 **Why:** no update can turn a search index into a vector one (or back), or give an automated-

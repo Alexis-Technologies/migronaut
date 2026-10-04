@@ -948,6 +948,15 @@ steps; a conflict or a destructive row the initial plan lacked stops the run (`p
   yes. Without Search, declared search indexes are `conflict` rows (`onSearchUnavailable: 'fail'`,
   refused before any write, with a hint) or `skip` rows (`'skip'`). A refusal at apply time in skip
   mode turns the step's rows to `skip` and Search off for the rest of the run.
+- *What the server reports.* `latestDefinition` comes back with defaults written in — top-level,
+  per field mapping by type (`FIELD_DEFAULTS`: `string` gains `indexOptions`/`store`/`norms`,
+  `number` its representation, `document` `dynamic`, …, recursively through `fields` and `multi`)
+  and per vector field — and a field indexed as several types in the server's own order. Both
+  sides are filled from the same tables and those lists sorted; the opt-in Atlas suite is what
+  proves the tables (atlas-local 8.0 and 8.3). A self-managed `mongot` reports `latestVersion`
+  instead of `latestDefinitionVersion.version`, and an Atlas CLI local deployment refuses every
+  `updateSearchIndex` of a vector index (with or without `type`): the step fails with the
+  new-name recipe as its hint.
 - *Builds are asynchronous.* The server accepts a create or update at once. The verify phase
   re-reads a lagging list a bounded number of times (250/500/1000 ms) before calling anything
   unstable, and refreshes each row's `build`. `result.search.notReady` lists declared indexes not

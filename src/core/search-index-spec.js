@@ -50,6 +50,23 @@ const SEARCH_DEFAULTS = Object.freeze({
 });
 const MAPPINGS_DEFAULTS = Object.freeze({ dynamic: false, fields: {} });
 
+/**
+ * Defaults of a field mapping, by type — what `mongot` writes into the
+ * definition it reports (a `string` field comes back with `indexOptions`,
+ * `store` and `norms`, a `number` with its representation, a `document` with
+ * `dynamic`). Types not listed come back as declared.
+ */
+const FIELD_DEFAULTS = Object.freeze({
+  string: { indexOptions: 'offsets', store: true, norms: 'include' },
+  number: { representation: 'double', indexIntegers: true, indexDoubles: true },
+  numberFacet: { representation: 'double', indexIntegers: true, indexDoubles: true },
+  autocomplete: { minGrams: 2, maxGrams: 15, foldDiacritics: true, tokenization: 'edgeGram' },
+  token: { normalization: 'none' },
+  geo: { indexShapes: false },
+  document: { dynamic: false, fields: {} },
+  embeddedDocuments: { dynamic: false, fields: {} },
+});
+
 /** Defaults of a vector field — and of an automated-embedding (`autoEmbed`) one */
 const VECTOR_FIELD_DEFAULTS = Object.freeze({ quantization: 'none', indexingMethod: 'hnsw' });
 const AUTO_EMBED_FIELD_DEFAULTS = Object.freeze({
@@ -203,7 +220,8 @@ function isUpdating(raw, version) {
 /** A `$listSearchIndexes` document in comparable form */
 function normalizeLiveSearchIndex(raw) {
   const definition = isPlainObject(raw.latestDefinition) ? raw.latestDefinition : {};
-  const version = raw.latestDefinitionVersion?.version;
+  // `latestVersion` is what a self-managed mongot (an Atlas CLI local deployment) reports.
+  const version = raw.latestDefinitionVersion?.version ?? raw.latestVersion;
   return {
     name: raw.name,
     type: SEARCH_INDEX_TYPES.includes(raw.type) ? raw.type : inferSearchIndexType(definition),
@@ -268,6 +286,35 @@ function sortFields(fields) {
 const compareText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
+ * A field mapping — or a list of them, one field indexed as several types —
+ * with its type's defaults filled in, nested `fields` and `multi` analyzers
+ * too. A list is a set to the server (it reports the types in its own
+ * order), so it is sorted.
+ */
+function effectiveFieldMapping(mapping) {
+  if (Array.isArray(mapping)) {
+    return mapping
+      .map((item) => effectiveFieldMapping(item))
+      .map((item) => ({ item, text: JSON.stringify(canonical(item)) }))
+      .sort((a, b) => compareText(a.text, b.text))
+      .map(({ item }) => item);
+  }
+  if (!isPlainObject(mapping)) return mapping;
+  const defaults = FIELD_DEFAULTS[mapping.type];
+  const filled = defaults ? withDefaults(mapping, defaults) : { ...mapping };
+  if (isPlainObject(filled.fields)) filled.fields = effectiveFields(filled.fields);
+  if (isPlainObject(filled.multi)) filled.multi = effectiveFields(filled.multi);
+  return filled;
+}
+
+/** `{ name: mapping }` with every mapping's defaults filled in */
+function effectiveFields(fields) {
+  const out = {};
+  for (const [name, mapping] of Object.entries(fields)) out[name] = effectiveFieldMapping(mapping);
+  return out;
+}
+
+/**
  * A definition with every documented default filled in — what the server
  * means by it. Only the defaults are filled; anything else stays as written,
  * so a real difference is never hidden.
@@ -285,6 +332,9 @@ function effectiveDefinition(type, definition) {
   if (filled.searchAnalyzer === undefined) filled.searchAnalyzer = filled.analyzer;
   if (isPlainObject(filled.mappings)) {
     filled.mappings = withDefaults(filled.mappings, MAPPINGS_DEFAULTS);
+    if (isPlainObject(filled.mappings.fields)) {
+      filled.mappings.fields = effectiveFields(filled.mappings.fields);
+    }
   }
   return filled;
 }
@@ -411,6 +461,7 @@ module.exports = {
   ABSENT_STATUSES,
   AUTO_EMBED_IMMUTABLE,
   DEFAULT_SEARCH_INDEX_NAME,
+  FIELD_DEFAULTS,
   SEARCH_DEFAULTS,
   SEARCH_INDEX_KEYS,
   SEARCH_INDEX_TYPES,

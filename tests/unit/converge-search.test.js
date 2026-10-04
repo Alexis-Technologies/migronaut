@@ -106,6 +106,11 @@ describe('searchHint', () => {
     ],
     ['a taken name', serverError(68, 'Index already exists'), /still being deleted/],
     ['a duplicate name', serverError(8, 'Duplicate Index'), /already exists/],
+    [
+      'a vector index a local deployment cannot update',
+      serverError(2, '"mappings" is required'),
+      /cannot update a vector search index in place .* new name/,
+    ],
   ]) {
     it(`should explain ${label}`, () => {
       assert.match(searchHint(error), pattern);
@@ -303,6 +308,36 @@ describe('runSearchStep', () => {
       { updateSearchIndex: 'movies', name: 'v', definition: { fields: [] } },
       { updateSearchIndex: 'movies', name: 'v', definition: { fields: [] }, type: 'vectorSearch' },
     ]);
+  });
+
+  it('should report the first refusal when the server does not know the type field either', async () => {
+    const db = commandDb((command) =>
+      command.type
+        ? serverError(40415, "BSON field 'updateSearchIndex.type' is an unknown field.")
+        : serverError(2, '"mappings" is required'),
+    );
+    await assert.rejects(
+      runSearchStep(db, 'movies', {
+        op: 'updateSearchIndex',
+        name: 'v',
+        type: 'vectorSearch',
+        definition: { fields: [] },
+      }),
+      (error) => error.code === 2 && /mappings/.test(error.message),
+    );
+    assert.strictEqual(db.commands.length, 2);
+    const other = commandDb((command) =>
+      command.type ? serverError(13, 'not authorized') : serverError(2, '"mappings" is required'),
+    );
+    await assert.rejects(
+      runSearchStep(other, 'movies', {
+        op: 'updateSearchIndex',
+        name: 'v',
+        type: 'vectorSearch',
+        definition: { fields: [] },
+      }),
+      /not authorized/,
+    );
   });
 
   it('should not retry a search index update, nor any other failure', async () => {
