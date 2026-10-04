@@ -762,6 +762,7 @@ export default {
   // collectionsDir: './collections', // one definition file per collection
   // convergeAfterUp: false,          // true → every bulk `up` ends by converging
   // onSearchUnavailable: 'fail',     // 'skip' → converge without search indexes where Search is absent
+  // waitForSearchIndexes: false,     // true → converge waits until search indexes are queryable
 
   // ── Code-only options (omit in migronaut.config.json) ─────────────────────────
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
@@ -898,6 +899,8 @@ optional rather than merely discouraged:
 | `MIGRONAUT_COLLECTIONS_DIR` | `collectionsDir` | — *(none read)* |
 | `MIGRONAUT_CONVERGE_AFTER_UP` | `convergeAfterUp` | `false` |
 | `MIGRONAUT_ON_SEARCH_UNAVAILABLE` | `onSearchUnavailable` | `fail` |
+| `MIGRONAUT_WAIT_FOR_SEARCH_INDEXES` | `waitForSearchIndexes` | `false` |
+| `MIGRONAUT_SEARCH_INDEX_WAIT_TIMEOUT_MS` | `searchIndexWaitTimeoutMs` | `600000` |
 | `MIGRONAUT_ENV_FILE` | `envFile` | `.env` |
 
 `fileExtensions`, `clientOptions`, `collections`, `client`, `mongoose`, `hooks`, `logger`,

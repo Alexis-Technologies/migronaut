@@ -1,4 +1,10 @@
+const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
+const {
+  isSearchIndexReady,
+  normalizeLiveSearchIndex,
+  searchBuild,
+} = require('./search-index-spec.js');
 
 /**
  * Atlas Search for converge: the commands that create, update, list and drop
@@ -22,8 +28,16 @@ const INVALID_OPTIONS = 72;
  * "no such command" and an unknown `$listSearchIndexes` stage (older still).
  */
 const SEARCH_UNAVAILABLE_CODES = new Set([31082, 115, 6047401, 59, 40324]);
-const SEARCH_UNAVAILABLE_MESSAGE =
-  /SearchNotEnabled|requires additional configuration|only (?:allowed|supported) (?:on|with) (?:MongoDB )?Atlas|Unrecognized pipeline stage name: '\$listSearchIndexes'|no such command: '(?:createSearchIndexes|updateSearchIndex|dropSearchIndex)'/i;
+const SEARCH_UNAVAILABLE_MESSAGE = new RegExp(
+  [
+    'SearchNotEnabled',
+    'requires additional configuration',
+    'only (?:allowed|supported) (?:on|with) (?:MongoDB )?Atlas',
+    "Unrecognized pipeline stage name: '\\$listSearchIndexes'",
+    "no such command: '(?:createSearchIndexes|updateSearchIndex|dropSearchIndex)'",
+  ].join('|'),
+  'i',
+);
 
 /** What to do about a server without Search — shown with every refusal it causes */
 const SEARCH_UNAVAILABLE_HINT =
@@ -65,7 +79,7 @@ function searchHint(error) {
   return undefined;
 }
 
-/** Every search index of a collection, as `$listSearchIndexes` reports them; none for a missing one */
+/** A collection's search indexes, as `$listSearchIndexes` reports them — none for a missing one */
 async function listSearchIndexes(db, collection, readOptions) {
   try {
     return await db
@@ -194,11 +208,84 @@ async function runSearchStep(db, collection, step) {
   }
 }
 
+/** Search index lists read at once while waiting — one per collection */
+const WAIT_READ_CONCURRENCY = 8;
+
+/**
+ * The pause before the next poll: from a second, half as long again each
+ * time, never more than ten seconds — nor more than the budget has left.
+ */
+function nextPollDelay(attempt, remainingMs) {
+  return Math.max(0, Math.round(Math.min(1000 * 1.5 ** attempt, 10_000, remainingMs)));
+}
+
+/**
+ * Poll until every target serves its latest definition (READY, queryable,
+ * nothing newer building — and, for one updated at `sinceVersion`, past that
+ * version), one of them FAILED, or `timeoutMs` (undefined: no limit) runs
+ * out. A STALE or missing index keeps the wait going: only FAILED ends it
+ * early.
+ *
+ * `targets`: `[{ collection, name, sinceVersion? }]`; `read(collection)` the
+ * collection's `$listSearchIndexes` documents; `beforePoll()` may throw to
+ * stop (an abort); `onPoll(live)` sees every poll's `Map` of
+ * `"collection\0name"` → normalized live index. Returns `{ outcome: 'ready' |
+ * 'timeout' | 'failed', notReady, waitedMs }`, `notReady` holding
+ * `{ collection, name, ...build }` (the failed ones first).
+ */
+async function awaitSearchIndexes({
+  targets,
+  read,
+  timeoutMs,
+  sleep,
+  now = Date.now,
+  beforePoll = () => undefined,
+  onPoll = () => undefined,
+}) {
+  const startedAt = now();
+  const collections = [...new Set(targets.map((target) => target.collection))];
+  for (let attempt = 0; ; attempt++) {
+    beforePoll();
+    const live = new Map();
+    await mapLimit(collections, WAIT_READ_CONCURRENCY, async (collection) => {
+      for (const raw of await read(collection)) {
+        const index = normalizeLiveSearchIndex(raw);
+        live.set(`${collection}\u0000${index.name}`, index);
+      }
+    });
+    onPoll(live);
+    const failed = [];
+    const notReady = [];
+    for (const target of targets) {
+      const index = live.get(`${target.collection}\u0000${target.name}`);
+      const entry = {
+        collection: target.collection,
+        name: target.name,
+        ...(index ? searchBuild(index) : { status: 'UNKNOWN', queryable: false }),
+      };
+      if (index?.status === 'FAILED') failed.push(entry);
+      else if (!index || !isSearchIndexReady(index, { sinceVersion: target.sinceVersion })) {
+        notReady.push(entry);
+      }
+    }
+    const waitedMs = now() - startedAt;
+    if (failed.length > 0) {
+      return { outcome: 'failed', notReady: [...failed, ...notReady], waitedMs };
+    }
+    if (notReady.length === 0) return { outcome: 'ready', notReady, waitedMs };
+    const remainingMs = timeoutMs === undefined ? Infinity : timeoutMs - waitedMs;
+    if (remainingMs <= 0) return { outcome: 'timeout', notReady, waitedMs };
+    await sleep(nextPollDelay(attempt, remainingMs));
+  }
+}
+
 module.exports = {
   SEARCH_STEPS,
   SEARCH_UNAVAILABLE_HINT,
+  awaitSearchIndexes,
   isSearchUnavailable,
   listSearchIndexes,
+  nextPollDelay,
   probeSearch,
   runSearchStep,
   searchHint,

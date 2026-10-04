@@ -1891,7 +1891,7 @@ class MigratorKit extends EventEmitter {
             definitions,
             prune: options.prune,
             rebuildUnique: options.rebuildUnique,
-            search: this.#convergeSearchOptions(),
+            search: this.#convergeSearchOptions(options),
             ...actor,
           },
           signal,
@@ -1929,9 +1929,14 @@ class MigratorKit extends EventEmitter {
     });
   }
 
-  /** How converge treats search indexes, from the config */
-  #convergeSearchOptions() {
-    return { onUnavailable: this.#config.onSearchUnavailable };
+  /** How converge treats search indexes: the config, and a call's own `waitForSearchIndexes` */
+  #convergeSearchOptions(options = {}) {
+    const config = this.#config;
+    return {
+      onUnavailable: config.onSearchUnavailable,
+      wait: options.waitForSearchIndexes ?? config.waitForSearchIndexes,
+      waitTimeoutMs: config.searchIndexWaitTimeoutMs,
+    };
   }
 
   #convergeDeps() {

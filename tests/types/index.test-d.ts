@@ -476,6 +476,12 @@ expectType<ConvergeSearchSummary | undefined>(converged.search);
 expectType<boolean>(converged.search!.available);
 expectType<string>(converged.search!.notReady[0].collection);
 expectAssignable<Partial<MigronautConfig>>({ onSearchUnavailable: 'skip' });
+expectAssignable<Partial<MigronautConfig>>({
+  waitForSearchIndexes: true,
+  searchIndexWaitTimeoutMs: 120_000,
+});
+expectType<Promise<ConvergeResult>>(kit.converge({ waitForSearchIndexes: true }));
+expectError(kit.converge({ waitForSearchIndexes: 'yes' }));
 expectError<Partial<MigronautConfig>>({ onSearchUnavailable: 'ignore' });
 
 kit.on('converge:start', (event) => {

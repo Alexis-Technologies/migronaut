@@ -33,6 +33,8 @@ const DEFAULT_CONFIG = {
   reloadMigrations: false,
   convergeAfterUp: false,
   onSearchUnavailable: 'fail',
+  waitForSearchIndexes: false,
+  searchIndexWaitTimeoutMs: 600_000,
 };
 
 /** Candidate config file names, checked in priority order within the cwd */
@@ -155,6 +157,13 @@ const CONFIG_KEYS = [
     path: 'onSearchUnavailable',
     check: (value) => value === 'fail' || value === 'skip',
     message: "must be 'fail' or 'skip'",
+    optional: true,
+  },
+  { path: 'waitForSearchIndexes', check: isBoolean, message: 'must be a boolean', optional: true },
+  {
+    path: 'searchIndexWaitTimeoutMs',
+    check: isPositiveInteger,
+    message: 'must be a positive integer',
     optional: true,
   },
 ];
@@ -342,6 +351,12 @@ const ENV_KEYS = [
     env: 'MIGRONAUT_ON_SEARCH_UNAVAILABLE',
     path: 'onSearchUnavailable',
     parse: parseEnum(['fail', 'skip']),
+  },
+  { env: 'MIGRONAUT_WAIT_FOR_SEARCH_INDEXES', path: 'waitForSearchIndexes', parse: parseBoolean },
+  {
+    env: 'MIGRONAUT_SEARCH_INDEX_WAIT_TIMEOUT_MS',
+    path: 'searchIndexWaitTimeoutMs',
+    parse: parsePositiveInteger,
   },
 ];
 

@@ -1204,6 +1204,23 @@ describe('converge CLI (integration)', () => {
     assert.match(clean.stdout, /1 undeclared index\(es\) kept/);
   });
 
+  it('should take --wait-search for a real converge only', async () => {
+    declare([USERS]);
+    for (const args of [
+      ['converge', '--dry-run', '--wait-search'],
+      ['converge', '--check', '--no-wait-search'],
+      ['converge', '--history', '--wait-search'],
+    ]) {
+      const refused = await runCli(baseArgs(args));
+      assert.strictEqual(refused.code, 6, args.join(' '));
+      assert.match(refused.stderr, /wait-search applies to a real converge/);
+    }
+    // Nothing declares a search index: there is nothing to wait for.
+    const result = await runCli(baseArgs(['converge', '--wait-search', '--json']));
+    assert.strictEqual(result.code, 0, result.stderr);
+    assert.strictEqual(JSON.parse(result.stdout).changed, 2);
+  });
+
   it('should ask before dropping or rebuilding an index', async () => {
     await mongo.db.collection('users').createIndex({ email: 1 });
     // unique + sparse: a rebuild (making an index unique alone is in place on 6.0+).

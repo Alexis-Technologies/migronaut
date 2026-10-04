@@ -300,6 +300,20 @@ export interface MigronautConfig {
    * @experimental New in 2.2
    */
   onSearchUnavailable?: 'fail' | 'skip';
+  /**
+   * Hold every converge — the after-up one included — until each declared
+   * search index is queryable with its declared definition. Search indexes
+   * build in the background, so without it a new one is not queryable yet when
+   * converge returns. Default: false
+   * @experimental New in 2.2
+   */
+  waitForSearchIndexes?: boolean;
+  /**
+   * How long `waitForSearchIndexes` waits before the converge fails with
+   * `phase: 'wait'` (the server goes on building). Default: 600000 (10 minutes)
+   * @experimental New in 2.2
+   */
+  searchIndexWaitTimeoutMs?: number;
   /** Mongoose instance — required only if your migrations use Mongoose models */
   mongoose?: MongooseLike;
   hooks?: MigrationHooks;
@@ -529,6 +543,14 @@ export interface ConvergeOptions {
    * CLI: `--rebuild-unique`.
    */
   rebuildUnique?: boolean;
+  /**
+   * Hold the run (and the lock) until every declared search index serves its
+   * declaration — failing on a FAILED build or after
+   * `searchIndexWaitTimeoutMs`. Overrides the config's `waitForSearchIndexes`;
+   * not with `dryRun`. CLI: `--wait-search` / `--no-wait-search`.
+   * @experimental New in 2.2
+   */
+  waitForSearchIndexes?: boolean;
   /** Who asked for this converge — recorded in the converge history */
   requestedBy?: string;
   /** Why — recorded in the converge history */
@@ -1783,7 +1805,11 @@ export class QueueJobFailedError extends MigronautError {
  *   collection was written);
  * - `'apply'` for a failed step (`collection`, `target`, `name`, `action`,
  *   `cause`, and `mongoCode`, `hint` and — after a failed rebuild — `restored`
- *   when they apply).
+ *   when they apply);
+ * - `'wait'` when `waitForSearchIndexes` gave up: `reason` is `'failed'` (a
+ *   search index build FAILED) or `'timeout'`, `notReady` the indexes not
+ *   serving their declaration, `waitedMs`, `timeoutMs`. Everything was
+ *   applied — only the builds were not finished.
  *
  * `context.converge` is the {@link ConvergeResult} so far.
  */

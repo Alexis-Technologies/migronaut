@@ -12,6 +12,7 @@ const {
 const {
   SEARCH_STEPS,
   SEARCH_UNAVAILABLE_HINT,
+  awaitSearchIndexes,
   isSearchUnavailable,
   listSearchIndexes,
   probeSearch,
@@ -19,6 +20,7 @@ const {
   searchHint,
 } = require('./converge-search.js');
 const { inPlaceCapabilities } = require('./index-spec.js');
+const { searchBuild } = require('./search-index-spec.js');
 
 /**
  * Converge: bring the declared collections' indexes, search indexes and
@@ -32,8 +34,9 @@ const { inPlaceCapabilities } = require('./index-spec.js');
  *
  * Pure orchestration over capabilities the MigratorKit injects (`deps`):
  * `{db, logger, fields, emit, assertNotAborted}`, and optionally `audit` +
- * `record` (the history entry), `shardKeyOf` (behind a mongos) and `sleep`
- * (`(ms) => Promise`, the pause between search index re-reads — for tests).
+ * `record` (the history entry), `shardKeyOf` (behind a mongos), and `sleep`
+ * (`(ms) => Promise`) and `now` (`() => ms`) — the pause between search index
+ * reads and the clock that times a wait for them, for tests.
  */
 
 /**
@@ -1024,6 +1027,121 @@ function refreshBuilds(rows, fresh) {
   }
 }
 
+/** How often a wait for search indexes says it is still waiting */
+const WAIT_PROGRESS_MS = 30_000;
+
+/**
+ * Every declared search index a wait is for: the ones that exist (or were
+ * just created) — with, for one this run updated, the definition version the
+ * update started from, so the old definition reading READY does not count.
+ */
+function waitTargets(run) {
+  const { definitions, plans, result } = run;
+  const targets = [];
+  for (const [position, definition] of definitions.entries()) {
+    const rows = result.collections[position].actions;
+    for (const declared of definition.searchIndexes ?? []) {
+      const row = rows.find(
+        (action) => action.target === 'searchIndex' && action.name === declared.name,
+      );
+      if (!row || !['create', 'modify', 'unchanged'].includes(row.action)) continue;
+      const update = plans[position].steps.find(
+        (step) => step.op === 'updateSearchIndex' && step.name === declared.name,
+      );
+      targets.push({
+        collection: definition.name,
+        name: declared.name,
+        ...(update?.sinceVersion !== undefined ? { sinceVersion: update.sinceVersion } : {}),
+      });
+    }
+  }
+  return targets;
+}
+
+/** `movies.default (BUILDING), shows.plot (FAILED: …)` */
+function describeNotReady(notReady) {
+  return notReady
+    .map(
+      (index) =>
+        `${index.collection}.${index.name} (${index.status}` +
+        `${index.updating ? ', updating' : ''}${index.message ? `: ${index.message}` : ''})`,
+    )
+    .join(', ');
+}
+
+/**
+ * The wait phase (`waitForSearchIndexes`): after every collection's steps,
+ * poll until each declared search index serves its declaration — or fail the
+ * run on a FAILED build or when the budget runs out. The lock is held
+ * throughout (its heartbeat keeps it); an abort stops the wait between polls.
+ */
+async function waitPhase(run, signal) {
+  const { deps, result, search, wait } = run;
+  if (!wait.enabled || !search.declared || !search.available) return;
+  const targets = waitTargets(run);
+  if (targets.length === 0) return;
+  const now = deps.now ?? Date.now;
+  const startedAt = now();
+  const limit =
+    wait.timeoutMs === undefined ? '' : ` (up to ${Math.round(wait.timeoutMs / 1000)}s)`;
+  deps.logger.info(
+    `… Waiting for ${targets.length} search index(es) to become queryable${limit}`,
+    deps.fields({ searchIndexes: targets.length, timeoutMs: wait.timeoutMs }),
+  );
+  let reportedAt = startedAt;
+  const outcome = await awaitSearchIndexes({
+    targets,
+    read: (collection) => readSearchIndexes(deps, collection),
+    timeoutMs: wait.timeoutMs,
+    sleep: deps.sleep ?? pause,
+    now,
+    beforePoll: () => {
+      try {
+        deps.assertNotAborted(signal);
+      } catch (error) {
+        throw attachConverge(error, result);
+      }
+    },
+    onPoll: (live) => {
+      for (const collection of result.collections) {
+        for (const row of collection.actions) {
+          const index = live.get(`${collection.name}\u0000${row.name}`);
+          if (row.target === 'searchIndex' && index) row.build = searchBuild(index);
+        }
+      }
+      if (now() - reportedAt < WAIT_PROGRESS_MS) return;
+      reportedAt = now();
+      deps.logger.info(
+        `… Still waiting for search indexes [${Math.round((reportedAt - startedAt) / 1000)}s]`,
+        deps.fields({ waitedMs: reportedAt - startedAt }),
+      );
+    },
+  });
+  if (outcome.outcome === 'ready') {
+    deps.logger.info(
+      `✔ Search index(es) queryable: ${targets.length}   [${outcome.waitedMs}ms]`,
+      deps.fields({ searchIndexes: targets.length, waitedMs: outcome.waitedMs }),
+    );
+    return;
+  }
+  const failed = outcome.outcome === 'failed';
+  throw new ConvergeFailedError(
+    failed
+      ? `Search index build failed: ${describeNotReady(outcome.notReady.filter((index) => index.status === 'FAILED'))} — fix the definition or the data, then converge again`
+      : `Search index(es) not queryable after ${Math.round(outcome.waitedMs / 1000)}s: ` +
+          `${describeNotReady(outcome.notReady)} — the server goes on building; converge ` +
+          'again to wait more, or raise searchIndexWaitTimeoutMs',
+    {
+      phase: 'wait',
+      reason: failed ? 'failed' : 'timeout',
+      notReady: outcome.notReady,
+      waitedMs: outcome.waitedMs,
+      ...(wait.timeoutMs !== undefined ? { timeoutMs: wait.timeoutMs } : {}),
+      converge: result,
+    },
+  );
+}
+
 /** Closing lines about search indexes that do not serve their declaration yet */
 function reportNotReady(deps, result) {
   const notReady = result.search?.notReady ?? [];
@@ -1031,7 +1149,8 @@ function reportNotReady(deps, result) {
   if (building.length > 0) {
     deps.logger.info(
       `• ${building.length} search index(es) still building on the server: ` +
-        building.map((index) => `${index.collection}.${index.name}`).join(', '),
+        building.map((index) => `${index.collection}.${index.name}`).join(', ') +
+        ' — waitForSearchIndexes (CLI: --wait-search) waits for them',
       deps.fields({ building: building.length }),
     );
   }
@@ -1119,8 +1238,10 @@ async function reportFailure(deps, options, result, startedAt, error, search) {
  * definitions that do not set their own; `rebuildUnique` lets a rebuild drop a
  * unique index it builds back (a conflict otherwise); `trigger` is
  * `'converge'` or `'up'` (the after-up hook), for events and logs; `search`
- * is `{ onUnavailable }` — `'fail'` (the default) refuses declared search
- * indexes on a server without Atlas Search, `'skip'` converges without them.
+ * is `{ onUnavailable, wait, waitTimeoutMs }` — `'fail'` (the default)
+ * refuses declared search indexes on a server without Atlas Search, `'skip'`
+ * converges without them; `wait` holds the run until every declared search
+ * index serves its declaration, for at most `waitTimeoutMs`.
  *
  * A plan with any conflict refuses the whole run before the first write. A
  * failed step stops the run (`ConvergeFailedError`); an abort between steps
@@ -1145,7 +1266,11 @@ async function runConverge(deps, options, signal) {
   };
   if (dryRun) return reportPlan(deps, result, search);
 
-  const run = { deps, definitions, live, plans, result, planFor, search };
+  const wait = {
+    enabled: options.search?.wait === true,
+    timeoutMs: options.search?.waitTimeoutMs,
+  };
+  const run = { deps, definitions, live, plans, result, planFor, search, wait };
   deps.emit('converge:start', { trigger, collections: definitions.length });
   try {
     refuseConflicts(result);
@@ -1161,6 +1286,7 @@ async function runConverge(deps, options, signal) {
       const kept = await applyCollection(deps, plan, result, signal, search);
       await verifyFixedPoint(run, position, kept);
     }
+    await waitPhase(run, signal);
     await reportSuccess(deps, options, result, startedAt, search);
     return result;
   } catch (error) {

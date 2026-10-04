@@ -171,6 +171,17 @@
       ],
       "default": "fail",
       "description": "What converge does with declared search indexes on a server without Atlas Search: refuse the run (fail), or converge everything else and skip them (skip)"
+    },
+    "waitForSearchIndexes": {
+      "type": "boolean",
+      "default": false,
+      "description": "Hold converge until every declared search index is queryable (search indexes build in the background)"
+    },
+    "searchIndexWaitTimeoutMs": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 600000,
+      "description": "How long waitForSearchIndexes waits, in milliseconds, before the converge fails (the build goes on)"
     }
   },
   "definitions": {

@@ -53,6 +53,11 @@ function registerConverge(program) {
         'Allow rebuilding a unique index (drops the constraint until the new one is built)',
       ],
       [
+        '--wait-search',
+        'Wait until every declared search index is queryable (overrides waitForSearchIndexes)',
+      ],
+      ['--no-wait-search', 'Do not wait for search indexes, whatever waitForSearchIndexes says'],
+      [
         '-y, --yes',
         'Drop and rebuild indexes, and change validators, without asking (required with --json)',
       ],
@@ -64,6 +69,13 @@ function registerConverge(program) {
     // ask only when the plan drops or rebuilds an index, then apply — the way
     // `unlock` reads the lock before asking.
     run: async (migrator, opts, _positionals, { logger, json, spinner, stopRequested }) => {
+      const waitSearch = typeof opts.waitSearch === 'boolean' ? opts.waitSearch : undefined;
+      if (waitSearch !== undefined && (opts.history || opts.dryRun || opts.check)) {
+        throw new ConfigInvalidError(
+          `--${waitSearch ? '' : 'no-'}wait-search applies to a real converge — not to ` +
+            `${opts.history ? '--history' : opts.check ? '--check' : '--dry-run'}`,
+        );
+      }
       if (opts.history) {
         return migrator.convergeHistory(
           opts.limit !== undefined ? { limit: Number(opts.limit) } : {},
@@ -127,6 +139,7 @@ function registerConverge(program) {
           noLock: opts.noLock,
           ...prune,
           ...ordered,
+          ...(waitSearch !== undefined ? { waitForSearchIndexes: waitSearch } : {}),
           ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
         });
       } finally {

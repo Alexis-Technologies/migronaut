@@ -286,6 +286,7 @@ function makeDeps(db, overrides = {}) {
       emit: (event, payload) => events.push([event, payload]),
       assertNotAborted: overrides.assertNotAborted ?? (() => undefined),
       sleep: overrides.sleep ?? (async () => undefined),
+      ...(overrides.now ? { now: overrides.now } : {}),
     },
   };
 }
@@ -1709,5 +1710,217 @@ describe('runConverge — search indexes', () => {
     );
     assert.deepStrictEqual(rowsOf(result), ['movies:searchIndex:plot:unchanged']);
     assert.strictEqual(result.inSync, true);
+  });
+});
+
+describe('runConverge — waiting for search indexes', () => {
+  const DYNAMIC = { mappings: { dynamic: true } };
+  /** A clock that only moves when the run sleeps */
+  function clock() {
+    const state = { now: 0, pauses: [] };
+    return {
+      state,
+      sleep: async (ms) => {
+        state.pauses.push(ms);
+        state.now += ms;
+      },
+      now: () => state.now,
+    };
+  }
+  const waiting = (waitTimeoutMs = 60_000) => ({
+    search: { onUnavailable: 'fail', wait: true, waitTimeoutMs },
+  });
+  const run = (deps, list, options) =>
+    runConverge(deps, { definitions: definitions(...list), ...options }, undefined);
+
+  it('should poll, backing off, until a new index is queryable', async () => {
+    // Read once by the verify phase, then by each poll: READY on the third.
+    const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 4 });
+    const time = clock();
+    const { deps, lines } = makeDeps(db, time);
+    const result = await run(
+      deps,
+      [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }],
+      waiting(),
+    );
+    assert.deepStrictEqual(time.state.pauses, [1000, 1500]);
+    assert.deepStrictEqual(result.search.notReady, []);
+    assert.deepStrictEqual(result.collections[0].actions[0].build, {
+      status: 'READY',
+      queryable: true,
+    });
+    assert.ok(
+      lines.some((line) =>
+        /Waiting for 1 search index\(es\) to become queryable \(up to 60s\)/.test(line.message),
+      ),
+    );
+    assert.ok(
+      lines.some((line) => /✔ Search index\(es\) queryable: 1 {3}\[2500ms\]/.test(line.message)),
+    );
+    assert.ok(!lines.some((line) => /still building/.test(line.message)));
+  });
+
+  it('should fail the run when the budget runs out, and record it', async () => {
+    const entries = [];
+    const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 1000 });
+    const time = clock();
+    const { deps } = makeDeps(db, time);
+    deps.record = async (entry) => entries.push(entry);
+    deps.audit = () => ({ runId: 'run-1' });
+    await assert.rejects(
+      run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], waiting(5000)),
+      (error) => {
+        assert.ok(error instanceof ConvergeFailedError);
+        assert.strictEqual(error.context.phase, 'wait');
+        assert.strictEqual(error.context.reason, 'timeout');
+        assert.strictEqual(error.context.timeoutMs, 5000);
+        assert.strictEqual(error.context.waitedMs, 5000);
+        assert.deepStrictEqual(error.context.notReady, [
+          { collection: 'movies', name: 'default', status: 'PENDING', queryable: false },
+        ]);
+        assert.match(error.message, /not queryable after 5s: movies\.default \(PENDING\)/);
+        assert.match(error.message, /raise searchIndexWaitTimeoutMs/);
+        assert.strictEqual(error.context.converge.collections[0].actions[0].status, 'applied');
+        return true;
+      },
+    );
+    assert.deepStrictEqual(time.state.pauses, [1000, 1500, 2250, 250], 'never past the budget');
+    assert.strictEqual(entries[0].success, false);
+    assert.strictEqual(entries[0].changed, 1, 'the create was applied all the same');
+  });
+
+  it('should wait for a declared index that is still building even when nothing changed — and stop on FAILED', async () => {
+    const db = fakeDb(
+      {
+        movies: {
+          searchIndexes: [
+            searchIndex('default', DYNAMIC, {
+              status: 'FAILED',
+              queryable: false,
+              message: 'too many fields',
+            }),
+          ],
+        },
+      },
+      { search: 'atlas' },
+    );
+    const time = clock();
+    await assert.rejects(
+      run(
+        makeDeps(db, time).deps,
+        [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }],
+        waiting(),
+      ),
+      (error) => {
+        assert.strictEqual(error.context.phase, 'wait');
+        assert.strictEqual(error.context.reason, 'failed');
+        assert.match(
+          error.message,
+          /movies\.default \(FAILED: too many fields\) — fix the definition/,
+        );
+        return true;
+      },
+    );
+    assert.deepStrictEqual(time.state.pauses, [], 'a FAILED build ends the wait at once');
+    assert.deepStrictEqual(db.ops, []);
+  });
+
+  it('should not take the old definition reading READY for an update that has landed', async () => {
+    const db = fakeDb(
+      {
+        movies: {
+          searchIndexes: [searchIndex('default', { mappings: { dynamic: false } }, { version: 2 })],
+        },
+      },
+      { search: 'atlas' },
+    );
+    // The verify read and the first poll still report the version the update started from.
+    let behind = 2;
+    const collection = db.collection;
+    db.collection = (name) => {
+      const handle = collection(name);
+      return {
+        ...handle,
+        aggregate: (pipeline, options) => ({
+          toArray: async () => {
+            const docs = await handle.aggregate(pipeline, options).toArray();
+            if (db.ops.length === 0 || behind-- <= 0) return docs;
+            return docs.map((doc) => ({ ...doc, latestDefinitionVersion: { version: 2 } }));
+          },
+        }),
+      };
+    };
+    const time = clock();
+    await run(
+      makeDeps(db, time).deps,
+      [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }],
+      waiting(),
+    );
+    assert.deepStrictEqual(db.ops, ['updateSearchIndex movies.default']);
+    assert.deepStrictEqual(time.state.pauses, [1000], 'one more poll, until the version moved');
+  });
+
+  it('should stop between polls when aborted, keeping what was applied', async () => {
+    const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 1000 });
+    let aborted = false;
+    const time = clock();
+    const { deps } = makeDeps(db, {
+      ...time,
+      sleep: async (ms) => {
+        await time.sleep(ms);
+        aborted = true;
+      },
+      assertNotAborted: () => {
+        if (aborted) throw new RunAbortedError('Stopped', { reason: 'Stopped' });
+      },
+    });
+    await assert.rejects(
+      run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], waiting()),
+      (error) => {
+        assert.ok(error instanceof RunAbortedError);
+        assert.strictEqual(error.context.converge.collections[0].actions[0].status, 'applied');
+        return true;
+      },
+    );
+    assert.deepStrictEqual(time.state.pauses, [1000], 'no poll after the abort');
+  });
+
+  it('should say how long it has been waiting, every 30 seconds', async () => {
+    const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 12 });
+    const time = clock();
+    const { deps, lines } = makeDeps(db, time);
+    await run(
+      deps,
+      [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }],
+      waiting(600_000),
+    );
+    const progress = lines.filter((line) => /Still waiting for search indexes/.test(line.message));
+    assert.ok(progress.length >= 1);
+    assert.match(progress[0].message, /\[\d+s\]/);
+  });
+
+  it('should not wait in a dry run, in skip mode, or for nothing', async () => {
+    const time = clock();
+    const dry = fakeDb({ movies: {} }, { search: 'atlas' });
+    await run(
+      makeDeps(dry, time).deps,
+      [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }],
+      {
+        ...waiting(),
+        dryRun: true,
+      },
+    );
+    const skipped = fakeDb({ movies: {} }, { search: { unavailable: 31082 } });
+    const skip = makeDeps(skipped, time);
+    await run(skip.deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], {
+      search: { onUnavailable: 'skip', wait: true, waitTimeoutMs: 1000 },
+    });
+    const none = fakeDb({ movies: {} }, { search: 'atlas' });
+    const nothing = makeDeps(none, time);
+    await run(nothing.deps, [{ name: 'movies', searchIndexes: [] }], waiting());
+    assert.deepStrictEqual(time.state.pauses, []);
+    for (const lines of [skip.lines, nothing.lines]) {
+      assert.ok(!lines.some((line) => /Waiting for/.test(line.message)));
+    }
   });
 });

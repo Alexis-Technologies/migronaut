@@ -2,8 +2,10 @@ const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const {
   SEARCH_STEPS,
+  awaitSearchIndexes,
   isSearchUnavailable,
   listSearchIndexes,
+  nextPollDelay,
   probeSearch,
   runSearchStep,
   searchHint,
@@ -343,5 +345,149 @@ describe('runSearchStep', () => {
       runSearchStep(refused, 'movies', { op: 'dropSearchIndex', name: 'x' }),
       /not authorized/,
     );
+  });
+});
+
+describe('nextPollDelay', () => {
+  for (const [attempt, remaining, delay] of [
+    [0, Infinity, 1000],
+    [1, Infinity, 1500],
+    [2, Infinity, 2250],
+    [5, Infinity, 7594],
+    [6, Infinity, 10_000],
+    [20, Infinity, 10_000],
+    [3, 800, 800],
+    [0, 0, 0],
+  ]) {
+    it(`should pause ${delay}ms before poll ${attempt + 1} with ${remaining}ms left`, () => {
+      assert.strictEqual(nextPollDelay(attempt, remaining), delay);
+    });
+  }
+});
+
+describe('awaitSearchIndexes', () => {
+  /** `read` answering each poll from a list of per-collection snapshots */
+  const polls = (...snapshots) => {
+    let poll = -1;
+    const seen = [];
+    return {
+      seen,
+      read: async (collection) => {
+        if (collection === 'movies') poll += 1;
+        seen.push(collection);
+        const snapshot = snapshots[Math.min(poll, snapshots.length - 1)];
+        return snapshot[collection] ?? [];
+      },
+    };
+  };
+  const doc = (name, fields = {}) => ({
+    name,
+    type: 'search',
+    status: 'READY',
+    queryable: true,
+    latestDefinitionVersion: { version: 1 },
+    latestDefinition: { mappings: {} },
+    ...fields,
+  });
+  const clock = () => {
+    let now = 0;
+    const pauses = [];
+    return {
+      pauses,
+      now: () => now,
+      sleep: async (ms) => {
+        pauses.push(ms);
+        now += ms;
+      },
+    };
+  };
+
+  it('should read each collection once per poll', async () => {
+    const time = clock();
+    const source = polls({ movies: [doc('a'), doc('b')], shows: [doc('c')] });
+    const outcome = await awaitSearchIndexes({
+      targets: [
+        { collection: 'movies', name: 'a' },
+        { collection: 'movies', name: 'b' },
+        { collection: 'shows', name: 'c' },
+      ],
+      read: source.read,
+      timeoutMs: 1000,
+      ...time,
+    });
+    assert.deepStrictEqual(outcome, { outcome: 'ready', notReady: [], waitedMs: 0 });
+    assert.deepStrictEqual(source.seen.sort(), ['movies', 'shows']);
+  });
+
+  it('should keep waiting through a missing or STALE index, and see it ready', async () => {
+    const time = clock();
+    const seen = [];
+    const outcome = await awaitSearchIndexes({
+      targets: [{ collection: 'movies', name: 'a' }],
+      read: polls(
+        { movies: [] },
+        { movies: [doc('a', { status: 'STALE' })] },
+        { movies: [doc('a')] },
+      ).read,
+      timeoutMs: 60_000,
+      onPoll: (live) => seen.push(live.size),
+      ...time,
+    });
+    assert.strictEqual(outcome.outcome, 'ready');
+    assert.deepStrictEqual(time.pauses, [1000, 1500]);
+    assert.deepStrictEqual(seen, [0, 1, 1]);
+  });
+
+  it('should hold an updated index to a version past the one it started from', async () => {
+    const time = clock();
+    const outcome = await awaitSearchIndexes({
+      targets: [{ collection: 'movies', name: 'a', sinceVersion: 3 }],
+      read: polls(
+        { movies: [doc('a', { latestDefinitionVersion: { version: 3 } })] },
+        { movies: [doc('a', { latestDefinitionVersion: { version: 4 } })] },
+      ).read,
+      timeoutMs: 60_000,
+      ...time,
+    });
+    assert.strictEqual(outcome.outcome, 'ready');
+    assert.deepStrictEqual(time.pauses, [1000]);
+  });
+
+  it('should report the failed ones first, and the missing ones as UNKNOWN', async () => {
+    const outcome = await awaitSearchIndexes({
+      targets: [
+        { collection: 'movies', name: 'gone' },
+        { collection: 'movies', name: 'broken' },
+      ],
+      read: polls({ movies: [doc('broken', { status: 'FAILED', queryable: false, message: 'x' })] })
+        .read,
+      timeoutMs: 60_000,
+      ...clock(),
+    });
+    assert.strictEqual(outcome.outcome, 'failed');
+    assert.deepStrictEqual(outcome.notReady, [
+      { collection: 'movies', name: 'broken', status: 'FAILED', queryable: false, message: 'x' },
+      { collection: 'movies', name: 'gone', status: 'UNKNOWN', queryable: false },
+    ]);
+  });
+
+  it('should wait with no limit when no budget is given, and let beforePoll stop it', async () => {
+    const time = clock();
+    let polled = 0;
+    await assert.rejects(
+      awaitSearchIndexes({
+        targets: [{ collection: 'movies', name: 'a' }],
+        read: polls({ movies: [doc('a', { status: 'BUILDING', queryable: false })] }).read,
+        timeoutMs: undefined,
+        beforePoll: () => {
+          polled += 1;
+          if (polled > 25) throw new Error('stopped');
+        },
+        ...time,
+      }),
+      /stopped/,
+    );
+    assert.strictEqual(time.pauses.length, 25);
+    assert.ok(time.pauses.every((ms) => ms <= 10_000));
   });
 });
