@@ -2135,6 +2135,59 @@ describe('runConverge — waiting for search indexes', () => {
     assert.deepStrictEqual(time.state.pauses, [1000], 'no poll after the abort');
   });
 
+  it('should give the lock up before the first poll — once, and only to wait', async () => {
+    const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 3 });
+    const time = clock();
+    const order = [];
+    const { deps, lines } = makeDeps(db, time);
+    deps.releaseLock = async () => {
+      order.push(`release after ${db.ops.length} op(s)`);
+      return true;
+    };
+    const read = db.collection;
+    db.collection = (name) => {
+      const handle = read(name);
+      return {
+        ...handle,
+        aggregate: (pipeline, options) => {
+          order.push('read');
+          return handle.aggregate(pipeline, options);
+        },
+      };
+    };
+    await run(deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], waiting());
+    // The read phase, the verify phase — then the release, then the polls.
+    assert.deepStrictEqual(order.slice(0, 3), ['read', 'read', 'release after 1 op(s)']);
+    assert.strictEqual(order.filter((entry) => entry.startsWith('release')).length, 1);
+    assert.ok(
+      lines.some((line) =>
+        /Waiting for 1 search index\(es\).* — the migration lock is released meanwhile/.test(
+          line.message,
+        ),
+      ),
+    );
+  });
+
+  it('should keep the lock when there is nothing to wait for', async () => {
+    const released = [];
+    const releaseLock = async () => released.push('released');
+    const quiet = fakeDb({ movies: {} }, { search: 'atlas' });
+    const noWait = makeDeps(quiet);
+    noWait.deps.releaseLock = releaseLock;
+    await run(noWait.deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }]);
+    const none = fakeDb({ movies: {} }, { search: 'atlas' });
+    const nothing = makeDeps(none);
+    nothing.deps.releaseLock = releaseLock;
+    await run(nothing.deps, [{ name: 'movies', indexes: [{ key: { a: 1 } }] }], waiting());
+    const plain = fakeDb({ movies: {} }, { search: { unavailable: 31082 } });
+    const skipped = makeDeps(plain);
+    skipped.deps.releaseLock = releaseLock;
+    await run(skipped.deps, [{ name: 'movies', searchIndexes: [{ definition: DYNAMIC }] }], {
+      search: { onUnavailable: 'skip', wait: true, waitTimeoutMs: 60_000 },
+    });
+    assert.deepStrictEqual(released, []);
+  });
+
   it('should say how long it has been waiting, every 30 seconds', async () => {
     const db = fakeDb({ movies: {} }, { search: 'atlas', readyAfter: 12 });
     const time = clock();

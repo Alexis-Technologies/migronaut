@@ -195,6 +195,9 @@ kit.once('lock:acquired', (event) => {
   expectType<number | undefined>(event.ttlMs);
   expectType<number | undefined>(event.acquireMs);
 });
+kit.on('lock:released', (event) => {
+  expectType<true | undefined>(event.early);
+});
 // The event-name union is enforced — a typo'd event does not degrade to the
 // untyped EventEmitter overload.
 expectError(kit.on('migration:done', () => undefined));

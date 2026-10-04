@@ -35,10 +35,11 @@ const { searchBuild, searchBuildState } = require('./search-index-spec.js');
  *
  * Pure orchestration over capabilities the MigratorKit injects (`deps`):
  * `{db, logger, fields, emit, assertNotAborted}`, and optionally `audit` +
- * `record` (the history entry), `shardKeyOf` (behind a mongos), and `sleep`
- * (`(ms, signal) => Promise`, cut short by an abort) and `now` (`() => ms`) —
- * the pause between search index reads and the clock that times a wait for
- * them, for tests.
+ * `record` (the history entry), `shardKeyOf` (behind a mongos), `releaseLock`
+ * (`() => Promise<boolean>`: give the run's lock up before waiting for search
+ * index builds), and `sleep` (`(ms, signal) => Promise`, cut short by an
+ * abort) and `now` (`() => ms`) — the pause between search index reads and
+ * the clock that times a wait for them, for tests.
  */
 
 /**
@@ -1104,9 +1105,11 @@ function timeoutAdvice(notReady) {
 /**
  * The wait phase (`waitForSearchIndexes`): after every collection's steps,
  * poll until each declared search index serves its declaration — or fail the
- * run on a FAILED build or when the budget runs out. The lock is held
- * throughout (its heartbeat keeps it); an abort stops the wait between polls,
- * and cuts the pause before the next one short.
+ * run on a FAILED build or when the budget runs out. It only reads, so the
+ * migration lock is given up first (`deps.releaseLock`, when the run holds
+ * one): other runs — the next deploy, a queue's jobs — need not wait out a
+ * build. The run itself goes on until the wait ends; an abort (a stop) ends
+ * the wait between polls, and cuts the pause before the next one short.
  */
 async function waitPhase(run, signal) {
   const { deps, result, search, wait } = run;
@@ -1115,11 +1118,13 @@ async function waitPhase(run, signal) {
   if (targets.length === 0) return;
   const now = deps.now ?? Date.now;
   const startedAt = now();
+  const lockReleased = typeof deps.releaseLock === 'function' && (await deps.releaseLock());
   const limit =
     wait.timeoutMs === undefined ? '' : ` (up to ${Math.round(wait.timeoutMs / 1000)}s)`;
   deps.logger.info(
-    `… Waiting for ${targets.length} search index(es) to become queryable${limit}`,
-    deps.fields({ searchIndexes: targets.length, timeoutMs: wait.timeoutMs }),
+    `… Waiting for ${targets.length} search index(es) to become queryable${limit}` +
+      (lockReleased ? ' — the migration lock is released meanwhile' : ''),
+    deps.fields({ searchIndexes: targets.length, timeoutMs: wait.timeoutMs, lockReleased }),
   );
   let reportedAt = startedAt;
   const sleep = deps.sleep ?? pause;

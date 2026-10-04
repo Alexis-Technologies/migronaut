@@ -408,10 +408,12 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * Run `fn` under the migration lock. The single place that pairs a lock with
-   * a unit of work, so `redo` can hold one lock across both directions instead
-   * of releasing between them. `info` names the run (`{command, direction?}`)
-   * for the `run:start`/`run:end` events.
+   * Run `fn(signal, lock)` under the migration lock. The single place that
+   * pairs a lock with a unit of work, so `redo` can hold one lock across both
+   * directions instead of releasing between them. `info` names the run
+   * (`{command, direction?}`) for the `run:start`/`run:end` events.
+   * `lock.release()` gives the lock up before `fn` returns, for a tail that
+   * only reads (see runWithLock) — the run, its id and its span go on.
    */
   async #withLock(options, info, fn) {
     // Not reentrant: a second overlapping run on this instance would clobber
@@ -468,7 +470,7 @@ class MigratorKit extends EventEmitter {
           onLockLostEvent: (reason) => recorder.lockLost(reason),
           ...(options.noLock ? { noLock: true } : {}),
         },
-        (lockSignal) =>
+        (lockSignal, lockControl) =>
           // The run's span exists only once the lock is held: a caller polling
           // for a busy lock retries the whole run every few hundred
           // milliseconds, and a span per refusal would bury the one run that
@@ -476,7 +478,7 @@ class MigratorKit extends EventEmitter {
           // recorder after the release, so the span's outcome is the run's.
           this.#telemetry.open(SPANS.RUN, recorder.spanAttributes(), (span) => {
             recorder.spanOpened(span);
-            return fn(AbortSignal.any([lockSignal, stopper.signal]));
+            return fn(AbortSignal.any([lockSignal, stopper.signal]), lockControl);
           }),
       );
       return result;
@@ -960,7 +962,7 @@ class MigratorKit extends EventEmitter {
           : [];
       return this.#keepDefinitionsWhileRefused(async () => {
         await this.connect();
-        return this.#withLock(options, { command: 'up', direction: 'up' }, async (signal) => {
+        return this.#withLock(options, { command: 'up', direction: 'up' }, async (signal, lock) => {
           const results = await this.#runUp(filename, options, signal);
           // Even when nothing was pending: a converge that failed last time is
           // retried by the next `up` instead of waiting for the next migration.
@@ -968,7 +970,7 @@ class MigratorKit extends EventEmitter {
             this.#assertNotAborted(signal, results);
             try {
               await runConverge(
-                this.#convergeDeps(),
+                this.#convergeDeps(lock),
                 {
                   definitions,
                   trigger: 'up',
@@ -1884,10 +1886,10 @@ class MigratorKit extends EventEmitter {
         return empty(false);
       }
       await this.connect();
-      return this.#withLock(options, { command: 'converge' }, async (signal) => {
+      return this.#withLock(options, { command: 'converge' }, async (signal, lock) => {
         if (options.ordered) await this.#assertNothingPending();
         return runConverge(
-          this.#convergeDeps(),
+          this.#convergeDeps(lock),
           {
             definitions,
             prune: options.prune,
@@ -1940,10 +1942,12 @@ class MigratorKit extends EventEmitter {
     };
   }
 
-  #convergeDeps() {
+  /** What runConverge works with; `lock` (a run's) lets it give the lock up before waiting */
+  #convergeDeps(lock) {
     const db = this.#requireDb();
     return {
       db,
+      ...(lock ? { releaseLock: () => lock.release() } : {}),
       logger: this.#logger,
       fields: (extra) => this.#fields(extra),
       emit: (event, payload) => this.#emit(event, payload),

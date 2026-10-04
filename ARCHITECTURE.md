@@ -710,6 +710,15 @@ and the next has not started. Set `onLockLost: 'warn'` to keep the old warn-and-
 **Release** — `deleteOne({_id, owner, nonce})`, scoped so we never delete a lock since reclaimed by
 someone else. `forceRelease()` (for `migronaut unlock`) deletes unconditionally by `_id`.
 
+**Early release** — the work function gets a second argument, `control`, whose `release()` gives
+the lock up before the work returns: it stops the heartbeat and the deadline, awaits the renewal in
+flight, deletes the document, fires `onLockReleased({ early: true })` (`lock:released` with
+`early: true`) and resolves to whether it worked. It is for a tail that only reads — converge
+waiting for search index builds — so the next deploy or a queue's next job need not wait out a
+build. The run goes on (its id, span and `run:end` are unchanged); a stop still aborts it, a lost
+lock no longer can. Idempotent; a failed early release is warned about and retried at the end;
+under `noLock` it resolves `false`.
+
 > **Why TTL + heartbeat instead of just TTL?** TTL alone means a migration longer than `lockTTLSeconds`
 > would let its own lock go stale and be stolen mid-run. The heartbeat refreshes it; the TTL is only
 > the *crash-recovery* window (a dead holder's lock becomes reclaimable after TTL).
@@ -964,7 +973,9 @@ steps; a conflict or a destructive row the initial plan lacked stops the run (`p
   otherwise enqueue a converge per tick while an index builds), but `converge --check` fails on a
   FAILED one. `waitForSearchIndexes` adds a wait phase after the last collection: polls back off
   1 s → 10 s, never past `searchIndexWaitTimeoutMs`; an updated index must also report a definition
-  version past the one the update started from. FAILED (of an index the run created or changed)
+  version past the one the update started from. The wait only reads, so it starts by giving the
+  migration lock up (`deps.releaseLock` → `runWithLock`'s early release); `converge:end` and the
+  history entry still come after it. FAILED (of an index the run created or changed)
   or timeout → `phase: 'wait'`; a FAILED or STALE index the run did not touch does not hold the
   wait (it is returned as `preexisting` and warned about). A read that fails with a blip (network,
   failover — `isTransientError`) is retried at the next poll, up to three in a row; the pause

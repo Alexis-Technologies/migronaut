@@ -233,8 +233,9 @@ definition), never by a payload sitting in Redis. A failed converge job is not r
 schedule or `convergeAfterUp`, the next tick or deploy tries again.
 
 **Search indexes** converge in the job like everything else. Whether the job waits for their builds
-is the worker kit's `waitForSearchIndexes` — never the payload — and the wait holds the MongoDB lock
-(not the job's own `lockDuration`, which BullMQ renews). The job result carries `search` (`{
+is the worker kit's `waitForSearchIndexes` — never the payload. The job stays active while it waits
+(BullMQ renews its own `lockDuration`), but the MongoDB migration lock is released when the wait
+starts, so the next migration or converge job does not wait out the build. The job result carries `search` (`{
 available, notReady }`), and a sync tick never enqueues a converge for a build under way: builds
 do not count against `inSync`.
 

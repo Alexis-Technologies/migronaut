@@ -337,6 +337,28 @@ describe(
       );
     });
 
+    it('should give the migration lock up while it waits for the builds', async () => {
+      const name = fresh('unlocked');
+      await seed(name);
+      const kit = kitWith([
+        { name, searchIndexes: [{ definition: { mappings: { dynamic: true } } }] },
+      ]);
+      const events = [];
+      kit.on('lock:released', (event) => events.push(event));
+      const observer = kitWith([]);
+      let seenFree = false;
+      const watching = (async () => {
+        while (events.length === 0) await new Promise((resolve) => setTimeout(resolve, 50));
+        seenFree = (await observer.lockInfo()) === null;
+      })();
+      const result = await kit.converge({ waitForSearchIndexes: true });
+      await watching;
+      assert.deepStrictEqual(result.search?.notReady, []);
+      assert.strictEqual(events.length, 1);
+      assert.strictEqual(events[0].early, true);
+      assert.ok(seenFree, 'another kit sees no lock while the first one waits');
+    });
+
     it('should pass the audit search check', async () => {
       const name = fresh('audited');
       await seed(name);
