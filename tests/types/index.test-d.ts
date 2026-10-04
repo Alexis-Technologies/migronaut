@@ -45,6 +45,8 @@ import {
   type RunEndEvent,
   type RunResult,
   type RunStartEvent,
+  type SearchIndexDefinition,
+  type SearchIndexType,
   type StatusRow,
   TransactionsUnsupportedError,
   createLogger,
@@ -411,6 +413,43 @@ expectAssignable<CollectionDefinitionFile>({ indexes: [{ key: { a: 1 } }] });
 expectError<CollectionDefinition>({ name: 'x', indexes: [{ key: { a: 'asc' } }] });
 expectError<CollectionDefinition>({ name: 'x', indexes: [{ key: { a: 1 }, uniqe: true }] });
 expectError<CollectionDefinition>({ name: 'x', validationLevel: 'loose' });
+
+// Search indexes: a search definition has mappings, a vector one a list of fields.
+const movies: CollectionDefinition = {
+  name: 'movies',
+  searchIndexes: [
+    { definition: { mappings: { dynamic: true } } },
+    {
+      name: 'titles',
+      type: 'search',
+      definition: {
+        analyzer: 'lucene.english',
+        mappings: { dynamic: false, fields: { title: { type: 'string' } } },
+        storedSource: { include: ['title'] },
+      },
+    },
+    {
+      name: 'plot_vectors',
+      type: 'vectorSearch',
+      definition: {
+        fields: [
+          { type: 'vector', path: 'embedding', numDimensions: 1536, similarity: 'cosine' },
+          { type: 'filter', path: 'year' },
+        ],
+      },
+    },
+  ],
+  prune: true,
+};
+expectAssignable<CollectionDefinitionFile>({
+  searchIndexes: [{ type: 'vectorSearch', definition: { fields: [] } }],
+});
+expectAssignable<SearchIndexDefinition>(movies.searchIndexes![0]);
+expectType<SearchIndexType | undefined>(movies.searchIndexes![0].type);
+expectError<SearchIndexDefinition>({ type: 'vectorSearch', definition: { mappings: {} } });
+expectError<SearchIndexDefinition>({ definition: { fields: [] } });
+expectError<SearchIndexDefinition>({ type: 'atlas', definition: { mappings: {} } });
+expectError<SearchIndexDefinition>({ name: 'x' });
 
 expectType<Promise<ConvergeResult>>(kit.converge());
 expectType<Promise<ConvergeResult>>(kit.converge({ dryRun: true, prune: true }));

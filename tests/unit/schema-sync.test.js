@@ -81,6 +81,9 @@ describe('config schema sync', () => {
     // run time — or the other way round.
     const { INDEX_KEYS } = require(path.join(repoRoot, 'src', 'core', 'index-spec.js'));
     const { DEFINITION_KEYS } = require(path.join(repoRoot, 'src', 'core', 'collections.js'));
+    const { SEARCH_INDEX_KEYS } = require(
+      path.join(repoRoot, 'src', 'core', 'search-index-spec.js'),
+    );
     assert.deepStrictEqual(
       Object.keys(schema.definitions.index.properties).sort(),
       [...INDEX_KEYS].sort(),
@@ -88,6 +91,10 @@ describe('config schema sync', () => {
     assert.deepStrictEqual(
       Object.keys(schema.definitions.collection.properties).sort(),
       [...DEFINITION_KEYS].sort(),
+    );
+    assert.deepStrictEqual(
+      Object.keys(schema.definitions.searchIndex.properties).sort(),
+      [...SEARCH_INDEX_KEYS].sort(),
     );
   });
 });

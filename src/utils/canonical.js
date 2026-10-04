@@ -101,6 +101,31 @@ function regExpIssue(value, seen = new Set()) {
 }
 
 /**
+ * Why `value` cannot be sent as declared — a function, a symbol, a cycle, or a
+ * RegExp the driver would change (see {@link regExpIssue}) — or null. Walks
+ * plain objects and arrays, the shapes a declaration is written in.
+ */
+function unsendable(value, seen = new Set()) {
+  if (seen.size === 0) {
+    const issue = regExpIssue(value);
+    if (issue) return issue;
+  }
+  const type = typeof value;
+  if (type === 'function') return 'must not contain functions';
+  if (type === 'symbol') return 'must not contain symbols';
+  if (value === null || type !== 'object') return null;
+  if (seen.has(value)) return 'must not contain circular references';
+  seen.add(value);
+  const items = Array.isArray(value) ? value : isPlainObject(value) ? Object.values(value) : [];
+  for (const item of items) {
+    const reason = unsendable(item, seen);
+    if (reason) return reason;
+  }
+  seen.delete(value);
+  return null;
+}
+
+/**
  * Assign without invoking setters: a key named `__proto__` (JSON.parse makes
  * one an own property) must stay a key, not replace the object's prototype —
  * otherwise it vanishes from what is sent and what is compared.
@@ -176,4 +201,4 @@ function toWire(value) {
   return out;
 }
 
-module.exports = { canonical, deepEqual, isPlainObject, regExpIssue, toWire };
+module.exports = { canonical, deepEqual, isPlainObject, regExpIssue, toWire, unsendable };

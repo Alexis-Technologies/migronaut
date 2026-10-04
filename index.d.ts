@@ -393,9 +393,77 @@ export interface IndexDefinition {
 export type ValidationLevel = 'off' | 'strict' | 'moderate';
 export type ValidationAction = 'error' | 'warn' | 'errorAndLog';
 
+/** The two kinds of Atlas search index */
+export type SearchIndexType = 'search' | 'vectorSearch';
+
+/** `mappings` of an Atlas Search definition */
+export interface SearchIndexMappings {
+  /** Default: false */
+  dynamic?: boolean | { typeSet: string };
+  fields?: Record<string, unknown>;
+}
+
+/**
+ * An Atlas Search index definition, as Atlas defines it. Compared whole, with
+ * the documented defaults filled in; anything Atlas adds can be declared too.
+ */
+export interface SearchDefinition {
+  mappings: SearchIndexMappings;
+  /** Default: 'lucene.standard' */
+  analyzer?: string;
+  /** Default: the analyzer */
+  searchAnalyzer?: string;
+  analyzers?: Array<Record<string, unknown>>;
+  synonyms?: Array<Record<string, unknown>>;
+  /** Default: false */
+  storedSource?: boolean | { include?: string[]; exclude?: string[] };
+  /** Default: 1 */
+  numPartitions?: number;
+  [option: string]: unknown;
+}
+
+/** One field of a Vector Search definition */
+export interface VectorSearchField {
+  /** `'autoEmbed'` is Atlas's automated embedding (in preview); one index holds vector or autoEmbed fields, not both */
+  type: 'vector' | 'filter' | 'autoEmbed' | (string & {});
+  path: string;
+  numDimensions?: number;
+  similarity?: 'euclidean' | 'cosine' | 'dotProduct';
+  /** Default: 'none' ('scalar' for autoEmbed) */
+  quantization?: string;
+  /** Default: 'hnsw' */
+  indexingMethod?: 'hnsw' | 'flat';
+  /** Default: { maxEdges: 16, numEdgeCandidates: 100 } */
+  hnswOptions?: { maxEdges?: number; numEdgeCandidates?: number };
+  /** autoEmbed: the embedding model */
+  model?: string;
+  /** autoEmbed: 'text' */
+  modality?: string;
+  [option: string]: unknown;
+}
+
+/** A Vector Search index definition */
+export interface VectorSearchDefinition {
+  fields: VectorSearchField[];
+  [option: string]: unknown;
+}
+
+/**
+ * One declared Atlas Search or Vector Search index. The name defaults to
+ * `'default'` and the type to `'search'`, as on the server. A change of type
+ * — or of an autoEmbed field's path, model, size, quantization or modality —
+ * cannot be made in place: converge refuses it, and the way is a new index
+ * under a new name (converge, then remove the old declaration and converge
+ * with prune).
+ * @experimental New in 2.2 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export type SearchIndexDefinition =
+  | { name?: string; type?: 'search'; definition: SearchDefinition }
+  | { name?: string; type: 'vectorSearch'; definition: VectorSearchDefinition };
+
 /**
  * A declared collection: the end state `converge()` keeps it in. Leave
- * `indexes` or `validator` out to leave that part unmanaged.
+ * `indexes`, `searchIndexes` or `validator` out to leave that part unmanaged.
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
 export interface CollectionDefinition {
@@ -405,13 +473,23 @@ export interface CollectionDefinition {
    * unless `prune` is on.
    */
   indexes?: IndexDefinition[];
+  /**
+   * Atlas Search and Vector Search indexes (Atlas, an Atlas CLI local
+   * deployment, or MongoDB 8.3+ with mongot). Undeclared live ones are kept
+   * unless `prune` is on; leave the key out and they are not managed at all.
+   * @experimental New in 2.2
+   */
+  searchIndexes?: SearchIndexDefinition[];
   /** A query or `{ $jsonSchema }` document; `null` (or `{}`) for no validator */
   validator?: Record<string, unknown> | null;
   /** Default: 'strict'. Only with a validator */
   validationLevel?: ValidationLevel;
   /** Default: 'error'. Only with a validator */
   validationAction?: ValidationAction;
-  /** Drop live indexes this definition does not declare. Default: the call's `prune`, else false */
+  /**
+   * Drop live indexes (and search indexes, when `searchIndexes` is declared)
+   * this definition does not declare. Default: the call's `prune`, else false
+   */
   prune?: boolean;
 }
 
