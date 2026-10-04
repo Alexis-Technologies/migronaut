@@ -43,7 +43,7 @@ No problems found (1 warning(s))
 | `config` | The config file and flags resolve and validate | Fatal — the rest is skipped |
 | `connection` | MongoDB is reachable with these credentials | Fatal — the rest is skipped |
 | `transactions` | The server is a replica set or sharded cluster | **Fails** if `useTransaction` is on against a standalone; warns otherwise |
-| `indexes` | All three changelog indexes exist | Warns — a missing index costs speed, not correctness |
+| `indexes` | Every index of the changelog collection exists | Warns — a missing index costs speed, not correctness. (Migronaut's own indexes: for your collections' indexes, see [`converge --check`](/commands/converge).) |
 | `lock` | No lock, or a lock that's still within its TTL | Warns when a lock is past its TTL — likely a crashed run |
 | `checksums` | No applied migration was edited afterwards | **Fails**, and names each drifted file |
 | `pending` | Nothing is waiting to be applied | Warns with the count |

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const {
   charWidth,
+  renderConvergeTable,
   renderImportTable,
   renderStatusTable,
   renderTable,
@@ -263,5 +264,94 @@ describe('terminal width budget', () => {
     // terminal's size.
     const table = renderStatusTable([row]);
     assert.ok(stripAnsi(table).includes(`${'a'.repeat(59)}…`));
+  });
+});
+
+describe('renderConvergeTable', () => {
+  const plan = (actions, extra = {}) => ({
+    dryRun: true,
+    changed: 0,
+    inSync: false,
+    collections: [
+      { name: 'users', actions },
+      { name: 'orders', actions: [] },
+    ],
+    ...extra,
+  });
+  const action = (fields) => ({ target: 'index', status: 'planned', ...fields });
+
+  it('should list changes, fold unchanged rows into the summary, and align', () => {
+    const output = renderConvergeTable(
+      plan([
+        action({ name: 'email_1', action: 'recreate', reason: 'unique' }),
+        action({ name: 'ttl', action: 'modify', reason: 'expireAfterSeconds' }),
+        action({ name: 'a_1', action: 'unchanged' }),
+        action({ name: 'stray_1', action: 'keep', reason: 'not declared' }),
+        { target: 'validator', name: 'users', action: 'create', status: 'planned' },
+      ]),
+    );
+    const lines = output.split('\n');
+    const summary = stripAnsi(lines.pop());
+    assert.strictEqual(
+      summary,
+      'Would make 3 change(s) in 1 of 2 collection(s) · 1 drop/rebuild · ' +
+        '1 undeclared index(es) kept · 1 unchanged',
+    );
+    assert.strictEqual(new Set(lineWidths(lines.join('\n'))).size, 1);
+    const plain = stripAnsi(output);
+    assert.ok(plain.includes('email_1'));
+    assert.ok(!plain.includes('a_1'));
+    // A validator row has no index name.
+    assert.match(plain, /│ users +│ validator │ +│ create/);
+  });
+
+  it('should show every row with all, and describe a rename by its old name', () => {
+    const plain = stripAnsi(
+      renderConvergeTable(
+        plan([
+          action({ name: 'a_1', action: 'unchanged' }),
+          action({ name: 'by_email', action: 'recreate', reason: 'name', liveName: 'old_email' }),
+        ]),
+        { all: true },
+      ),
+    );
+    assert.ok(plain.includes('a_1'));
+    assert.ok(plain.includes('renamed from "old_email"'));
+    assert.ok(!plain.includes('unchanged ·') && !plain.endsWith('unchanged'));
+  });
+
+  it('should collapse to one line when nothing needs doing', () => {
+    const output = renderConvergeTable(
+      plan([action({ name: 'a_1', action: 'unchanged' })], { inSync: true }),
+    );
+    assert.strictEqual(
+      stripAnsi(output),
+      '✔ 2 collection(s) match their declarations · 1 unchanged',
+    );
+  });
+
+  it('should count conflicts and word an applied result in the past tense', () => {
+    assert.match(
+      stripAnsi(
+        renderConvergeTable(plan([action({ name: 'x', action: 'conflict', reason: 'why' })])),
+      ),
+      /Would make 0 change\(s\) in 0 of 2 collection\(s\) · 1 conflict\(s\)$/,
+    );
+    assert.match(
+      stripAnsi(
+        renderConvergeTable(
+          plan([action({ name: 'x', action: 'create', status: 'applied' })], { dryRun: false }),
+        ),
+      ),
+      /^Made 1 change|\nMade 1 change\(s\) in 1 of 2 collection\(s\)$/,
+    );
+  });
+
+  it('should sanitize names that come from the database', () => {
+    const escape = String.fromCharCode(27);
+    const plain = renderConvergeTable(
+      plan([action({ name: `evil${escape}[31mname`, action: 'drop', reason: 'not declared' })]),
+    );
+    assert.ok(!plain.includes(`${escape}[31mname`));
   });
 });

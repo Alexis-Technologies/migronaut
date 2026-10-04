@@ -54,9 +54,9 @@ afterEach(() => {
 // against each other means adding a config key without an env var (or without a
 // deliberate exemption below) fails here rather than in a user's CI.
 describe('ENV_KEYS covers every scalar config option', () => {
-  // Not expressible as a single env string: two are structured values, and
+  // Not expressible as a single env string: three are structured values, and
   // envFile selects which .env to load, so it is read before the table runs.
-  const NON_SCALAR_KEYS = ['clientOptions', 'envFile', 'fileExtensions'];
+  const NON_SCALAR_KEYS = ['clientOptions', 'collections', 'envFile', 'fileExtensions'];
 
   it('should map every config key except the documented exemptions', () => {
     const envPaths = new Set(ENV_KEYS.map((spec) => spec.path));
@@ -257,6 +257,7 @@ describe('loadConfig', () => {
       'MIGRONAUT_SEQUENTIAL',
       'MIGRONAUT_ENSURE_INDEXES',
       'MIGRONAUT_RELOAD_MIGRATIONS',
+      'MIGRONAUT_CONVERGE_AFTER_UP',
     ]) {
       process.env[key] = 'maybe';
       await assert.rejects(
@@ -314,6 +315,8 @@ describe('loadConfig', () => {
     process.env.MIGRONAUT_ENSURE_INDEXES = 'false';
     process.env.MIGRONAUT_RELOAD_MIGRATIONS = 'true';
     process.env.MIGRONAUT_ENVIRONMENT = 'staging';
+    process.env.MIGRONAUT_COLLECTIONS_DIR = './db/collections';
+    process.env.MIGRONAUT_CONVERGE_AFTER_UP = 'yes';
     const config = await loadConfig({
       cwd: tmp,
       flags: { uri: 'mongodb://x:27017', dbName: 'x' },
@@ -324,6 +327,55 @@ describe('loadConfig', () => {
     assert.strictEqual(config.ensureIndexes, false);
     assert.strictEqual(config.reloadMigrations, true);
     assert.strictEqual(config.environment, 'staging');
+    assert.strictEqual(config.collectionsDir, './db/collections');
+    assert.strictEqual(config.convergeAfterUp, true);
+  });
+
+  it('should default convergeAfterUp to false and leave collections unset', async () => {
+    const config = await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } });
+    assert.strictEqual(config.convergeAfterUp, false);
+    assert.strictEqual(config.collections, undefined);
+    assert.strictEqual(config.collectionsDir, undefined);
+  });
+
+  it('should validate declared collections from a JSON config, with nested paths', async () => {
+    writeFileSync(
+      path.join(tmp, 'migronaut.config.json'),
+      JSON.stringify({
+        uri: 'mongodb://x:27017',
+        dbName: 'x',
+        collections: [{ name: 'users', indexes: [{ key: { email: 1 }, uniqe: true }] }],
+      }),
+    );
+    await assert.rejects(loadConfig({ cwd: tmp }), (error) => {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.deepStrictEqual(
+        error.context.issues.map((issue) => issue.path),
+        ['collections[0].indexes[0].uniqe'],
+      );
+      return true;
+    });
+  });
+
+  it('should show declared collections by name only in the debug dump', async () => {
+    const lines = [];
+    const logger = {
+      debug: (msg, fields) => lines.push({ msg, fields }),
+      info() {},
+      warn() {},
+      error() {},
+    };
+    await loadConfig({
+      cwd: tmp,
+      flags: {
+        uri: 'mongodb://x:27017',
+        dbName: 'x',
+        logger,
+        collections: [{ name: 'users', validator: { $jsonSchema: { required: ['a'] } } }],
+      },
+    });
+    const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+    assert.deepStrictEqual(dump.fields.collections, ['users']);
   });
 
   it('should not let a JSON config poison the prototype via __proto__', async () => {
@@ -530,6 +582,237 @@ describe('validateConfig', () => {
       logger: null,
     });
     assert.deepStrictEqual(validateConfig(config), []);
+  });
+
+  it('should accept a generateId function and refuse anything else under that key', () => {
+    assert.deepStrictEqual(validateConfig(validConfig({ generateId: () => 'id' })), []);
+    // What a JSON config can hold — a name, not a generator.
+    for (const value of ['ulid', null, 7, {}, true]) {
+      assert.deepStrictEqual(validateConfig(validConfig({ generateId: value })), [
+        { path: 'generateId', message: 'must be a function' },
+      ]);
+    }
+  });
+
+  it('should keep generateId out of the scalar key table — it is code-only', () => {
+    // CONFIG_KEYS is pinned against the JSON schema and the env table, neither
+    // of which can express a function.
+    assert.ok(!CONFIG_KEYS.some((spec) => spec.path === 'generateId'));
+    assert.ok(!ENV_KEYS.some((spec) => spec.path === 'generateId'));
+  });
+
+  it('should carry generateId through, known and elided from the debug dump', async () => {
+    const lines = [];
+    const logger = {
+      debug: (msg, fields) => lines.push({ msg, fields }),
+      info() {},
+      warn() {},
+      error() {},
+    };
+    const generateId = () => 'id';
+    const config = await loadConfig({
+      cwd: tmp,
+      flags: { uri: 'mongodb://x:27017', dbName: 'x', logger, generateId },
+    });
+    assert.strictEqual(config.generateId, generateId);
+    assert.ok(!lines.some((line) => line.msg.startsWith('Unrecognized config key')));
+    const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+    assert.strictEqual(dump.fields.generateId, '[injected]');
+  });
+
+  it('should leave generateId out of the debug dump when none is configured', async () => {
+    const lines = [];
+    const logger = {
+      debug: (msg, fields) => lines.push({ msg, fields }),
+      info() {},
+      warn() {},
+      error() {},
+    };
+    await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x', logger } });
+    const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+    assert.ok(!('generateId' in dump.fields));
+  });
+
+  it('should reject a non-function generateId through loadConfig', async () => {
+    await assert.rejects(
+      loadConfig({
+        cwd: tmp,
+        flags: { uri: 'mongodb://x:27017', dbName: 'x', generateId: 'ulid' },
+      }),
+      (error) => {
+        assert.ok(error instanceof ConfigInvalidError);
+        assert.deepStrictEqual(error.context.issues, [
+          { path: 'generateId', message: 'must be a function' },
+        ]);
+        return true;
+      },
+    );
+  });
+
+  describe('telemetry', () => {
+    const tracer = { startActiveSpan() {} };
+    const meter = { createHistogram() {}, createCounter() {} };
+    const recorder = () => {
+      const lines = [];
+      return {
+        lines,
+        logger: {
+          debug: (msg, fields) => lines.push({ msg, fields }),
+          info() {},
+          warn() {},
+          error() {},
+        },
+      };
+    };
+
+    it('should accept a tracer, a meter, both, or neither', () => {
+      for (const telemetry of [
+        { tracer, meter },
+        { tracer },
+        { meter },
+        // Off, in every shape a config that builds it conditionally produces.
+        undefined,
+        null,
+        {},
+        { tracer: undefined, meter: null },
+      ]) {
+        assert.deepStrictEqual(validateConfig(validConfig({ telemetry })), []);
+      }
+    });
+
+    it('should refuse a telemetry that is not an object', () => {
+      // What a JSON config can hold, plus an array — none of them a tracer.
+      for (const telemetry of ['otel', 7, true, [], [tracer]]) {
+        assert.deepStrictEqual(validateConfig(validConfig({ telemetry })), [
+          { path: 'telemetry', message: 'must be an object' },
+        ]);
+      }
+    });
+
+    it('should refuse a tracer that cannot start a span, naming the key', () => {
+      for (const bad of ['tracer', 7, {}, { startActiveSpan: 'yes' }, () => {}]) {
+        assert.deepStrictEqual(validateConfig(validConfig({ telemetry: { tracer: bad } })), [
+          {
+            path: 'telemetry.tracer',
+            message: 'must be an OpenTelemetry Tracer (an object with startActiveSpan)',
+          },
+        ]);
+      }
+    });
+
+    it('should accept a handful of scalar static attributes, and nothing else', () => {
+      assert.deepStrictEqual(
+        validateConfig(
+          validConfig({ telemetry: { attributes: { tenant: 'a', shard: 3, canary: true } } }),
+        ),
+        [],
+      );
+      assert.deepStrictEqual(validateConfig(validConfig({ telemetry: { attributes: 'x' } })), [
+        { path: 'telemetry.attributes', message: 'must be an object' },
+      ]);
+      assert.deepStrictEqual(
+        validateConfig(validConfig({ telemetry: { attributes: { tenant: { id: 1 } } } })),
+        [
+          {
+            path: 'telemetry.attributes.tenant',
+            message: 'must be a string, a number or a boolean',
+          },
+        ],
+      );
+      const many = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`k${i}`, i]));
+      assert.match(
+        validateConfig(validConfig({ telemetry: { attributes: many } }))[0].message,
+        /at most 20/,
+      );
+    });
+
+    it('should refuse a meter missing either instrument factory', () => {
+      for (const bad of [
+        'meter',
+        {},
+        { createHistogram() {} },
+        { createCounter() {} },
+        { createHistogram() {}, createCounter: 1 },
+      ]) {
+        assert.deepStrictEqual(validateConfig(validConfig({ telemetry: { meter: bad } })), [
+          {
+            path: 'telemetry.meter',
+            message:
+              'must be an OpenTelemetry Meter (an object with createHistogram and createCounter)',
+          },
+        ]);
+      }
+    });
+
+    it('should report a bad tracer and a bad meter together', () => {
+      const issues = validateConfig(validConfig({ telemetry: { tracer: {}, meter: {} } }));
+      assert.deepStrictEqual(
+        issues.map((issue) => issue.path),
+        ['telemetry.tracer', 'telemetry.meter'],
+      );
+    });
+
+    it('should keep telemetry out of the scalar key table — it is code-only', () => {
+      assert.ok(!CONFIG_KEYS.some((spec) => spec.path.startsWith('telemetry')));
+      assert.ok(!ENV_KEYS.some((spec) => spec.path.startsWith('telemetry')));
+      assert.ok(!('telemetry' in DEFAULT_CONFIG));
+    });
+
+    it('should carry telemetry through, known and elided from the debug dump', async () => {
+      const { lines, logger } = recorder();
+      const telemetry = { tracer, meter };
+      const config = await loadConfig({
+        cwd: tmp,
+        flags: { uri: 'mongodb://x:27017', dbName: 'x', logger, telemetry },
+      });
+      assert.strictEqual(config.telemetry, telemetry);
+      assert.ok(!lines.some((line) => line.msg.startsWith('Unrecognized config key')));
+      const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+      assert.strictEqual(dump.fields.telemetry, '[injected]');
+    });
+
+    it('should leave telemetry out of the debug dump when none is configured', async () => {
+      const { lines, logger } = recorder();
+      await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x', logger } });
+      const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+      assert.ok(!('telemetry' in dump.fields));
+    });
+
+    it('should mention a stray key inside telemetry — the whole API module is the usual one', async () => {
+      // `telemetry: require('@opentelemetry/api')` validates (no tracer, no
+      // meter — "off") and would otherwise do nothing without a word.
+      const { lines, logger } = recorder();
+      await loadConfig({
+        cwd: tmp,
+        flags: {
+          uri: 'mongodb://x:27017',
+          dbName: 'x',
+          logger,
+          telemetry: { trace: {}, metrics: {}, tracer },
+        },
+      });
+      const mention = lines.find((line) => line.msg.startsWith('Unrecognized config key'));
+      assert.strictEqual(
+        mention.msg,
+        'Unrecognized config key(s), ignored: telemetry.trace, telemetry.metrics',
+      );
+    });
+
+    it('should reject an unusable telemetry through loadConfig', async () => {
+      await assert.rejects(
+        loadConfig({
+          cwd: tmp,
+          flags: { uri: 'mongodb://x:27017', dbName: 'x', telemetry: 'otel' },
+        }),
+        (error) => {
+          assert.ok(error instanceof ConfigInvalidError);
+          assert.deepStrictEqual(error.context.issues, [
+            { path: 'telemetry', message: 'must be an object' },
+          ]);
+          return true;
+        },
+      );
+    });
   });
 
   it('should surface issues through loadConfig as ConfigInvalidError context', async () => {

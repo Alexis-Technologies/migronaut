@@ -1,4 +1,3 @@
-const { randomUUID } = require('node:crypto');
 const os = require('node:os');
 const {
   LockAlreadyHeldError,
@@ -6,6 +5,7 @@ const {
   LockReleaseFailedError,
 } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
+const { randomId } = require('../utils/id.js');
 const { safeUsername } = require('../utils/user.js');
 
 /** Fixed `_id` of the singleton lock document */
@@ -17,13 +17,23 @@ function isDuplicateKeyError(error) {
 }
 
 /**
- * Map a raw lock document to the public LockInfo shape. Strips internal fields —
- * most importantly the `owner` token, which proves lock ownership and must never
- * leak into error context or CLI output.
+ * Map a raw lock document to the public LockInfo shape. The `nonce` — what
+ * proves ownership — never leaves this module. The `owner` is the holder's run
+ * id, the same value its events, log lines and changelog records carry, so it
+ * is reported as `runId`: "which run holds the lock?" is the first question
+ * when one is stuck. `ttlMs` is the holder's own TTL, which paces its
+ * heartbeat (written since 2.1; absent from an older holder's document).
  */
 function toLockInfo(doc) {
   if (!doc) return null;
-  return { lockedAt: doc.lockedAt, pid: doc.pid, host: doc.host, executedBy: doc.executedBy };
+  return {
+    lockedAt: doc.lockedAt,
+    pid: doc.pid,
+    host: doc.host,
+    executedBy: doc.executedBy,
+    ...(typeof doc.owner === 'string' ? { runId: doc.owner } : {}),
+    ...(typeof doc.ttlMs === 'number' ? { ttlMs: doc.ttlMs } : {}),
+  };
 }
 
 /**
@@ -35,8 +45,15 @@ class MigrationLock {
   #db;
   #collectionName;
   #ttlSeconds;
-  /** Token proving this instance is the current holder; set on acquire, cleared on release */
+  /** Token naming this instance as the current holder; set on acquire, cleared on release */
   #owner;
+  /**
+   * Minted here on every acquire and matched alongside `owner`. The owner token
+   * is the run id, whose format — and therefore whose uniqueness — a user's
+   * `generateId` decides; the nonce is what keeps two holders apart even when
+   * that generator hands both the same id.
+   */
+  #nonce;
 
   constructor(db, collectionName, ttlSeconds) {
     this.#db = db;
@@ -68,7 +85,8 @@ class MigrationLock {
     const collection = this.#db.collection(this.#collectionName);
     // The caller may supply the run id so the lock document, the changelog
     // records and the log lines of one run all carry the same token.
-    const owner = token ?? randomUUID();
+    const owner = token ?? randomId();
+    const nonce = randomId();
     // The replacement document for the taken branch. $literal guards the
     // strings: a pipeline expression would otherwise interpret a leading `$`
     // in a value as a field path.
@@ -79,6 +97,8 @@ class MigrationLock {
       host: { $literal: os.hostname() },
       executedBy: { $literal: safeUsername() },
       owner: { $literal: owner },
+      nonce: { $literal: nonce },
+      ttlMs: { $literal: this.ttlMs },
     };
 
     let result;
@@ -114,6 +134,7 @@ class MigrationLock {
         const holder = await collection.findOne({ _id: LOCK_ID });
         throw new LockAlreadyHeldError('Migration lock is already held', {
           holder: toLockInfo(holder) ?? undefined,
+          ttlMs: this.ttlMs,
         });
       }
       throw error;
@@ -125,27 +146,31 @@ class MigrationLock {
     // read-back halves that path's round trips.
     if (result.upsertedCount === 1) {
       this.#owner = owner;
+      this.#nonce = nonce;
       return;
     }
 
     // Confirm we are the holder. A fresh lock left the document untouched, and
     // if two processes raced to reclaim the same stale lock only the last
-    // writer's `owner` wins; either way the loser reads a different token here
-    // and backs off instead of running concurrently.
+    // writer's document wins; either way the loser reads a different one here
+    // and backs off instead of running concurrently. The nonce is what makes
+    // that hold when both carry the same owner token.
     const current = await collection.findOne({ _id: LOCK_ID });
-    if (!current || current.owner !== owner) {
+    if (!current || current.owner !== owner || current.nonce !== nonce) {
       throw new LockAlreadyHeldError('Migration lock is already held', {
         holder: toLockInfo(current) ?? undefined,
+        ttlMs: this.ttlMs,
       });
     }
     this.#owner = owner;
+    this.#nonce = nonce;
   }
 
   /**
    * Refresh `lockedAt` so a long-running migration's lock never goes stale and
-   * gets reclaimed mid-run. Scoped to our `owner` token, so it is a no-op if the
-   * lock was already lost. Server time, for the same reason as acquire().
-   * Returns true while we still hold the lock.
+   * gets reclaimed mid-run. Scoped to our `owner` token and nonce, so it is a
+   * no-op if the lock was already lost. Server time, for the same reason as
+   * acquire(). Returns true while we still hold the lock.
    */
   async renew() {
     if (!this.#owner) {
@@ -153,7 +178,9 @@ class MigrationLock {
     }
     const result = await this.#db
       .collection(this.#collectionName)
-      .updateOne({ _id: LOCK_ID, owner: this.#owner }, [{ $set: { lockedAt: '$$NOW' } }]);
+      .updateOne({ _id: LOCK_ID, owner: this.#owner, nonce: this.#nonce }, [
+        { $set: { lockedAt: '$$NOW' } },
+      ]);
     return result.matchedCount === 1;
   }
 
@@ -176,7 +203,8 @@ class MigrationLock {
 
   /**
    * Release the lock by deleting the lock document. Scoped to our `owner` token
-   * so we never delete a lock that has since been reclaimed by another process.
+   * and nonce so we never delete a lock that has since been reclaimed by another
+   * process — not even one that was handed the same owner token.
    * With no token held this is a no-op — an unscoped delete here would be
    * `forceRelease()` without its deliberate opt-in, and a future caller
    * releasing twice (or before acquiring) must not silently steal a peer's
@@ -185,10 +213,11 @@ class MigrationLock {
    */
   async release() {
     if (!this.#owner) return;
-    const filter = { _id: LOCK_ID, owner: this.#owner };
+    const filter = { _id: LOCK_ID, owner: this.#owner, nonce: this.#nonce };
     try {
       await this.#db.collection(this.#collectionName).deleteOne(filter);
       this.#owner = undefined;
+      this.#nonce = undefined;
     } catch (error) {
       throw new LockReleaseFailedError(
         'Failed to release migration lock',

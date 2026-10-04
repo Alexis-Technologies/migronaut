@@ -1,3 +1,5 @@
+const { actorFields } = require('../utils/actor.js');
+
 /**
  * Reads and writes migration records in the changelog collection
  * (`_migronaut_migrations` by default).
@@ -90,6 +92,23 @@ class Changelog {
     return names;
   }
 
+  /**
+   * Which of `names` carry a `'failed'` trace — what tells a migration that
+   * failed (the line is stopped) from one that simply has not run yet (it may
+   * be in flight elsewhere). Served by the `status_name` index.
+   */
+  async getFailedNames(db, names) {
+    if (names.length === 0) return [];
+    const docs = await this.#coll(db)
+      .find({ status: 'failed', name: { $in: names } })
+      .sort({ name: 1 })
+      .project({ name: 1, _id: 0 })
+      .toArray();
+    const failed = [];
+    for (const doc of docs) failed.push(doc.name);
+    return failed;
+  }
+
   /** Return a single record by migration name, or null */
   async getByName(db, name) {
     return this.#coll(db).findOne({ name });
@@ -132,6 +151,29 @@ class Changelog {
     return this.#coll(db)
       .find({ status: 'applied', name: { $gt: name } })
       .sort({ name: 1 })
+      .toArray();
+  }
+
+  /**
+   * Applied records that were applied *after* `record`, newest first — the
+   * revert order `down --steps` uses (`appliedAt`, name-desc tiebreak). An
+   * `ordered` rollback refuses while any exist: undoing effects is only safe in
+   * reverse of the order they were made. A record with no `appliedAt` (a
+   * hand-edited or legacy document) treats every other applied record as
+   * newer — the conservative answer.
+   */
+  async getAppliedNewerThan(db, { appliedAt, name }) {
+    const filter =
+      appliedAt instanceof Date
+        ? {
+            status: 'applied',
+            $or: [{ appliedAt: { $gt: appliedAt } }, { appliedAt, name: { $gt: name } }],
+          }
+        : { status: 'applied', name: { $ne: name } };
+    return this.#coll(db)
+      .find(filter)
+      .sort({ appliedAt: -1, name: -1 })
+      .project({ _id: 0, name: 1, appliedAt: 1, batch: 1 })
       .toArray();
   }
 
@@ -184,10 +226,22 @@ class Changelog {
     const { name, appliedAt, ...fields } = record;
     const update = {
       $set: fields,
-      // A re-apply clears the stale revert marker — and the failure trace a
-      // markFailed() from an earlier crashed attempt may have left.
-      $unset: { revertedAt: '', failedAt: '', error: '' },
+      // A re-apply clears the stale revert marker (and who asked for the
+      // revert, and why) — and the failure trace a markFailed() from an earlier
+      // crashed attempt may have left.
+      $unset: {
+        revertedAt: '',
+        revertRequestedBy: '',
+        revertReason: '',
+        failedAt: '',
+        error: '',
+      },
     };
+    // Who asked for this apply, and why — or nobody said: then the previous
+    // apply's answer must not linger as if it were this one's.
+    for (const key of ['requestedBy', 'reason']) {
+      if (fields[key] === undefined) update.$unset[key] = '';
+    }
     if (appliedAt !== undefined) {
       update.$set.appliedAt = appliedAt;
       update.$setOnInsert = { firstAppliedAt: appliedAt };
@@ -248,11 +302,22 @@ class Changelog {
    * was no longer `'applied'` (a concurrent peer got there first) — the caller
    * decides what to do with that, since this module stays logger-free.
    */
-  async markReverted(db, name, session) {
+  async markReverted(db, name, session, actor = {}) {
+    const update = {
+      $set: {
+        status: 'reverted',
+        ...actorFields(actor, 'revert'),
+      },
+      // Server time, like markApplied's appliedAt — one clock for the whole trail.
+      $currentDate: { revertedAt: true },
+    };
+    const unset = {};
+    if (actor.requestedBy === undefined) unset.revertRequestedBy = '';
+    if (actor.reason === undefined) unset.revertReason = '';
+    if (Object.keys(unset).length > 0) update.$unset = unset;
     return this.#coll(db).updateOne(
       { name, status: 'applied' },
-      // Server time, like markApplied's appliedAt — one clock for the whole trail.
-      { $set: { status: 'reverted' }, $currentDate: { revertedAt: true } },
+      update,
       session ? { session } : {},
     );
   }

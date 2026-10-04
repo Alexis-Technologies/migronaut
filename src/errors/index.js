@@ -204,6 +204,58 @@ class OutOfOrderMigrationError extends MigronautError {
   }
 }
 
+/**
+ * Thrown by an `ordered` single-file run that would apply or revert out of
+ * sequence: an earlier migration is still pending (`up`), or one applied later
+ * is still applied (`down`). `context.blockedBy` names what must go first.
+ */
+class MigrationBlockedError extends MigronautError {
+  constructor(message, context, options) {
+    super('MIGRATION_BLOCKED', message, context, options);
+    this.name = 'MigrationBlockedError';
+  }
+}
+
+/**
+ * Thrown by the queue adapter when a job's payload fails the contract check.
+ * Job data comes back from Redis, so it is untrusted input — never a config
+ * mistake of the process that reads it.
+ */
+class QueueJobInvalidError extends MigronautError {
+  constructor(message, context, options) {
+    super('QUEUE_JOB_INVALID', message, context, options);
+    this.name = 'QueueJobInvalidError';
+  }
+}
+
+/**
+ * Thrown by a queue group's `wait()` when one of its jobs failed or the wait
+ * timed out. The worker's typed error does not cross the queue — only its
+ * message does — so `context.failedReason` carries it and `context.results`
+ * lists the jobs that finished before it.
+ */
+class QueueJobFailedError extends MigronautError {
+  constructor(message, context, options) {
+    super('QUEUE_JOB_FAILED', message, context, options);
+    this.name = 'QueueJobFailedError';
+  }
+}
+
+/**
+ * Thrown by `converge` when the database cannot be brought to the declared
+ * state: the plan has a conflict (refused before any write — `context.phase`
+ * is `'plan'`), or a step failed (`'apply'`). `context.converge` is the
+ * converge result so far — which steps were applied, which failed, which were
+ * never reached — and `context.hint`, when present, says what usually fixes
+ * the server error behind it.
+ */
+class ConvergeFailedError extends MigronautError {
+  constructor(message, context, options) {
+    super('CONVERGE_FAILED', message, context, options);
+    this.name = 'ConvergeFailedError';
+  }
+}
+
 module.exports = {
   MigronautError,
   LockAlreadyHeldError,
@@ -226,4 +278,8 @@ module.exports = {
   ImportTargetNotEmptyError,
   IrreversibleMigrationError,
   OutOfOrderMigrationError,
+  MigrationBlockedError,
+  QueueJobInvalidError,
+  QueueJobFailedError,
+  ConvergeFailedError,
 };

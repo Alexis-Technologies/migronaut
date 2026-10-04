@@ -12,6 +12,13 @@ Key facts:
 - CLI binary: `migronaut`
 - Requires Node.js >= 22.18 and MongoDB >= 5.0; supports TypeScript, ESM, and CommonJS
 - Zero runtime dependencies; `mongodb` is a required peer, `mongoose` an optional one
+- Optional queue adapter at `@alexify/migronaut/bullmq`: migrations as BullMQ jobs (one migration
+  per job). BullMQ is injected by the caller (`bullmq: { Queue, Worker }`) — never a dependency
+- Optional OpenTelemetry: `telemetry: { tracer, meter }` from the caller's own
+  `@opentelemetry/api` — injected, never a dependency or a peer
+- Declared collections (experimental): indexes and validators declared as an end state in
+  `collections` / `collectionsDir`, applied statelessly by `migronaut converge` (or
+  `convergeAfterUp` after every bulk `up`) — no migration file per change
 - License: MIT
 - Repository: https://github.com/Alexis-Technologies/migronaut
 
@@ -26,7 +33,10 @@ Key facts:
 - [Writing Migrations](https://migronaut.vercel.app/guide/writing-migrations): The up/down contract in TypeScript, ESM, and CommonJS
 - [Transactions](https://migronaut.vercel.app/guide/transactions): Opt-in MongoDB transactions per file or globally
 - [Lifecycle Hooks](https://migronaut.vercel.app/guide/hooks): beforeAll, afterAll, beforeEach, afterEach, onError
+- [Declared Collections](https://migronaut.vercel.app/guide/collections): Declare indexes and validators as an end state; converge compares with the live database and applies the difference
 - [Programmatic API](https://migronaut.vercel.app/guide/api): The MigratorKit class, methods, and result types
+- [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq): Run migrations as BullMQ jobs — a migration service with ordering, batches, scheduling, and enqueue-and-wait
+- [OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry): Traces and metrics through an injected tracer and meter — a span per run and per migration, with the MongoDB driver's spans nested under it
 - [CI/CD & Deployment](https://migronaut.vercel.app/guide/ci-cd): GitHub Actions, Docker, deploy gates, and JSON output
 - [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting): Common errors and how to fix them
 - [Migrating from migrate-mongo](https://migronaut.vercel.app/guide/migrate-mongo): Adopt an existing migrate-mongo changelog
@@ -37,6 +47,7 @@ Key facts:
 - [migronaut up](https://migronaut.vercel.app/commands/up): Run all pending migrations, or a single file
 - [migronaut down](https://migronaut.vercel.app/commands/down): Roll back the last batch, a batch, the last N, or a file
 - [migronaut redo](https://migronaut.vercel.app/commands/redo): Roll back then re-apply a migration
+- [migronaut converge](https://migronaut.vercel.app/commands/converge): Bring declared indexes and validators to their declared state; --check gates CI
 - [migronaut status & list](https://migronaut.vercel.app/commands/status): Inspect migration state; --check gates CI
 - [migronaut create & init](https://migronaut.vercel.app/commands/create): Scaffold migrations and generate a config
 - [migronaut dry-run](https://migronaut.vercel.app/commands/dry-run): Preview up/down without touching the database

@@ -17,8 +17,9 @@ describe('config schema sync', () => {
 
   // The JSON-expressible config keys: everything validateConfig checks, minus
   // nothing (all CONFIG_KEYS values are JSON-expressible), plus $schema
-  // itself. Live instances (hooks, logger, mongoose, client) are .ts/.js-only
-  // and deliberately absent; clientOptions IS a plain object, so it stays.
+  // itself. Live instances (hooks, logger, mongoose, client, telemetry) and
+  // the generateId function are .ts/.js-only and deliberately absent;
+  // clientOptions IS a plain object, so it stays.
   it('should describe every validated config key, and nothing else', () => {
     // Through the exported table, not a regex over the source: config.js
     // exports CONFIG_KEYS for exactly this kind of pin (config.test.js already
@@ -72,5 +73,21 @@ describe('config schema sync', () => {
       );
     }
     assert.strictEqual(schema.properties.envFile.default, '.env');
+  });
+
+  it('should describe exactly the index options and definition keys the validator accepts', () => {
+    // The validator is strict, and so is the schema: a key one accepts and the
+    // other does not is a config that validates in the editor and fails at
+    // run time — or the other way round.
+    const { INDEX_KEYS } = require(path.join(repoRoot, 'src', 'core', 'index-spec.js'));
+    const { DEFINITION_KEYS } = require(path.join(repoRoot, 'src', 'core', 'collections.js'));
+    assert.deepStrictEqual(
+      Object.keys(schema.definitions.index.properties).sort(),
+      [...INDEX_KEYS].sort(),
+    );
+    assert.deepStrictEqual(
+      Object.keys(schema.definitions.collection.properties).sort(),
+      [...DEFINITION_KEYS].sort(),
+    );
   });
 });

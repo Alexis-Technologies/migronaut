@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { errorText } = require('../../src/utils/error.js');
-const { redactDeep, redactUris } = require('../../src/utils/redact.js');
+const { redactDeep, redactOutbound, redactUris } = require('../../src/utils/redact.js');
 
 describe('redactUris', () => {
   it('should mask the password in a URI anywhere inside a message', () => {
@@ -93,5 +93,38 @@ describe('redactUris — query-string secrets', () => {
 
   it('should mask a password behind an empty username', () => {
     assert.strictEqual(redactUris('mongodb://:pw@host/db'), 'mongodb://:****@host/db');
+  });
+});
+
+describe('redactOutbound', () => {
+  const E11000 =
+    'E11000 duplicate key error collection: app.users index: email_1 dup key: ' +
+    '{ email: "alice@example.com" }';
+
+  it('should mask the data values a duplicate-key error quotes, keeping the index', () => {
+    assert.strictEqual(
+      redactOutbound(E11000),
+      'E11000 duplicate key error collection: app.users index: email_1 dup key: { <redacted> }',
+    );
+    // A compound key, and values with braces inside strings, all go.
+    assert.strictEqual(
+      redactOutbound('… dup key: { a: "x}y", b: { c: 1 } }'),
+      '… dup key: { <redacted> }',
+    );
+  });
+
+  it('should still mask credentials, and leave a message without data alone', () => {
+    assert.strictEqual(
+      redactOutbound(`mongodb://u:pw@h failed — ${E11000}`),
+      'mongodb://u:****@h failed — E11000 duplicate key error collection: app.users index: ' +
+        'email_1 dup key: { <redacted> }',
+    );
+    assert.strictEqual(redactOutbound('lock held'), 'lock held');
+    assert.strictEqual(redactOutbound(undefined), undefined);
+  });
+
+  it('should keep the rest of a multi-line stack', () => {
+    const stack = `MongoServerError: ${E11000}\n    at insertOne (driver.js:1:1)`;
+    assert.strictEqual(redactOutbound(stack).split('\n')[1], '    at insertOne (driver.js:1:1)');
   });
 });

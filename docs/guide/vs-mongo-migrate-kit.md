@@ -27,6 +27,7 @@ either earns its place in a deploy pipeline or doesn't.
 | Terminal-injection safety on DB-sourced text    |        ❌        |          ✅          |
 | Pino-compatible logger                          |        ❌        |          ✅          |
 | Every scalar option settable from the environment |      ❌        |          ✅          |
+| Declared indexes & validators (`converge`)      |        ❌        |          ✅          |
 
 <sub>Compared against `mongo-migrate-kit` 1.2.2 — the version this project forked from. Each row was
 checked against that source tree, not inferred from its README.</sub>

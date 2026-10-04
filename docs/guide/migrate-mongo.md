@@ -63,6 +63,7 @@ reversible. Only the *imported* legacy records are forward-only.
 | Lifecycle hooks                                 |        ❌        |          ✅          |
 | First-class TypeScript (built-in)               |        ❌        |          ✅          |
 | History preserved on rollback (never deleted)   |        ❌        |          ✅          |
+| Declared indexes & validators (`converge`)      |        ❌        |          ✅          |
 | Adopt an existing `migrate-mongo` changelog     |        —        | ✅ `migronaut import` |
 
 <sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026. It has since added transaction access

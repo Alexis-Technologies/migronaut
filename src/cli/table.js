@@ -247,6 +247,109 @@ function renderImportTable(rows) {
   return renderTable(head, cells);
 }
 
+/** Longest index or collection name rendered before it is ellipsized */
+const MAX_NAME_WIDTH = 48;
+
+/** Longest converge detail rendered before it is ellipsized */
+const MAX_DETAIL_WIDTH = 72;
+
+/** Render a converge action cell: what changes stands out, what does not recedes */
+function convergeActionCell(colors, action) {
+  switch (action) {
+    case 'create':
+      return colors.green(action);
+    case 'modify':
+      return colors.cyan(action);
+    case 'recreate':
+    case 'drop':
+      return colors.yellow(action);
+    case 'conflict':
+      return colors.red(action);
+    default:
+      return colors.dim(action);
+  }
+}
+
+/** The detail column: what differs, or why the row is what it is */
+function convergeDetail(action) {
+  if (action.reason === 'name' && action.liveName !== undefined) {
+    return `renamed from "${action.liveName}"`;
+  }
+  return action.reason ?? '';
+}
+
+/**
+ * Render a converge plan (or result) as a table plus a one-line summary.
+ * Rows that need nothing are folded into the summary unless `all` — a large
+ * schema would otherwise bury its two changes under fifty "unchanged" lines.
+ */
+function renderConvergeTable(result, { all = false } = {}) {
+  const colors = palette();
+  const cells = [];
+  const counts = { change: 0, destructive: 0, conflict: 0, keep: 0, unchanged: 0, touched: 0 };
+  for (const collection of result.collections) {
+    let changes = 0;
+    for (const action of collection.actions) {
+      if (action.action === 'unchanged') counts.unchanged += 1;
+      else if (action.action === 'keep') counts.keep += 1;
+      else if (action.action === 'conflict') counts.conflict += 1;
+      else changes += 1;
+      if (action.target === 'index' && (action.action === 'drop' || action.action === 'recreate')) {
+        counts.destructive += 1;
+      }
+      if (action.action === 'unchanged' && !all) continue;
+      cells.push([
+        truncate(sanitize(collection.name), MAX_NAME_WIDTH),
+        action.target,
+        action.target === 'index' ? truncate(sanitize(action.name), MAX_NAME_WIDTH) : '',
+        convergeActionCell(colors, action.action),
+        truncate(sanitize(convergeDetail(action)), MAX_DETAIL_WIDTH),
+      ]);
+    }
+    counts.change += changes;
+    if (changes > 0) counts.touched += 1;
+  }
+  const collections = result.collections.length;
+  let summary;
+  if (counts.change === 0 && counts.conflict === 0) {
+    summary = `✔ ${collections} collection(s) match their declarations`;
+  } else {
+    const verb = result.dryRun ? 'Would make' : 'Made';
+    summary =
+      `${verb} ${counts.change} change(s) in ${counts.touched} of ${collections} ` +
+      'collection(s)';
+  }
+  const parts = [summary];
+  if (counts.destructive > 0) parts.push(`${counts.destructive} drop/rebuild`);
+  if (counts.conflict > 0) parts.push(colors.red(`${counts.conflict} conflict(s)`));
+  if (counts.keep > 0) parts.push(`${counts.keep} undeclared index(es) kept`);
+  if (counts.unchanged > 0 && !all) parts.push(`${counts.unchanged} unchanged`);
+  const line = parts.join(' · ');
+  if (cells.length === 0) return line;
+  return `${renderTable(['Collection', 'Target', 'Index', 'Action', 'Detail'], cells)}\n${line}`;
+}
+
+/**
+ * Render the converge history: one line per converge that changed something
+ * or failed, newest first — the audit view (`migronaut converge --history`).
+ */
+function renderConvergeHistory(entries) {
+  if (entries.length === 0) return 'No converge has changed anything yet';
+  const colors = palette();
+  const cells = entries.map((entry) => [
+    entry.startedAt instanceof Date ? entry.startedAt.toISOString() : String(entry.startedAt),
+    entry.trigger,
+    entry.success ? colors.green('ok') : colors.red('failed'),
+    String(entry.changed),
+    truncate(sanitize(entry.requestedBy ?? entry.executedBy ?? ''), MAX_NAME_WIDTH),
+    truncate(
+      sanitize(entry.reason ?? (entry.success ? '' : (entry.error ?? ''))),
+      MAX_DETAIL_WIDTH,
+    ),
+  ]);
+  return renderTable(['When', 'Trigger', 'Result', 'Changes', 'Who', 'Why'], cells);
+}
+
 module.exports = {
   charWidth,
   sanitize,
@@ -256,4 +359,6 @@ module.exports = {
   renderStatusTable,
   renderImportTable,
   renderRowsOrEmpty,
+  renderConvergeTable,
+  renderConvergeHistory,
 };

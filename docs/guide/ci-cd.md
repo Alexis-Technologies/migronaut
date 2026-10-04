@@ -27,6 +27,18 @@ migronaut status --check || {
 }
 ```
 
+### …and on collections that match their declarations
+
+With [declared collections](/guide/collections), `converge --check` is the same kind of gate for
+indexes and validators — it exits `28` when anything would change, and never writes:
+
+```bash
+migronaut converge --check || {
+  echo "Indexes or validators differ from their declarations"
+  exit 1
+}
+```
+
 ## GitHub Actions
 
 ```yaml
@@ -106,5 +118,11 @@ See [Configuration → async/factory config](/guide/configuration#async-factory-
 
 - Pin a Node version in CI (≥ 22.18 — the package's `engines` floor). `.ts` migrations then run with
   no loader; on that same floor `tsx` is only needed for syntax type stripping can't erase.
-- Run `migronaut dry-run up` in a pre-deploy check to log exactly what *would* run.
+- Run `migronaut dry-run up` in a pre-deploy check to log exactly what *would* run — and
+  `migronaut converge --dry-run` for the declared indexes and validators.
+- Converging after migrations? `migronaut up --converge` (or `convergeAfterUp: true`) does both
+  under one lock; `migronaut converge --json --yes` applies even drops and rebuilds without a
+  prompt, while `--json` alone refuses a plan that would drop or rebuild an index.
 - If a job is killed mid-run and leaves a lock, `migronaut unlock --yes` clears it in the next job.
+- Running migrations from a long-lived service instead of the pipeline? A deploy hook can enqueue
+  them and wait for the result — see [Migrations as a Queue](/guide/bullmq#enqueue-and-wait-deploy-hooks-and-ci).

@@ -133,6 +133,35 @@ IrreversibleMigrationError: 2026...-legacy.js was imported from migrate-mongo an
 **Fix:** imported history is forward-only. To undo such a change, write a new migration that performs
 the reverse operation.
 
+## "Converge refused: … conflict(s)"
+
+```
+✖ CONVERGE_FAILED: Converge refused: 1 conflict(s) — users index "email_1": the undeclared index "by_email" covers the same key — …
+```
+
+**Why:** a declared index has the same key (and partial filter and collation) as a live index
+with another name that you did not declare. MongoDB keeps only one of them, and converge never
+drops an undeclared index unless asked to.
+
+**Fix:** declare the index under the name it already has (`name: 'by_email'`), or run
+`migronaut converge --prune` to replace it. Nothing was written.
+
+## "Could not create index … E11000 duplicate key error"
+
+**Why:** a unique index cannot be built over documents that already share a value. When the index
+was being rebuilt, converge put the old one back — `context.restored` says whether it could.
+
+**Fix:** deduplicate the data in a migration, then converge again (with `convergeAfterUp`, the
+next `up` does both, in that order).
+
+## "not authorized … collMod"
+
+**Why:** changing a validator, a TTL or `hidden` uses `collMod`, which needs the `dbAdmin` role;
+plain `readWrite` covers creating and dropping indexes only.
+
+**Fix:** grant `dbAdmin` on the database to the user converge runs as, or converge from a
+deploy step that has it.
+
 ## Still stuck?
 
 - Run any command with `--json` to get a structured error object you can inspect.

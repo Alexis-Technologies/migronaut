@@ -62,4 +62,124 @@ console.log('esm-interop-ok');
     const { stdout } = await run(process.execPath, [path.join(dir, 'consumer.mjs')]);
     assert.match(stdout, /esm-interop-ok/);
   });
+
+  describe('the ./bullmq subpath', () => {
+    // The JS entry, not node_modules/.bin/tsc: that one is a shell shim (and a
+    // .cmd on Windows), which `node` cannot run.
+    const tsc = require.resolve('typescript/bin/tsc');
+
+    before(() => {
+      writeFileSync(
+        path.join(dir, 'subpath.mjs'),
+        `import adapter from '@alexify/migronaut/bullmq';
+import {
+  createMigrationQueue,
+  createMigrationProcessor,
+  JOB_NAMES,
+} from '@alexify/migronaut/bullmq';
+
+if (typeof createMigrationQueue !== 'function') throw new Error('createMigrationQueue missing');
+if (typeof createMigrationProcessor !== 'function') throw new Error('processor factory missing');
+if (JOB_NAMES.UP !== 'up') throw new Error('JOB_NAMES missing');
+if (adapter.createMigrationQueue !== createMigrationQueue) {
+  throw new Error('default and named exports disagree');
+}
+console.log('subpath-esm-ok');
+`,
+      );
+      writeFileSync(
+        path.join(dir, 'subpath.cjs'),
+        `const adapter = require('@alexify/migronaut/bullmq');
+if (typeof adapter.createMigrationQueue !== 'function') throw new Error('subpath did not resolve');
+
+// The exports map is closed: only what it lists is reachable, so an internal
+// module can be moved without breaking anyone who reached past the entry point.
+let code;
+try {
+  require('@alexify/migronaut/src/bullmq/index.js');
+} catch (error) {
+  code = error.code;
+}
+if (code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw new Error('deep import was allowed: ' + code);
+console.log('subpath-cjs-ok');
+`,
+      );
+      writeFileSync(
+        path.join(dir, 'root-only.cjs'),
+        // Whoever only migrates must not pay for the queue adapter — nor ever
+        // touch bullmq, which they may not have installed.
+        `require('@alexify/migronaut');
+const loaded = Object.keys(require.cache).filter(
+  (file) => /[\\/]src[\\/]bullmq[\\/]/.test(file) || /[\\/]node_modules[\\/]bullmq[\\/]/.test(file),
+);
+if (loaded.length > 0) throw new Error('the root entry loaded: ' + loaded.join(', '));
+console.log('root-only-ok');
+`,
+      );
+      writeFileSync(
+        path.join(dir, 'adapter-only.cjs'),
+        // The adapter itself never loads bullmq either — it is injected.
+        `require('@alexify/migronaut/bullmq');
+const loaded = Object.keys(require.cache).filter((file) =>
+  /[\\/]node_modules[\\/](bullmq|ioredis)[\\/]/.test(file),
+);
+if (loaded.length > 0) throw new Error('the adapter loaded: ' + loaded.join(', '));
+console.log('adapter-only-ok');
+`,
+      );
+      writeFileSync(
+        path.join(dir, 'types.mts'),
+        // Type-only: bullmq is deliberately absent from this consumer, which is
+        // exactly the install the declaration file must still resolve for.
+        `import type { MigrationJobData, MigrationQueue } from '@alexify/migronaut/bullmq';
+import type { MigratorKit } from '@alexify/migronaut';
+
+export type Kit = MigrationQueue['kit'] extends MigratorKit ? true : never;
+export const direction: MigrationJobData['direction'] = 'up';
+export const ok: Kit = true;
+`,
+      );
+    });
+
+    it('should resolve from an ESM consumer through the exports map', async () => {
+      const { stdout } = await run(process.execPath, [path.join(dir, 'subpath.mjs')]);
+      assert.match(stdout, /subpath-esm-ok/);
+    });
+
+    it('should resolve from a CJS consumer, and keep deep imports closed', async () => {
+      const { stdout } = await run(process.execPath, [path.join(dir, 'subpath.cjs')]);
+      assert.match(stdout, /subpath-cjs-ok/);
+    });
+
+    it('should not be loaded by the package root', async () => {
+      const { stdout } = await run(process.execPath, [path.join(dir, 'root-only.cjs')]);
+      assert.match(stdout, /root-only-ok/);
+    });
+
+    it('should not load bullmq itself', async () => {
+      const { stdout } = await run(process.execPath, [path.join(dir, 'adapter-only.cjs')]);
+      assert.match(stdout, /adapter-only-ok/);
+    });
+
+    it('should resolve its types for a nodenext consumer without bullmq installed', async () => {
+      // tsd and check:dts only ever use classic resolution, which ignores the
+      // exports map — this is the one place `exports["./bullmq"].types` is
+      // proven for the resolver modern TypeScript projects actually use.
+      await run(
+        process.execPath,
+        [
+          tsc,
+          '--noEmit',
+          '--strict',
+          '--module',
+          'nodenext',
+          '--moduleResolution',
+          'nodenext',
+          '--skipLibCheck',
+          path.join(dir, 'types.mts'),
+        ],
+        { cwd: dir },
+      );
+    });
+  });
 });

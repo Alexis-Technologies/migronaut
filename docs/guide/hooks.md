@@ -102,15 +102,30 @@ await kit.up();
 
 | Event | Payload |
 |---|---|
-| `run:start` | `{ runId }` |
-| `run:end` | `{ runId, success, error? }` |
+| `run:start` | `{ runId, command, direction? }` |
+| `run:end` | `{ runId, command, direction?, success, durationMs, applied?, reverted?, total?, error? }` |
 | `migration:start` | `{ runId, migration, direction, batch? }` |
 | `migration:success` | `{ runId, migration, direction, batch?, durationMs }` |
-| `migration:error` | `{ runId, migration, direction, error }` |
-| `lock:acquired` | `{ runId, owner }` |
+| `migration:skipped` | `{ runId, migration, direction, reason }` |
+| `migration:error` | `{ runId, migration, direction, batch?, durationMs?, error }` |
+| `lock:acquired` | `{ runId, owner, ttlMs, acquireMs }` — or `{ runId, owner, skipped: true }` under `--no-lock` |
 | `lock:released` | `{ runId, owner }` |
-| `lock:lost` | `{ runId, reason }` |
+| `lock:lost` | `{ runId, owner, reason }` |
+| `converge:start` | `{ runId, trigger, collections }` — a real [converge](/guide/collections) run |
+| `converge:action` | `{ runId, collection, target, name, action, status, durationMs?, reason?, error? }` — `status` is `'started'` before a step runs, then `'applied'` or `'failed'` |
+| `converge:end` | `{ runId, trigger, success, durationMs, changed, inSync, counts, result, error? }` |
+
+`command` is `'up'`, `'down'`, `'redo'`, `'baseline'`, `'import'` or `'converge'`. The counts on `run:end` are
+present when the run produced a result list — on the failure path too, counted from what was
+applied before it failed. `error` is a message with URI credentials already redacted.
 
 `runId` is the same value on every event of a run, on the lock document, and on
 each changelog record that run writes — so logs, metrics and the database can be
-correlated after the fact.
+correlated after the fact. It is a random UUID by default; the
+[`generateId`](/guide/configuration#custom-id-format) option puts it in your own
+format.
+
+Events are notifications: a listener can time a migration, but it cannot make a
+span the parent of what the migration does next. For traces — and for metrics
+without writing the listeners yourself — pass a tracer and a meter through the
+[`telemetry`](/guide/opentelemetry) option instead.

@@ -23,6 +23,8 @@ your database half-migrated when something fails.
 - **Audit trail kept** — a rollback updates the record, it never deletes it.
 - **Lifecycle hooks** — `beforeAll`, `afterAll`, `beforeEach`, `afterEach`, `onError`.
 - **Opt-in transactions** — wrap a migration so it fully commits or fully aborts.
+- **Indexes and validators as an end state** — declare them, and `migronaut converge` brings the
+  database to match; no migration file per index change.
 - **TypeScript, ESM & CommonJS** — all run with no `ts-node` plumbing.
 - **Zero config files required** — drive everything from env vars if you prefer.
 
@@ -39,6 +41,7 @@ your database half-migrated when something fails.
 | Lifecycle hooks                                 |        ❌        |          ✅          |
 | First-class TypeScript (built-in)               |        ❌        |          ✅          |
 | History preserved on rollback (never deleted)   |        ❌        |          ✅          |
+| Declared indexes & validators (`converge`)      |        ❌        |          ✅          |
 | Adopt an existing `migrate-mongo` changelog     |        —        | ✅ `migronaut import` |
 
 <sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026. It has since added transaction access

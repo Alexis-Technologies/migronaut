@@ -1,7 +1,13 @@
 const assert = require('node:assert/strict');
 const { after, before, beforeEach, afterEach, describe, it } = require('node:test');
 const { LOCK_ID, MigrationLock, runWithLock } = require('../../src/core/lock.js');
-const { HookFailedError, LockLostError, RunAbortedError } = require('../../src/errors/index.js');
+const {
+  ConfigInvalidError,
+  HookFailedError,
+  LockAlreadyHeldError,
+  LockLostError,
+  RunAbortedError,
+} = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const {
@@ -457,6 +463,203 @@ describe('run correlation (integration)', () => {
   });
 });
 
+describe('custom id format — generateId (integration)', () => {
+  /** The lock document, sampled once while a run holds it */
+  function lockSampler() {
+    let sample;
+    return {
+      progress: {
+        onStart: () => {
+          sample ??= mongo.db.collection(LOCK_COLLECTION).findOne({ _id: LOCK_ID });
+        },
+        onStop: () => undefined,
+      },
+      read: () => sample,
+    };
+  }
+
+  it('should mint the run id through generateId — records, lock, events and status', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+
+    let count = 0;
+    const sampler = lockSampler();
+    const kit = makeMigrator(
+      mongo.uri,
+      DB,
+      project.dir,
+      { generateId: () => `run_${++count}` },
+      { progress: sampler.progress },
+    );
+    const events = [];
+    for (const name of ['run:start', 'lock:acquired', 'migration:success', 'run:end']) {
+      kit.on(name, (event) => events.push({ name, runId: event.runId, owner: event.owner }));
+    }
+
+    const results = await kit.up();
+    const lockDoc = await sampler.read();
+
+    assert.strictEqual(results.length, 2);
+    assert.ok(events.length >= 5);
+    assert.ok(events.every((event) => event.runId === 'run_1'));
+    assert.strictEqual(events.find((event) => event.name === 'lock:acquired').owner, 'run_1');
+
+    assert.strictEqual(lockDoc.owner, 'run_1');
+    // The lock's own token: never the user's id, and never taken from its generator.
+    assert.match(lockDoc.nonce, /^[0-9a-f-]{36}$/);
+    assert.strictEqual(count, 1, 'one run mints exactly one id');
+
+    const records = await mongo.db.collection('_migronaut_migrations').find().toArray();
+    assert.deepStrictEqual(
+      records.map((record) => record.runId),
+      ['run_1', 'run_1'],
+    );
+    const status = await kit.status();
+    assert.deepStrictEqual(
+      status.map((row) => row.runId),
+      ['run_1', 'run_1'],
+    );
+
+    // The next run on the same kit asks the generator again.
+    project.write('0003-c.ts', insertMigration('things', 'c'));
+    await kit.up();
+    await kit.disconnect();
+    const third = await mongo.db.collection('_migronaut_migrations').findOne({ name: '0003-c.ts' });
+    assert.strictEqual(third.runId, 'run_2');
+  });
+
+  it('should stamp reverted, failed and baselined records with the custom id too', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    let count = 0;
+    const kit = migrator({ generateId: () => `run_${++count}` });
+    const changelog = mongo.db.collection('_migronaut_migrations');
+
+    await kit.baseline();
+    assert.strictEqual((await changelog.findOne({ name: '0001-a.ts' })).runId, 'run_1');
+
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    await kit.up();
+    await kit.down();
+    assert.strictEqual((await changelog.findOne({ name: '0002-b.ts' })).status, 'reverted');
+
+    project.write('0003-c.ts', failingMigration());
+    await assert.rejects(kit.up('0003-c.ts'));
+    await kit.disconnect();
+    const failed = await changelog.findOne({ name: '0003-c.ts' });
+    assert.strictEqual(failed.status, 'failed');
+    assert.strictEqual(failed.runId, 'run_4');
+  });
+
+  it('should refuse the run when the generator throws, then run cleanly once it recovers', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    let broken = true;
+    const kit = migrator({
+      generateId: () => {
+        if (broken) throw new Error('entropy pool closed');
+        return 'run_recovered';
+      },
+    });
+    const started = [];
+    kit.on('run:start', (event) => started.push(event.runId));
+
+    await assert.rejects(kit.up(), (error) => {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.strictEqual(error.message, 'generateId threw');
+      assert.strictEqual(error.cause.message, 'entropy pool closed');
+      return true;
+    });
+    // Refused before any run state existed: no event, no lock, nothing applied.
+    assert.deepStrictEqual(started, []);
+    assert.strictEqual(await mongo.db.collection(LOCK_COLLECTION).countDocuments(), 0);
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+
+    // And nothing was left behind that would make the kit think a run is in flight.
+    broken = false;
+    const results = await kit.up();
+    await kit.disconnect();
+    assert.deepStrictEqual(
+      results.map((row) => row.status),
+      ['applied'],
+    );
+    assert.deepStrictEqual(started, ['run_recovered']);
+  });
+
+  for (const [label, generateId, message] of [
+    ['an empty id', () => '', /non-empty string/],
+    ['an id over 128 characters', () => 'r'.repeat(129), /at most 128 characters/],
+    ['a non-string id', () => 42, /non-empty string/],
+    ['a promise', async () => 'too-late', /must be synchronous/],
+  ]) {
+    it(`should refuse the run when the generator returns ${label}`, async () => {
+      project.write('0001-a.ts', insertMigration('things', 'a'));
+      const kit = migrator({ generateId });
+      await assert.rejects(kit.up(), (error) => {
+        assert.strictEqual(error.code, 'CONFIG_INVALID');
+        assert.match(error.message, message);
+        return true;
+      });
+      await kit.disconnect();
+      assert.strictEqual(await mongo.db.collection(LOCK_COLLECTION).countDocuments(), 0);
+      assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+    });
+  }
+
+  it('should keep two runs apart even when their generator hands both the same id', async () => {
+    // `generateId: () => process.env.DEPLOY_ID`, or a counter that starts at 1
+    // in every process: both runs get one owner token. The owner readback alone
+    // would then tell the second run it holds the lock.
+    project.write('0001-slow.ts', slowMigration('things', 'a', 400));
+    const generateId = () => 'same-for-everyone';
+    const started = deferred();
+    const first = makeMigrator(
+      mongo.uri,
+      DB,
+      project.dir,
+      { generateId },
+      { progress: { onStart: () => started.resolve(), onStop: () => undefined } },
+    );
+    const second = migrator({ generateId });
+
+    const running = first.up();
+    let results;
+    try {
+      await started.promise;
+      const held = await mongo.db.collection(LOCK_COLLECTION).findOne({ _id: LOCK_ID });
+      assert.strictEqual(held.owner, 'same-for-everyone');
+
+      await assert.rejects(second.up(), LockAlreadyHeldError);
+      // The refused run must not have released the lock on its way out either.
+      const after = await mongo.db.collection(LOCK_COLLECTION).findOne({ _id: LOCK_ID });
+      assert.strictEqual(after.nonce, held.nonce);
+      results = await running;
+    } finally {
+      // Open clients would keep a failing run of this test from ever exiting.
+      await running.catch(() => undefined);
+      await first.disconnect();
+      await second.disconnect();
+    }
+    assert.deepStrictEqual(
+      results.map((row) => row.status),
+      ['applied'],
+    );
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
+    assert.strictEqual(await mongo.db.collection(LOCK_COLLECTION).countDocuments(), 0);
+  });
+
+  it('should not let a same-id run reclaim-and-release under a live holder', async () => {
+    // The direct form of the hazard, on the lock itself: two holders, one token.
+    const holder = new MigrationLock(mongo.db, LOCK_COLLECTION, 60);
+    const peer = new MigrationLock(mongo.db, LOCK_COLLECTION, 60);
+    await holder.acquire('same-for-everyone');
+    await assert.rejects(peer.acquire('same-for-everyone'), LockAlreadyHeldError);
+    assert.strictEqual(await peer.renew(), false);
+    await peer.release();
+    assert.strictEqual(await holder.renew(), true, 'the holder lost its lock to a same-id peer');
+    await holder.release();
+    assert.strictEqual(await mongo.db.collection(LOCK_COLLECTION).countDocuments(), 0);
+  });
+});
+
 describe('redo atomicity (integration)', () => {
   it('should hold a single lock across both directions', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
@@ -465,8 +668,9 @@ describe('redo atomicity (integration)', () => {
     await setup.disconnect();
 
     // Sample the lock document as each phase begins. A release between down and
-    // up would show up as a missing document or a fresh owner token, since
-    // acquire() mints a new UUID every time.
+    // up would show up as a missing document or a fresh nonce, since acquire()
+    // mints a new one every time (the owner token alone would not tell: it is
+    // the run id, and one redo is one run).
     const samples = [];
     const reads = [];
     const kit = makeMigrator(
@@ -481,7 +685,9 @@ describe('redo atomicity (integration)', () => {
               mongo.db
                 .collection(LOCK_COLLECTION)
                 .findOne({ _id: LOCK_ID })
-                .then((doc) => samples.push({ direction, owner: doc?.owner ?? null })),
+                .then((doc) =>
+                  samples.push({ direction, owner: doc?.owner ?? null, nonce: doc?.nonce ?? null }),
+                ),
             );
           },
           onStop: () => undefined,
@@ -502,9 +708,11 @@ describe('redo atomicity (integration)', () => {
       ['down', 'up'],
     );
     assert.ok(samples[0].owner, 'no lock was held during the down phase');
+    assert.strictEqual(samples[1].owner, samples[0].owner);
+    assert.ok(samples[0].nonce, 'the lock document carries no nonce');
     assert.strictEqual(
-      samples[1].owner,
-      samples[0].owner,
+      samples[1].nonce,
+      samples[0].nonce,
       'the lock was released and re-acquired between down and up',
     );
     // And it is cleaned up once the redo finishes.

@@ -43,8 +43,11 @@ Nothing to migrate
 | `-f, --force` | Re-run an **already-applied** file (requires a `[file]`). Prompts for confirmation. |
 | `-y, --yes` | Skip the confirmation prompt for `--force` (required in `--json` mode). |
 | `--strict` | Override config: abort on a checksum mismatch instead of warning. |
+| `--reason <text>` | Why — stamped on the changelog records the run writes (`reason`; who: the OS user, `executedBy`). Shown by `status`. |
 | `--no-lock` | Skip the concurrency lock. **Dev only** — warns loudly. |
-| `--json` | Emit the run results as a JSON array on stdout. |
+| `--converge` | After the migrations, converge the [declared collections](/guide/collections), under the same lock — even when nothing was pending. Bulk runs only: refused with a `[file]` or `--to`. |
+| `--no-converge` | Don't converge afterwards, even with `convergeAfterUp: true`. |
+| `--json` | Emit the run results as a JSON array on stdout — the converge lines, if any, go to stderr. |
 
 Plus the [global flags](/guide/configuration#global-cli-flags): `--uri`, `--db`, `--dir`, `--config`.
 
@@ -115,6 +118,7 @@ Each file's SHA-256 is verified against what was recorded when it was applied. I
 | `7` | A migration threw. The batch stops at the first error. |
 | `8` | The named file (or `--to` target) doesn't exist. |
 | `11` | Stopped by SIGINT/SIGTERM — see `context.results` for what was applied. |
+| `27` | The converge after the migrations failed. The migrations stay applied (`partial` in `--json`); the next `up` retries the converge. |
 
 See the [full exit-code table](/reference/cli#exit-codes) for the rest. Anything unmapped is `1`, so
 a script testing `!= 0` keeps working.

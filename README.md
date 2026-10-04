@@ -43,7 +43,9 @@ change before it touches your database.
 
 ## Reasons to choose it
 
-- **Zero dependencies** — no runtime dependencies at all; only the `mongodb` driver as a peer.
+- **Zero dependencies** — no runtime dependencies at all; only the `mongodb` driver as a peer
+  (Mongoose, BullMQ and OpenTelemetry are optional integrations you inject — never installed for
+  you).
   Instant installs, nothing extra in your lockfile, no supply-chain surface.
 - **Run a single migration** — `migronaut up <file>`, not just "all pending".
 - **Roll back anything** — a batch (`--batch 3`), the last N (`--steps 2`), one file, or `redo`.
@@ -57,10 +59,21 @@ change before it touches your database.
   (warn by default, `onOutOfOrder: 'error'` to refuse) instead of silently applying.
 - **Lifecycle hooks** — `beforeAll`, `afterAll`, `beforeEach`, `afterEach`, `onError`.
 - **Opt-in transactions** — wrap a migration so it fully commits or fully aborts.
+- **Indexes and validators as an end state** — declare them, and `migronaut converge` brings the
+  database to match; no migration file per index change ([details](#declared-collections)).
 - **TypeScript, ESM & CommonJS** — all run with no `ts-node` plumbing.
 - **Zero config files required** — drive everything from env vars if you prefer.
 - **Pino-friendly logging** — the `logger` option is pino-compatible; pass a pino instance directly
   and migronaut logs through it (with a `component: 'migronaut'` child binding).
+- **Your id format** — run ids and queue group ids are random UUIDs by default; pass
+  `generateId: ulid` (or cuid2, nanoid, UUIDv7 — any `() => string`) and every id migronaut mints
+  comes from your generator.
+- **OpenTelemetry (optional)** — pass a tracer and a meter from your own `@opentelemetry/api`: a
+  span per run and per migration, active while the migration runs, so an instrumented MongoDB
+  driver nests its command spans under the migration that issued them — plus duration metrics.
+- **Migrations as a queue (optional)** — `@alexify/migronaut/bullmq` runs each migration as its own
+  BullMQ job, in order, so migronaut can be a migration service: trigger it over HTTP, on a
+  schedule, or from a deploy hook that waits for the result.
 
 ### How it compares to `migrate-mongo`
 
@@ -76,6 +89,7 @@ change before it touches your database.
 | Lifecycle hooks                                 |        ❌        |          ✅          |
 | First-class TypeScript (built-in)               |        ❌        |          ✅          |
 | History preserved on rollback (never deleted)   |        ❌        |          ✅          |
+| Declared indexes & validators (`converge`)      |        ❌        |          ✅          |
 | Adopt an existing `migrate-mongo` changelog     |        —        | ✅ `migronaut import` |
 
 <sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026 (v14: optional
@@ -101,6 +115,8 @@ via a `client` argument; `migronaut` exposes the same plus a declarative per-fil
 | Changelog written inside the migration's transaction |   ❌        |          ✅          |
 | Credentials masked in errors, logs and `--json` |        ❌        |          ✅          |
 | Pino-compatible logger                          |        ❌        |          ✅          |
+| BullMQ queue adapter (`/bullmq` entry point)    |        ❌        |          ✅          |
+| Declared indexes & validators (`converge`)      |        ❌        |          ✅          |
 | Node floor                                      |      ≥ 18       |      ≥ 22.18        |
 
 <sub>Compared against `mongo-migrate-kit` 1.2.2 — the version this project forked from. The Node
@@ -161,7 +177,7 @@ Full docs, guides, and the API reference live at
 - [Core Concepts](https://migronaut.vercel.app/guide/concepts) — migrations, batches, the changelog, locking
 - [Getting Started](https://migronaut.vercel.app/guide/getting-started) & [Tutorial](https://migronaut.vercel.app/guide/tutorial)
 - [Configuration](https://migronaut.vercel.app/guide/configuration) · [Writing Migrations](https://migronaut.vercel.app/guide/writing-migrations) · [Transactions](https://migronaut.vercel.app/guide/transactions) · [Hooks](https://migronaut.vercel.app/guide/hooks)
-- [Programmatic API](https://migronaut.vercel.app/guide/api) · [CI/CD](https://migronaut.vercel.app/guide/ci-cd) · [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting)
+- [Programmatic API](https://migronaut.vercel.app/guide/api) · [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq) · [OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry) · [CI/CD](https://migronaut.vercel.app/guide/ci-cd) · [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting)
 - Reference: [CLI Cheatsheet](https://migronaut.vercel.app/reference/cli) · [Error Codes](https://migronaut.vercel.app/reference/error-codes)
 
 ---
@@ -180,6 +196,7 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--
 | `migronaut up [file]` | Run all pending migrations, one named file, or up to `--to <file>` |
 | `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, one file, or to `--to <file>` |
 | `migronaut redo [file]` | Roll back then re-apply (the last migration, or one file) |
+| `migronaut converge` | Bring declared collections — indexes and validators — to their declared state |
 | `migronaut status` | Print the full migration status table (`--check` to fail CI on pending) |
 | `migronaut list` | List migrations, filtered by status |
 | `migronaut dry-run <up\|down> [file]` | Preview a run without touching the database |
@@ -187,8 +204,8 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--
 | `migronaut lock` | Show who currently holds the migration lock |
 | `migronaut unlock` | Force-release a stuck lock left behind by a crashed run |
 
-Most data commands (`up`, `down`, `redo`, `status`, `list`, `dry-run`, `import`, `baseline`,
-`create`, `audit`, `lock`, `unlock`) accept **`--json`** for machine-readable output — see
+Most data commands (`up`, `down`, `redo`, `converge`, `status`, `list`, `dry-run`, `import`,
+`baseline`, `create`, `audit`, `lock`, `unlock`) accept **`--json`** for machine-readable output — see
 [CI & automation](#ci--automation).
 
 <details>
@@ -236,6 +253,8 @@ migronaut up <file> --force        # re-run an ALREADY-applied file (asks for co
 migronaut up <file> --force --yes  # confirm a re-run non-interactively (required with --json)
 migronaut up --strict              # abort on any checksum mismatch
 migronaut up --no-lock             # skip the concurrency lock (local dev only)
+migronaut up --converge            # converge the declared collections afterwards (bulk runs only)
+migronaut up --no-converge         # don't, even with convergeAfterUp on
 migronaut up --json                # machine-readable output (array of run results)
 
 # down — roll back
@@ -252,6 +271,15 @@ migronaut redo                     # the most recently applied migration
 migronaut redo <file>              # a specific file
 migronaut redo --no-lock           # skip the lock (dev only)
 migronaut redo --json              # machine-readable output (array of run results)
+
+# converge — declared indexes and validators → the database
+migronaut converge                 # plan, ask before any drop/rebuild, then apply
+migronaut converge --dry-run       # show the plan, change nothing
+migronaut converge --check         # exit 28 if anything would change (CI gate)
+migronaut converge --prune         # also drop indexes a definition does not declare
+migronaut converge --yes           # no confirmation (required for drops/rebuilds with --json)
+migronaut converge --no-lock       # skip the concurrency lock (local dev only)
+migronaut converge --json          # machine-readable output (the converge result)
 
 # status — full status table
 migronaut status                   # the full status table
@@ -601,6 +629,95 @@ All errors extend `MigronautError` and carry a typed `code` (`LOCK_ALREADY_HELD`
 
 </details>
 
+<details id="declared-collections">
+<summary><b>Declared collections</b> — indexes and validators as an end state, with no migration file per change</summary>
+
+<br>
+
+When what matters is *the final shape* of a collection's indexes and validator — not the history
+of how it got there — declare it and let `migronaut converge` make the difference:
+
+```js
+// migronaut.config.js
+export default {
+  uri: process.env.MIGRONAUT_URI,
+  dbName: 'my_app',
+  collections: [
+    {
+      name: 'users',
+      indexes: [
+        { key: { email: 1 }, unique: true },
+        { key: { createdAt: 1 }, expireAfterSeconds: 60 * 60 * 24 * 30 },
+      ],
+      validator: { $jsonSchema: { bsonType: 'object', required: ['email'] } },
+    },
+  ],
+  collectionsDir: './collections', // …and/or one file per collection
+};
+```
+
+```bash
+migronaut converge --dry-run   # what would change
+migronaut converge             # apply — asks before dropping or rebuilding an index
+migronaut converge --check     # exit 28 on drift: a CI gate
+```
+
+- **Stateless.** Every run reads `listIndexes` / `listCollections` and compares; nothing is
+  recorded. Edit the declaration, converge again.
+- **Safe by default.** Missing indexes are created, a TTL or `hidden` change is applied in place,
+  a changed index is rebuilt (and put back if the rebuild fails). An index you did not declare is
+  **kept and reported** — dropped only with `prune`. An identical index under another name is
+  accepted as is, never silently rebuilt.
+- **Locked like a migration**, and refused before the first write when the plan has a conflict.
+- **After every deploy** with `convergeAfterUp: true` — a bulk `up` then ends by converging,
+  under the same lock — or as a [queue job](https://migronaut.vercel.app/guide/bullmq#converge-jobs).
+
+Experimental in 2.1. → **[Declared Collections](https://migronaut.vercel.app/guide/collections)**
+
+</details>
+
+<details>
+<summary><b>Migrations as a queue</b> — a migration service on BullMQ, one migration per job</summary>
+
+<br>
+
+`@alexify/migronaut/bullmq` enqueues each pending migration as its own BullMQ job and applies them
+in order with a single-concurrency worker. BullMQ is **injected** — it is your dependency, never
+migronaut's:
+
+```js
+const { Queue, Worker, QueueEvents } = require('bullmq');
+const { createMigrationQueue } = require('@alexify/migronaut/bullmq');
+
+const mq = createMigrationQueue({
+  config: { uri: process.env.MIGRONAUT_URI, dbName: 'my_app' },
+  bullmq: { Queue, Worker, QueueEvents },
+  connection: { host: 'redis', port: 6379 },
+});
+
+await mq.startWorker();                  // the process that applies migrations
+
+const group = await mq.enqueueUp();      // one job per pending migration, one shared batch
+const { results } = await group.wait();  // optional: block until they all finished
+
+await mq.enqueueDown();                  // roll the last batch back, newest first
+await mq.schedule({ every: 300_000 });   // or keep the database migrated on a schedule
+await mq.enqueueConverge();              // declared indexes and validators, as a job
+```
+
+- **Order comes from MongoDB, not from Redis.** Every job is a normal single-file run under the
+  usual lock, and refuses while an earlier migration is still pending — so a failed migration
+  stops the line (`MIGRATION_BLOCKED`), and a CLI `migronaut up` at the same moment is safe.
+- **One attempt per job, on purpose** — a queue retry would let later migrations overtake the
+  failed one. Duplicate enqueues are deduplicated; an already-applied migration completes as
+  `skipped`.
+- **Bring your own Worker** with `createMigrationProcessor()` (NestJS, BullMQ Pro).
+
+→ **[Migrations as a Queue](https://migronaut.vercel.app/guide/bullmq)** ·
+[runnable example service](examples/migration-service)
+
+</details>
+
 ---
 
 ## Configuration
@@ -633,18 +750,99 @@ export default {
   // ── Bookkeeping collections ─────────────────────────────────────────────
   migrationsCollection: '_migronaut_migrations', // the append-only audit trail
   lockCollection: '_migronaut_locks',            // the concurrency lock
+  convergeLogCollection: '_migronaut_converge',  // what each converge changed
   lockTTLSeconds: 60,                       // a lock older than this is reclaimable
 
   // ── Safety ──────────────────────────────────────────────────────────────
   strict: false,        // true → abort on a checksum mismatch (instead of warn + skip)
   useTransaction: false, // true → wrap every migration in a transaction (override per file)
 
+  // ── Declared collections (experimental) — see `migronaut converge` ──────
+  // collections: [{ name: 'users', indexes: [{ key: { email: 1 }, unique: true }] }],
+  // collectionsDir: './collections', // one definition file per collection
+  // convergeAfterUp: false,          // true → every bulk `up` ends by converging
+
   // ── Code-only options (omit in migronaut.config.json) ─────────────────────────
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
   // mongoose: myMongooseInstance, // pass if your migrations use Mongoose models
   // logger: null,                 // null silences all output; a pino instance works directly
+  // generateId: ulid,             // your id format for run ids — any sync `() => string`
+  // telemetry: { tracer, meter }, // OpenTelemetry, from your own @opentelemetry/api
 };
 ```
+
+<details>
+<summary><b>Custom id format</b> — ULID, CUID, UUIDv7 or anything else instead of UUIDs</summary>
+
+<br>
+
+Every run gets a `runId` — stamped on its changelog records, events and log lines, and stored as
+the lock's owner token — and every queue enqueue gets a `groupId`. Both are `crypto.randomUUID()`
+by default. Pass `generateId` to mint them with the generator the rest of your system uses:
+
+```js
+const { ulid } = require('ulid');
+const { runMigrations } = require('@alexify/migronaut');
+
+await runMigrations({
+  uri: process.env.MIGRONAUT_URI,
+  dbName: 'my_app',
+  generateId: ulid, // createId (cuid2), nanoid, uuidv7 … pass straight through
+});
+```
+
+It is called with no arguments and must synchronously return a non-empty string of at most 128
+characters; anything else fails the run with `CONFIG_INVALID` before a migration starts. Ids are
+for correlation only — the lock carries a token of its own, so a generator that repeats a value
+can never let two runs hold the lock at once.
+
+</details>
+
+<details>
+<summary><b>OpenTelemetry</b> — a span per run and per migration, and their durations as metrics</summary>
+
+<br>
+
+Pass a tracer and/or a meter from your own `@opentelemetry/api` — migronaut never imports it:
+
+```js
+const { metrics, trace } = require('@opentelemetry/api');
+const { runMigrations } = require('@alexify/migronaut');
+
+await runMigrations({
+  uri: process.env.MIGRONAUT_URI,
+  dbName: 'my_app',
+  telemetry: {
+    tracer: trace.getTracer('@alexify/migronaut'),
+    meter: metrics.getMeter('@alexify/migronaut'),
+  },
+});
+```
+
+```
+migronaut.run                          one per run, once it holds the lock
+└─ migronaut.migration                 one per migration — the ACTIVE span while it runs
+   ├─ insert users                     ← your instrumented MongoDB driver nests here
+   └─ update _migronaut_migrations
+```
+
+That nesting is the point. An instrumented driver only records a command that has a parent span,
+and a migration run at application startup has none — so without this, the driver's spans for your
+migrations are simply missing. A [lifecycle event](#advanced-features) can tell you a migration
+started; only a span opened inside the kit can be the parent of what it does next.
+
+The meter gets `migronaut.run.duration`, `migronaut.migration.duration` and
+`migronaut.lock.acquire.duration` (histograms, seconds), plus the counters `migronaut.lock.refused`
+and `migronaut.lock.lost`. A failure sets the span's status to `ERROR` — with the message redacted
+like every log line — and `error.type` to the typed error code. A tracer or meter that throws never
+fails a run.
+
+Through the [BullMQ adapter](https://migronaut.vercel.app/guide/bullmq), add
+`bullmq: { Queue, Worker, telemetry: new BullMQOtel({ tracerName }) }` and one trace runs from the
+request that enqueued to the MongoDB commands in the worker. Full guide:
+[OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry).
+
+</details>
 
 <details>
 <summary><b>Structured logging with pino</b> — the logger option is pino-compatible</summary>
@@ -683,6 +881,7 @@ optional rather than merely discouraged:
 | `MIGRONAUT_MIGRATIONS_DIR` | `migrationsDir` | `./migrations` |
 | `MIGRONAUT_COLLECTION` | `migrationsCollection` | `_migronaut_migrations` |
 | `MIGRONAUT_LOCK_COLLECTION` | `lockCollection` | `_migronaut_locks` |
+| `MIGRONAUT_CONVERGE_LOG_COLLECTION` | `convergeLogCollection` | `_migronaut_converge` |
 | `MIGRONAUT_LOCK_TTL` | `lockTTLSeconds` | `60` |
 | `MIGRONAUT_STRICT` | `strict` | `false` |
 | `MIGRONAUT_USE_TRANSACTION` | `useTransaction` | `false` |
@@ -695,10 +894,13 @@ optional rather than merely discouraged:
 | `MIGRONAUT_ON_OUT_OF_ORDER` | `onOutOfOrder` | `warn` |
 | `MIGRONAUT_ENSURE_INDEXES` | `ensureIndexes` | `true` |
 | `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` | `false` |
+| `MIGRONAUT_COLLECTIONS_DIR` | `collectionsDir` | — *(none read)* |
+| `MIGRONAUT_CONVERGE_AFTER_UP` | `convergeAfterUp` | `false` |
 | `MIGRONAUT_ENV_FILE` | `envFile` | `.env` |
 
-`fileExtensions`, `clientOptions`, `client`, `mongoose`, `hooks` and `logger` are config-file/API
-only — they aren't scalars, so no environment variable can express them.
+`fileExtensions`, `clientOptions`, `collections`, `client`, `mongoose`, `hooks`, `logger`,
+`generateId` and `telemetry` are config-file/API only — they aren't scalars, so no environment
+variable can express them.
 
 A value that doesn't parse is **rejected, never coerced**: `MIGRONAUT_STRICT=on` or
 `MIGRONAUT_LOCK_TTL=abc` fails with an error naming the variable, rather than quietly turning a

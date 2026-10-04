@@ -30,6 +30,13 @@ production run before committing to it.
    • 20260605120500-backfill-status.js
 ```
 
+::: tip Declared collections are not previewed here
+With `convergeAfterUp` on, a bulk `up` ends by converging the
+[declared collections](/guide/collections) — but that plan only means something against the
+database the migrations leave behind, so `dry-run up` does not guess at it. It points you at
+[`migronaut converge --dry-run`](/commands/converge), to run once the migrations are applied.
+:::
+
 ## Options
 
 | Option | Description |
@@ -42,6 +49,11 @@ production run before committing to it.
 | `--json` | Emit the planned rows as JSON. |
 
 Plus the [global flags](/guide/configuration#global-cli-flags).
+
+A preview applies the same refusals as the run: a rollback that would touch a forward-only record
+is rejected, and — since v2.1.0 — so is a bulk `dry-run up` under
+[`onOutOfOrder: 'error'`](/guide/configuration#all-options) when a pending file was merged late
+(under the default `'warn'` it prints the warning and still lists the plan).
 
 ::: tip Read-only
 Because a dry-run never writes, it takes no concurrency lock and is always safe to run against

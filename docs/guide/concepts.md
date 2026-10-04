@@ -17,6 +17,12 @@ Each migration has two halves:
 - **`up`** — apply the change (create the index).
 - **`down`** — revert it (drop the index).
 
+::: tip Indexes and validators without the history
+When only the *current* shape of a collection's indexes and validator matters, you can
+[declare it](/guide/collections) instead and let `migronaut converge` apply the difference — no
+migration file per change.
+:::
+
 ## The changelog
 
 `migronaut` records every migration it has applied in a collection called `_migronaut_migrations` (the

@@ -50,6 +50,19 @@ describe('MigratorKit.status (integration)', () => {
     assert.strictEqual(rows[0]?.checksumOk, false);
   });
 
+  it('should skip hashing for list(…, { checksums: false }) — names and dates only', async () => {
+    setup();
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    await migrator.up();
+    project.tamper('0001-a.ts');
+    const [row] = await migrator.list('applied', { checksums: false });
+    assert.strictEqual(row.file, '0001-a.ts');
+    assert.ok(row.appliedAt instanceof Date);
+    assert.strictEqual(row.checksumOk, null, 'not hashed, so not judged');
+    assert.strictEqual((await migrator.list('applied'))[0].checksumOk, false);
+    await assert.rejects(migrator.list('applied', { checksums: 'no' }), /boolean/);
+  });
+
   it('should report checksumOk=null for pending files', async () => {
     setup();
     project.write('0001-a.ts', insertMigration('things', 'a'));

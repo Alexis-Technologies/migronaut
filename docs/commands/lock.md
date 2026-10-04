@@ -22,7 +22,7 @@ migronaut lock --json   # machine-readable { held, holder }
 ```
 
 ```
-Lock held by pid 48213 on deploy-runner-7 (ci) since 2026-06-05T12:01:33.412Z
+Lock held by pid 48213 on deploy-runner-7 (ci) since 2026-06-05T12:01:33.412Z — run 0195f6a2-4c1b-7c3e-9a51-3b2d1e0f9a8b
 ```
 
 When nothing holds it:
@@ -48,14 +48,18 @@ Plus the [global flags](/guide/configuration#global-cli-flags): `--uri`, `--db`,
     "lockedAt": "2026-06-05T12:01:33.412Z",
     "pid": 48213,
     "host": "deploy-runner-7",
-    "executedBy": "ci"
+    "executedBy": "ci",
+    "runId": "0195f6a2-4c1b-7c3e-9a51-3b2d1e0f9a8b",
+    "ttlMs": 60000
   }
 }
 ```
 
 `lockedAt` is the last time the lock was acquired **or renewed** — a healthy long migration refreshes
 it on a heartbeat every `lockTTLSeconds / 2`. So an old `lockedAt` is the signal to look for: it means
-nothing has renewed the lock, and the holder is probably gone.
+nothing has renewed the lock, and the holder is probably gone. `runId` names the run that holds it
+— the same id on its log lines, its events and the changelog records it writes; `ttlMs` is the
+holder's own lock TTL (both are absent from a lock taken by a release before 2.1).
 
 The holder view is deliberately limited to these four fields. The internal owner token is never
 exposed, so this output is safe to paste into an incident channel.

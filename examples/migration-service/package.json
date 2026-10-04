@@ -1,0 +1,25 @@
+{
+  "name": "migronaut-migration-service-example",
+  "private": true,
+  "description": "A migration service: @alexify/migronaut behind a BullMQ queue and a plain node:http API",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "api": "ROLE=api node server.js",
+    "worker": "ROLE=worker node server.js"
+  },
+  "dependencies": {
+    "@alexify/migronaut": "file:../..",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/instrumentation-http": "^0.222.0",
+    "@opentelemetry/instrumentation-mongodb": "^0.75.0",
+    "@opentelemetry/sdk-node": "^0.222.0",
+    "bullmq": "^6.3.10",
+    "bullmq-otel": "^2.0.1",
+    "ioredis": "^5.11.1",
+    "mongodb": "^6.12.0"
+  }
+}

@@ -126,3 +126,8 @@ dist
 docs/.vitepress/dist
 docs/.vitepress/cache
 /.claude/launch.json
+
+# The runnable examples install on their own (not workspace members) — their
+# lockfiles are not part of this repository.
+examples/**/pnpm-lock.yaml
+examples/**/package-lock.json

@@ -11,6 +11,7 @@ function registerDown(program) {
       ['--batch <n>', 'Revert a specific batch number'],
       ['--steps <n>', 'Revert the last N migrations, regardless of batch'],
       ['--to <file>', 'Revert everything applied after this file (it stays applied)'],
+      ['--reason <text>', 'Why — recorded on the changelog with the run (who: the OS user)'],
     ],
     lockable: true,
     mutating: true,
@@ -22,6 +23,7 @@ function registerDown(program) {
         ...(opts.batch !== undefined ? { batch: Number(opts.batch) } : {}),
         ...(opts.steps !== undefined ? { steps: Number(opts.steps) } : {}),
         ...(opts.to ? { to: opts.to } : {}),
+        ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
       }),
     // No render: core logs every ↩ Reverted line itself.
   });

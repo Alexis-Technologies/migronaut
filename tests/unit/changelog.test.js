@@ -46,7 +46,15 @@ describe('Changelog (mocked DB)', () => {
     // fields preserved across a re-import.
     assert.strictEqual(first.update.$set.name, undefined);
     assert.ok(first.update.$setOnInsert.firstAppliedAt instanceof Date);
-    assert.deepStrictEqual(first.update.$unset, { revertedAt: '', failedAt: '', error: '' });
+    assert.deepStrictEqual(first.update.$unset, {
+      revertedAt: '',
+      revertRequestedBy: '',
+      revertReason: '',
+      failedAt: '',
+      error: '',
+      requestedBy: '',
+      reason: '',
+    });
   });
 
   it('markAppliedBulk should skip the round trip entirely for zero records', async () => {
@@ -75,7 +83,15 @@ describe('Changelog (mocked DB)', () => {
     // firstAppliedAt survives a re-apply; a stale revertedAt — and the trace
     // of an earlier failed attempt — are cleared.
     assert.ok(update.$setOnInsert.firstAppliedAt instanceof Date);
-    assert.deepStrictEqual(update.$unset, { revertedAt: '', failedAt: '', error: '' });
+    assert.deepStrictEqual(update.$unset, {
+      revertedAt: '',
+      revertRequestedBy: '',
+      revertReason: '',
+      failedAt: '',
+      error: '',
+      requestedBy: '',
+      reason: '',
+    });
   });
 
   it('markApplied should stamp appliedAt in server time when the record has none', async () => {
@@ -167,5 +183,34 @@ describe('Changelog (mocked DB)', () => {
     const found = await new Changelog('_migronaut_migrations').getByName(db, 'a.ts');
     assert.deepStrictEqual(collection.findOne.mock.calls[0].arguments, [{ name: 'a.ts' }]);
     assert.strictEqual(found?.name, 'a.ts');
+  });
+});
+
+describe('Changelog — who asked, and why', () => {
+  it('should keep the requester of an apply, and clear a stale one', async () => {
+    const calls = [];
+    const db = {
+      collection: () => ({
+        updateOne: async (filter, update) => {
+          calls.push(update);
+          return { matchedCount: 1 };
+        },
+      }),
+    };
+    const changelog = new Changelog('_migronaut_migrations');
+    await changelog.markApplied(db, { name: 'a.js', requestedBy: 'alice', reason: 'TICKET-1' });
+    assert.deepStrictEqual(
+      [calls[0].$set.requestedBy, calls[0].$set.reason],
+      ['alice', 'TICKET-1'],
+    );
+    assert.ok(!('requestedBy' in calls[0].$unset));
+    await changelog.markReverted(db, 'a.js', undefined, { requestedBy: 'bob', reason: 'rollback' });
+    assert.deepStrictEqual(
+      [calls[1].$set.revertRequestedBy, calls[1].$set.revertReason],
+      ['bob', 'rollback'],
+    );
+    assert.strictEqual(calls[1].$unset, undefined);
+    await changelog.markReverted(db, 'a.js');
+    assert.deepStrictEqual(calls[2].$unset, { revertRequestedBy: '', revertReason: '' });
   });
 });
