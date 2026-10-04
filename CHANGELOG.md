@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
-## v2.1.0 — 2026-10-03
+## v2.1.0 — 2026-10-04
 
 Migrations as a queue, ids in your own format, OpenTelemetry, and declared collections. Additive:
 nothing changes for anyone who uses none of them, with the narrow exceptions listed under
