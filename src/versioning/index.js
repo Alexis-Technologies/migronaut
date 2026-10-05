@@ -12,6 +12,7 @@ const {
   updateWithRevision,
 } = require('./occ.js');
 const { isVersion } = require('./document.js');
+const { versioningPlugin } = require('./mongoose.js');
 const { defineShapes } = require('./registry.js');
 const { upcaster } = require('./upcaster.js');
 
@@ -37,6 +38,9 @@ module.exports = {
   findOneAndUpdateWithRevision,
   retryOnConflict,
   bumpRevision,
+
+  // Mongoose
+  versioningPlugin,
 
   // Errors — the same classes the package root exports
   MigronautError,

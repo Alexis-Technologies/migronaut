@@ -2,6 +2,7 @@ const { ConfigInvalidError, ShapeVersionError } = require('../errors/index.js');
 const { resolveVersioning } = require('./config.js');
 const { stampDocument, versionOf } = require('./document.js');
 const { isPlainObject, touchedFields } = require('./internal.js');
+const { applyVersioningPlugin } = require('./mongoose.js');
 const { createUpcaster } = require('./upcaster.js');
 
 /**
@@ -100,6 +101,11 @@ function defineShapes(definitions) {
     isCurrent: (name, doc) => docVersion(name, doc) === get(name).current,
     isVersion: (name, doc, version) => docVersion(name, doc) === version,
     stamp,
+    /** The Mongoose plugin for this collection: `schema.plugin(shapes.plugin('orders'))` */
+    plugin: (name) => {
+      const versioning = get(name);
+      return (schema) => applyVersioningPlugin(schema, versioning);
+    },
     /** An upcaster over this collection's versioning — see upcaster.js */
     upcaster: (name, steps, options) =>
       createUpcaster(get(name), steps, { ...options, collection: name }),

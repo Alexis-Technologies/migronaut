@@ -1,4 +1,5 @@
 import type { Collection, Db } from 'mongodb';
+import { Schema } from 'mongoose';
 import { expectAssignable, expectError, expectType } from 'tsd';
 import { RevisionConflictError as RootRevisionConflictError } from '../../index.js';
 import {
@@ -16,6 +17,7 @@ import {
   retryOnConflict,
   updateWithRevision,
   upcaster,
+  versioningPlugin,
 } from '../../versioning.js';
 
 declare const db: Db;
@@ -82,3 +84,10 @@ expectType<(doc: any) => Record<string, unknown>>(lift.step(1));
 expectType<Upcaster>(upcaster({ current: 1, min: 0 }, { 0: (doc) => doc }, { newer: 'keep' }));
 expectError(upcaster({ current: 2 }, { 1: (doc: object) => doc }, { newer: 'drop' }));
 expectType<Upcaster>(shapes.upcaster('orders', { 1: (doc) => doc }));
+
+// ─── Mongoose ─────────────────────────────────────────────────────────────────
+const schema = new Schema({ name: String });
+schema.plugin(versioningPlugin, { versioning: { current: 2 } });
+expectType<void>(versioningPlugin(schema, { current: 1, revision: false }));
+schema.plugin(shapes.plugin('orders'));
+expectError(versioningPlugin({}, { current: 1 }));

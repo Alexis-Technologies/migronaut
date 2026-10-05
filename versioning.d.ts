@@ -374,6 +374,35 @@ export function upcaster(
   options?: UpcasterOptions,
 ): Upcaster;
 
+// ─── Mongoose ─────────────────────────────────────────────────────────────────
+
+/**
+ * The schema methods the plugin uses — a Mongoose `Schema` satisfies it.
+ * Structural, so this file never imports mongoose.
+ */
+export interface MongooseSchemaLike {
+  set(key: any, value: any): unknown;
+  get(key: any): unknown;
+  add(definition: any): unknown;
+  path(name: any): unknown;
+  pre(hook: any, fn: any): unknown;
+}
+
+/**
+ * The Mongoose plugin for a versioned collection:
+ * `schema.plugin(versioningPlugin, require('./collections/orders'))`.
+ * The revision becomes the schema's `versionKey` with `optimisticConcurrency`
+ * (a stale `save()` throws Mongoose's `VersionError`); a new document is
+ * stamped with the current version (the path has no default, so a loaded
+ * legacy document never is); `updateOne`/`updateMany`/`findOneAndUpdate` bump
+ * the revision and stamp an upserted document. Lean `insertMany`, `bulkWrite`,
+ * replacements and pipeline updates are not covered.
+ */
+export function versioningPlugin(
+  schema: MongooseSchemaLike,
+  definition: CollectionDefinitionFile | CollectionVersioning,
+): void;
+
 // ─── The registry ─────────────────────────────────────────────────────────────
 
 /** The fields `stamp` adds — the default names */
@@ -404,6 +433,8 @@ export interface ShapeRegistry<Name extends string = string> {
   stamp<D extends object>(name: Name, doc: D): D & VersionStamp;
   /** An upcaster over the collection's versioning */
   upcaster(name: Name, steps: UpcastSteps, options?: UpcasterOptions): Upcaster;
+  /** The Mongoose plugin for the collection: `schema.plugin(shapes.plugin('orders'))` */
+  plugin(name: Name): (schema: MongooseSchemaLike) => void;
   /** `stamp` for one document or each of an array — for `insertOne` / `insertMany` */
   onInsert<D extends object>(name: Name, docs: readonly D[]): (D & VersionStamp)[];
   onInsert<D extends object>(name: Name, docs: D): D & VersionStamp;
