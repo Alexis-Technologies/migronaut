@@ -152,6 +152,20 @@ function assertConvergeAfterUpValid(converge, filename, to) {
   }
 }
 
+/**
+ * `onBackgroundPending`: what a run does at a migration that `requires` a
+ * background migration not completed yet — `'error'` (throw
+ * BackgroundPendingError) or `'stop'` (end the run there, cleanly).
+ */
+function assertBackgroundPendingValid(onBackgroundPending) {
+  if (onBackgroundPending === undefined) return;
+  if (onBackgroundPending !== 'error' && onBackgroundPending !== 'stop') {
+    throw new ConfigInvalidError("onBackgroundPending must be 'error' or 'stop'", {
+      onBackgroundPending,
+    });
+  }
+}
+
 /** `up(filename, options)` */
 function assertUpOptions(filename, options) {
   assertFilename(filename);
@@ -167,6 +181,7 @@ function assertUpOptions(filename, options) {
   assertOrderedValid(options.ordered, filename);
   assertConvergeAfterUpValid(options.converge, filename, options.to);
   assertChecksumValid(options.checksum, filename);
+  assertBackgroundPendingValid(options.onBackgroundPending);
   assertActorValid(options);
 }
 
@@ -254,6 +269,7 @@ function assertImportOptions(options) {
 }
 
 module.exports = {
+  assertBackgroundPendingValid,
   assertConvergeOptions,
   assertDownOptions,
   assertDryRunOptions,
