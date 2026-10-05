@@ -561,3 +561,77 @@ describe('telemetry — never in the way (integration)', () => {
     assert.deepStrictEqual(await metrics.collect(), {});
   });
 });
+
+describe('telemetry — background migrations (integration)', () => {
+  it('should open a span per coordinator step and per lease held, the probes nested in them', async () => {
+    project.write(
+      '0001-orders.js',
+      `export const background = {
+  collection: 'orders',
+  from: 1,
+  to: 2,
+  pauseMs: 0,
+  batchSize: 10,
+  migrate: (doc) => {
+    globalThis.__migronautProbe('bg');
+    return { ...doc, done: true };
+  },
+};
+`,
+    );
+    await mongo.db
+      .collection('orders')
+      .insertMany(Array.from({ length: 25 }, (_, i) => ({ __v: 1, i })));
+    const kit = migrator();
+    await kit.up();
+    tracing.reset();
+    const status = await kit.runBackground('0001-orders.js');
+    await kit.disconnect();
+    assert.strictEqual(status.status, 'completed');
+
+    const coordinators = tracing.named('migronaut.background.coordinate');
+    const slices = tracing.named('migronaut.background.slice');
+    assert.ok(coordinators.length >= 2, 'one per step');
+    assert.ok(slices.length >= 1);
+    assert.strictEqual(slices[0].attributes['migronaut.background.name'], '0001-orders.js');
+    assert.ok(
+      ['exhausted', 'yielded'].includes(slices[0].attributes['migronaut.background.outcome']),
+    );
+    assert.strictEqual(coordinators.at(-1).attributes['migronaut.background.outcome'], 'done');
+    const sliceIds = new Set(slices.map(idOf));
+    const probes = tracing.named('probe bg');
+    assert.strictEqual(probes.length, 25);
+    assert.ok(
+      probes.every((probe) => sliceIds.has(parentIdOf(probe))),
+      'nested in the slice',
+    );
+    assert.deepStrictEqual(runSpans(), [], 'not a run');
+
+    const data = await metrics.collect();
+    const documents = data['migronaut.background.documents'];
+    const migrated = documents.find(
+      (point) => point.attributes['migronaut.background.result'] === 'migrated',
+    );
+    assert.strictEqual(migrated.value, 25);
+    assert.ok(data['migronaut.background.slice.duration'].length >= 1);
+    assert.ok(data['migronaut.background.batch.write.duration'].length >= 1);
+  });
+
+  it('should make no span for a coordinator step that found the lock busy', async () => {
+    project.write(
+      '0001-orders.js',
+      `export const background = { collection: 'orders', from: 1, to: 2, migrate: (d) => d };\n`,
+    );
+    const kit = migrator();
+    await kit.up();
+    const lock = new MigrationLock(mongo.db, LOCK_COLLECTION, 60, {
+      id: 'background:0001-orders.js',
+    });
+    await lock.acquire();
+    tracing.reset();
+    assert.strictEqual((await kit.coordinateBackground('0001-orders.js')).next, 'busy');
+    await lock.release();
+    await kit.disconnect();
+    assert.deepStrictEqual(tracing.named('migronaut.background.coordinate'), []);
+  });
+});

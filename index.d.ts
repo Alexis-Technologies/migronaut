@@ -1605,6 +1605,18 @@ export interface MigronautEvents {
   'converge:action': (event: ConvergeActionEvent) => void;
   'converge:wait': (event: ConvergeWaitEvent) => void;
   'converge:end': (event: ConvergeEndEvent) => void;
+  'background:registered': (event: BackgroundRegisteredEvent) => void;
+  'background:unblocked': (event: BackgroundEvent) => void;
+  'background:partitioned': (event: BackgroundEvent) => void;
+  'background:pass': (event: BackgroundEvent) => void;
+  'background:slice:start': (event: BackgroundEvent) => void;
+  'background:batch': (event: BackgroundEvent) => void;
+  'background:slice:end': (event: BackgroundEvent) => void;
+  'background:lease:lost': (event: BackgroundEvent) => void;
+  'background:throttle': (event: BackgroundEvent) => void;
+  'background:control': (event: BackgroundEvent) => void;
+  'background:completed': (event: BackgroundEvent) => void;
+  'background:failed': (event: BackgroundEvent) => void;
 }
 
 /** One check performed by {@link MigratorKit.audit} */
@@ -1853,6 +1865,225 @@ export class MigratorKit extends EventEmitter {
    * per converge that changed something or failed. Read-only.
    */
   convergeHistory(options?: { limit?: number }): Promise<ConvergeHistoryEntry[]>;
+
+  // ─── Background migrations (experimental, new in 2.3) ─────────────────────
+  // Reentrant: none of these is a run — no migration lock, no run id; one kit
+  // may drive many at once.
+
+  /** One coordinator step — see {@link BackgroundCoordinatorAnswer}. @experimental */
+  coordinateBackground(
+    name: string,
+    options?: { signal?: AbortSignal; driver?: BackgroundDriver },
+  ): Promise<BackgroundCoordinatorAnswer>;
+  /** One slice of one lane: claim a partition and a slot, work it, release. @experimental */
+  runBackgroundSlice(
+    name: string,
+    options?: { signal?: AbortSignal; sliceMs?: number },
+  ): Promise<BackgroundSliceResult>;
+  /**
+   * Drive a background migration from this process until it is done (or one
+   * round, `untilDone: false`) with up to `concurrency` lanes (≤ its
+   * `maxParallel`). A failed one throws {@link BackgroundFailedError}; a stop
+   * {@link RunAbortedError} — it goes on from there next time. @experimental
+   */
+  runBackground(
+    name: string,
+    options?: {
+      signal?: AbortSignal;
+      sliceMs?: number;
+      untilDone?: boolean;
+      concurrency?: number;
+    },
+  ): Promise<BackgroundStatus>;
+  /** One background migration's status, or `null` when it is not registered. @experimental */
+  backgroundStatus(name: string): Promise<BackgroundStatus | null>;
+  /** Every background migration's status, oldest registration first. @experimental */
+  backgroundStatus(): Promise<BackgroundStatus[]>;
+  /** The partitions of a background migration's latest generation. @experimental */
+  backgroundPartitions(name: string): Promise<BackgroundPartitionInfo[]>;
+  /** The background migrations with work to do (blocked ones unblocked on the way). @experimental */
+  runnableBackground(): Promise<{ migration: string; status: BackgroundState }[]>;
+  /** Pause; its lanes stop at the next batch (`wait` until they have). @experimental */
+  pauseBackground(name: string, options?: BackgroundControlOptions): Promise<BackgroundControlResult>;
+  /** Resume a paused one. @experimental */
+  resumeBackground(name: string, options?: BackgroundControlOptions): Promise<BackgroundControlResult>;
+  /** Cancel (`wait` until its lanes have stopped). @experimental */
+  cancelBackground(name: string, options?: BackgroundControlOptions): Promise<BackgroundControlResult>;
+  /**
+   * Retry a failed or cancelled one — the same generation, or `fromStart`;
+   * `repin` pins the file on disk first. A completed one is reopened. @experimental
+   */
+  retryBackground(
+    name: string,
+    options?: BackgroundControlOptions & { fromStart?: boolean; repin?: boolean },
+  ): Promise<BackgroundControlResult>;
+  /** Pin the file on disk (checksum, spec — and the changelog's checksum). @experimental */
+  repinBackground(
+    name: string,
+    options?: BackgroundControlOptions,
+  ): Promise<BackgroundControlResult & { replan: boolean; checksum: string }>;
+  /** Clear the coordinator lock and every lease of a stuck one. @experimental */
+  unlockBackground(name: string): Promise<{ lock: boolean; leases: number }>;
+}
+
+// ─── Background migration results ─────────────────────────────────────────────
+
+/** Where a background migration stands */
+export type BackgroundState =
+  | 'blocked'
+  | 'pending'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/** Who runs a coordinator step: `{ kind, ref?, round? }` — a BullMQ round lets the newest win */
+export interface BackgroundDriver {
+  kind: 'bullmq' | 'runner' | 'cli' | 'inline' | 'local';
+  ref?: string;
+  round?: number;
+}
+
+/** What a coordinator step says to do next */
+export interface BackgroundCoordinatorAnswer {
+  next: 'process' | 'wait' | 'done' | 'busy' | 'superseded';
+  /** `process`: lanes that could start now */
+  lanes?: number;
+  generation?: number;
+  round?: number;
+  /** `done`: where it stands */
+  status?: BackgroundState | 'unregistered';
+  /** `wait`: why — `checksum`, `replan-draining`, `plan-race`, … */
+  reason?: string;
+  /** `done` + `failed`: why */
+  error?: string;
+  waitsFor?: string[];
+  retryAfterMs?: number;
+}
+
+/** Counters of a slice, a partition or a whole background migration */
+export interface BackgroundCounters {
+  scanned?: number;
+  migrated?: number;
+  skipped?: number;
+  conflicts?: number;
+  failed?: number;
+  retried?: number;
+  batches?: number;
+  processed?: number;
+  txnRetries?: number;
+}
+
+/** How a lane's slice ended */
+export interface BackgroundSliceResult {
+  outcome:
+    | 'yielded'
+    | 'exhausted'
+    | 'busy'
+    | 'stale'
+    | 'paused'
+    | 'cancelled'
+    | 'failed'
+    | 'stopped'
+    | 'lost';
+  counters: BackgroundCounters;
+  retryAfterMs?: number;
+  error?: BackgroundFailedError;
+}
+
+/** A background migration, as {@link MigratorKit.backgroundStatus} reports it */
+export interface BackgroundStatus {
+  migration: string;
+  status: BackgroundState;
+  phase: 'partition' | 'process' | 'replan';
+  direction: 'forward' | 'revert';
+  mode: 'declarative' | 'step';
+  collection?: string;
+  from?: number;
+  to?: number;
+  generation: number;
+  pass: number;
+  maxParallel: number;
+  transaction: boolean;
+  totals: BackgroundCounters & { slices?: number; reclaims?: number };
+  /** Distinct documents that failed (within `maxDocumentErrors`) */
+  failedDocuments: number;
+  requires: string[];
+  waitsFor: string[];
+  /** The current plan's partitions by status */
+  partitions?: {
+    total: number;
+    pending: number;
+    running: number;
+    done: number;
+    failed: number;
+    cancelled: number;
+    superseded: number;
+    leased: number;
+  };
+  /** Leases renewed within their TTL — lanes working right now */
+  liveLeases: number;
+  plan?: { method: string; estimate: number; partitions: number; degraded?: string };
+  registeredAt: Date;
+  startedAt?: Date;
+  completedAt?: Date;
+  lastProgressAt?: Date;
+  lastError?: string;
+  description?: string;
+}
+
+/** One partition of a background migration */
+export interface BackgroundPartitionInfo {
+  id: string;
+  generation: number;
+  seq: number;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'cancelled' | 'superseded';
+  scope: Record<string, unknown>;
+  estimate: number;
+  counters: BackgroundCounters;
+  group?: string;
+  lease?: { slot: number; owner: string; host: string; pid: number; renewedAt: Date };
+  throttle?: { batchSize: number; pauseMs: number };
+  claims: number;
+  reclaims: number;
+  failures: number;
+  lastError?: string;
+}
+
+/** Options every background control action takes */
+export interface BackgroundControlOptions {
+  /** Who asked — recorded in its history */
+  requestedBy?: string;
+  /** Why — recorded in its history */
+  reason?: string;
+  /** pause / cancel: resolve once no lane holds a lease any more */
+  wait?: boolean;
+  signal?: AbortSignal;
+}
+
+/** What a control action did */
+export interface BackgroundControlResult {
+  applied: 'changed' | 'unchanged';
+  status: BackgroundState;
+  /** `wait`: whether every lane stopped in time */
+  stopped?: boolean;
+}
+
+/** `background:registered` */
+export interface BackgroundRegisteredEvent {
+  runId?: string;
+  migration: string;
+  status: BackgroundState | 'withdrawn';
+  direction: 'forward' | 'revert';
+  waitsFor?: string[];
+}
+
+/** Any other `background:*` event: the migration it is about, and what happened */
+export interface BackgroundEvent {
+  runId?: string;
+  migration: string;
+  [field: string]: unknown;
 }
 
 // ─── Programmatic entry points ─────────────────────────────────────────────────

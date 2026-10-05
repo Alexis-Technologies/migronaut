@@ -503,10 +503,18 @@ describe('failureText', () => {
 });
 
 describe('metrics', () => {
-  it('should create five duration histograms in seconds and two counters', () => {
+  it('should create eight duration histograms in seconds and seven counters', () => {
     const meter = fakeMeter();
     createTelemetry({ meter });
     assert.deepStrictEqual(Object.keys(meter.instruments).sort(), [
+      'migronaut.background.batch.write.duration',
+      'migronaut.background.documents',
+      'migronaut.background.drift',
+      'migronaut.background.leases.reclaimed',
+      'migronaut.background.slice.duration',
+      'migronaut.background.throttle',
+      'migronaut.background.transaction.retries',
+      'migronaut.background.watch.delay',
       'migronaut.converge.search.wait.duration',
       'migronaut.lock.acquire.duration',
       'migronaut.lock.lost',
@@ -521,6 +529,9 @@ describe('metrics', () => {
       METRICS.LOCK_ACQUIRE_DURATION,
       METRICS.LOCK_WAIT_DURATION,
       METRICS.SEARCH_WAIT_DURATION,
+      METRICS.BACKGROUND_SLICE_DURATION,
+      METRICS.BACKGROUND_BATCH_WRITE_DURATION,
+      METRICS.BACKGROUND_WATCH_DELAY,
     ]) {
       const instrument = meter.instruments[name];
       assert.strictEqual(instrument.kind, 'histogram');
@@ -531,7 +542,15 @@ describe('metrics', () => {
         DURATION_BUCKETS_SECONDS,
       );
     }
-    for (const name of [METRICS.LOCK_REFUSED, METRICS.LOCK_LOST]) {
+    for (const name of [
+      METRICS.LOCK_REFUSED,
+      METRICS.LOCK_LOST,
+      METRICS.BACKGROUND_DOCUMENTS,
+      METRICS.BACKGROUND_THROTTLE,
+      METRICS.BACKGROUND_DRIFT,
+      METRICS.BACKGROUND_TRANSACTION_RETRIES,
+      METRICS.BACKGROUND_LEASES_RECLAIMED,
+    ]) {
       assert.strictEqual(meter.instruments[name].kind, 'counter');
       // A counter of events says what it counts, as the conventions ask.
       assert.match(meter.instruments[name].options.unit, /^\{\w+\}$/);
@@ -774,5 +793,65 @@ describe('createTelemetry — against the real OpenTelemetry SDK', () => {
     assert.strictEqual(data['migronaut.lock.refused'][0].value, 1);
     assert.strictEqual(data['migronaut.lock.lost'][0].value, 1);
     await metrics.stop();
+  });
+});
+
+describe('metrics — background migrations', () => {
+  it('should record slices, documents by result, writes, throttles, drift, retries and reclaims', () => {
+    const meter = fakeMeter();
+    const telemetry = createTelemetry({ meter }, { dbName: 'app' });
+    const at = { 'db.namespace': 'app', 'migronaut.background.name': 'm.js' };
+    telemetry.backgroundSliceEnded({
+      name: 'm.js',
+      durationMs: 1500,
+      outcome: 'yielded',
+      counters: { migrated: 10, skipped: 0, conflicts: 2, failed: 1 },
+    });
+    assert.deepStrictEqual(meter.instruments[METRICS.BACKGROUND_SLICE_DURATION].points, [
+      { value: 1.5, attributes: { ...at, 'migronaut.background.outcome': 'yielded' } },
+    ]);
+    assert.deepStrictEqual(meter.instruments[METRICS.BACKGROUND_DOCUMENTS].points, [
+      { value: 10, attributes: { ...at, 'migronaut.background.result': 'migrated' } },
+      { value: 2, attributes: { ...at, 'migronaut.background.result': 'conflict' } },
+      { value: 1, attributes: { ...at, 'migronaut.background.result': 'failed' } },
+    ]);
+    telemetry.backgroundSliceEnded({
+      name: 'm.js',
+      durationMs: 10,
+      outcome: 'error',
+      error: new Error('x'),
+    });
+    assert.strictEqual(
+      meter.instruments[METRICS.BACKGROUND_SLICE_DURATION].points[1].attributes['error.type'],
+      'Error',
+    );
+    telemetry.backgroundBatchWritten({ name: 'm.js', durationMs: 200, shard: 'rs0' });
+    assert.deepStrictEqual(meter.instruments[METRICS.BACKGROUND_BATCH_WRITE_DURATION].points, [
+      { value: 0.2, attributes: { ...at, 'migronaut.background.shard': 'rs0' } },
+    ]);
+    telemetry.backgroundThrottled({ name: 'm.js', reason: 'slow' });
+    telemetry.backgroundDrift({ name: 'm.js', count: 3 });
+    telemetry.backgroundTransactionRetried({ name: 'm.js', reason: 'write-conflict' });
+    telemetry.backgroundLeasesReclaimed({ name: 'm.js', count: 2 });
+    telemetry.backgroundWatchDelay({ name: 'm.js', delayMs: 50 });
+    assert.strictEqual(meter.instruments[METRICS.BACKGROUND_THROTTLE].points[0].value, 1);
+    assert.strictEqual(meter.instruments[METRICS.BACKGROUND_DRIFT].points[0].value, 3);
+    assert.strictEqual(meter.instruments[METRICS.BACKGROUND_TRANSACTION_RETRIES].points.length, 1);
+    assert.strictEqual(meter.instruments[METRICS.BACKGROUND_LEASES_RECLAIMED].points[0].value, 2);
+    assert.strictEqual(meter.instruments[METRICS.BACKGROUND_WATCH_DELAY].points[0].value, 0.05);
+    // Nothing to count is not a point.
+    telemetry.backgroundLeasesReclaimed({ name: 'm.js', count: 0 });
+    assert.strictEqual(meter.instruments[METRICS.BACKGROUND_LEASES_RECLAIMED].points.length, 1);
+  });
+
+  it('should cost nothing without a meter', () => {
+    const telemetry = createTelemetry({});
+    telemetry.backgroundSliceEnded({
+      name: 'm',
+      durationMs: 1,
+      outcome: 'yielded',
+      counters: { migrated: 1 },
+    });
+    telemetry.backgroundDrift({ name: 'm' });
   });
 });

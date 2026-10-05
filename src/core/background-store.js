@@ -503,8 +503,9 @@ class BackgroundStore {
    * Returns `{ partition, lease }`, `{ busy: true, retryAfterMs }` when every
    * slot is taken, or `{ exhausted: true }` when no partition is left to claim.
    */
-  async claim(name, { generation, plan, maxParallel, ttlMs, owner, shardConcurrency }) {
-    await this.reap(name);
+  async claim(name, { generation, plan, maxParallel, ttlMs, owner, shardConcurrency, onReaped }) {
+    const reaped = await this.reap(name);
+    if (reaped > 0) onReaped?.(reaped);
     const occupied = new Set();
     const perGroup = new Map();
     const leased = await this.#partitions

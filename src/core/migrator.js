@@ -36,8 +36,18 @@ const {
 } = require('../utils/template.js');
 const { safeUsername } = require('../utils/user.js');
 const { runAudit } = require('./audit.js');
+const {
+  control: controlBackground,
+  coordinate,
+  failedError,
+  repin: repinBackgroundState,
+  runSlice,
+  tryUnblock,
+  waitForLanes,
+} = require('./background.js');
 const { resolveBackgroundSpec } = require('./background-spec.js');
 const { BackgroundStore } = require('./background-store.js');
+const { sleep } = require('./background-throttle.js');
 const { runBaseline } = require('./baseline.js');
 const { Changelog } = require('./changelog.js');
 const { ConvergeLog } = require('./converge-log.js');
@@ -145,6 +155,12 @@ class MigratorKit extends EventEmitter {
   #upDefinitions;
   /** The background migrations' store — made on first use (see #backgroundStore) */
   #backgroundStoreInstance;
+  /** Warnings about background migrations said once per kit (a missing index, no lag rights) */
+  #backgroundWarned = new Set();
+  /** The adaptive throttles of this process, per background migration and group */
+  #adaptiveCache = new Map();
+  /** Declared collections, for background specs — resolved once unless migrations reload */
+  #backgroundDefinitions;
 
   constructor(config = {}, options = {}) {
     super();
@@ -2025,7 +2041,10 @@ class MigratorKit extends EventEmitter {
       }
       const config = this.#config;
       if (config.collections !== undefined || config.collectionsDir !== undefined) {
-        for (const definition of await this.#resolveCollections()) {
+        const definitions = config.reloadMigrations
+          ? await this.#resolveCollections()
+          : (this.#backgroundDefinitions ??= await this.#resolveCollections());
+        for (const definition of definitions) {
           if (definition.name === collection) {
             versioning = definition.versioning;
             break;
@@ -2132,6 +2151,382 @@ class MigratorKit extends EventEmitter {
     }
     await store.remove(name, { session });
     return { status: 'withdrawn', direction: 'forward' };
+  }
+  /** What background.js runs with — `owner` names a lane: its lease's owner, its events' runId */
+  #backgroundDeps(owner) {
+    const config = this.#config;
+    const db = this.#requireDb();
+    const stamp = owner ? { runId: owner } : {};
+    return {
+      db,
+      client: this.#client,
+      store: this.#backgroundStore(),
+      logger: this.#logger,
+      fields: (extra) => ({ ...stamp, ...extra }),
+      emit: (event, payload) => this.#emit(event, { ...stamp, ...payload }),
+      lockFor: (name) =>
+        new MigrationLock(db, config.lockCollection, config.lockTTLSeconds, {
+          id: `background:${name}`,
+          label: 'background coordinator lock',
+        }),
+      load: (name) => this.#loadBackground(name),
+      ttlMs: config.lockTTLSeconds * 1000,
+      owner: () => owner,
+      warned: this.#backgroundWarned,
+      adaptiveCache: this.#adaptiveCache,
+      telemetry: this.#telemetry,
+      // The third wrap site: a span per lease held (slice) and per coordinator
+      // step — each opened only once the lease or the lock is held.
+      span: (kind, name, fn) =>
+        this.#telemetry.wrap(
+          kind === 'slice' ? SPANS.BACKGROUND_SLICE : SPANS.BACKGROUND_COORDINATE,
+          { [ATTRIBUTES.BACKGROUND_NAME]: name },
+          async (span) => {
+            const result = await fn();
+            span.set({ [ATTRIBUTES.BACKGROUND_OUTCOME]: result?.outcome ?? result?.next });
+            return result;
+          },
+        ),
+      onCompleted: (name) => this.#unblockDependents(name),
+    };
+  }
+
+  /** A background migration file, loaded and resolved: `{ spec, fns, checksum }` */
+  async #loadBackground(name) {
+    assertMigrationName(name);
+    const filepath = this.#filepath(name);
+    const loaded = await loadMigrationFile(filepath, {
+      reload: this.#config.reloadMigrations,
+      allowBackground: true,
+    });
+    if (loaded.kind !== 'background') {
+      throw new MigrationInvalidExportError(`${name} is not a background migration`, { name });
+    }
+    const { spec, fns } = await this.#backgroundSpec(name, loaded);
+    return { spec, fns, checksum: await computeChecksum(filepath) };
+  }
+
+  /** After one completes: the blocked ones that required it, unblocked if nothing else holds them */
+  async #unblockDependents(name) {
+    const store = this.#backgroundStore();
+    const deps = this.#backgroundDeps();
+    for (const state of await store.list({ requires: name, status: 'blocked' })) {
+      await tryUnblock(deps, state);
+    }
+  }
+
+  /** Config and connection for a background method — no run, no migration lock */
+  async #backgroundReady(name) {
+    if (name !== undefined) assertMigrationName(name);
+    await this.#ensureConfig();
+    await this.connect();
+    await this.#backgroundStore().ensureIndexes();
+  }
+
+  /** The state, or NotAppliedError — a control action needs a registered background migration */
+  async #registered(name) {
+    const state = await this.#backgroundStore().get(name);
+    if (state === null) {
+      throw new NotAppliedError(`Background migration ${name} is not registered — run up first`, {
+        migration: name,
+      });
+    }
+    return state;
+  }
+
+  /**
+   * One coordinator step for a background migration — see background.js.
+   * Reentrant: no run, no migration lock; serialized by its own lock.
+   * @experimental
+   */
+  async coordinateBackground(name, { signal, driver } = {}) {
+    await this.#backgroundReady(name);
+    return coordinate(this.#backgroundDeps(this.#newId()), name, {
+      signal,
+      ...(driver ? { driver } : {}),
+    });
+  }
+
+  /**
+   * One slice of one lane of a background migration: claim a partition and a
+   * slot, work it until `sliceMs` (the spec's by default) runs out, release.
+   * @experimental
+   */
+  async runBackgroundSlice(name, { signal, sliceMs } = {}) {
+    await this.#backgroundReady(name);
+    const owner = this.#newId();
+    return runSlice(this.#backgroundDeps(owner), name, { signal, sliceMs, owner });
+  }
+
+  /**
+   * Drive a background migration from this process — the coordinator and up
+   * to `concurrency` lanes (at most its `maxParallel`) — until it is done
+   * (`untilDone`, the default) or for one round. Resolves to its status; a
+   * failed one throws BackgroundFailedError, a stop RunAbortedError (the
+   * background migration itself goes on from where it was).
+   * @experimental
+   */
+  async runBackground(name, { signal, sliceMs, untilDone = true, concurrency = 1 } = {}) {
+    await this.#backgroundReady(name);
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+      throw new ConfigInvalidError('concurrency must be a positive integer', { concurrency });
+    }
+    const deps = this.#backgroundDeps(this.#newId());
+    const stopped = () =>
+      new RunAbortedError(`Stopped driving background migration ${name} — it goes on from here`, {
+        migration: name,
+      });
+    for (;;) {
+      if (signal?.aborted) throw stopped();
+      const answer = await coordinate(deps, name, { signal });
+      if (answer.next === 'done' || answer.next === 'superseded') break;
+      if (answer.next === 'process') {
+        const state = await this.#registered(name);
+        const lanes = Math.max(1, Math.min(concurrency, state.spec?.maxParallel ?? 1));
+        await Promise.all(
+          Array.from({ length: lanes }, () => this.#lane(name, { signal, sliceMs, untilDone })),
+        );
+      } else {
+        if (!untilDone) break;
+        try {
+          await sleep(answer.retryAfterMs ?? 1000, signal);
+        } catch {
+          throw stopped();
+        }
+      }
+      if (!untilDone) break;
+    }
+    if (signal?.aborted) throw stopped();
+    const state = await this.#registered(name);
+    if (state.status === 'failed') throw failedError(state);
+    return this.backgroundStatus(name);
+  }
+
+  /** One lane of runBackground: slices until nothing is left to claim (or one, without untilDone) */
+  async #lane(name, { signal, sliceMs, untilDone }) {
+    let failures = 0;
+    for (;;) {
+      if (signal?.aborted) return;
+      const owner = this.#newId();
+      let slice;
+      try {
+        slice = await runSlice(this.#backgroundDeps(owner), name, { signal, sliceMs, owner });
+        failures = 0;
+      } catch (error) {
+        failures += 1;
+        this.#logger.warn(
+          `⚠ Background migration ${name}: a slice failed (${errorText(error)}) — retrying`,
+          { background: name, runId: owner, error: errorText(error) },
+        );
+        try {
+          await sleep(Math.min(30_000, 250 * 2 ** failures), signal);
+        } catch {
+          return;
+        }
+        continue;
+      }
+      if (!untilDone) return;
+      if (slice.outcome === 'yielded') continue;
+      if (slice.outcome === 'busy') {
+        try {
+          await sleep(slice.retryAfterMs ?? 1000, signal);
+        } catch {
+          return;
+        }
+        continue;
+      }
+      return;
+    }
+  }
+
+  /** The public view of a state document, with its current plan's partition counts */
+  async #backgroundView(state) {
+    const store = this.#backgroundStore();
+    const spec = state.spec ?? {};
+    const counts =
+      state.plan !== undefined
+        ? await store.partitionCounts(state._id, {
+            generation: state.generation,
+            plan: state.plan.token,
+          })
+        : undefined;
+    const leases = await store.leases(state._id);
+    return {
+      migration: state._id,
+      status: state.status,
+      phase: state.phase,
+      direction: state.direction ?? 'forward',
+      mode: state.mode ?? spec.mode,
+      ...(state.collection !== undefined ? { collection: state.collection } : {}),
+      ...(spec.from !== undefined ? { from: spec.from, to: spec.to } : {}),
+      generation: state.generation ?? 0,
+      pass: state.pass ?? 0,
+      maxParallel: spec.maxParallel ?? 1,
+      transaction: Boolean(spec.transaction),
+      totals: { ...state.totals },
+      failedDocuments: (state.badIds ?? []).length,
+      requires: state.requires ?? [],
+      waitsFor: state.waitsFor ?? [],
+      ...(counts ? { partitions: counts } : {}),
+      liveLeases: leases.live,
+      ...(state.plan
+        ? {
+            plan: {
+              method: state.plan.method,
+              estimate: state.plan.estimate,
+              partitions: state.plan.partitions,
+              ...(state.plan.degraded ? { degraded: state.plan.degraded } : {}),
+            },
+          }
+        : {}),
+      registeredAt: state.registeredAt,
+      ...(state.startedAt ? { startedAt: state.startedAt } : {}),
+      ...(state.completedAt ? { completedAt: state.completedAt } : {}),
+      ...(state.lastProgressAt ? { lastProgressAt: state.lastProgressAt } : {}),
+      ...(state.lastError ? { lastError: state.lastError } : {}),
+      ...(state.description ? { description: state.description } : {}),
+    };
+  }
+
+  /**
+   * The status of one background migration (`null` when not registered), or
+   * of every one when no name is given.
+   * @experimental
+   */
+  async backgroundStatus(name) {
+    await this.#backgroundReady(name);
+    const store = this.#backgroundStore();
+    if (name !== undefined) {
+      const state = await store.get(name);
+      return state === null ? null : this.#backgroundView(state);
+    }
+    const views = [];
+    for (const state of await store.list()) views.push(await this.#backgroundView(state));
+    return views;
+  }
+
+  /**
+   * The partitions of a background migration's latest generation — scope,
+   * cursor, counters and lease holder (never its token).
+   * @experimental
+   */
+  async backgroundPartitions(name) {
+    await this.#backgroundReady(name);
+    const state = await this.#registered(name);
+    const partitions = await this.#backgroundStore().partitions(name, {
+      generation: state.generation,
+    });
+    return partitions.map((partition) => ({
+      id: String(partition._id),
+      generation: partition.generation,
+      seq: partition.seq,
+      status: partition.status,
+      scope: partition.scope,
+      estimate: partition.estimate,
+      counters: { ...partition.counters },
+      ...(partition.group !== undefined ? { group: partition.group } : {}),
+      ...(partition.lease
+        ? {
+            lease: {
+              slot: partition.lease.slot,
+              owner: partition.lease.owner,
+              host: partition.lease.host,
+              pid: partition.lease.pid,
+              renewedAt: partition.lease.renewedAt,
+            },
+          }
+        : {}),
+      ...(partition.throttle ? { throttle: partition.throttle } : {}),
+      claims: partition.claims ?? 0,
+      reclaims: partition.reclaims ?? 0,
+      failures: partition.failures ?? 0,
+      ...(partition.lastError ? { lastError: partition.lastError } : {}),
+    }));
+  }
+
+  /**
+   * The background migrations with work to do — blocked ones whose requires
+   * are met are unblocked on the way. `[{ migration, status }]`, oldest first.
+   * @experimental
+   */
+  async runnableBackground() {
+    await this.#backgroundReady();
+    const store = this.#backgroundStore();
+    const deps = this.#backgroundDeps();
+    const runnable = [];
+    for (const state of await store.list({ status: { $in: ['blocked', 'pending', 'running'] } })) {
+      let current = state;
+      if (state.status === 'blocked') current = (await tryUnblock(deps, state)) ?? state;
+      if (current.status !== 'blocked') {
+        runnable.push({ migration: current._id, status: current.status });
+      }
+    }
+    return runnable;
+  }
+
+  /** A control action, after the checks every one shares */
+  async #controlBackground(name, action, options = {}) {
+    await this.#backgroundReady(name);
+    await this.#registered(name);
+    const deps = this.#backgroundDeps();
+    const result = await controlBackground(deps, name, action, options);
+    if (options.wait === true && (action === 'pause' || action === 'cancel')) {
+      result.stopped = await waitForLanes(deps, name, { signal: options.signal });
+    }
+    return result;
+  }
+
+  /** Pause a background migration; its lanes stop at the next batch. `wait` until they have. @experimental */
+  pauseBackground(name, options = {}) {
+    return this.#controlBackground(name, 'pause', options);
+  }
+
+  /** Resume a paused background migration. @experimental */
+  resumeBackground(name, options = {}) {
+    return this.#controlBackground(name, 'resume', options);
+  }
+
+  /** Cancel a background migration; `wait` until its lanes have stopped. @experimental */
+  cancelBackground(name, options = {}) {
+    return this.#controlBackground(name, 'cancel', options);
+  }
+
+  /**
+   * Retry a failed or cancelled background migration — the same generation,
+   * or `fromStart`; `repin` pins the file on disk first. A completed one is
+   * reopened over whatever is left.
+   * @experimental
+   */
+  async retryBackground(name, options = {}) {
+    if (options.repin === true) await this.repinBackground(name, options);
+    return this.#controlBackground(name, 'retry', options);
+  }
+
+  /**
+   * Pin the file on disk as the background migration's version — its
+   * checksum (in the changelog too, so a strict drift check agrees) and its
+   * spec. A change to what it matches or how it splits means a new plan.
+   * @experimental
+   */
+  async repinBackground(name, options = {}) {
+    await this.#backgroundReady(name);
+    await this.#registered(name);
+    const result = await repinBackgroundState(this.#backgroundDeps(), name, options);
+    await this.#requireChangelog().setChecksum(this.#requireDb(), name, result.checksum);
+    return result;
+  }
+
+  /**
+   * Clear a background migration's coordinator lock and every partition
+   * lease — for a stuck one; live lanes are fenced off at their next write.
+   * @experimental
+   */
+  async unlockBackground(name) {
+    await this.#backgroundReady(name);
+    const deps = this.#backgroundDeps();
+    const lock = await deps.lockFor(name).forceRelease();
+    const leases = await deps.store.unlockAll(name);
+    return { lock: lock !== null, leases };
   }
 
   /** How converge treats search indexes: the config, and a call's own `waitForSearchIndexes` */

@@ -13,6 +13,8 @@ const SPAN_STATUS_ERROR = 2;
 const SPANS = {
   RUN: 'migronaut.run',
   MIGRATION: 'migronaut.migration',
+  BACKGROUND_SLICE: 'migronaut.background.slice',
+  BACKGROUND_COORDINATE: 'migronaut.background.coordinate',
 };
 
 /** Every attribute key migronaut sets, on spans and on metric points */
@@ -35,6 +37,11 @@ const ATTRIBUTES = {
   MIGRATION_INDEX: 'migronaut.migration.index',
   MIGRATION_TOTAL: 'migronaut.migration.total',
   MIGRATION_TRANSACTION: 'migronaut.migration.transaction',
+  BACKGROUND_NAME: 'migronaut.background.name',
+  BACKGROUND_OUTCOME: 'migronaut.background.outcome',
+  BACKGROUND_RESULT: 'migronaut.background.result',
+  BACKGROUND_REASON: 'migronaut.background.reason',
+  BACKGROUND_SHARD: 'migronaut.background.shard',
   ERROR_TYPE: 'error.type',
   /** The database a run is against — OpenTelemetry's database semantic convention */
   DB_NAMESPACE: 'db.namespace',
@@ -48,6 +55,14 @@ const METRICS = {
   LOCK_REFUSED: 'migronaut.lock.refused',
   LOCK_LOST: 'migronaut.lock.lost',
   SEARCH_WAIT_DURATION: 'migronaut.converge.search.wait.duration',
+  BACKGROUND_DOCUMENTS: 'migronaut.background.documents',
+  BACKGROUND_SLICE_DURATION: 'migronaut.background.slice.duration',
+  BACKGROUND_BATCH_WRITE_DURATION: 'migronaut.background.batch.write.duration',
+  BACKGROUND_THROTTLE: 'migronaut.background.throttle',
+  BACKGROUND_DRIFT: 'migronaut.background.drift',
+  BACKGROUND_TRANSACTION_RETRIES: 'migronaut.background.transaction.retries',
+  BACKGROUND_LEASES_RECLAIMED: 'migronaut.background.leases.reclaimed',
+  BACKGROUND_WATCH_DELAY: 'migronaut.background.watch.delay',
 };
 
 /**
@@ -339,6 +354,47 @@ function createTelemetry(telemetry, { dbName } = {}) {
     'Time a converge waited for its search index builds, by how the wait ended',
   );
 
+  const backgroundDocuments = counter(
+    METRICS.BACKGROUND_DOCUMENTS,
+    'Documents a background migration handled, by result (migrated, skipped, conflict, failed)',
+    '{document}',
+  );
+  const backgroundSliceDuration = histogram(
+    METRICS.BACKGROUND_SLICE_DURATION,
+    'Duration of one background migration slice, by outcome',
+  );
+  const backgroundBatchWrite = histogram(
+    METRICS.BACKGROUND_BATCH_WRITE_DURATION,
+    'Time to write one background migration batch',
+  );
+  const backgroundThrottle = counter(
+    METRICS.BACKGROUND_THROTTLE,
+    'Adaptive throttle changes of background migrations, by reason',
+    '{change}',
+  );
+  const backgroundDrift = counter(
+    METRICS.BACKGROUND_DRIFT,
+    'Old-shape documents found after a background migration completed',
+    '{finding}',
+  );
+  const backgroundTransactionRetries = counter(
+    METRICS.BACKGROUND_TRANSACTION_RETRIES,
+    'Transactional background batches retried, by reason',
+    '{retry}',
+  );
+  const backgroundLeasesReclaimed = counter(
+    METRICS.BACKGROUND_LEASES_RECLAIMED,
+    'Partition leases reclaimed from a lane that stopped renewing',
+    '{lease}',
+  );
+  const backgroundWatchDelay = histogram(
+    METRICS.BACKGROUND_WATCH_DELAY,
+    'Time from an old-shape write to its upgrade by the live drift watcher',
+  );
+  const add = (instrument, value, attributes) => {
+    if (instrument && value > 0) safe(() => instrument.add(value, withBase(attributes)));
+  };
+
   // Durations are measured in milliseconds everywhere in migronaut and
   // reported in seconds, the unit OpenTelemetry's conventions settle on.
   const record = (instrument, durationMs, attributes) => {
@@ -390,6 +446,57 @@ function createTelemetry(telemetry, { dbName } = {}) {
      */
     searchWaited({ waitedMs, outcome }) {
       record(searchWaitDuration, waitedMs, { [ATTRIBUTES.SEARCH_WAIT_OUTCOME]: outcome });
+    },
+    /**
+     * A background migration slice ended: its duration by outcome, and the
+     * documents it handled by result. The partition is never an attribute —
+     * dimensions stay low-cardinality.
+     */
+    backgroundSliceEnded({ name, durationMs, outcome, counters = {}, error }) {
+      const at = { [ATTRIBUTES.BACKGROUND_NAME]: name };
+      record(backgroundSliceDuration, durationMs, {
+        ...at,
+        [ATTRIBUTES.BACKGROUND_OUTCOME]: outcome,
+        ...failure(error),
+      });
+      for (const [key, result] of [
+        ['migrated', 'migrated'],
+        ['skipped', 'skipped'],
+        ['conflicts', 'conflict'],
+        ['failed', 'failed'],
+      ]) {
+        add(backgroundDocuments, counters[key] ?? 0, {
+          ...at,
+          [ATTRIBUTES.BACKGROUND_RESULT]: result,
+        });
+      }
+    },
+    backgroundBatchWritten({ name, durationMs, shard }) {
+      record(backgroundBatchWrite, durationMs, {
+        [ATTRIBUTES.BACKGROUND_NAME]: name,
+        [ATTRIBUTES.BACKGROUND_SHARD]: shard,
+      });
+    },
+    backgroundThrottled({ name, reason }) {
+      add(backgroundThrottle, 1, {
+        [ATTRIBUTES.BACKGROUND_NAME]: name,
+        [ATTRIBUTES.BACKGROUND_REASON]: reason,
+      });
+    },
+    backgroundDrift({ name, count = 1 }) {
+      add(backgroundDrift, count, { [ATTRIBUTES.BACKGROUND_NAME]: name });
+    },
+    backgroundTransactionRetried({ name, reason }) {
+      add(backgroundTransactionRetries, 1, {
+        [ATTRIBUTES.BACKGROUND_NAME]: name,
+        [ATTRIBUTES.BACKGROUND_REASON]: reason,
+      });
+    },
+    backgroundLeasesReclaimed({ name, count }) {
+      add(backgroundLeasesReclaimed, count, { [ATTRIBUTES.BACKGROUND_NAME]: name });
+    },
+    backgroundWatchDelay({ name, delayMs }) {
+      record(backgroundWatchDelay, delayMs, { [ATTRIBUTES.BACKGROUND_NAME]: name });
     },
   };
 }

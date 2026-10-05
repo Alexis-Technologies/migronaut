@@ -293,6 +293,18 @@ class Changelog {
   }
 
   /**
+   * Re-pin an applied record to the file now on disk — `background repin`,
+   * so the strict drift check agrees with what is actually running.
+   */
+  async setChecksum(db, name, checksum) {
+    const result = await this.#coll(db).updateOne(
+      { name, status: 'applied' },
+      { $set: { checksum } },
+    );
+    return result.matchedCount === 1;
+  }
+
+  /**
    * Mark a migration as reverted. Sets `status='reverted'` and `revertedAt=now`.
    * Never deletes the record — preserves the full audit history.
    *

@@ -118,7 +118,10 @@ async function coordinate(deps, name, { signal, driver = { kind: 'local' } } = {
   const lock = deps.lockFor(name);
   try {
     return await runWithLock(lock, { logger: deps.logger, owner: deps.owner?.() }, (lockSignal) =>
-      coordinateStep(deps, name, { signal: anySignal(signal, lockSignal), driver }),
+      // The span opens once the lock is held: a busy coordinator makes none.
+      withSpan(deps, 'coordinate', name, () =>
+        coordinateStep(deps, name, { signal: anySignal(signal, lockSignal), driver }),
+      ),
     );
   } catch (error) {
     if (error instanceof LockAlreadyHeldError) {
@@ -126,6 +129,11 @@ async function coordinate(deps, name, { signal, driver = { kind: 'local' } } = {
     }
     throw error;
   }
+}
+
+/** `fn` inside the kit's span for `kind` (`slice`, `coordinate`), when it gives one */
+function withSpan(deps, kind, name, fn) {
+  return typeof deps.span === 'function' ? deps.span(kind, name, fn) : fn();
 }
 
 /** A signal aborted when either is */
@@ -495,6 +503,7 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
       maxParallel: job.spec.maxParallel,
       ttlMs: deps.ttlMs,
       owner,
+      onReaped: (count) => deps.telemetry?.backgroundLeasesReclaimed({ name, count }),
     });
     if (claimed.exhausted) return { outcome: 'exhausted', counters };
     if (claimed.busy) {
@@ -515,9 +524,8 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
       partition: String(partition._id),
       slot: partition.lease.slot,
     });
-    let result;
-    try {
-      result = await runWithLock(lease, { logger: deps.logger, owner }, (leaseSignal) => {
+    const runLease = () =>
+      runWithLock(lease, { logger: deps.logger, owner }, (leaseSignal) => {
         job.signal = anySignal(signal, leaseSignal);
         return processPartition(job, {
           store,
@@ -538,16 +546,41 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
                   ? null
                   : { status: current.status, generation: current.generation, plan: current.plan },
               ),
-          onBatch: (info) =>
+          onBatch: (info) => {
+            deps.telemetry?.backgroundBatchWritten({
+              name,
+              durationMs: info.latencyMs,
+              shard: partition.group,
+            });
             deps.emit('background:batch', {
               migration: name,
               partition: String(partition._id),
+              ...(partition.group !== undefined ? { group: partition.group } : {}),
               ...info,
-            }),
-          onThrottle: (change) => deps.emit('background:throttle', { migration: name, ...change }),
+            });
+          },
+          onThrottle: (change) => {
+            deps.telemetry?.backgroundThrottled({ name, reason: change.reason });
+            deps.emit('background:throttle', {
+              migration: name,
+              ...(partition.group !== undefined ? { group: partition.group } : {}),
+              ...change,
+            });
+          },
         });
       });
+    let result;
+    const sliceStarted = now();
+    try {
+      // One span per lease held — it exists only once the claim succeeded.
+      result = await withSpan(deps, 'slice', name, runLease);
     } catch (error) {
+      deps.telemetry?.backgroundSliceEnded({
+        name,
+        durationMs: now() - sliceStarted,
+        outcome: error instanceof LockLostError ? 'lost' : 'error',
+        error,
+      });
       if (error instanceof LockLostError) {
         deps.emit('background:lease:lost', { migration: name, partition: String(partition._id) });
         return { outcome: 'lost', counters };
@@ -566,6 +599,12 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
       }
       throw error;
     }
+    deps.telemetry?.backgroundSliceEnded({
+      name,
+      durationMs: now() - sliceStarted,
+      outcome: result.outcome,
+      counters: result.counters,
+    });
     addInto(counters, result.counters);
     await store.set(name, { lastProgressAt: new Date() });
     deps.emit('background:slice:end', {
