@@ -365,6 +365,28 @@ class BackgroundStore {
     return { totals, badIds: ids, docErrors: errors.slice(-MAX_DOC_ERRORS) };
   }
 
+  /**
+   * The distinct documents that failed — the state's (earlier generations,
+   * already excluded from later passes) plus this generation's partitions'.
+   */
+  async countBadIds(name, generation) {
+    const [state, rows] = await Promise.all([
+      this.#states.findOne({ _id: name }, { projection: { badIds: 1 }, ...READ_OPTIONS }),
+      this.#partitions
+        .aggregate(
+          [
+            { $match: { background: name, generation, 'badIds.0': { $exists: true } } },
+            { $unwind: '$badIds' },
+            { $group: { _id: '$badIds' } },
+            { $count: 'n' },
+          ],
+          READ_OPTIONS,
+        )
+        .toArray(),
+    ]);
+    return (state?.badIds?.length ?? 0) + (rows[0]?.n ?? 0);
+  }
+
   /** Delete the partitions of generations up to `generation` — `keep` spares one */
   async dropGenerations(name, generation, { keep } = {}) {
     const filter = { background: name, generation: { $lte: generation } };

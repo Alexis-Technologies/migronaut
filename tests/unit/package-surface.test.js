@@ -308,7 +308,8 @@ describe('peer dependencies', () => {
   it('should never require mongoose from src, and the driver only where it is a peer by design', () => {
     // mongoose is an optional peer the caller injects; the driver is loaded
     // lazily, from the one place that connects.
-    const allowed = new Set(['src/core/migrator.js']);
+    // bson-peer.js is the one lazy door to the driver's BSON (sizes, EJSON).
+    const allowed = new Set(['src/core/migrator.js', 'src/core/bson-peer.js']);
     const offenders = [];
     for (const file of sourceFiles('src')) {
       for (const target of [
