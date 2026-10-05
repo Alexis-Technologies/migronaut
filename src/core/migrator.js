@@ -61,6 +61,7 @@ const { backgroundCollectionNames, loadConfig } = require('./config.js');
 const { buildContext } = require('./context.js');
 const { runConverge } = require('./converge.js');
 const { readServer } = require('./server-info.js');
+const { readShardKey } = require('./shard-info.js');
 const { runImport } = require('./import-runner.js');
 const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
 const {
@@ -2868,14 +2869,13 @@ class MigratorKit extends EventEmitter {
         environment: this.#environment(),
       }),
       record: (entry) => this.#convergeLog().append(db, entry),
-      // Behind a mongos only: the shard key, so prune never tries to drop its index.
-      shardKeyOf: async (name) =>
-        (
-          await this.#client
-            .db('config')
-            .collection('collections')
-            .findOne({ _id: `${db.databaseName}.${name}` }, { projection: { key: 1 } })
-        )?.key,
+      // Behind a mongos only: the shard key — so prune never drops its index,
+      // and the version index takes it as a prefix. An 8.0 `unsplittable`
+      // collection is not sharded; `undefined` when config may not be read.
+      shardKeyOf: async (name) => {
+        const sharding = await readShardKey(this.#client, db.databaseName, name);
+        return sharding === undefined ? undefined : (sharding?.key ?? null);
+      },
     };
   }
 

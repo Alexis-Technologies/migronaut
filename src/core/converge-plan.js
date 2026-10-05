@@ -1,6 +1,12 @@
 const { deepEqual } = require('../utils/canonical.js');
-const { versionFloorConflict } = require('./versioning-spec.js');
-const { compareIndex, normalizeLiveIndex, restoreSpec, sameSignature } = require('./index-spec.js');
+const { shardedVersionIndexKey, versionFloorConflict } = require('./versioning-spec.js');
+const {
+  compareIndex,
+  normalizeDeclaredIndex,
+  normalizeLiveIndex,
+  restoreSpec,
+  sameSignature,
+} = require('./index-spec.js');
 const {
   compareSearchIndex,
   isBeingRemoved,
@@ -186,10 +192,40 @@ function joinReasons(first, second) {
  * collection's own list) the other live indexes are not managed at all: never
  * listed, never dropped — prune does not reach them.
  */
+/** Why the ordinary version index stays on a sharded collection whose version index replaced it */
+const DISPLACED_REASON =
+  'replaced by the shard-key-prefixed version index — drop it once nothing hints it ' +
+  '(prune does, when the indexes are declared)';
+
+/**
+ * The declared indexes as they apply to this live collection: on a sharded
+ * one, the version index takes the shard key between the version field and
+ * `_id` (versioning-spec.js). `displaced` names the ordinary version index it
+ * replaces, when the two differ.
+ */
+function indexesFor(definition, live) {
+  const indexes = definition.indexes;
+  if (indexes === undefined || !definition.versioning || !live.shardKey) return { indexes };
+  const sharded = normalizeDeclaredIndex({
+    key: shardedVersionIndexKey(definition.versioning, live.shardKey),
+  });
+  const result = [];
+  let displaced;
+  for (const index of indexes) {
+    if (index.versionIndex === true && index.name !== sharded.name) {
+      displaced = index.name;
+      result.push({ ...sharded, versionIndex: true });
+    } else {
+      result.push(index);
+    }
+  }
+  return { indexes: result, displaced };
+}
+
 function planIndexes(
   declaredIndexes,
   live,
-  { prune: pruneOption, rebuildUnique, capabilities, partial = false },
+  { prune: pruneOption, rebuildUnique, capabilities, partial = false, displaced },
   row,
   steps,
 ) {
@@ -373,6 +409,20 @@ function planIndexes(
     }
   }
   if (group.actions.length > 0) steps.push(group);
+
+  // The ordinary version index a sharded one replaced: kept, and said so —
+  // a background migration may still be hinting it.
+  const old = displaced !== undefined ? byName.get(displaced) : undefined;
+  if (old !== undefined && !declaredNames.has(displaced) && !prune) {
+    consumed.add(displaced);
+    row({
+      target: 'index',
+      name: displaced,
+      action: 'keep',
+      reason: DISPLACED_REASON,
+      from: indexValue(old.raw),
+    });
+  }
 
   // Last, so an index is only ever removed once everything declared exists.
   if (partial) return;
@@ -630,7 +680,7 @@ function planCollectionSteps(
   }
 
   const desired = desiredValidator(definition);
-  const declaredIndexes = definition.indexes;
+  const { indexes: declaredIndexes, displaced } = indexesFor(definition, live);
   const declaredSearch = definition.searchIndexes;
   const indexSteps = [];
   const searchSubmit = [];
@@ -684,7 +734,7 @@ function planCollectionSteps(
     planIndexes(
       declaredIndexes,
       live,
-      { prune, rebuildUnique, capabilities, partial },
+      { prune, rebuildUnique, capabilities, partial, displaced },
       row,
       indexSteps,
     );

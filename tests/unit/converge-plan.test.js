@@ -905,4 +905,72 @@ describe('planCollection — versioning', () => {
     assert.deepStrictEqual(steps(plan), ['createCollection', 'create __v_1__id_1']);
     assert.strictEqual(plan.steps[0].options.validationLevel, 'moderate');
   });
+
+  it('should put the shard key between the version and _id on a sharded collection', () => {
+    const sharded = (indexes, shardKey) => ({ ...existing(indexes), shardKey });
+    const ranged = planCollection(
+      definition({ versioning: { current: 1 } }),
+      sharded([{ key: { region: 1 }, name: 'region_1' }], { region: 1 }),
+    );
+    assert.deepStrictEqual(rows(ranged), [
+      'validator:c:create',
+      'index:__v_1_region_1__id_1:create',
+    ]);
+    assert.deepStrictEqual(
+      [...ranged.steps[1].specs[0].key],
+      [
+        ['__v', 1],
+        ['region', 1],
+        ['_id', 1],
+      ],
+    );
+    const hashed = planCollection(
+      definition({ versioning: { current: 1, field: 'shape' } }),
+      sharded([], { tenant: 1, uid: 'hashed' }),
+    );
+    assert.ok(rows(hashed).includes('index:shape_1_tenant_1_uid_hashed__id_1:create'));
+    const onId = planCollection(
+      definition({ versioning: { current: 1 } }),
+      sharded([], { _id: 'hashed' }),
+    );
+    assert.ok(rows(onId).includes('index:__v_1__id_hashed:create'), 'no second _id');
+    // A collection sharded on _id needs nothing new.
+    const plain = planCollection(
+      definition({ versioning: { current: 1 } }),
+      sharded([{ key: { __v: 1, _id: 1 }, name: '__v_1__id_1' }], { _id: 1 }),
+    );
+    assert.deepStrictEqual(rows(plain), ['validator:c:create', 'index:__v_1__id_1:unchanged']);
+  });
+
+  it('should keep the ordinary version index a sharded one replaces, and say why', () => {
+    const live = {
+      ...existing([
+        { key: { __v: 1, _id: 1 }, name: '__v_1__id_1' },
+        { key: { region: 1 }, name: 'region_1' },
+      ]),
+      shardKey: { region: 1 },
+    };
+    const partial = planCollection(definition({ versioning: { current: 1 } }), live, {
+      prune: true,
+    });
+    assert.deepStrictEqual(rows(partial), [
+      'validator:c:create',
+      'index:__v_1_region_1__id_1:create',
+      `index:__v_1__id_1:keep:${'replaced by the shard-key-prefixed version index — drop it once nothing hints it (prune does, when the indexes are declared)'}`,
+    ]);
+    const declared = definition({ versioning: { current: 1 }, indexes: [{ key: { region: 1 } }] });
+    const kept = planCollection(declared, live);
+    assert.ok(rows(kept).some((line) => line.startsWith('index:__v_1__id_1:keep:replaced')));
+    const pruned = planCollection(declared, live, { prune: true });
+    assert.ok(rows(pruned).includes('index:__v_1__id_1:drop:not declared'));
+    assert.ok(rows(pruned).includes('index:region_1:unchanged'), 'the shard key index stays');
+    const settled = planCollection(declared, {
+      ...existing([
+        { key: { __v: 1, region: 1, _id: 1 }, name: '__v_1_region_1__id_1' },
+        { key: { region: 1 }, name: 'region_1' },
+      ]),
+      shardKey: { region: 1 },
+    });
+    assert.deepStrictEqual(steps(settled), ['collMod validator'], 'a fixed point for its indexes');
+  });
 });

@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { after, before, describe, it } = require('node:test');
+const { makeMigrator, makeProject } = require('../helpers/project.js');
 
 const SHARDED_URI = process.env.MIGRONAUT_TEST_SHARDED_URI;
 const DB = `migronaut_sharded_${process.pid}`;
@@ -46,7 +47,20 @@ describe(
       assert.ok(shards.length >= 2, 'the fixture has two shards');
     });
 
+    const kits = [];
+    let project;
+
+    /** A kit on the cluster, declaring `collections` */
+    function kitWith(collections) {
+      project ??= makeProject();
+      const kit = makeMigrator(SHARDED_URI, DB, project.dir, { collections });
+      kits.push(kit);
+      return kit;
+    }
+
     after(async () => {
+      for (const kit of kits) await kit.disconnect();
+      project?.cleanup();
       await db?.dropDatabase().catch(() => undefined);
       await admin?.command({ dropUser: 'limited' }).catch(() => undefined);
       await client?.close();
@@ -298,6 +312,46 @@ describe(
         await session.abortTransaction().catch(() => undefined);
         await session.endSession();
       }
+    });
+
+    // ─── Declared collections ────────────────────────────────────────────────
+
+    it('should put the shard key into the version index of a sharded collection, to a fixed point', async () => {
+      await sharded(
+        'converged',
+        { region: 1 },
+        {
+          docs: docs(100, (i) => ({ region: i < 50 ? 'eu' : 'us' })),
+        },
+      );
+      await db.collection('converged').createIndex({ __v: 1, _id: 1 });
+      const kit = kitWith([{ name: 'converged', versioning: { current: 1, min: 0 } }]);
+      const first = await kit.converge();
+      const [collection] = first.collections;
+      const created = collection.actions.find((action) => action.target === 'index');
+      assert.strictEqual(created.name, '__v_1_region_1__id_1');
+      assert.strictEqual(created.action, 'create');
+      const kept = collection.actions.find((action) => action.name === '__v_1__id_1');
+      assert.strictEqual(kept.action, 'keep');
+      assert.match(kept.reason, /replaced by the shard-key-prefixed version index/);
+      const names = new Set();
+      for (const index of await db.collection('converged').indexes()) names.add(index.name);
+      assert.ok(names.has('__v_1_region_1__id_1'));
+      assert.ok(names.has('__v_1__id_1'), 'kept until it is dropped on purpose');
+      const second = await kit.converge();
+      assert.strictEqual(second.changed, 0);
+      assert.strictEqual(second.inSync, true);
+    });
+
+    it('should treat an unsplittable collection as not sharded', async () => {
+      const { version } = await admin.command({ buildInfo: 1 });
+      if (Number(version.split('.')[0]) < 8) return;
+      const entry = await collectionEntry('plain');
+      assert.strictEqual(entry?.unsplittable, true, 'moved by the probe above');
+      const kit = kitWith([{ name: 'plain', versioning: { current: 1, min: 0 } }]);
+      const result = await kit.converge();
+      const index = result.collections[0].actions.find((action) => action.target === 'index');
+      assert.strictEqual(index.name, '__v_1__id_1');
     });
 
     it('[probe] should refuse config reads to a user with readWrite only', async () => {

@@ -4,6 +4,7 @@ const { Int32 } = require('mongodb');
 const {
   isVersioningIndexKey,
   liveVersionFloor,
+  shardedVersionIndexKey,
   versionFloorConflict,
   versionFloorToCheck,
 } = require('../../src/core/versioning-spec.js');
@@ -60,5 +61,31 @@ describe('versioning-spec — the version floor', () => {
     assert.ok(!isVersioningIndexKey({ __v: 1 }, versioning));
     assert.ok(!isVersioningIndexKey({ _id: 1, __v: 1 }, versioning));
     assert.ok(!isVersioningIndexKey(null, versioning));
+  });
+});
+
+describe('versioning-spec — the version index of a sharded collection', () => {
+  it('should put the shard key between the version field and _id', () => {
+    assert.deepStrictEqual(shardedVersionIndexKey(versioning, { region: 1, at: -1 }), {
+      __v: 1,
+      region: 1,
+      at: -1,
+      _id: 1,
+    });
+    assert.deepStrictEqual(shardedVersionIndexKey(versioning, { uid: 'hashed' }), {
+      __v: 1,
+      uid: 'hashed',
+      _id: 1,
+    });
+    assert.deepStrictEqual(shardedVersionIndexKey(versioning, { _id: 'hashed' }), {
+      __v: 1,
+      _id: 'hashed',
+    });
+    assert.deepStrictEqual(shardedVersionIndexKey(versioning, { _id: 1 }), { __v: 1, _id: 1 });
+    assert.deepStrictEqual(shardedVersionIndexKey(versioning, { __v: 1, k: 1 }), {
+      __v: 1,
+      k: 1,
+      _id: 1,
+    });
   });
 });

@@ -96,6 +96,22 @@ function mergeVersioningValidator(validator, versioning) {
 /** The declared version index — `{ [field]: 1, _id: 1 }`, named by its key */
 const versioningIndex = (versioning) => ({ key: versionIndexKey(versioning) });
 
+/**
+ * The version index of a sharded collection: the shard key between the
+ * version field and `_id` — `{ __v: 1, region: 1, _id: 1 }` — so a batch
+ * over one chunk's range is an index range, not a filter over every old
+ * document of the shard. A hashed field stays hashed; `_id` is not repeated
+ * when the key holds it. On `{ _id: 1 }` it is the ordinary version index.
+ */
+function shardedVersionIndexKey(versioning, shardKey) {
+  const key = { [versioning.field]: 1 };
+  for (const [field, value] of Object.entries(shardKey)) {
+    if (field !== versioning.field) key[field] = value;
+  }
+  if (!('_id' in key)) key._id = 1;
+  return key;
+}
+
 /** Whether an index key is the version index's (same fields, same order, ascending) */
 function isVersioningIndexKey(key, versioning) {
   if (!isPlainObject(key)) return false;
@@ -154,6 +170,7 @@ function versionFloorConflict(floor) {
 
 module.exports = {
   isVersioningIndexKey,
+  shardedVersionIndexKey,
   liveVersionFloor,
   versionFloorConflict,
   versionFloorToCheck,

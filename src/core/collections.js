@@ -287,7 +287,8 @@ function normalizeDefinition(definition, { name, source } = {}) {
     if (wireValidator === undefined || isEmptyObject(wireValidator)) validationLevel ??= 'moderate';
     wireValidator = mergeVersioningValidator(wireValidator, versioning);
     if (versioning.index) {
-      const index = normalizeDeclaredIndex(versioningIndex(versioning));
+      // Marked: on a sharded collection the planner swaps in the shard-key-prefixed form.
+      const index = { ...normalizeDeclaredIndex(versioningIndex(versioning)), versionIndex: true };
       // Declaring the version index alone must not make every other index of
       // the collection "undeclared" — and so a candidate for prune.
       indexesPartial = indexes === undefined;
