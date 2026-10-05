@@ -249,6 +249,10 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
   is where its coverage comes from, so the gate passes with no Redis. The scenarios live once, in
   `tests/helpers/bullmq-scenarios.js`, and run against both the fake and (in the opt-in file) the
   real `bullmq`: add adapter behaviour there. If the two disagree, the fake is what is wrong.
+  Every scenario must wait for everything it enqueued — `settled`, `untilRecord`, a group's
+  `wait()` — before it ends: `afterEach` force-closes, which does not wait for a migration in
+  flight, and a straggler writes into the next scenario's database (a sync tick's migration job
+  runs *after* the tick completes).
 - Coverage gate: 90% lines / 90% functions / 90% branches (`pnpm run test:coverage`, via `c8`).
 - The lock-heartbeat integration tests use real timers; running the *full* integration suite in
   parallel (13 concurrent `mongodb-memory-server` replica sets) can make timing-sensitive tests
