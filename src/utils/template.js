@@ -145,6 +145,48 @@ module.exports = { description, up, down };
 `;
 }
 
+/**
+ * The built-in background migration template (`create --background`): the
+ * declarative form, with the knobs most worth knowing about spelled out.
+ */
+function defaultBackgroundTemplate(js, esm = false) {
+  const typed = js
+    ? "/** @type {import('@alexify/migronaut').DeclarativeBackgroundMigration} */\n"
+    : '';
+  const typeImport = js
+    ? ''
+    : "import type { DeclarativeBackgroundMigration } from '@alexify/migronaut';\n\n";
+  const annotation = js ? '' : ': DeclarativeBackgroundMigration';
+  const body = `{
+  collection: 'TODO',
+  // Documents at version \`from\` (0: no version field yet) become version \`to\`.
+  from: 1,
+  to: 2,
+  // The new document for one old one — return it reshaped; migronaut sets the
+  // version, bumps the revision and writes only the fields that changed.
+  migrate: (doc) => {
+    // TODO: reshape doc
+    return doc;
+  },
+  // The way back, for \`down\` — remove it if there is none.
+  revert: (doc) => doc,
+  // Partitions worked at once, across every process (default 1).
+  // maxParallel: 4,
+}`;
+  if (esm) {
+    return `${typeImport}export const description = '';
+
+${typed}export const background${annotation} = ${body};
+`;
+  }
+  return `${typeImport}const description = '';
+
+${typed}const background${annotation} = ${body};
+
+module.exports = { description, background };
+`;
+}
+
 /** Extensions a custom `--template` file may have — anything else is refused */
 const TEMPLATE_EXTENSIONS = ['.ts', '.js', '.cjs', '.mjs'];
 
@@ -152,7 +194,8 @@ const TEMPLATE_EXTENSIONS = ['.ts', '.js', '.cjs', '.mjs'];
 const MAX_TEMPLATE_BYTES = 1024 * 1024;
 
 /** Resolve template file contents — a custom template if provided, else the built-in */
-async function resolveTemplateContent(templatePath, js, esm = false) {
+async function resolveTemplateContent(templatePath, js, esm = false, background = false) {
+  if (background) return defaultBackgroundTemplate(js, esm);
   if (templatePath) {
     const ext = path.extname(templatePath);
     if (!TEMPLATE_EXTENSIONS.includes(ext)) {
@@ -198,6 +241,7 @@ async function createMigrationFile(options) {
     // Match the project's module system, so a generated migration never makes
     // Node reparse it and warn.
     await isEsmProject(options.dir),
+    options.background === true,
   );
   try {
     // 'wx' fails if the path exists — creating a migration must never silently

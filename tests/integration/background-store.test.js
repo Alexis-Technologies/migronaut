@@ -269,6 +269,32 @@ describe('BackgroundStore — checkpoints, failures and roll-up (integration)', 
     assert.strictEqual(await store.generationTotals(NAME, 99), null);
   });
 
+  it('should count a failed slice after its lease was released, but not a fenced one', async () => {
+    const state = await planned(1);
+    const first = await store.claim(NAME, claimArgs(state));
+    await first.lease.release();
+    assert.strictEqual(
+      await store.failSlice(first.lease, { error: 'x', maxSliceFailures: 1 }),
+      true,
+    );
+    await store.setOpenPartitions(NAME, {
+      generation: state.generation,
+      plan: state.plan.token,
+      from: ['failed'],
+      status: 'pending',
+    });
+    const stale = await store.claim(NAME, claimArgs(state));
+    await stale.lease.release();
+    const current = await store.claim(NAME, claimArgs(state));
+    // Another lane holds it now: the stale lane's failure is not the partition's.
+    assert.strictEqual(
+      await store.failSlice(stale.lease, { error: 'y', maxSliceFailures: 1 }),
+      false,
+    );
+    assert.strictEqual((await store.partitions(NAME))[0].status, 'running');
+    await current.lease.release();
+  });
+
   it('should fail a partition after maxSliceFailures failed slices', async () => {
     const state = await planned(1);
     for (let i = 1; i <= 3; i++) {

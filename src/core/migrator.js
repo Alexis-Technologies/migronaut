@@ -1844,6 +1844,7 @@ class MigratorKit extends EventEmitter {
       js,
       fileExtensions: config.fileExtensions,
       ...(templatePath ? { templatePath } : {}),
+      ...(options.background ? { background: true } : {}),
     });
     this.#logger.info(
       `✔ Created  ${path.basename(filepath)}`,

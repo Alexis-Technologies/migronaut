@@ -696,8 +696,15 @@ class BackgroundStore {
    * partition failed.
    */
   async failSlice(lease, { error, maxSliceFailures }) {
+    // The lease is usually released by the time the failure is counted
+    // (runWithLock's finally); a lease of another lane, though, means this
+    // one was fenced off — its failure is not the partition's.
     const doc = await this.#partitions.findOneAndUpdate(
-      { _id: lease.partitionId, 'lease.token': lease.token },
+      {
+        _id: lease.partitionId,
+        status: { $in: OPEN_PARTITION },
+        $or: [{ 'lease.token': lease.token }, { lease: { $exists: false } }],
+      },
       [
         { $set: { failures: plus('failures', 1), lastError: literal(error), updatedAt: '$$NOW' } },
         {
@@ -714,10 +721,16 @@ class BackgroundStore {
 
   /** Fail a partition at once (a document error beyond the budget) and free its slot */
   async failPartition(lease, { error }) {
-    await this.#partitions.updateOne({ _id: lease.partitionId, 'lease.token': lease.token }, [
-      { $set: { status: 'failed', lastError: literal(error), updatedAt: '$$NOW' } },
-      { $unset: 'lease' },
-    ]);
+    await this.#partitions.updateOne(
+      {
+        _id: lease.partitionId,
+        $or: [{ 'lease.token': lease.token }, { lease: { $exists: false } }],
+      },
+      [
+        { $set: { status: 'failed', lastError: literal(error), updatedAt: '$$NOW' } },
+        { $unset: 'lease' },
+      ],
+    );
   }
 }
 

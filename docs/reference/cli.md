@@ -73,6 +73,14 @@ Combined short flags are not supported: write `-f -y`, not `-fy`.
 | `migronaut converge --yes` | Apply drops and rebuilds without asking (required for them with `--json`) |
 | `migronaut converge --rebuild-unique` | Allow rebuilding a unique index (a `conflict` otherwise) |
 | `migronaut converge --no-lock` | Skip the lock (dev only) |
+| [`migronaut background status [name]`](/commands/background) | Background migrations and their progress (`--partitions`, `--check`: exit 32 failed / 31 not completed) |
+| `migronaut background run <name>` / `--all` | Drive it from this process (`--concurrency N`, `--once`); Ctrl-C stops the lanes at their next batch (exit 11) |
+| `migronaut background pause\|resume\|cancel <name>` | Control it (`--wait` for the lanes, `--reason`) |
+| `migronaut background retry <name>` | Retry a failed or cancelled one (`--from-start`, `--repin`), reopen a completed one |
+| `migronaut background repin <name>` | Pin the file on disk (asks first) |
+| `migronaut background dry-run <name>` | On a sample (`--sample`, `--first`, `--validate`, `--revert`) or by steps (`--steps`) — nothing written |
+| `migronaut background unlock <name>` | Clear a stuck coordinator lock and every lease (asks first) |
+| `migronaut background verify` | The drift watch, once (`--report`: never reopen; exit 31 on drift) |
 
 ## Inspecting
 

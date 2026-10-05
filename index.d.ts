@@ -1696,6 +1696,12 @@ export interface CreateOptions {
    * `createExtension`. Leave unset to let the config decide (default: `'js'`).
    */
   js?: boolean;
+  /**
+   * Generate a background migration (`export const background`) instead of
+   * `up`/`down`. Not combined with `template`.
+   * @experimental New in 2.3
+   */
+  background?: boolean;
 }
 
 /** Options for {@link MigratorKit.init} */

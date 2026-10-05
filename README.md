@@ -200,6 +200,7 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--
 | `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, one file, or to `--to <file>` |
 | `migronaut redo [file]` | Roll back then re-apply (the last migration, or one file) |
 | `migronaut converge` | Bring declared collections — indexes, search indexes and validators — to their declared state |
+| `migronaut background <action> [name]` | Background migrations: `status`, `run`, `pause`, `resume`, `cancel`, `retry`, `repin`, `dry-run`, `unlock`, `verify` |
 | `migronaut status` | Print the full migration status table (`--check` to fail CI on pending) |
 | `migronaut list` | List migrations, filtered by status |
 | `migronaut dry-run <up\|down> [file]` | Preview a run without touching the database |
@@ -207,8 +208,8 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--
 | `migronaut lock` | Show who currently holds the migration lock |
 | `migronaut unlock` | Force-release a stuck lock left behind by a crashed run |
 
-Most data commands (`up`, `down`, `redo`, `converge`, `status`, `list`, `dry-run`, `import`,
-`baseline`, `create`, `audit`, `lock`, `unlock`) accept **`--json`** for machine-readable output — see
+Most data commands (`up`, `down`, `redo`, `converge`, `background`, `status`, `list`, `dry-run`,
+`import`, `baseline`, `create`, `audit`, `lock`, `unlock`) accept **`--json`** for machine-readable output — see
 [CI & automation](#ci--automation).
 
 <details>
@@ -284,6 +285,14 @@ migronaut converge --wait-search   # wait until every declared search index is q
 migronaut converge --yes           # no confirmation (required for drops/rebuilds with --json)
 migronaut converge --no-lock       # skip the concurrency lock (local dev only)
 migronaut converge --json          # machine-readable output (the converge result)
+
+# background — background migrations (registered by up, rewritten in partitions)
+migronaut background status                 # every background migration
+migronaut background status --check         # exit 32 if one failed, 31 if one is not completed
+migronaut background run <name>             # drive it from here (--concurrency N, --once, --all)
+migronaut background pause <name> --wait    # stop its lanes at the next batch
+migronaut background dry-run <name> --validate   # on a sample, in an always-aborted transaction
+migronaut background verify                 # look for old-shape documents after completion
 
 # status — full status table
 migronaut status                   # the full status table
