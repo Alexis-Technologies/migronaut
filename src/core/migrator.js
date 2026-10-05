@@ -47,6 +47,7 @@ const {
   waitForLanes,
 } = require('./background.js');
 const { resolveBackgroundSpec } = require('./background-spec.js');
+const { previewSample } = require('./background-dry-run.js');
 const { matchOf } = require('./background-engine.js');
 const { BackgroundStore } = require('./background-store.js');
 const { sleep } = require('./background-throttle.js');
@@ -2716,6 +2717,38 @@ class MigratorKit extends EventEmitter {
     const result = await repinBackgroundState(this.#backgroundDeps(), name, options);
     await this.#requireChangelog().setChecksum(this.#requireDb(), name, result.checksum);
     return result;
+  }
+
+  /**
+   * Dry-run a background migration — registered or not — with nothing
+   * written: on a sample (`sample` random documents, or the `first` n), its
+   * transformation alone; with `validate`, the real write path in a
+   * transaction that is always aborted. A step migration runs `steps` steps
+   * in that transaction instead.
+   * @experimental
+   */
+  async dryRunBackground(name, options = {}) {
+    await this.#ensureConfig();
+    await this.connect();
+    const loaded = await this.#loadBackground(name);
+    const db = this.#requireDb();
+    const deps = {
+      db,
+      client: this.#client,
+      logger: this.#logger,
+      forbidden: this.#bookkeepingNames(),
+      topology: () => (this.#topology ??= readServer(db).then((server) => server.topology)),
+    };
+    if (loaded.spec.mode === 'step' || options.steps !== undefined) {
+      if (loaded.spec.mode !== 'step') {
+        throw new ConfigInvalidError(
+          `${name} is declarative — dry-run it on a sample (sample, first), not by steps`,
+          { migration: name },
+        );
+      }
+      throw new ConfigInvalidError('Step dry runs are not available yet', { migration: name });
+    }
+    return previewSample(deps, name, loaded, options);
   }
 
   /**

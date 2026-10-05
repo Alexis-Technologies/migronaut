@@ -167,14 +167,15 @@ function buildOps(job, transformed) {
  * single documents (a duplicate key, the validator) are taken apart; a write
  * concern error, or anything else, fails the batch — and the slice.
  */
-async function writeOps(collection, ops, { writeConcern, session }) {
+async function writeOps(collection, ops, { writeConcern, session, bare = false }) {
   const failed = new Map();
   if (ops.length === 0) return { matched: 0, failed };
   try {
+    // Inside a transaction the transaction's write concern is the one that
+    // counts; in the sandbox (`bare`) the proxy supplies the session.
     const result = await collection.bulkWrite(ops, {
       ordered: false,
-      writeConcern,
-      ...(session ? { session } : {}),
+      ...(bare ? {} : session ? { session } : { writeConcern }),
     });
     return { matched: result.matchedCount, failed };
   } catch (error) {
@@ -203,7 +204,7 @@ async function writeOps(collection, ops, { writeConcern, session }) {
 async function applyBatch(
   job,
   docs,
-  { db, session, ctxExtra, abortOnConflict = false, strict = false } = {},
+  { db, session, ctxExtra, abortOnConflict = false, strict = false, bare = false } = {},
 ) {
   const spec = job.spec;
   const collection = db.collection(spec.collection);
@@ -221,6 +222,7 @@ async function applyBatch(
     const { matched, failed } = await writeOps(collection, ops, {
       writeConcern: spec.writeConcern,
       session,
+      bare,
     });
     if (strict && failed.size > 0) {
       const [[index, writeError]] = failed;
@@ -753,6 +755,7 @@ function controlOutcome(control, job, partition) {
 module.exports = {
   DOCUMENT_ERRORS,
   applyBatch,
+  transformAll,
   isOverload,
   buildStepContext,
   controlOutcome,

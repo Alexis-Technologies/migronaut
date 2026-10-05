@@ -1954,6 +1954,12 @@ export class MigratorKit extends EventEmitter {
   ): Promise<BackgroundControlResult & { replan: boolean; checksum: string }>;
   /** Clear the coordinator lock and every lease of a stuck one. @experimental */
   unlockBackground(name: string): Promise<{ lock: boolean; leases: number }>;
+  /**
+   * Dry-run a background migration, registered or not, with nothing written:
+   * on a sample, its transformation alone — or with `validate`, the real write
+   * path in a transaction that is always aborted. @experimental
+   */
+  dryRunBackground(name: string, options?: BackgroundDryRunOptions): Promise<BackgroundDryRun>;
 }
 
 // ─── Background migration results ─────────────────────────────────────────────
@@ -2098,6 +2104,109 @@ export interface BackgroundControlResult {
   status: BackgroundState;
   /** `wait`: whether every lane stopped in time */
   stopped?: boolean;
+}
+
+/** Options of {@link MigratorKit.dryRunBackground} */
+export interface BackgroundDryRunOptions {
+  /** A random sample of this many matching documents (1–1000, default 5) */
+  sample?: number;
+  /** The first n matching documents by `_id`, instead of a sample */
+  first?: number;
+  /** Through the real write path, in the always-aborted sandbox */
+  validate?: boolean;
+  /** Dry-run the way back */
+  direction?: 'forward' | 'revert';
+  /** Step migrations: how many steps (1–50, default 1) */
+  steps?: number;
+  /** Step migrations: document images kept (default 20, at most 1000) */
+  maxDocuments?: number;
+  /** Step migrations: from no checkpoint, not the pinned one */
+  fromStart?: boolean;
+  /** Step migrations: stop the sandbox after this long (default 50 000 ms) */
+  deadlineMs?: number;
+}
+
+/** One document of a dry run, as relaxed EJSON */
+export interface BackgroundDryRunDocument {
+  _id: unknown;
+  before: Record<string, unknown>;
+  after?: Record<string, unknown>;
+  /** The operator update it would be written with (without `validate`) */
+  change?: Record<string, unknown>;
+  error?: string;
+  /** With `validate`: what the server made of it */
+  validation?: 'ok' | 'failed' | 'skipped';
+}
+
+/** One operation the sandbox ran — the filter as relaxed EJSON, at most 2 KiB */
+export interface BackgroundSandboxOperation {
+  seq: number;
+  step: number;
+  collection?: string;
+  method: string;
+  filter?: unknown;
+  result?: unknown;
+  durationMs?: number;
+  error?: string;
+}
+
+/** A document the sandbox saw change */
+export interface BackgroundSandboxDocument {
+  collection: string;
+  _id: unknown;
+  op: 'insert' | 'update' | 'delete' | 'unknown';
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
+}
+
+/** What {@link MigratorKit.dryRunBackground} found */
+export type BackgroundDryRun =
+  | {
+      mode: 'declarative';
+      migration: string;
+      direction: 'forward' | 'revert';
+      method: 'sample' | 'first';
+      requested: number;
+      found: number;
+      migrated: number;
+      failed: number;
+      documents: BackgroundDryRunDocument[];
+      /** With `validate` */
+      validated?: true;
+      aborted?: true;
+      ops?: BackgroundSandboxOperation[];
+      refusals?: { method: string; reason: string; collection?: string }[];
+      /** Documents of other collections the side writes touched */
+      sideEffects?: BackgroundSandboxDocument[];
+      attempts?: number;
+    }
+  | BackgroundStepDryRun;
+
+/** A step migration's dry run: up to `steps` steps in one always-aborted transaction */
+export interface BackgroundStepDryRun {
+  mode: 'step';
+  migration: string;
+  direction: 'forward' | 'revert';
+  aborted: true;
+  ok: boolean;
+  attempts: number;
+  stoppedBy?: 'deadline' | 'done' | 'steps';
+  steps: {
+    step: number;
+    checkpointIn: unknown;
+    checkpointOut?: unknown;
+    done?: boolean;
+    processed?: number;
+    migrated?: number;
+    error?: string;
+  }[];
+  ops: BackgroundSandboxOperation[];
+  documents: BackgroundSandboxDocument[];
+  refusals: { method: string; reason: string; collection?: string }[];
+  leakedCursors: number;
+  truncated: boolean;
+  abortedBy?: string;
+  error?: string;
 }
 
 /** `background:registered` */

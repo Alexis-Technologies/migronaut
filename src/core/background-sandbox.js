@@ -166,7 +166,7 @@ async function runOnce(options, fn, attempt) {
     const handles = {
       db: proxyDb(state, options.db),
       client: proxyClient(state),
-      session: proxySession(state),
+      session: (state.sessionProxy = proxySession(state)),
       mongoose: refusedMongoose(state),
       /** For a caller that runs several steps: number the operations by step */
       nextStep: () => {
@@ -234,7 +234,11 @@ function serialized(state, work) {
 function sandboxOptions(state, method, collection, options) {
   if (options !== undefined && !isPlainObject(options)) return { session: state.session };
   const out = { ...options };
-  if (out.session !== undefined && out.session !== state.session) {
+  if (
+    out.session !== undefined &&
+    out.session !== state.session &&
+    out.session !== state.sessionProxy
+  ) {
     throw refuse(state, method, 'it passes another session', collection);
   }
   for (const key of REFUSED_OPTIONS) {
