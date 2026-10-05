@@ -144,8 +144,9 @@ function startWatch(deps, options = {}) {
       const spec = state.spec;
       if (state.status !== 'completed' || state.direction === 'revert') continue;
       if (spec?.mode !== 'declarative') continue;
-      if (settings.collections !== undefined && !settings.collections.has(spec.collection))
+      if (settings.collections !== undefined && !settings.collections.has(spec.collection)) {
         continue;
+      }
       names.add(spec.collection);
     }
     const sorted = [...names].sort();
@@ -164,7 +165,9 @@ function startWatch(deps, options = {}) {
   }
 
   async function supervise() {
-    while (!signal.aborted && unsupported === undefined) {
+    while (!signal.aborted) {
+      // A follower found no change streams here at all: nothing to supervise.
+      if (unsupported !== undefined) break;
       try {
         const wanted = wantedCollections(await deps.store.list());
         for (const collection of wanted) {
@@ -434,8 +437,9 @@ function startWatch(deps, options = {}) {
       if (result.migrated !== 1) return;
       count('upgraded');
       drift(collection, edge.name, 'upgraded');
-      if (lag !== undefined)
+      if (lag !== undefined) {
         deps.telemetry?.backgroundWatchDelay({ name: edge.name, delayMs: lag });
+      }
     }
   }
 

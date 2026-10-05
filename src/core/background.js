@@ -229,8 +229,9 @@ function shardingOf(job, plan) {
     return { mode: 'untargeted', ...(job.sharding.key ? { key: job.sharding.key } : {}) };
   }
   const groups = new Set();
-  for (const partition of plan.partitions)
+  for (const partition of plan.partitions) {
     if (partition.group !== undefined) groups.add(partition.group);
+  }
   return { mode: plan.method, key: job.sharding.key, groups: groups.size };
 }
 

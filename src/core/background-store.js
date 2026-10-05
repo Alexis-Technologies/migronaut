@@ -615,8 +615,9 @@ class BackgroundStore {
           // Claimed by someone else between the pick and the write: pick again.
           taken = true;
         } catch (error) {
-          if (error?.code !== DUPLICATE_KEY || /lease_slot/.test(String(error?.message)))
+          if (error?.code !== DUPLICATE_KEY || /lease_slot/.test(String(error?.message))) {
             throw error;
+          }
         }
       }
       if (taken) continue;

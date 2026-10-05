@@ -78,8 +78,9 @@ describe('background-watch-plan — the stream', () => {
 
   it('should read stream errors', () => {
     const coded = (code) => Object.assign(new Error('x'), { code });
-    for (const code of [286, 280, 136])
+    for (const code of [286, 280, 136]) {
       assert.strictEqual(classifyStreamError(coded(code)), 'history-lost');
+    }
     assert.strictEqual(classifyStreamError(coded(13)), 'unauthorized');
     assert.strictEqual(classifyStreamError(coded(40573)), 'unsupported');
     assert.strictEqual(classifyStreamError(coded(6)), 'retry');

@@ -33,8 +33,9 @@ function edgesOf(states, collection) {
     const spec = state.spec;
     if (spec?.collection !== collection || spec.mode !== 'declarative') continue;
     if (state.status !== 'completed' || state.direction === 'revert') continue;
-    if (!edges.has(spec.from))
+    if (!edges.has(spec.from)) {
       edges.set(spec.from, { name: state._id, from: spec.from, to: spec.to });
+    }
     if (target === undefined || spec.to > target) target = spec.to;
   }
   return { edges, target };
