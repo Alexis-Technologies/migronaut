@@ -553,3 +553,13 @@ expectAssignable<CollectionDefinitionFile>({
 expectAssignable<CollectionVersioning>({ current: 1, revisionField: 'rev' });
 expectError<CollectionVersioning>({ min: 1 });
 expectNotAssignable<CollectionVersioning>({ current: 1, maximum: 3 });
+
+// ─── Background config ────────────────────────────────────────────────────────
+expectAssignable<Partial<MigronautConfig>>({
+  backgroundCollection: '_bg',
+  backgroundInline: true,
+  backgroundOnDrift: 'report',
+  backgroundDrift: 'both',
+  backgroundShardAware: 'off',
+});
+expectNotAssignable<Partial<MigronautConfig>>({ backgroundDrift: 'never' });

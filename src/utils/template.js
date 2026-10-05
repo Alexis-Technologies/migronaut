@@ -366,6 +366,20 @@ function configBody(values, createExtension) {
   // waitForSearchIndexes: false,
   // searchIndexWaitTimeoutMs: 600000,
 
+  // ── Background migrations (experimental) ────────────────────
+  // A migration file with \`export const background = {…}\` is registered by
+  // \`up\` and runs in partitions (BullMQ, \`migronaut background run\`, or an
+  // in-process runner) without holding the migration lock.
+  // backgroundCollection: '_migronaut_background',
+  // Run it to the end inside the \`up\` that registers it instead.
+  // backgroundInline: false,
+  // Old-shape documents after it completed: reopen it ('reopen') or report.
+  // backgroundOnDrift: 'reopen',
+  // How drift is watched: 'poll' (every 10 minutes), 'stream', or 'both'.
+  // backgroundDrift: 'poll',
+  // Partition a sharded collection by its shard key ('auto') or not ('off').
+  // backgroundShardAware: 'auto',
+
   // ── Lifecycle hooks (code only — not available in JSON config) ──
   // hooks: {
   //   beforeAll: async (ctx) => {},

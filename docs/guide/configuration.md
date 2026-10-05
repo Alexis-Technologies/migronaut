@@ -107,6 +107,11 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `waitForSearchIndexes` | `boolean` | `false` | Hold `converge` until every declared search index is queryable — search indexes build in the background |
 | `searchIndexWaitTimeoutMs` | `number` | `600000` | How long `waitForSearchIndexes` waits before the converge fails (the build goes on) |
 | `onSearchUnavailable` | `'fail' \| 'skip'` | `'fail'` | What converge does with declared [search indexes](/guide/collections#search-indexes) on a server without Atlas Search: refuse the run, or converge everything else and skip them |
+| `backgroundCollection` | `string` | `'_migronaut_background'` | Where [background migrations](/guide/background-migrations) keep their state — and, named after it, their partitions (`<name>_partitions`) and the drift watcher's resume tokens (`<name>_watch`) |
+| `backgroundInline` | `boolean` | `false` | Run a background migration to the end inside the `up` that registers it, under the migration lock — for small collections and tests |
+| `backgroundOnDrift` | `'reopen' \| 'report'` | `'reopen'` | What the drift watch does with old-shape documents that appear after a background migration completed |
+| `backgroundDrift` | `'poll' \| 'stream' \| 'both'` | `'poll'` | How drift is watched: a check every 10 minutes, change streams (with the check as a backstop), or both |
+| `backgroundShardAware` | `'auto' \| 'off'` | `'auto'` | Partition a sharded collection by its shard key and target each write at one shard |
 | `mongoose` | `Mongoose` | — | Mongoose instance, if your migrations use it |
 | `hooks` | `MigrationHooks` | — | [Lifecycle hooks](/guide/hooks) |
 | `logger` | `MigronautLogger \| null` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` silences all output |
@@ -213,6 +218,11 @@ config file is never required" literally true, not just a slogan. These
 | `MIGRONAUT_ON_SEARCH_UNAVAILABLE` | `onSearchUnavailable` |
 | `MIGRONAUT_WAIT_FOR_SEARCH_INDEXES` | `waitForSearchIndexes` |
 | `MIGRONAUT_SEARCH_INDEX_WAIT_TIMEOUT_MS` | `searchIndexWaitTimeoutMs` |
+| `MIGRONAUT_BACKGROUND_COLLECTION` | `backgroundCollection` |
+| `MIGRONAUT_BACKGROUND_INLINE` | `backgroundInline` |
+| `MIGRONAUT_BACKGROUND_ON_DRIFT` | `backgroundOnDrift` |
+| `MIGRONAUT_BACKGROUND_DRIFT` | `backgroundDrift` |
+| `MIGRONAUT_BACKGROUND_SHARD_AWARE` | `backgroundShardAware` |
 | `MIGRONAUT_ENV_FILE` | `envFile` |
 
 The remaining options — `fileExtensions`, `clientOptions`, `collections`,

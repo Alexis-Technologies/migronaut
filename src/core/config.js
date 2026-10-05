@@ -38,6 +38,11 @@ const DEFAULT_CONFIG = {
   onSearchUnavailable: 'fail',
   waitForSearchIndexes: false,
   searchIndexWaitTimeoutMs: 600_000,
+  backgroundCollection: '_migronaut_background',
+  backgroundInline: false,
+  backgroundOnDrift: 'reopen',
+  backgroundDrift: 'poll',
+  backgroundShardAware: 'auto',
 };
 
 /** Candidate config file names, checked in priority order within the cwd */
@@ -47,6 +52,26 @@ const isNonEmptyString = (value) => typeof value === 'string' && value.length > 
 const isBoolean = (value) => typeof value === 'boolean';
 const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
 const isExtension = (value) => value === 'ts' || value === 'js';
+const oneOf = (values) => (value) => values.includes(value);
+const quoted = (values) => values.map((value) => `'${value}'`).join(', ');
+
+const ON_DRIFT = ['reopen', 'report'];
+const DRIFT_MODES = ['poll', 'stream', 'both'];
+const SHARD_AWARE = ['auto', 'off'];
+
+/**
+ * The collections a background migration keeps its state in: the state
+ * documents themselves, their partitions and the drift watcher's resume
+ * tokens — the last two named after the first, so one setting moves all
+ * three (and a test of "must differ" covers them together).
+ */
+function backgroundCollectionNames(backgroundCollection) {
+  return {
+    state: backgroundCollection,
+    partitions: `${backgroundCollection}_partitions`,
+    watch: `${backgroundCollection}_watch`,
+  };
+}
 
 function isStringList(value) {
   if (!Array.isArray(value) || value.length === 0) return false;
@@ -169,6 +194,31 @@ const CONFIG_KEYS = [
     message: 'must be a positive integer',
     optional: true,
   },
+  {
+    path: 'backgroundCollection',
+    check: isCollectionName,
+    message: "must be a valid collection name (no '$'/NUL, not system.*)",
+    optional: true,
+  },
+  { path: 'backgroundInline', check: isBoolean, message: 'must be a boolean', optional: true },
+  {
+    path: 'backgroundOnDrift',
+    check: oneOf(ON_DRIFT),
+    message: `must be ${quoted(ON_DRIFT)}`,
+    optional: true,
+  },
+  {
+    path: 'backgroundDrift',
+    check: oneOf(DRIFT_MODES),
+    message: `must be ${quoted(DRIFT_MODES)}`,
+    optional: true,
+  },
+  {
+    path: 'backgroundShardAware',
+    check: oneOf(SHARD_AWARE),
+    message: `must be ${quoted(SHARD_AWARE)}`,
+    optional: true,
+  },
 ];
 
 /**
@@ -220,24 +270,49 @@ function validateConfig(config, options = {}) {
   // pure data, so this costs nothing. Definition *files* are loaded only when
   // a converge runs: importing them here would make one broken file block
   // every command, an emergency `down` included.
-  // Three bookkeeping collections, three jobs: sharing one would mix records.
-  const bookkeeping = ['migrationsCollection', 'lockCollection', 'convergeLogCollection'];
-  for (const [position, key] of bookkeeping.entries()) {
-    for (const other of bookkeeping.slice(0, position)) {
-      if (config[key] !== undefined && config[key] === config[other]) {
-        issues.push({ path: key, message: `must differ from ${other}` });
-      }
+  // Every bookkeeping collection has one job: sharing one would mix records.
+  const bookkeeping = bookkeepingCollections(config);
+  for (let position = 1; position < bookkeeping.length; position++) {
+    const [key, name, what] = bookkeeping[position];
+    if (name === undefined) continue;
+    for (let earlier = 0; earlier < position; earlier++) {
+      const [otherKey, otherName, otherWhat] = bookkeeping[earlier];
+      if (name !== otherName) continue;
+      issues.push({
+        path: key,
+        message: `${what ? `${what} (${name}) ` : ''}must differ from ${otherWhat ? `${otherKey}'s ${otherWhat}` : otherKey}`,
+      });
+      break;
     }
   }
   if (Array.isArray(config.collections)) {
-    const reserved = [
-      config.migrationsCollection,
-      config.lockCollection,
-      config.convergeLogCollection,
-    ];
+    const reserved = [];
+    for (const [, name] of bookkeeping) if (name !== undefined) reserved.push(name);
     for (const issue of collectionsIssues(config.collections, { reserved })) issues.push(issue);
   }
   return issues;
+}
+
+/**
+ * Every collection migronaut keeps records in, as `[configKey, name, what?]`
+ * — `what` names a collection derived from the key (the background
+ * partitions and watch collections).
+ */
+function bookkeepingCollections(config) {
+  const entries = [
+    ['migrationsCollection', config.migrationsCollection],
+    ['lockCollection', config.lockCollection],
+    ['convergeLogCollection', config.convergeLogCollection],
+  ];
+  if (typeof config.backgroundCollection === 'string') {
+    const names = backgroundCollectionNames(config.backgroundCollection);
+    entries.push(
+      ['backgroundCollection', names.state],
+      ['backgroundCollection', names.partitions, 'partitions collection'],
+      ['backgroundCollection', names.watch, 'watch collection'],
+    );
+  }
+  return entries;
 }
 
 const TRUE_BOOLEAN_STRINGS = new Set(['true', '1', 'yes']);
@@ -360,6 +435,19 @@ const ENV_KEYS = [
     env: 'MIGRONAUT_SEARCH_INDEX_WAIT_TIMEOUT_MS',
     path: 'searchIndexWaitTimeoutMs',
     parse: parsePositiveInteger,
+  },
+  { env: 'MIGRONAUT_BACKGROUND_COLLECTION', path: 'backgroundCollection', parse: parseString },
+  { env: 'MIGRONAUT_BACKGROUND_INLINE', path: 'backgroundInline', parse: parseBoolean },
+  {
+    env: 'MIGRONAUT_BACKGROUND_ON_DRIFT',
+    path: 'backgroundOnDrift',
+    parse: parseEnum(ON_DRIFT),
+  },
+  { env: 'MIGRONAUT_BACKGROUND_DRIFT', path: 'backgroundDrift', parse: parseEnum(DRIFT_MODES) },
+  {
+    env: 'MIGRONAUT_BACKGROUND_SHARD_AWARE',
+    path: 'backgroundShardAware',
+    parse: parseEnum(SHARD_AWARE),
   },
 ];
 
@@ -599,6 +687,8 @@ module.exports = {
   CONFIG_KEYS,
   DEFAULT_CONFIG,
   ENV_KEYS,
+  backgroundCollectionNames,
+  bookkeepingCollections,
   // Re-exported from utils/collection-name.js, where it moved so that
   // core/collections.js can use it without a require cycle through here.
   isCollectionName,

@@ -517,6 +517,37 @@ export interface MigronautConfig {
    * @experimental New in 2.2
    */
   searchIndexWaitTimeoutMs?: number;
+  /**
+   * Where background migrations keep their state — and, named after it,
+   * their partitions (`<name>_partitions`) and the drift watcher's resume
+   * tokens (`<name>_watch`). Default `'_migronaut_background'`.
+   * @experimental New in 2.3
+   */
+  backgroundCollection?: string;
+  /**
+   * Run a background migration to the end inside the `up` that registers it,
+   * under the migration lock — for small collections and tests. Default false.
+   * @experimental New in 2.3
+   */
+  backgroundInline?: boolean;
+  /**
+   * What the drift watch does with old-shape documents that appear after a
+   * background migration completed: `'reopen'` it (default) or only `'report'`.
+   * @experimental New in 2.3
+   */
+  backgroundOnDrift?: 'reopen' | 'report';
+  /**
+   * How drift is watched: `'poll'` (default — a check every 10 minutes),
+   * `'stream'` (change streams, the check as a backstop) or `'both'`.
+   * @experimental New in 2.3
+   */
+  backgroundDrift?: 'poll' | 'stream' | 'both';
+  /**
+   * Partition a sharded collection by its shard key and target each write at
+   * one shard (`'auto'`, default), or treat it like any other (`'off'`).
+   * @experimental New in 2.3
+   */
+  backgroundShardAware?: 'auto' | 'off';
   /** Mongoose instance — required only if your migrations use Mongoose models */
   mongoose?: MongooseLike;
   hooks?: MigrationHooks;

@@ -786,6 +786,13 @@ export default {
   // onSearchUnavailable: 'fail',     // 'skip' → converge without search indexes where Search is absent
   // waitForSearchIndexes: false,     // true → converge waits until search indexes are queryable
 
+  // ── Background migrations (experimental) — see `migronaut background` ───
+  // backgroundCollection: '_migronaut_background', // state (+ _partitions, _watch)
+  // backgroundInline: false,         // true → run it to the end inside the registering `up`
+  // backgroundOnDrift: 'reopen',     // 'report' → only report old-shape documents after completion
+  // backgroundDrift: 'poll',         // 'stream' | 'both' → watch drift with change streams
+  // backgroundShardAware: 'auto',    // 'off' → no shard-key partitions on sharded collections
+
   // ── Code-only options (omit in migronaut.config.json) ─────────────────────────
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
   // mongoose: myMongooseInstance, // pass if your migrations use Mongoose models
@@ -923,6 +930,11 @@ optional rather than merely discouraged:
 | `MIGRONAUT_ON_SEARCH_UNAVAILABLE` | `onSearchUnavailable` | `fail` |
 | `MIGRONAUT_WAIT_FOR_SEARCH_INDEXES` | `waitForSearchIndexes` | `false` |
 | `MIGRONAUT_SEARCH_INDEX_WAIT_TIMEOUT_MS` | `searchIndexWaitTimeoutMs` | `600000` |
+| `MIGRONAUT_BACKGROUND_COLLECTION` | `backgroundCollection` | `_migronaut_background` |
+| `MIGRONAUT_BACKGROUND_INLINE` | `backgroundInline` | `false` |
+| `MIGRONAUT_BACKGROUND_ON_DRIFT` | `backgroundOnDrift` | `reopen` |
+| `MIGRONAUT_BACKGROUND_DRIFT` | `backgroundDrift` | `poll` |
+| `MIGRONAUT_BACKGROUND_SHARD_AWARE` | `backgroundShardAware` | `auto` |
 | `MIGRONAUT_ENV_FILE` | `envFile` | `.env` |
 
 `fileExtensions`, `clientOptions`, `collections`, `client`, `mongoose`, `hooks`, `logger`,
