@@ -173,6 +173,38 @@ whose `context.converge` is the result so far. `up(undefined, { converge: true }
 the migrations under the same lock — what `convergeAfterUp` does for every bulk `up`; `up` still
 returns its migration rows, and the converge outcome arrives as the `converge:end` event.
 
+### Background migrations
+
+A [background migration](/guide/background-migrations) is registered by `up` and carried out by
+these methods — none of them takes the migration lock, and one kit may run many at once. All are
+experimental.
+
+```ts
+await migrator.runBackground('20261004-orders-v2.js', { concurrency: 4 }); // to the end, from here
+const status = await migrator.backgroundStatus('20261004-orders-v2.js');   // null when not registered
+await migrator.pauseBackground('20261004-orders-v2.js', { wait: true, reason: 'peak hours' });
+await migrator.resumeBackground('20261004-orders-v2.js');
+```
+
+| Method | What it does |
+|---|---|
+| `runBackground(name, { signal?, sliceMs?, untilDone?, concurrency? })` | Drive it from this process — the coordinator and up to `concurrency` lanes (at most its `maxParallel`) — to the end, or one round with `untilDone: false`. A failure rejects with `BackgroundFailedError`; an aborted `signal` with `RunAbortedError` (it goes on from there next time) |
+| `coordinateBackground(name, { signal?, driver? })` / `runBackgroundSlice(name, { signal?, sliceMs? })` | One coordinator step / one lane's slice — the building blocks the runner and the queue use |
+| `backgroundStatus(name?)` / `backgroundPartitions(name)` / `runnableBackground()` | Read its state, the partitions of its latest generation, the ones with work to do |
+| `pauseBackground` / `resumeBackground` / `cancelBackground(name, { wait?, requestedBy?, reason? })` | Controls; each lane sees them at its next batch |
+| `retryBackground(name, { fromStart?, repin? })` / `repinBackground(name)` / `unlockBackground(name)` | Retry a failed or cancelled one (or reopen a completed one), pin the file on disk, release its coordinator lock and every lease |
+| `dryRunBackground(name, { sample?, first?, validate?, steps?, direction? })` | Preview without writing — a sample, or a `step` migration's steps in the always-aborted sandbox |
+| `verifyBackground({ onDrift?, collections? })` | The drift check, once: old-shape documents written after completion |
+| `watchBackground(options?)` / `backgroundWatchStatus(collection?)` | The live drift watcher (change streams), and what the watchers recorded |
+| `driftMode()` | The `backgroundDrift` setting — what a runner or a queue worker hosting this kit follows |
+
+`startBackgroundRunner({ kit | config, concurrency?, pollIntervalMs?, verifyIntervalMs?, watch?,
+signal?, onError? })` runs lanes inside the application, shared by every runnable background
+migration, plus the drift check (and, when drift is streamed, the live watcher); it resolves to
+`{ kit, running, watcher, stop() }`. An ordinary migration that `requires` a background one waits
+for it: `up` rejects with `BackgroundPendingError` — or, with `onBackgroundPending: 'stop'` (also
+on `runMigrations`), ends the line cleanly and reports it as `summary.waiting`.
+
 ::: tip `MigratorKit` is an `EventEmitter`
 Subscribe to `run:start`, `run:end`, `migration:start`, `migration:success`, `migration:skipped`,
 `migration:error`, `lock:acquired`, `lock:released`, `lock:lost` and — for a real converge run —
@@ -305,6 +337,42 @@ The CLI's exit-code map, so a wrapper script can mirror its semantics without ha
 One entry per error code, plus `PENDING_MIGRATIONS` (from `status --check`), `AUDIT_FAILED` and
 `COLLECTIONS_DRIFT` (from `converge --check`).
 See the [exit-code table](/reference/cli#exit-codes).
+
+## Document versioning
+
+`@alexify/migronaut/versioning` is a third entry point, beside the package root and `./bullmq`: the
+[document versioning](/guide/versioning) runtime for your application's repository layer. It loads
+no part of the migration engine, and neither the driver nor Mongoose — the helpers take your
+collection (a driver `Collection`, or a Mongoose model's `Model.collection`) and use only its
+methods.
+
+```ts
+import { defineShapes, updateWithRevision } from '@alexify/migronaut/versioning';
+import ordersDefinition from './collections/orders.js';
+
+// The same definition converge declares the collection with
+const shapes = defineShapes({ orders: ordersDefinition });
+const orders = db.collection('orders');
+
+await orders.insertOne(shapes.stamp('orders', draft)); // __v: current, __rev: 0
+await updateWithRevision(orders, { _id }, order.__rev ?? 0, { $set: { status: 'paid' } });
+```
+
+| Export | What it is |
+|---|---|
+| `defineShapes(definitions)` | The registry of your versioned collections, read from their definitions: `stamp`, `onInsert`, `stampUpsert`, `versionOf`, `isCurrent`, `isVersion`, `upcaster`, `plugin`. `defineShapes<Shapes>()(definitions)` is the [typed form](/guide/versioning#typed-shapes) |
+| `updateWithRevision`, `replaceWithRevision`, `findOneAndUpdateWithRevision` | Writes that land only at the revision the caller read, and bump it — `RevisionConflictError` otherwise |
+| `retryOnConflict(fn, options?)` | Read, decide and write again after a conflict — 3 attempts, full-jitter backoff |
+| `bumpRevision(update, options?)` | The update with the revision bumped, for a write that needs no guard |
+| `upcaster(definition, steps, options?)` | One collection's shape changes: `step(from)` for a background migration, `upcast(doc)` on read |
+| `isVersion(doc, version, options?)` | Whether a document is at a version — a missing field is 0; a type guard |
+| `versioningPlugin` | The [Mongoose plugin](/guide/mongoose#document-versioning) |
+| `MigronautError`, `ConfigInvalidError`, `RevisionConflictError`, `ShapeVersionError` | The package root's own classes — `instanceof` agrees whichever entry point you import them from |
+
+Its types live in `versioning.d.ts` (TypeScript ≥ 5.0): `AnyShape`, `CurrentShape`, `ShapeAt`,
+`Stamped`, `BackgroundMigrationFor`, `ShapeRegistry`, `Upcaster`, `RevisionWriteOptions` and more.
+`Body` and `CollectionVersioning` come from the package root as well. Experimental, like everything
+new in 2.3 — see [Document Versioning](/guide/versioning) for the whole picture.
 
 ## Key types
 

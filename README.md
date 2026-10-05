@@ -75,6 +75,15 @@ change before it touches your database.
 - **Migrations as a queue (optional)** — `@alexify/migronaut/bullmq` runs each migration as its own
   BullMQ job, in order, so migronaut can be a migration service: trigger it over HTTP, on a
   schedule, or from a deploy hook that waits for the result.
+- **Document versioning (experimental)** — declare a collection's shape version (`__v`) and
+  optimistic-concurrency revision (`__rev`) once; converge enforces them, and
+  `@alexify/migronaut/versioning` gives your repository layer `updateWithRevision`, typed
+  per-version shapes, an upcaster and a Mongoose plugin ([guide](https://migronaut.vercel.app/guide/versioning)).
+- **Background migrations (experimental)** — long data rewrites (`export const background = {…}`)
+  that `up` only registers and that run beside the migration line: partitions and parallel lanes
+  across pods, checkpoints, pause/resume, transactional batches, shard-aware on sharded clusters,
+  dry runs, and a drift watcher that upgrades old-shape writes after completion — from the CLI,
+  inside your app, or on the queue ([guide](https://migronaut.vercel.app/guide/background-migrations)).
 
 ### How it compares to `migrate-mongo`
 
@@ -200,7 +209,7 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--
 | `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, one file, or to `--to <file>` |
 | `migronaut redo [file]` | Roll back then re-apply (the last migration, or one file) |
 | `migronaut converge` | Bring declared collections — indexes, search indexes and validators — to their declared state |
-| `migronaut background <action> [name]` | Background migrations: `status`, `run`, `pause`, `resume`, `cancel`, `retry`, `repin`, `dry-run`, `unlock`, `verify` |
+| `migronaut background <action> [name]` | Background migrations: `status`, `run`, `pause`, `resume`, `cancel`, `retry`, `repin`, `dry-run`, `unlock`, `verify`, `watch` |
 | `migronaut status` | Print the full migration status table (`--check` to fail CI on pending) |
 | `migronaut list` | List migrations, filtered by status |
 | `migronaut dry-run <up\|down> [file]` | Preview a run without touching the database |
@@ -293,6 +302,7 @@ migronaut background run <name>             # drive it from here (--concurrency 
 migronaut background pause <name> --wait    # stop its lanes at the next batch
 migronaut background dry-run <name> --validate   # on a sample, in an always-aborted transaction
 migronaut background verify                 # look for old-shape documents after completion
+migronaut background watch                  # upgrade old-shape writes as they land (Ctrl-C stops)
 
 # status — full status table
 migronaut status                   # the full status table

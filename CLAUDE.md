@@ -14,7 +14,7 @@ in sync with the code and is the source of truth for anything not covered below.
 
 ## The 5-minute mental model
 
-Two faces, one engine — plus one optional adapter on top:
+Two faces, one engine — plus one optional adapter on top, and one engine-free runtime beside it:
 
 - **CLI** (`migronaut`) — what most users run (`bin/migronaut.js` → `src/cli/index.js`).
 - **Programmatic API** (`MigratorKit` class + helper functions) — for app startup, serverless,
@@ -22,10 +22,21 @@ Two faces, one engine — plus one optional adapter on top:
 - **Queue adapter** (`@alexify/migronaut/bullmq`) — opt-in: migrations as BullMQ jobs, one
   migration per job, for running migronaut as a service. Exported from `src/bullmq/index.js`,
   re-exported by the root shim `bullmq.js`. It drives the public `MigratorKit` API and nothing
-  below it.
+  below it. Since 2.3 it also runs background migrations on a queue of their own.
+- **Versioning runtime** (`@alexify/migronaut/versioning`) — small helpers for an application's
+  repository layer: the shape version `__v`, the optimistic-concurrency revision `__rev`,
+  `defineShapes`, `upcaster`, the Mongoose plugin. Exported from `src/versioning/index.js`,
+  re-exported by `versioning.js`. It requires nothing outside `src/versioning/` and `src/errors/`
+  (a test pins it): no core, no `mongodb`, no `mongoose`.
 
-The package root and the `./bullmq` subpath are the *only* two things users import from — the
-`exports` map is closed to everything else.
+The package root, `./bullmq` and `./versioning` are the *only* three things users import from —
+the `exports` map is closed to everything else.
+
+Since 2.3 the engine also runs **background migrations** (ARCHITECTURE §6.8): a file with
+`export const background = {…}` that `up` only registers; partitions, leases (= slots, capped by a
+unique index at `maxParallel`) and a coordinator then rewrite the collection beside the line, in
+any runtime (CLI `background run`, `startBackgroundRunner`, the queue), never holding the
+migration lock. MongoDB holds all of their truth.
 
 All real logic lives in the orchestrator `MigratorKit` ([src/core/migrator.js](src/core/migrator.js)),
 which coordinates small single-responsibility modules: `config`, `lock`, `changelog`, `runner`,
@@ -51,13 +62,15 @@ consumers:
 - **Source is plain CommonJS** (`require`/`module.exports`), not TypeScript. JSDoc comments in
   `.js` files are documentation for the reader/editor only — nothing runs `tsc`/`checkJs` over
   them, so they are never type-checked.
-- **Types live in two hand-written files, one per entry point**: [index.d.ts](index.d.ts) for the
-  package root and [bullmq.d.ts](bullmq.d.ts) for the `./bullmq` subpath. They are the *only*
-  source of truth for the public type surface — there is no per-file `.d.ts`, no generation step.
-  When you add or change a public export, update the entry's runtime barrel **and** its `.d.ts`
-  together (`src/index.js` + `index.d.ts`, or `src/bullmq/index.js` + `bullmq.d.ts`) — they are
-  maintained by hand in lockstep, not derived from each other. `bullmq.d.ts` imports root types
-  from `./index.js`; the root never imports from the subpath.
+- **Types live in three hand-written files, one per entry point**: [index.d.ts](index.d.ts) for
+  the package root, [bullmq.d.ts](bullmq.d.ts) for `./bullmq` and [versioning.d.ts](versioning.d.ts)
+  for `./versioning`. They are the *only* source of truth for the public type surface — there is no
+  per-file `.d.ts`, no generation step. When you add or change a public export, update the entry's
+  runtime barrel **and** its `.d.ts` together (`src/index.js` + `index.d.ts`, `src/bullmq/index.js`
+  + `bullmq.d.ts`, or `src/versioning/index.js` + `versioning.d.ts`) — they are maintained by hand
+  in lockstep, not derived from each other. The subpaths import root types from `./index.js`; the
+  root never imports from a subpath. `versioning.d.ts` needs TypeScript ≥ 5.0 (`const` type
+  parameters); the others ≥ 4.8.
 - **Correctness of the hand-written types is enforced by [tsd](https://github.com/tsdjs/tsd)**
   (`tests/types/*.test-d.ts`, run via `pnpm run test:types`), not by a compiler pass over the
   declaration files themselves.
@@ -116,10 +129,12 @@ code-only like `logger`) takes the user's own `@opentelemetry/api` objects; migr
 spans and instruments and never looks at the SDK behind them. [src/utils/telemetry.js](src/utils/telemetry.js)
 is the only module that knows an OpenTelemetry name or calls the tracer/meter — every call goes
 through its one `safe()` guard (telemetry must never break a run), failures are reported as a
-redacted status message plus `error.type`, and there are exactly two wrap sites, both in
-`core/migrator.js`: the `migronaut.run` span (opened once the lock is held) and the
+redacted status message plus `error.type`, and there are exactly three wrap sites, all in
+`core/migrator.js`: the `migronaut.run` span (opened once the lock is held), the
 `migronaut.migration` span (the *active* span while a migration runs — the one thing lifecycle
-events cannot provide). Nothing under `src/` or `bin/` may `require` an `@opentelemetry/*` package or
+events cannot provide), and the background spans handed to `background.js` through its deps —
+`migronaut.background.slice` (one lease held) and `migronaut.background.coordinate` (one
+coordinator step), each opened only once the lease or the coordinator lock is held. Nothing under `src/` or `bin/` may `require` an `@opentelemetry/*` package or
 `bullmq-otel`, and neither `.d.ts` may import one (a unit test greps for it); the types are
 structural (`MigronautTracer`, `MigronautMeter`, …). BullMQ's own telemetry object rides in with the
 classes — `bullmq: { Queue, Worker, telemetry }` — and is passed through untouched.
@@ -133,6 +148,8 @@ index.js               # module.exports = require('./src/index.js') — package 
 index.d.ts               # Hand-written types for the package root
 bullmq.js                # module.exports = require('./src/bullmq/index.js') — the ./bullmq subpath
 bullmq.d.ts              # Hand-written types for the subpath (structural BullMQ types, no bullmq import)
+versioning.js            # module.exports = require('./src/versioning/index.js') — the ./versioning subpath
+versioning.d.ts          # Hand-written types for it (structural driver types, per-version shape types)
 bin/migronaut.js          # CLI shebang entry (CJS, no build)
 src/
 ├── index.js                # Public API barrel — re-exported at the package root
@@ -140,16 +157,24 @@ src/
 ├── core/                     # The engine (config, lock, lock-wait, changelog, runner, context, import, migrator, run,
 │                             #   options, sequence, run-recorder, and declared collections: collections,
 │                             #   index-spec, search-index-spec, converge-plan, converge, converge-search,
-│                             #   converge-search-run, converge-log, server-info)
+│                             #   converge-search-run, converge-log, server-info, versioning-spec,
+│                             #   shard-info; background migrations: background-spec, -partition, -shard,
+│                             #   -store, -engine, -throttle, background, -sandbox, -dry-run, -runner,
+│                             #   -watch, -watch-plan, -watch-store; bson-peer)
+├── versioning/                # The ./versioning runtime: internal, config, document (the shared contract),
+│                             #   occ, registry, upcaster, mongoose
 ├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id, telemetry,
 │                             #   canonical, collection-name, actor, error, redact — pure-ish helpers
 ├── cli/                        # own arg parser (args.js) + spinner + table + one file per command
-└── bullmq/                      # Queue adapter: jobs (contract), producer, processor, wait, service (facade)
+└── bullmq/                      # Queue adapter: jobs (contract), producer, processor, background-processor,
+                                 #   wait, service (facade)
 tests/
 ├── unit/                # mocked DB, pure logic — node:test
 ├── integration/          # real in-memory MongoDB via mongodb-memory-server (replica set) — node:test
-├── helpers/              # incl. fake-bullmq.js (in-memory BullMQ double) + bullmq-scenarios.js + otel.js (real SDK, in-memory)
-└── types/                 # tsd type-tests against index.d.ts and bullmq.d.ts
+├── helpers/              # incl. fake-bullmq.js (in-memory BullMQ double) + bullmq-scenarios.js,
+│                         #   bullmq-fidelity.js, bullmq-background-scenarios.js + otel.js (real SDK, in-memory)
+├── fixtures/sharded/     # start.sh — a whole sharded cluster in one mongo:8.0 container
+└── types/                 # tsd type-tests against index.d.ts, bullmq.d.ts and versioning.d.ts
 examples/               # Runnable example apps (migration-service) — own package.json, never published
 docs/                   # VitePress user-facing site — never published to npm
 blog/                   # Long-form posts, also docs-only
@@ -163,8 +188,12 @@ steps and owns the connection lifecycle. Mechanism modules
 imports. The CLI injects a `ProgressReporter` callback into core instead. The queue adapter
 (`bullmq/`) is a second orchestration layer *above* the kit: it may require `core/migrator.js`,
 `core/lock-wait.js`, `utils/` and `errors/`, but never a mechanism module (`lock`, `changelog`,
-`runner`) and never the database — if it needs something the kit does not offer, the kit gains a
-small public option (that is where `up({ batch, ordered })` and `nextBatch()` came from).
+`runner`, any `background-*`) and never the database — if it needs something the kit does not
+offer, the kit gains a small public option (that is where `up({ batch, ordered })`, `nextBatch()`,
+`coordinateBackground()` and `driftMode()` came from). `core/background.js` and
+`core/background-watch.js` are flows like `converge.js`: they get what they need as `deps`, built
+only by `migrator.js`. The core may require `src/versioning/`; `src/versioning/` never requires
+the core.
 
 ## Naming conventions (post-rename)
 
@@ -224,8 +253,11 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
 - Never `throw new Error` — always a `MigronautError` subclass with a typed `code`.
 - Never `console.*` — always the injected `MigronautLogger` (`null` = silent, used in tests).
 - Public API changes touch two files together — the entry's runtime barrel and its hand-written
-  types: `src/index.js` + `index.d.ts`, or `src/bullmq/index.js` + `bullmq.d.ts` — never one
-  without the other.
+  types: `src/index.js` + `index.d.ts`, `src/bullmq/index.js` + `bullmq.d.ts`, or
+  `src/versioning/index.js` + `versioning.d.ts` — never one without the other.
+- `require('mongodb')` only in `core/migrator.js` and `core/bson-peer.js` (lazily, for `BSON`);
+  never `require('mongoose')` under `src/` — the Mongoose plugin works on the schema it is given
+  (a unit test greps for both).
 - Never `require('bullmq')` (or `ioredis`) under `src/`, and never import it in a `.d.ts` — the
   adapter works on what the caller injects.
 - Never `require('@opentelemetry/…')` (or `bullmq-otel`) under `src/` or `bin/`, and never import
@@ -261,6 +293,14 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
   `wait()` — before it ends: `afterEach` force-closes, which does not wait for a migration in
   flight, and a straggler writes into the next scenario's database (a sync tick's migration job
   runs *after* the tick completes).
+- The background queue builds on BullMQ semantics the fake models and
+  `tests/helpers/bullmq-fidelity.js` pins against both the fake and the real library (delays,
+  parents and children). Background scenarios (`tests/helpers/bullmq-background-scenarios.js`) wait
+  until MongoDB says what they expect *and* the background queue holds nothing waiting, active,
+  delayed or waiting for children.
+- Background migrations' integration tests use a child process for `kill -9`
+  (`tests/helpers/background-child.js`) and the server's `failCommand` fail point (the memory server
+  starts with `enableTestCommands`) — e.g. for a real change-stream error 286.
 - Coverage gate: 90% lines / 90% functions / 90% branches (`pnpm run test:coverage`, via `c8`).
 - The lock-heartbeat integration tests use real timers; running the *full* integration suite in
   parallel (13 concurrent `mongodb-memory-server` replica sets) can make timing-sensitive tests
@@ -309,7 +349,7 @@ converge result travels as `converge:end`, `summary.converge` and `converge --js
 never previews a converge; `ConvergeFailedError` keeps its progress in `context.converge`, never
 `context.results` (the kit and the CLI read `results` as migration rows); the CLI confirms *after*
 planning, inside `run`, like `unlock`; a converge job carries no `prune` and is ordered by default;
-and a converge run adds no third telemetry wrap site. For search indexes (§6.7 too): a search
+and a converge run adds no telemetry wrap site of its own. For search indexes (§6.7 too): a search
 index is never `recreate`d (a `$search` on a missing index returns nothing — a type or immutable
 `autoEmbed` change is a `conflict`); a FAILED build with the declared definition stays `unchanged`,
 and builds never count against `inSync`; `type` is sent to `createSearchIndexes` only for a vector
@@ -328,9 +368,27 @@ can precede `run:end`, and a newer converge may change the index under it; it fa
 FAILED build of an index the run created or changed (an untouched FAILED/STALE one is warned about,
 and `--check` still fails on FAILED); STALE never ends a wait early; up to three network or
 failover blips in a row are ridden out; and `migronaut.converge.search.wait.duration` is a metric
-point, not a third wrap site. A search index list that cannot be read reports the phase that read
-it (`plan` only before the first write). Names
+point, not a wrap site. A search index list that cannot be read reports the phase that read
+it (`plan` only before the first write). For background migrations (§6.8): `up` applies a
+background file without running it (the state document says how far the rewrite is), and a file
+may not export both `background` and `up`/`down`; completion is decided by counting what still
+matches, never by summing partitions; a drift reopening is a new pass, not a reset, so an old
+release that keeps writing exhausts `maxPasses` and fails visibly; the coordinator lock
+(`background:<name>`) and the watcher lock (`watch:<collection>`) live beside `migronaut_lock` and
+`forceUnlock`/`unlock`/audit never touch them; on the queue a lane *completes* for every outcome
+the kit recorded (its coordinator decides from MongoDB), lanes carry `ignoreDependencyOnFailure`
+(the other three failure policies strand or wake the coordinator wrongly) and get a new job id per
+spawn (BullMQ will not move a job to another parent); `stampedDiff` writes only the fields that
+changed, so untouched fields keep their BSON types; a shard-aware read may reach two shards (a
+mongos takes a `$lt` bound as inclusive when it picks shards); the shard-key guard compares
+numbers by value; the live watcher opens its stream *before* it probes the past; a typed
+`current` past the highest shape, written inline, errors as "not assignable to type 'never'"
+(from an imported `as const` definition it names the two numbers); there is no
+`maximum` on the version, and a validator synthesized for versioning alone is `moderate`. Names
 already taken, so not to reuse for anything else: `sync` (the queue job), `ensureIndexes` and the
 audit check `indexes` (the changelog's own indexes), the audit check `search`, `schema`
-(`migronaut.schema.json`).
+(`migronaut.schema.json`), the queue jobs `background`, `background-lane` and
+`background-verify` (and the scheduler `migronaut-background-verify`), the audit check
+`background`, the collections `_migronaut_background`, `_migronaut_background_partitions` and
+`_migronaut_background_watch`, and the lock ids `background:*` and `watch:*`.
 Don't "fix" these without checking the doc first.

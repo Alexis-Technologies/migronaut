@@ -81,6 +81,7 @@ Three rules explain every behaviour on this page:
 | `globalConcurrency` | `true` | Set the queue's global concurrency to 1 when the worker starts |
 | `allow` | | `{ down: true, force: false, unordered: false }` — what a job may ask for beyond applying what is pending in order. See [Security](#security) |
 | `lockWait` | | `{ onLockHeld: 'wait' \| 'throw', lockWaitTimeoutMs, lockPollIntervalMs: 500 }` — how a job behaves when the MongoDB lock is held. The timeout defaults to 90 s or 1.5× the holder's lock TTL, whichever is longer; polls back off up to 5 s |
+| `background` | | `true` or `{ … }`: a second queue for [background migrations](#background-migrations-on-the-queue) |
 
 | Method | Returns | |
 |---|---|---|
@@ -90,9 +91,11 @@ Three rules explain every behaviour on this page:
 | `status()` / `pending()` / `audit()` / `lockInfo()` | | Read straight from MongoDB — same as the [kit methods](/guide/api) |
 | `getJob(id)` | `MigrationJobView \| null` | A job as plain, redacted data — safe to return from an API |
 | `pause()` / `resume()` | | Stop / resume picking up jobs; the one in flight finishes |
-| `schedule({ every \| pattern, tz?, to?, id? })` / `unschedule(id?)` | | Keep the database migrated on a schedule |
+| `schedule({ every \| pattern, tz?, to?, id?, job? })` / `unschedule(id?)` | | Keep the database migrated on a schedule — `job: 'converge'` or `'background-verify'` for those schedules |
+| `startBackgroundWorker(options?)` | your `Worker` | The [background](#background-migrations-on-the-queue) worker: coordinators and lanes, side by side |
+| `enqueueBackground(name?, options?)` / `backgroundStatus(name?)` / `verifyBackground(options?)` | | Background migrations on the queue — see [below](#background-migrations-on-the-queue) |
 | `close({ force? })` | | Graceful shutdown |
-| `kit`, `queue`, `worker`, `queueEvents`, `processor`, `queueName` | | The parts, when you need them |
+| `kit`, `queue`, `worker`, `queueEvents`, `processor`, `queueName` | | The parts, when you need them — and `backgroundQueue`, `backgroundWorker`, `backgroundProcessor`, `backgroundWatcher` |
 
 ### The group handle
 
@@ -243,6 +246,199 @@ do not count against `inSync`.
 A worker running old code converges to the old definitions — with `prune`, it can drop an index the
 new deploy just declared. Deploy the workers before you rely on a changed definition.
 :::
+
+## Background migrations on the queue
+
+A [background migration](/guide/background-migrations) rewrites a collection for as long as that
+takes, so it does not belong in the migration line. With the `background` option it gets a
+**queue of its own**, `<queueName>-background`. Its jobs run side by side, and a migration job
+never waits behind a rewrite:
+
+```js
+const mq = createMigrationQueue({
+  config,
+  bullmq: { Queue, Worker, QueueEvents },
+  connection,
+  background: true, // or { … } — see below
+});
+
+await mq.startWorker(); // migrations: one job at a time
+await mq.startBackgroundWorker(); // background migrations: coordinators and lanes, side by side
+```
+
+An `up` job that registers a background migration enqueues its coordinator at once. The job's
+result lists it under `background: [{ migration, jobId }]`. There is nothing else to call.
+
+::: warning Experimental
+New in 2.3, like background migrations themselves. The job names and payloads may still change in
+a minor release.
+:::
+
+### How it runs
+
+The background queue carries three kinds of job:
+
+| Job | What it is |
+|---|---|
+| `background` | The **coordinator** of one background migration: plans its partitions, starts its lanes, closes each pass |
+| `background-lane` | One **lane**: claims a partition and works it a slice at a time. A child job of its coordinator |
+| `background-verify` | A tick of the [drift watch](/guide/background-migrations#the-poll-verifybackground) |
+
+1. **The coordinator plans.** It takes one coordinator step. When partitions have work, it adds
+   that many lanes as its **children** and waits for them (`moveToWaitingChildren`).
+2. **Lanes work slices.** A lane works a slice, then moves itself to delayed and continues behind
+   whatever else waits. It completes once there is nothing left for it to claim.
+3. **The coordinator decides again.** It wakes when its last lane has finished and decides from
+   MongoDB what comes next: more lanes, the next pass, or the end. When the background migration
+   completes, the coordinator also enqueues the coordinators of whatever was waiting for it.
+
+The coordinator never decides from how its lanes ended. Lanes are added with
+`ignoreDependencyOnFailure`, so a lane that fails still wakes its coordinator, which reads the truth
+from MongoDB like everything else. A lane completes for every outcome the kit recorded, and fails
+only on an unexpected error. A failed slice backs off, starting at 1 s, doubling, and capped at 5
+minutes. After 8 failures in a row the lane completes as `gave-up`. Each failure is counted on its
+partition in MongoDB, which fails after `maxSliceFailures`.
+
+- **One coordinator chain per background migration.** Coordinator jobs are deduplicated on the
+  migration, so every heal collapses into the chain that is alive. Each has `attempts: 3` with a
+  30-second backoff, as an outer safety net. Lanes have `attempts: 1`, and their ids are new for
+  every spawn.
+- **`maxParallel` holds across every worker.** It is enforced in MongoDB, not in Redis. The
+  background worker runs 2 jobs at once by default (`workerOptions.concurrency`, or
+  `startBackgroundWorker({ concurrency })`). Raise it to let one pod run more lanes.
+- **Losing Redis costs nothing that matters.** Plans, cursors, leases and counters are in MongoDB.
+  The next heal adds the coordinators again, and leases that nobody renews expire.
+
+### Heals and takeovers
+
+A **heal** adds a coordinator for every background migration that has work to do. It is
+idempotent, because a chain that is alive absorbs the add. Heals happen:
+
+- when `startBackgroundWorker()` starts;
+- on every `sync` tick of the migration queue, before it plans;
+- on every `background-verify` tick;
+- whenever you call `mq.enqueueBackground()` without a name.
+
+A `running` background migration with no live lease, no checkpoint and no coordinator step for
+`stallMs` (15 minutes by default) also gets a **takeover** coordinator. There is one per round,
+however many pods ask. Its newer round retires the stuck chain, which bows out at its next step.
+
+### Options
+
+`background: true` takes every default. An object takes:
+
+| Option | Default | |
+|---|---|---|
+| `queueName` | `<queueName>-background` | Must differ from the migration queue |
+| `queue` | — | A background `Queue` instance you own, never closed by `close()`. Otherwise one is built from `bullmq.Queue` |
+| `jobOptions` | — | Passed to every background job: retention, logs. Besides what migration jobs refuse, the four child-failure options (`failParentOnFailure`, `continueParentOnFailure`, `ignoreDependencyOnFailure`, `removeDependencyOnFailure`) are refused: the adapter owns them |
+| `workerOptions` | `{ concurrency: 2 }` | Defaults for `startBackgroundWorker()` |
+| `sliceMs` | each one's `sliceMs` | A lane's slice |
+| `children` | `'auto'` | Lanes as children of their coordinator, when the queue and its jobs support it. `false`: see [without children](#without-parent-and-child-jobs) |
+| `pollIntervalMs` | `5000` | How often a coordinator without children looks again |
+| `stallMs` | `900000` | Quiet time before a takeover (≥ 1000) |
+| `verifyIntervalMs` | `600000` | The drift watch's schedule, registered by `startBackgroundWorker()` when there is none yet — or at every start, when given explicitly (≥ 1000). `false` registers none |
+| `maxLaneRetries` | `8` | Failed slices in a row before a lane gives up (each one counted on its partition) |
+| `watch` | when `backgroundDrift` is `'stream'` or `'both'` | Host the [live drift watcher](/guide/background-migrations#the-live-watcher) in the background worker's process: `true`, `false` or its options |
+
+| Method | |
+|---|---|
+| `startBackgroundWorker(options?)` | Connects to MongoDB, registers the drift watch's schedule, starts the worker, heals, then starts the live watcher if wanted. Needs `bullmq.Worker`. Calling it again returns the same worker |
+| `enqueueBackground(name?, { stallMs?, requestedBy?, reason? })` | A coordinator for one background migration, or for every one with work to do. `{ jobs: [{ migration, id, takeover? }] }` |
+| `backgroundStatus(name?)` | Read from MongoDB, like [`kit.backgroundStatus()`](/guide/background-migrations#status) |
+| `verifyBackground({ onDrift?, collections? })` | The drift watch, now. A coordinator is enqueued for whatever it reopened |
+| `schedule({ job: 'background-verify', every \| pattern })` | The drift watch on a schedule of your choosing (id `'migronaut-background-verify'`) |
+
+`startBackgroundWorker()` registers the drift watch's schedule under that same id — every
+`verifyIntervalMs` — when none exists yet. A schedule set with
+`schedule({ job: 'background-verify', pattern })` therefore stays across restarts; a
+`verifyIntervalMs` given explicitly, though, is registered at every start and replaces it.
+`unschedule(DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID)` removes it.
+
+### The drift watch on the queue
+
+Each `background-verify` tick runs `verifyBackground()` and then heals, so a background migration
+reopened because of drift gets its coordinator on the same tick. The tick returns
+`{ checked, skipped, drift, enqueued }`. The [live watcher](/guide/background-migrations#the-live-watcher)
+is not a job, because a change stream is a cursor that stays open. It runs inside the background
+worker's process (`watch`), with one leader per collection across every worker, and
+`mq.backgroundWatcher` is its handle.
+
+### Migrations that wait for a background one
+
+An ordinary migration that [`requires`](/guide/background-migrations#requires-waiting-for-a-background-migration)
+a background migration that has not completed is never enqueued to fail:
+
+- **`enqueueUp()`** plans up to that migration and stops there. `group.waiting` is
+  `{ migration, waitsFor }`, the group gets no converge job, `upToDate` is `false`, and a warning
+  says why.
+- **`enqueueUp(name)`** for that very file throws `BackgroundPendingError` at the call.
+- **A `sync` tick** enqueues what comes before it and reports
+  `held: { migration, reason: 'waiting for background migrations', waitsFor }`. Once the background
+  migration completes, the next tick enqueues the rest.
+
+A background migration file that requires another one is not held. It registers as `blocked` and
+starts once the one it requires completes.
+
+### Without parent and child jobs
+
+Lanes are children of their coordinator only when the queue has a `qualifiedName` and its jobs can
+`moveToWaitingChildren`, which BullMQ supports. Otherwise, or with `children: false`, lanes are
+added on their own, deduplicated per lane slot. The coordinator then looks at MongoDB again every
+`pollIntervalMs` instead of being woken by its last lane. The outcome is the same; it only reacts a
+little later.
+
+### Shutdown
+
+`close()` shuts things down in this order:
+
+1. **The live watcher.** Its streams close, their positions are saved, and its locks go to another
+   pod's watcher.
+2. **Both workers stop fetching, and both processors are told to stop.** A lane stops at its next
+   batch, checkpoints, releases its lease and moves itself back to delayed for the next worker. A
+   coordinator in the middle of a step bows out and comes back.
+3. **QueueEvents, the queues it built, and the kit**, last.
+
+A pod killed without that loses nothing either: its leases expire after `lockTTLSeconds`, and
+another lane resumes from the last checkpoint.
+
+### Your own Worker
+
+The building blocks work on queues you own:
+
+```js
+const { Queue, Worker } = require('bullmq');
+const {
+  backgroundQueueName,
+  createBackgroundProcessor,
+  createMigrationProcessor,
+} = require('@alexify/migronaut/bullmq');
+
+const queue = new Queue('migronaut', { connection });
+const backgroundQueue = new Queue(backgroundQueueName('migronaut'), { connection }); // 'migronaut-background'
+
+// The migration worker hands what an `up` registers to the background queue, and heals it on sync ticks.
+const processor = createMigrationProcessor({ config, queue, background: { queue: backgroundQueue } });
+const worker = new Worker('migronaut', processor, { connection, concurrency: 1 });
+
+const backgroundProcessor = createBackgroundProcessor({ config, queue: backgroundQueue });
+const backgroundWorker = new Worker(backgroundQueue.name, backgroundProcessor, {
+  connection,
+  concurrency: 2,
+});
+await backgroundProcessor.heal(); // what startBackgroundWorker() does at start
+```
+
+`createBackgroundProcessor` takes `config` or `kit` (and `kitOptions`), `queue` (required: the
+coordinators add their lanes to it), `jobOptions`, `sliceMs`, `children`, `pollIntervalMs`,
+`stallMs`, and `maxLaneRetries` (failed slices in a row before a lane gives up, default 8). The
+processor has `shutdown()`, `close()` and `heal()`. `createMigrationProcessor`'s `background` takes
+`{ queue, jobOptions?, stallMs? }`. On the producer side,
+`enqueueBackground(queue, kit, { migration?, stallMs?, jobOptions?, requestedBy?, reason? })`
+enqueues coordinators on a background queue you own.
+
+The job contract is versioned like every other (`data.v`), and every background job's fields are
+checked against a strict allow-list before anything runs.
 
 ## Enqueue and wait: deploy hooks and CI
 
@@ -431,4 +627,5 @@ run-level [hooks](/guide/hooks) fire once per job. `beforeEach` / `afterEach` be
 
 - A complete, runnable service: [`examples/migration-service`](https://github.com/Alexis-Technologies/migronaut/tree/main/examples/migration-service)
 - [Programmatic API](/guide/api) — `MigratorKit`, `nextBatch()`, the `batch` / `ordered` options the queue is built on
+- [Background Migrations](/guide/background-migrations) — what the background queue runs
 - [Error Codes](/reference/error-codes)

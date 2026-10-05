@@ -43,7 +43,15 @@ Both faces are thin. All real logic lives in **one orchestrator class**, [`Migra
 which coordinates a handful of small, single-responsibility modules. A third, optional consumer —
 the **queue adapter** (`@alexify/migronaut/bullmq`, [§6.6](#66-the-queue-adapter-bullmq)) — sits
 on top of the same public API as "your code" does: it runs each migration as a BullMQ job by
-calling `kit.up(name)` / `kit.down(name)`.
+calling `kit.up(name)` / `kit.down(name)` (and, since 2.3, background migrations as coordinator and
+lane jobs on a queue of their own). Beside them sits a fourth, engine-free entry point: the
+**versioning runtime** (`@alexify/migronaut/versioning`, [§6.9](#69-document-versioning-and-the-versioning-subpath)) —
+small helpers an application's repository layer uses for the shape version (`__v`) and the
+optimistic-concurrency revision (`__rev`) that converge declares and background migrations write.
+
+Since 2.3 the engine also runs **background migrations** ([§6.8](#68-background-migrations)):
+long data rewrites that `up` only registers, and that partitions, leases and a coordinator then
+carry out beside the migration line — never holding the migration lock.
 
 ```
             ┌────────────────────────────────────────────────┐
@@ -74,9 +82,20 @@ index.js                     # module.exports = require('./src/index.js') — pa
 index.d.ts                   # Hand-written types for the package root
 bullmq.js                    # module.exports = require('./src/bullmq/index.js') — the ./bullmq subpath
 bullmq.d.ts                  # Hand-written types for the subpath (structural BullMQ types)
+versioning.js                # module.exports = require('./src/versioning/index.js') — the ./versioning subpath
+versioning.d.ts              # Hand-written types for it (structural driver types, the shape-map machinery)
 src/
 ├── index.js                 # Public API barrel of the package root
 ├── errors/index.js          # MigronautError base + one subclass per error code
+├── versioning/              # The versioning runtime — requires nothing but its siblings and errors/
+│   ├── internal.js          # PURE: plain-object/BSON helpers, counts, BSON-aware sameValue, touched fields
+│   ├── config.js            # PURE: versioning keys, defaults, validation, resolve, versioningOf
+│   ├── document.js          # PURE: the shared contract — version/revision filters, occFilter, stampedDiff
+│   ├── occ.js               # updateWithRevision & co., retryOnConflict, bumpRevision
+│   ├── registry.js          # defineShapes() — stamp, onInsert, stampUpsert, upcaster, plugin
+│   ├── upcaster.js          # The in-memory upcaster (and its step() for background migrations)
+│   ├── mongoose.js          # versioningPlugin — never requires mongoose
+│   └── index.js             # Barrel of the ./versioning subpath
 ├── core/                    # The engine
 │   ├── migrator.js          # MigratorKit — orchestrates everything (the heart)
 │   ├── options.js           # PURE: validation of each run method's options (the preambles)
@@ -101,7 +120,23 @@ src/
 │   ├── converge-log.js      # ConvergeLog — the append-only converge history (_migronaut_converge)
 │   ├── import.js            # PURE migrate-mongo → MigrationRecord mapping
 │   ├── import-runner.js     # runImport() — the impure import flow (read/map/write)
-│   └── run.js               # Programmatic helpers: runMigrations(), pendingMigrations()
+│   ├── run.js               # Programmatic helpers: runMigrations(), pendingMigrations()
+│   ├── versioning-spec.js   # PURE: a collection's versioning as validator rules, an index, a floor guard
+│   ├── shard-info.js        # A collection's shard key and chunks, from config (clusterMonitor)
+│   ├── background-spec.js   # PURE: background specs, settings, state transitions, scopes, keysets
+│   ├── background-partition.js # The _id-range partitioner (sampled _id quantiles per BSON bracket)
+│   ├── background-shard.js  # The shard-aware partitioner, targeted writes, the shard-key guard
+│   ├── background-store.js  # BackgroundStore — state, partitions, leases (= slots), fenced checkpoints
+│   ├── background-engine.js # One batch / one partition: read, transform, stampedDiff, OCC write
+│   ├── background-throttle.js # pauseMs, the throttle hook, replication lag, the AIMD controller
+│   ├── background.js        # The flow: coordinate, runSlice, control, verify (drift), audit findings
+│   ├── background-sandbox.js # The always-aborted transaction + allow-list proxies of a dry run
+│   ├── background-dry-run.js # previewSample / previewSteps
+│   ├── background-runner.js # startBackgroundRunner() — lanes in the application's own process
+│   ├── background-watch-plan.js # PURE: the live drift watcher's edges, pipeline, error reading
+│   ├── background-watch-store.js # Its resume tokens and leaders (<backgroundCollection>_watch)
+│   ├── background-watch.js  # The live drift watcher: change streams, one leader per collection
+│   └── bson-peer.js         # The one lazy require('mongodb').BSON outside migrator.js
 ├── utils/
 │   ├── logger.js            # Pino-compatible logger (default console, silent, pino adapter)
 │   ├── colors.js            # ANSI palette + FORCE_COLOR/NO_COLOR/TTY detection + stripAnsi
@@ -133,6 +168,7 @@ src/
     ├── jobs.js              # The job contract: names, data version, validation, dedup ids
     ├── producer.js          # planUpJobs/planDownJobs + enqueueUp/enqueueDown/enqueueConverge
     ├── processor.js         # createMigrationProcessor() — runs ONE job (the Worker's function)
+    ├── background-processor.js # createBackgroundProcessor() — coordinator, lane and verify jobs
     ├── wait.js              # waitForGroup() — enqueue-and-wait over QueueEvents
     └── service.js           # MigrationQueue / createMigrationQueue() — the facade
 
@@ -157,7 +193,15 @@ There are three layers. Keep logic in the lowest layer it belongs to.
 | **Presentation** | `cli/`, `bin/` | Parse args, render tables/JSON, spinner, prompts, exit codes | Contain migration logic; touch the DB directly |
 | **Orchestration** | `core/migrator.js` (+ `run-recorder.js`), `core/run.js` | Sequence the steps of each command; own the connection lifecycle | Import the spinner or table renderer; render tables |
 | **Mechanism** | `core/{lock,changelog,runner,context,import,config,options,sequence}.js`, `utils/` | One job each, pure-ish, unit-testable | Know about the CLI; call `console.*` |
-| **Integration adapter** | `bullmq.js`, `src/bullmq/` | Drive the kit's *public* API from queue jobs; own the Queue/Worker lifecycle | Require a mechanism module (`lock`, `changelog`, `runner`) or touch the DB; `require('bullmq')`; call `console.*` |
+| **Integration adapter** | `bullmq.js`, `src/bullmq/` | Drive the kit's *public* API from queue jobs; own the Queue/Worker lifecycle | Require a mechanism module (`lock`, `changelog`, `runner`, any `background-*`) or touch the DB; `require('bullmq')`; call `console.*` |
+| **Versioning runtime** | `versioning.js`, `src/versioning/` | Pure helpers and thin driver calls for an application's repository layer | Require anything outside `src/versioning/` and `src/errors/` — no core, no `mongodb`, no `mongoose` (pinned by a test) |
+
+The background modules split the same way: `background-spec.js`, `background-watch-plan.js` and
+the planning halves of the partitioners are pure; `background-store.js`,
+`background-watch-store.js`, the engine and the throttle are mechanism; `background.js` and
+`background-watch.js` are flows that receive what they need as `deps` from the kit (like
+`converge.js`), and only `migrator.js` builds those deps. The core may require `src/versioning/`;
+`src/versioning/` never requires the core.
 
 **Why this matters for you:** the CLI's spinner lives *entirely* in the CLI layer
 ([cli/spinner.js](src/cli/spinner.js), driven from [cli/shared.js](src/cli/shared.js)) and is
@@ -379,8 +423,8 @@ Each entry: **responsibility · key exports · nuances you must know.**
   the same source to layers above the kit.
 - **Telemetry:** `#ensureConfig` also builds `#telemetry` from the `telemetry` option
   (`createTelemetry`, [utils/telemetry.js](src/utils/telemetry.js)) — a no-op object when nothing
-  was injected. There are exactly two wrap sites, both here, so the mechanism modules stay ignorant
-  of it:
+  was injected. There are exactly three wrap sites, all here, so the mechanism modules stay
+  ignorant of it:
   - `#withLock` opens the `migronaut.run` span around the callback it hands to `runWithLock` — i.e.
     *after* the lock is held — and hands it to its `RunRecorder`, which ends it in the `finally`,
     after the release, from the same summary `run:end` is built from. A refused acquisition
@@ -388,6 +432,12 @@ Each entry: **responsibility · key exports · nuances you must know.**
   - `#executeMigration` wraps `#executeMigrationSteps` (hooks, load, body, changelog write) in the
     `migronaut.migration` span, which makes it the *active* span for everything the migration
     does, and records the duration histogram on both the success and the failure path.
+  - `#backgroundDeps` hands `background.js` a `span(kind, name, fn)` that wraps one background
+    step: `migronaut.background.slice` (one lease held by one lane) or
+    `migronaut.background.coordinate` (one coordinator step). Each is opened only once the lease or
+    the coordinator lock is held — a `busy` answer opens none — and is active for that step's
+    driver commands. Background migrations run outside `#withLock`, so this third site is
+    separate from the run span.
 
 ### `src/core/options.js` — run-method option validation (pure)
 - **Responsibility:** one `assert*Options` per run method (`up`, `down`, `redo`, `dryRun`,
@@ -408,7 +458,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
   span's attributes and end, `run:end` with the row counts (taken from the error's
   `context.results` on the failure path), and the closing "✔ Done" line. Built per run by
   `#withLock` from the kit's guarded emitter, telemetry and logger, so nothing it does can fail a
-  run. The span is still *opened* in `migrator.js` — one of the kit's two wrap sites.
+  run. The span is still *opened* in `migrator.js` — one of the kit's three wrap sites.
 
 ### `src/core/audit.js` — read-only health check
 - **Responsibility:** the `migronaut audit` checks (config, connectivity, transactions, indexes,
@@ -544,8 +594,30 @@ symbol.
   progress) — that is how a worker shutdown interrupts a job that is waiting for the lock.
   `kit.stop()` cannot do it: between attempts no run is in flight for it to stop.
 
+### `src/core/background*.js` — background migrations
+Background migrations get their own section, [§6.8](#68-background-migrations). In short:
+`background-spec.js` validates a file's `background` export and holds the pure tables (defaults,
+the state transitions, `_id` brackets, keysets); the two partitioners (`background-partition.js`
+by `_id`, `background-shard.js` by shard key) plan a pass and build each batch's query;
+`background-store.js` owns the state and partition documents and their leases;
+`background-engine.js` rewrites one batch and works one partition; `background-throttle.js`
+paces it; `background.js` is the flow (`coordinate`, `runSlice`, `control`, `verify`, the audit
+findings); `background-sandbox.js` and `background-dry-run.js` preview without writing;
+`background-runner.js` drives lanes in-process; and `background-watch*.js` are the live drift
+watcher. `shard-info.js` reads a collection's shard key and chunks from `config`, and
+`bson-peer.js` is the only place besides `migrator.js` that requires `mongodb` (lazily, for
+`BSON`: a checkpoint's size, EJSON for a dry run, the Long/MinKey/MaxKey bounds of a shard-key
+range).
+
+### `src/versioning/` — the versioning runtime
+The `./versioning` subpath: see [§6.9](#69-document-versioning-and-the-versioning-subpath). It
+requires nothing outside itself and `src/errors/` — no core, no `mongodb`, no `mongoose` (a
+test pins that). `document.js` is the contract the background engine shares with application code
+(version and revision filters, `occFilter`, `stampedDiff`), so a background migration and a
+repository write by the same rules.
+
 ### `src/bullmq/` — the queue adapter
-Five small modules behind the `./bullmq` subpath; see [§6.6](#66-the-queue-adapter-bullmq) for
+Six small modules behind the `./bullmq` subpath; see [§6.6](#66-the-queue-adapter-bullmq) for
 the design.
 - **`jobs.js`** — the contract shared by producer and worker: job names
   (`up`/`down`/`sync`/`converge`), the versioned data shape, `parseJobData` (validation of
@@ -559,6 +631,9 @@ the design.
   events to the job as log rows and progress.
 - **`wait.js`** — `waitForGroup()`: sequential `job.waitUntilFinished` under one time budget, the
   group's converge job last.
+- **`background-processor.js`** — `createBackgroundProcessor()`: the function a Worker on the
+  background queue runs — a coordinator job, a lane job or a drift-watch tick; jobs run side by
+  side, every decision is the kit's (`coordinateBackground`, `runBackgroundSlice`).
 - **`service.js`** — `MigrationQueue`: validates everything before constructing anything, owns
   what it constructs (and only that), closes in dependency order.
 
@@ -916,6 +991,42 @@ records as neither failed nor completed (matched by name, like `UnrecoverableErr
 work had begun is never put back. `close()` starts closing the Worker before shutting the
 processor down, so a job put back is not fetched again by the same worker.
 
+**Background migrations on the queue (2.3).** A queue with the `background` option gets a second
+queue, `<queueName>-background`, with its own Worker (concurrency 2 by default) and processor, so
+a migration job never waits behind a background one. Here flows *are* used — differently from the
+line above, and for a reason that does not apply there: the ordering truth stays in MongoDB.
+
+- A **coordinator** job per background migration (`background`, deduplicated on its name, a few
+  attempts with a long backoff as the outer safety net) asks the kit for one coordinator step.
+  When lanes have work it adds them as **children** (`parent` + `moveToWaitingChildren`) and
+  waits; it wakes once its last lane is done and asks the kit again — the kit decides from
+  MongoDB whether to spawn more, plan another pass, or finish. `wait`/`busy` answers move it to
+  delayed (`DelayedError`, matched by name like `WaitingError`).
+- **Lanes** (`background-lane`) run one slice each and continue themselves with `moveToDelayed`
+  between slices; they *complete* for every outcome the kit recorded and give up (complete as
+  `gave-up`) after `maxLaneRetries` failed slices, each counted on its partition in MongoDB.
+  They carry `ignoreDependencyOnFailure: true` — verified on BullMQ 6.3.11 (and pinned by the
+  fidelity scenarios): `failParentOnFailure` fails the parent without running it (no finalize),
+  `continueParentOnFailure` wakes it while siblings still hold leases, and with no option a failed
+  child strands the parent in `waiting-children` for good. A lane's id is new for every spawn
+  (`…-r<round>-s<spawn>-l<k>`): BullMQ will not move an existing job to another parent, and
+  deduplication cannot be combined with `parent`.
+- **Rounds.** A coordinator chain takes the round after the last one recorded on the state
+  document and keeps it in its job data; the kit refuses an older round (`superseded`). That is
+  what makes a **stall takeover** safe: a heal (worker start, every sync tick, every drift-watch
+  tick) adds a coordinator for every runnable background migration — absorbed by the chain that
+  is alive — plus, for one nothing has moved for `stallMs`, a takeover deduplicated per round.
+- **Heals are the recovery for everything Redis can lose.** Plans, cursors, leases and counters
+  are in MongoDB; a flushed queue costs one heal, not work. A queue without parent support (or
+  `children: false`) deduplicates lanes per slot and lets the coordinator poll instead.
+- **The `up` side.** The migration processor enqueues the coordinator of whatever an `up` (or a
+  `down`) job registered (`background:registered`); and an `up` plan stops before an ordinary
+  migration that requires a background one not completed yet (`plan.waiting`, a sync tick's
+  `held.waitsFor`) — a background file that requires one is not held: it registers as blocked.
+- **Close order:** the drift watcher, then both workers together (both processors told to stop: a
+  lane checkpoints at its batch boundary and moves itself back to delayed for the next worker),
+  then both processors, QueueEvents, the queues, the kit.
+
 ### 6.7 Declared collections (converge)
 Files: [collections.js](src/core/collections.js), [index-spec.js](src/core/index-spec.js),
 [converge-plan.js](src/core/converge-plan.js), [converge.js](src/core/converge.js).
@@ -1021,12 +1132,99 @@ pending; on failure the migration rows are attached as `context.results`, the co
 `context.converge` — never the other way round, because `#withLock` and `reportError` read
 `results` as migration rows.
 
-### 6.8 Background migrations on a sharded cluster
+### 6.8 Background migrations
 
-The shard-aware side of background migrations rests on what a mongos and the `config` database
-actually do — so those assumptions were probed on a real cluster before anything was built on
-them (`tests/integration/sharded.test.js`, the `[probe]` cases; MongoDB 8.0, two shards behind a
-mongos). What they established, and what follows from each:
+Files: `src/core/background*.js`, `src/core/shard-info.js`, `src/bullmq/background-processor.js`.
+
+**What it is.** A background migration is a migration file with `export const background =
+{ collection, from, to, migrate | migrateBatch, … }` (or a free-form `step(ctx)`) instead of
+`up`/`down`. `up` only **registers** it — the changelog record (`kind: 'background'`) and a state
+document — and the line goes on. The rewrite itself runs beside the line, for as long as it takes,
+in any number of processes: lanes in the CLI (`background run`), in the application
+(`startBackgroundRunner`) or on the queue ([§6.6](#66-the-queue-adapter-bullmq)). It never holds
+the migration lock. An ordinary migration that must wait for it says so with `export const requires
+= [...]`; the kit checks that *before* `beforeEach` (no hook fires, no failed trace) and refuses
+with `BackgroundPendingError` — or, with `onBackgroundPending: 'stop'`, ends the line cleanly.
+
+**Where the truth is.** MongoDB, always: `<backgroundCollection>` holds one state document per
+background migration (status, phase, plan, generation, pass, totals, requires/waitsFor, history),
+`<backgroundCollection>_partitions` one document per range of the current plan (cursor, counters,
+lease), `<backgroundCollection>_watch` the live drift watchers' positions. Processes and Redis are
+only executors; anything they lose is recovered from these.
+
+**Leases are slots.** A lane claims a partition and a slot `0..maxParallel-1` in one atomic write;
+a unique partial index on `{ background, lease.slot }` makes "at most `maxParallel` at once" an
+invariant of the schema, across every pod. Expired leases are reaped in server time (`$$NOW`).
+Every checkpoint is fenced by the lease token, so a lane that lost its lease (a GC pause, a
+partition) stops at the next batch boundary; the lease is heartbeated through the same
+`runWithLock` that holds the migration lock (any object with `acquire/renew/release/ttlMs` is a
+lock there). On a sharded collection a second unique partial index, `{ background,
+lease.groupSlot }` (`<shard>#<k>`), caps the lanes per shard (`shardConcurrency`); a claim picks
+its candidate first and rules out a full shard by name, so losing that race never reads as busy.
+
+**The coordinator.** One idempotent step at a time under the `background:<name>` lock (a
+`MigrationLock` with an id of its own; `forceUnlock` and `unlock` never touch it): unblock what
+waits for others, plan a pass (partitions committed under a fresh plan token with a CAS on the
+state — a coordinator that lost the race leaves partitions nobody can claim, dropped next time),
+tell the drivers how many lanes have work, and finalize: roll the partitions' counters into the
+state once per generation (`rolledGeneration` makes it idempotent after a crash), then **count
+what is left** — zero completes it, anything left starts another generation over just that, and
+`maxPasses` passes that never drain it fail it ("an old release is still writing the old shape").
+Completion is decided by that count alone; partitions only spread the work. The state transitions
+are a pure table (`background-spec.js`).
+
+**One batch.** Read through the version index (`READ_OPTIONS` — the transform sees plain JS
+values), transform a copy, `stampedDiff` it against what was read — `$set` only the top-level
+fields that changed, `$unset` those that went, `$set __v`, `$inc __rev` — and write with the
+optimistic filter (`_id`, the exact version and revision read; on a sharded collection the shard
+key too). A write that matched nothing is re-read: still old → transformed again (up to
+`maxConflictRetries`), gone or new → skipped. Writing only the diff keeps the BSON types of every
+field the transform did not touch (a full replace would write a `Double 1.0` back as an `Int32`).
+The checkpoint follows; a crash between the two replays the batch, which the version filter makes
+a no-op. **Transactional mode** reads, writes and checkpoints in one snapshot transaction (the
+fenced checkpoint is its last write, so a lane that lost its lease cannot commit), with its own
+retry loop (transient errors, commit-unknown, time/size limits → a smaller batch), and lets the
+transform write elsewhere through `ctx.session`.
+
+**Pacing.** `pauseMs` and the `throttle` hook before each batch, replication lag
+(`replSetGetStatus`, quietly off without the privilege), and the AIMD controller per process and
+shard: slow or overloaded writes halve the batch, then double the pause; healthy ones grow it back
+— never past the author's `batchSize`.
+
+**Drift.** After `completed`, an old pod can still write the old shape. Three lines of defence: the
+validator once `min` is raised (converge refuses to raise it over old documents); the `requires`
+guard and the min guard both look at the data, not the status; and the drift watch — a probe per
+completed migration (`verifyBackground`, every 10 minutes in each runtime by default) that reopens
+it (`backgroundOnDrift: 'reopen'`) or reports it — plus, opt-in, the **live drift watcher**
+(`watchBackground`, `backgroundDrift: 'stream' | 'both'`): a change stream per collection, one
+leader per collection (`watch:<collection>` lock), its token kept in the `_watch` collection (at
+most every `checkpointMs`, the post-batch token while idle). It upgrades a document through the
+lanes' own write path, edge by edge, only with completed forward migrations, and stands aside
+while a revert works the collection. A fresh start opens the stream *before* it probes the past,
+so nothing falls between the two; a lost history (286/280/136) starts over from now; a stream more
+than `maxLagMs` behind reopens its background migrations rather than becoming one. In `'stream'`
+mode the poll skips a collection whose watcher is streaming and fresh.
+
+**Dry runs** never write: a sample previewed in memory, `--validate` through the real write path in
+a transaction that is always aborted, and a `step` migration's steps in the same sandbox behind
+allow-list proxies of `db`/`client`/`session` (anything else is refused, exit 34). The sandbox is
+a guard rail, not a security boundary — code can reach around it.
+
+**Sharded clusters.** On a sharded collection whose key can be read (`clusterMonitor`) and whose
+version index carries it (`{ __v, …shard key, _id }`, converge's), partitions follow runs of
+adjacent chunks on one shard, split further at sampled key quantiles (or arithmetically, for a
+hashed first field) when a shard's lanes want more. A batch reads the version index with exact
+`min`/`max` bounds plus a targeting predicate; a ranged key keeps a keyset cursor of index tuples,
+a hashed one drains (rewritten documents leave the range by themselves; at most 100 stuck ones are
+stepped over by id). Writes carry the shard key; a transform that changes it is a document error
+(`shard-key-changed`). A plan records the collection's epoch (uuid, key): resharded since, the
+pass is re-split. Without the privilege, or without that index, the collection stays on `_id`
+ranges ("untargeted"), said once per process.
+
+**On a sharded cluster: what the probes established.** The shard-aware side rests on what a
+mongos and the `config` database actually do — so those assumptions were probed on a real cluster
+before anything was built on them (`tests/integration/sharded.test.js`, the `[probe]` cases;
+MongoDB 8.0, two shards behind a mongos). What they established, and what follows from each:
 
 - **Where the layout lives.** `config.collections` holds a sharded collection's `key`, `uuid` and
   `timestamp` (the epoch); `config.chunks` lists its chunks **by `uuid`** — a 5.0+ chunk carries
@@ -1061,6 +1259,39 @@ mongos). What they established, and what follows from each:
 - **Privileges.** A user with `readWrite` on the application database is refused (13) on both
   `config.collections` and `config.chunks`: the shard-aware mode needs `clusterMonitor`, and falls
   back without it.
+
+### 6.9 Document versioning and the versioning subpath
+
+Files: `src/core/versioning-spec.js`, `src/versioning/`. Entry point:
+`@alexify/migronaut/versioning`.
+
+**One contract, two writers.** A collection's `versioning: { current, min?, field?, revision?,
+revisionField?, index? }` is declared once, in its definition. Converge folds it into an ordinary
+validator (the version an `int` with a `minimum` of `min`, never a `maximum` — that would break a
+rolling deploy and every rollback; the revision `int|long`, since `$inc` overflows an int32 into a
+long; `moderate` when the validator exists for versioning alone, so a legacy document stays
+updatable) and an ordinary index, so the planner knows nothing about versioning. The application
+writes through the subpath's helpers and background migrations through the engine, and both use
+`src/versioning/document.js` — the same filters, the same "a missing or null field is 0", the
+same revision bump — so a background migration never silently loses an application write.
+
+**The min guard.** Raising `min` would leave older documents invalid; converge probes for one
+(`{ field: { $not: { $gte: min } } }`) only when `min` rises — the steady state costs nothing —
+and refuses the whole run with a `conflict` row before any write. The ids found are never named
+(PII).
+
+**The revision invariant.** In a collection with `revision: true` *every* write must bump `__rev`
+(`updateWithRevision`, `bumpRevision`, the Mongoose plugin): the optimistic filter can only see a
+concurrent write that moved the revision. What the helpers deliberately do not do — and why — is in
+the user guide: no repository base class, no on-read upgrade hooks (`upcaster` is explicit and
+in-memory, the exception), no HTTP policy, no mandatory OCC, no automated contract step.
+
+**Types without codegen.** `versioning.d.ts` turns a shape map (`{ orders: { 1: OrderV1; 2:
+OrderV2 } }`) into discriminated unions on the literal version (`AnyShape`, `CurrentShape`,
+`Stamped`, `BackgroundMigrationFor`), with the `Hold<T>` trick standing in for `NoInfer` so an
+upcaster's steps are typed contextually. A literal `current` past the highest shape is caught —
+written inline its error reads "not assignable to type 'never'"; from an imported `as const`
+definition it names the two numbers.
 
 ---
 
@@ -1214,9 +1445,9 @@ The high-impact ones for code changes:
 - **A converge job carries no `prune`, and is ordered by default.** Pruning is a property of the
   definitions the worker loaded, not of a payload in Redis; and the tail of a deploy must not
   converge to a schema its own migrations have not reached.
-- **No third telemetry wrap site.** A converge run is an ordinary `migronaut.run` span with
+- **A converge run adds no wrap site.** It is an ordinary `migronaut.run` span with
   `command: 'converge'`; there are no per-step spans (the driver's index commands nest under the
-  run span).
+  run span). The third wrap site belongs to background migrations, which run outside any run.
 - **A search index is never `recreate`d.** Changing its type, or an `autoEmbed` field's immutable
   attributes, is a `conflict` — even with `prune`. Dropping it to build it again would leave every
   `$search` silently returning nothing until the build ends.
@@ -1234,6 +1465,41 @@ The high-impact ones for code changes:
   `prune: true` — "leave a part out to leave it alone" holds for Search too.
 
 ---
+
+### Background migrations and versioning
+
+- **`up` applies a background file without running it.** The record says `applied`; the state
+  document says how far the rewrite is. `down` with a `revert` withdraws the forward rewrite and
+  registers the way back; without one it refuses once documents were rewritten
+  (`IrreversibleMigrationError`). A file may not export both `background` and `up`/`down`: the
+  expand step is a migration of its own.
+- **Completion is a count, not a sum of partitions.** A pass ends when no partition is open; the
+  background migration completes only when counting what still matches finds nothing. Gaps between
+  partitions and documents written meanwhile are why — the partitioner may sample and round freely.
+- **A finished `generation` is never reset** (lane ids and leases are unique per generation);
+  `pass` counts toward `maxPasses` and a drift reopening is a new pass, not a reset — an old
+  release that keeps writing the old shape exhausts `maxPasses` and fails it visibly.
+- **The coordinator lock is not the migration lock.** `background:<name>` and `watch:<collection>`
+  live in the lock collection beside `migronaut_lock`; `forceUnlock`, `unlock` and audit's lock
+  check look only at the migration lock. `background unlock` clears a coordinator lock and every
+  lease of one background migration.
+- **Lanes complete; they do not fail.** On the queue a lane completes for every outcome the kit
+  recorded and only gives up after `maxLaneRetries`; its coordinator decides from MongoDB. A lane
+  job id is new for every spawn and coordinators are deduplicated, never lanes under a parent.
+- **`stampedDiff` writes only what changed.** A full replace would rewrite every field the engine
+  read through `READ_OPTIONS` with its promoted JS type; the diff leaves them as they are. A changed
+  nested field rewrites its whole top-level subdocument.
+- **No `maximum` on the version**, and `moderate` for a validator synthesized for versioning alone:
+  both protect a rolling deploy and a rollback.
+- **The shard-key guard compares numbers by value.** A `Long 5` that becomes an `int 5` routes the
+  same; anything it cannot prove equal counts as a change.
+- **A shard-aware read may reach two shards.** The mongos takes a `$lt` bound as inclusive when it
+  picks shards, and a partition ends where its run of chunks does (§6.8).
+- **The live watcher opens its stream before it probes.** The other order leaves a window where a
+  write is neither probed nor streamed.
+- **A typed `current` past the highest shape errors as "not assignable to type 'never'"** when it
+  is written inline — the check works through a conditional type there; from an imported
+  `as const` definition the same check names the two numbers.
 
 ## 9. Testing strategy
 
@@ -1262,7 +1528,18 @@ The high-impact ones for code changes:
   run twice: by `tests/integration/bullmq.test.js` against the fake (always — this carries the
   adapter's coverage) and by `tests/integration/bullmq-redis.test.js` against the real `bullmq`
   package on a real Redis. The second run is what keeps the first honest: when they disagree, the
-  fake is wrong. Add adapter behaviour to the scenario module, not to either file.
+  fake is wrong. Add adapter behaviour to the scenario module, not to either file. Two more
+  modules run the same way: [bullmq-fidelity.js](tests/helpers/bullmq-fidelity.js) checks the
+  BullMQ semantics the background queue builds on (delays, parents and children) on bare
+  Queue/Worker objects, and [bullmq-background-scenarios.js](tests/helpers/bullmq-background-scenarios.js)
+  drives background migrations through the queue — each one waits until MongoDB says what it
+  expects *and* the background queue holds nothing waiting, active, delayed or waiting for children.
+- **Background migrations** are tested on the replica set: the store (30 racing claims against
+  three slots), the engine (an application write in the middle of a batch is never lost), the
+  coordinator (passes, controls, a crash between roll-up and clean-up), a lane killed with `kill -9`
+  in a child process ([background-child.js](tests/helpers/background-child.js)), the transactional
+  mode, the sandbox, the drift watch and the live watcher (a real 286 comes from the `failCommand`
+  fail point — the memory server is started with `enableTestCommands`).
 - **Search indexes:** the unit tier's fake (`tests/unit/converge.test.js`) answers
   `$listSearchIndexes` and the three search commands, with lag, server-side normalization and
   build progress on demand — that carries the coverage. The memory-server suite proves the
@@ -1429,6 +1706,21 @@ it *looks* or *exits* → the CLI layer.
   stored as the lock's owner token. Also the `migronaut.run.id` span attribute.
 - **Run span / migration span** — `migronaut.run` and `migronaut.migration`, emitted through an
   injected OpenTelemetry tracer. The migration span is the active context while a migration runs.
+- **Background migration** — a migration file exporting `background`: a long rewrite of one
+  collection from one shape version to another, which `up` registers and lanes carry out beside the
+  line. Its run over the data is a **background update**.
+- **Partition** — a range of a background migration's collection (`_id` or shard key) with its own
+  cursor, counters and lease; the unit of parallel work.
+- **Lane** — a worker of one background migration: claims a partition and a slot, works it in
+  batches for a slice, releases it. A BullMQ child job, a runner loop or a CLI `--concurrency`.
+- **Slot** — `0..maxParallel-1`, held with a lease; a unique index caps the lanes at `maxParallel`.
+- **Coordinator** — the step-by-step process that plans a pass, waits for its lanes and finalizes.
+- **Pass / generation** — one walk over every partition of one plan; another one starts over
+  whatever is left.
+- **Drift** (of a background migration) — an old-shape document written after it completed.
+- **Live drift watcher** — the change-stream follower that upgrades such documents as they land.
+- **Shape version / revision** — `__v` and `__rev`: what shape a document has, and how many times it
+  was written — the optimistic-concurrency token.
 - **Telemetry** — the `telemetry: { tracer, meter }` config option: the user's own OpenTelemetry
   objects. Not to be confused with `bullmq.telemetry`, BullMQ's own telemetry object.
 - **Progress reporter** — the CLI-injected callback that drives the spinner without core ever

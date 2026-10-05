@@ -3,6 +3,81 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
+## v2.3.0 — unreleased
+
+Document versioning and background migrations. Additive: nothing changes for a project that
+declares no `versioning` and writes no `background` file. Everything new is experimental — its
+shape may still change in a minor release (named here).
+
+### Added
+
+- **Document versioning** — a collection definition takes `versioning: { current, min?, field?,
+  revision?, revisionField?, index? }`: the shape version (`__v`) and the optimistic-concurrency
+  revision (`__rev`) as one contract. Converge folds it into the validator (the version an `int`
+  with a `minimum` of `min` and no `maximum`; the revision `int|long`; `moderate` when the
+  validator exists for versioning alone) and an index `{ __v: 1, _id: 1 }` — on a sharded
+  collection `{ __v: 1, …shard key, _id: 1 }`, the ordinary one kept with a row that says why.
+  Raising `min` over documents still below it is refused before any write (a `conflict` row, no
+  id named).
+- **`@alexify/migronaut/versioning`** — a third entry point, with no engine behind it, for the
+  repository layer: `defineShapes` (`stamp`, `onInsert`, `stampUpsert`, `upcaster`, `plugin`),
+  `updateWithRevision` / `replaceWithRevision` / `findOneAndUpdateWithRevision`
+  (`RevisionConflictError` with `reason: 'conflict' | 'not-found' | 'unknown'`),
+  `retryOnConflict`, `bumpRevision`, the in-memory `upcaster` (`ShapeVersionError`),
+  `isVersion`, and `versioningPlugin` for Mongoose (its version key moved to `__rev`, optimistic
+  concurrency on). Per-version shape types without codegen: `AnyShape`, `CurrentShape`,
+  `ShapeAt`, `Stamped`, `Body`, `BackgroundMigrationFor`, a typed `defineShapes<Shapes>()(…)`
+  (`versioning.d.ts` needs TypeScript ≥ 5.0).
+- **Background migrations** — a migration file with `export const background = { collection,
+  from, to, migrate | migrateBatch, revert?, … }` (or a free-form `step(ctx)`), which `up`
+  registers without running; the rewrite runs beside the migration line, never holding the
+  migration lock:
+  - **partitions and lanes**: the collection split into `_id` ranges from a sampled quantile per
+    BSON type — or, on a sharded collection, into runs of chunks per shard, with targeted reads
+    and writes, a shard-key guard (`shard-key-changed`) and `shardConcurrency`; leases are slots,
+    capped by a unique index at `maxParallel` across every process, every checkpoint fenced;
+  - **a coordinator** that plans passes, finalizes them and completes when nothing matches any
+    more (`maxPasses` against an old release that keeps writing); writes are `stampedDiff`s under
+    the optimistic filter, so an application write in between is never lost and untouched fields
+    keep their BSON types;
+  - **transactional batches** (`transaction: true`) with side writes through `ctx.session`;
+  - **pacing**: `pauseMs`, a `throttle` hook, replication lag and an adaptive (AIMD) controller;
+  - **`requires`** between background migrations (a DAG, unblocked as they complete) and from
+    ordinary migrations, which wait (`BackgroundPendingError`, or `onBackgroundPending: 'stop'`);
+    `backgroundInline` runs them inside `up`;
+  - **controls**: pause, resume, cancel, retry (`fromStart`), repin, unlock; **dry runs** on a
+    sample (`--validate` through the real write path in an always-aborted transaction) and of
+    `step` migrations in a sandbox (refusals exit 34);
+  - **drift after completion**: the drift watch (`verifyBackground`, every 10 minutes in each
+    runtime, `backgroundOnDrift: 'reopen' | 'report'`) and the **live drift watcher**
+    (`watchBackground`, change streams, one leader per collection, `backgroundDrift: 'poll' |
+    'stream' | 'both'`);
+  - **three runtimes**: `migronaut background run`, `startBackgroundRunner()` in the application,
+    and the queue (below); `status()`, `background status --partitions`, an audit check, events
+    `background:*`, and OpenTelemetry spans `migronaut.background.slice` /
+    `migronaut.background.coordinate` with their metrics.
+- **`migronaut background <action>`** — status, run, pause, resume, cancel, retry, repin,
+  dry-run, unlock, verify and watch; `create --background`.
+- **Background migrations on the queue** — `createMigrationQueue({ background: true | {…} })`: a
+  queue of their own, a coordinator job per background migration with its lanes as children,
+  heals from MongoDB (worker start, every sync tick, every drift-watch tick) and a stall
+  takeover; `startBackgroundWorker()`, `enqueueBackground()`, the `background-verify` schedule,
+  `createBackgroundProcessor()`. An `up` plan stops before a migration that waits for a
+  background one.
+- **Config**: `backgroundCollection`, `backgroundInline`, `backgroundOnDrift`, `backgroundDrift`,
+  `backgroundShardAware`, each with its `MIGRONAUT_*` variable.
+- **Errors and exit codes**: `REVISION_CONFLICT` (29), `SHAPE_VERSION_UNSUPPORTED` (30),
+  `BACKGROUND_PENDING` (31), `BACKGROUND_FAILED` (32), `BACKGROUND_CONFLICT` (33),
+  `SANDBOX_REFUSED` (34).
+
+### Notes
+
+- A typed `current` past the highest declared shape is a compile error. Written inline it reads
+  "Type 'number' is not assignable to type 'never'"; from an imported `as const` definition, it
+  names the two versions ("Type '3' is not assignable to type '2'").
+- The shard-aware mode needs `clusterMonitor` (it reads `config.collections` and
+  `config.chunks`); without it, a sharded collection is partitioned by `_id`.
+
 ## v2.2.0 — 2026-10-05
 
 Atlas Search and Vector Search indexes in declared collections. Additive: a definition without

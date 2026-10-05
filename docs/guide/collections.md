@@ -14,8 +14,8 @@ database and makes the difference. No history, no state stored anywhere: every r
 database afresh and plans against what it finds.
 
 ::: warning Experimental
-New in 2.1 — search indexes in 2.2. The definition shape, the result shape and the queue job
-contract may still change in a minor release.
+New in 2.1 — search indexes in 2.2, [versioning](#versioning) in 2.3. The definition shape, the
+result shape and the queue job contract may still change in a minor release.
 :::
 
 ## Declaring a collection
@@ -72,7 +72,8 @@ Leave a part out to leave it alone:
 - **No `validator`** — the validator is not managed. `validator: null` (or `{}`) means *there must
   be none*.
 
-A definition that declares none of the three is refused: it would manage nothing.
+A definition that declares none of the three — nor [`versioning`](#versioning) — is refused: it
+would manage nothing.
 
 ## One file per collection
 
@@ -334,6 +335,115 @@ export default {
 
 `migronaut audit` checks the same thing ahead of time: its `search` check fails where converge
 would refuse, and warns about a FAILED build.
+
+## Versioning
+
+A definition can also declare the **shape version** its documents are at and, for optimistic
+concurrency, a **revision** — the `__v` / `__rev` contract that the repository helpers and
+background migrations share. [Document Versioning](/guide/versioning) covers the whole release
+cycle; this is what converge makes of it.
+
+```js
+{
+  name: 'orders',
+  versioning: { current: 2, min: 1 },
+  indexes: [{ key: { customerId: 1 } }],
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `current` | required | The shape version new documents are written at (an integer ≥ 1) |
+| `min` | `1` | The oldest shape still allowed, from 0 to `current`. `0` types the fields without requiring them — for a collection whose documents predate versioning |
+| `field` | `'__v'` | The version field: top level (no `.`, no leading `$`), at most 64 characters, not `_id` |
+| `revision` | `true` | Also keep a revision field |
+| `revisionField` | `'__rev'` | The revision field, by the same rules — and not the version field. An error with `revision: false` |
+| `index` | `true` | Declare the version index |
+
+The keys are checked like every other part of a definition: an unknown one is an error, so a typo
+never reads as "not versioned". Versioning adds no new kind of row — its rules arrive as the
+ordinary `validator` row, its index as an ordinary `index` row.
+
+### The validator rules
+
+```js
+{
+  $jsonSchema: {
+    required: ['__v', '__rev'], // left out with min: 0
+    properties: {
+      __v: { bsonType: 'int', minimum: 1 }, // the minimum is min
+      __rev: { bsonType: ['int', 'long'], minimum: 0 }, // without revision: false
+    },
+  },
+}
+```
+
+How they meet your own validator:
+
+- **None declared** (or `{}`) — these rules are the validator, at `validationLevel: 'moderate'`
+  unless you set a level: an update to a legacy document that predates the rules still goes through.
+- **A `$jsonSchema`** — merged in: your `required` and `properties` first, these after. The level
+  stays yours (`strict` by default).
+- **Query operators only** — the rules are added beside them as a top-level `$jsonSchema`, and the
+  server applies both.
+- **A rule of your own on `__v` or `__rev`** — in `properties`, in `required` or as a query — is an
+  error: the fields are managed by versioning. So is `validator: null`, which would remove the rules.
+
+The version gets a `minimum` and never a `maximum`: during a rolling deploy, or after a rollback, a
+newer release writes a version the declaration does not know yet, and refusing that write would turn
+the deploy into an outage. It must be an `int` — what the Node.js driver stores for a whole number
+that fits in 32 bits. The revision may be an `int` or a `long`, because `$inc` turns it into a
+`long` once it outgrows 32 bits.
+
+### The version index
+
+`{ __v: 1, _id: 1 }` (`__v_1__id_1`) — background migrations select documents by version through it,
+and the `min` check below reads a single key of it.
+
+- **With `indexes` declared**, it is added to them, and the list stays the whole truth: `prune`
+  drops the other undeclared indexes as usual.
+- **Without `indexes`**, it is the only index converge manages: the collection's other indexes are
+  not listed and never dropped, `prune` or not — declaring versioning does not make them undeclared.
+- **Declaring the same key yourself** while `index` is on is an error — remove it, or set
+  `versioning.index: false` (then no version index is declared at all).
+
+On a **sharded** collection — when converge can read the shard key, behind a `mongos` — the index
+takes the shard key between the version field and `_id`: `{ __v: 1, region: 1, _id: 1 }` for a
+shard key `{ region: 1 }`, so a background migration's batch over one chunk range is an index range.
+A hashed shard-key field stays hashed, and `_id` is not repeated when the shard key holds it. If
+the collection already has the ordinary version index (say, it was sharded after the index was
+built), converge builds the new one and keeps the old — a `keep` row on `__v_1__id_1` whose reason reads
+*replaced by the shard-key-prefixed version index — drop it once nothing hints it (prune does, when
+the indexes are declared)*.
+
+A background migration in flight may still be hinting it. With `indexes` declared, a converge with
+`prune` drops it as any undeclared index; without them, `prune` never reaches it — drop it in a
+migration once no background migration uses it.
+
+### Raising `min`
+
+Raising the floor is the contract step of a release, and converge checks the data before it takes
+it. When `min` rises above the floor the live validator enforces, converge first looks for one
+document below the new `min` — `_id` only, through the version index, for at most 60 seconds. If it
+finds one, the `validator` row is a `conflict` and the whole run is refused before its first write:
+
+> documents below version 2 remain — raising versioning.min would leave them invalid; let the
+> background migration that upgrades them finish (migronaut background status), then converge again
+
+If the check cannot run — a timeout on a large collection that has no version index yet — the raise
+is refused too: converge with the old `min` first, so the index exists, then raise it. The
+`converge --check` dry run reports a raise that cannot happen yet as drift. No document is ever
+named: its id may be personal data.
+
+The check costs nothing in the steady state: it runs only when `min` actually rises — never for a
+collection that does not exist yet, never at `min: 0`. If an old release writes old-shape documents
+while the raise is being applied, converge cannot take the validator back: it warns, after the run,
+that documents below `min` were written — run the background migration again once that release is
+gone.
+
+Since `min` defaults to 1, declaring versioning over documents that have no `__v` yet is refused the
+same way. Adopt with `min: 0`, upgrade them with a background migration `from: 0`, then raise it —
+see [Adopting an existing collection](/guide/versioning#adopting-an-existing-collection).
 
 ## After every deploy
 

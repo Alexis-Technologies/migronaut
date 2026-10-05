@@ -1,6 +1,8 @@
+// Seeded in the first shape (v1); the background migration after this one
+// brings them to v2.
 const PLANS = [
-  { _id: 'free', seats: 1 },
-  { _id: 'team', seats: 10 },
+  { _id: 'free', seats: 1, __v: 1, __rev: 0 },
+  { _id: 'team', seats: 10, __v: 1, __rev: 0 },
 ];
 
 /** A data change: upserts, so applying it twice leaves the same documents */

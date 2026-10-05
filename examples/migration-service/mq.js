@@ -28,6 +28,10 @@ const mq = createMigrationQueue({
     // migration ends with a converge job — after the migrations, in order.
     collectionsDir: path.join(__dirname, 'collections'),
     convergeAfterUp: true,
+    // After a background migration completes, an old pod may still write the
+    // old shape: 'both' adds the live drift watcher (change streams) to the
+    // periodic check, and the background worker hosts it.
+    backgroundDrift: 'both',
     // OpenTelemetry is injected like everything else: a tracer and a meter from
     // this app's own @opentelemetry/api. Until tracing.js starts an SDK both
     // are no-ops, so this costs nothing when tracing is off. (The meter stays a
@@ -57,6 +61,10 @@ const mq = createMigrationQueue({
   // them; a service that does not offer them should leave both off (the
   // default) — then a job planted in Redis cannot ask for them either.
   allow: { force: true, unordered: true },
+  // Background migrations on a queue of their own ("migrations-background"):
+  // a coordinator job each, with its lanes as child jobs. An `up` job that
+  // registers one starts it at once.
+  background: true,
 });
 
 module.exports = { connection, mq };

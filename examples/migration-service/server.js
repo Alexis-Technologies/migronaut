@@ -161,6 +161,14 @@ const routes = {
 
   'DELETE /migrations/schedule': async (_req, res) =>
     send(res, 200, { removed: await mq.unschedule() }),
+
+  // Background migrations, straight from MongoDB: status, partitions done, lanes working
+  'GET /migrations/background': async (_req, res) =>
+    send(res, 200, { background: await mq.backgroundStatus() }),
+
+  // The drift check, now: old-shape documents written after a background migration completed
+  'POST /migrations/background/verify': async (_req, res) =>
+    send(res, 200, await mq.verifyBackground()),
 };
 
 async function handle(req, res) {
@@ -205,6 +213,10 @@ async function main() {
     // Connects to MongoDB first: a worker that cannot reach it fails here.
     await mq.startWorker();
     console.log(`worker started on queue "${mq.queueName}"`);
+    // Coordinators and lanes of background migrations, side by side — and the
+    // live drift watcher (backgroundDrift: 'both').
+    await mq.startBackgroundWorker();
+    console.log(`background worker started on queue "${mq.backgroundQueue.name}"`);
   }
   if (ROLE === 'api' || ROLE === 'all') {
     await new Promise((resolve) => server.listen(PORT, HOST, resolve));
