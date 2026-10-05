@@ -11,6 +11,7 @@ const {
 const { idRangePartitioner } = require('../../src/core/background-partition.js');
 const { resolveBackgroundSpec } = require('../../src/core/background-spec.js');
 const { BackgroundStore } = require('../../src/core/background-store.js');
+const { createAdaptive } = require('../../src/core/background-throttle.js');
 const { BackgroundFailedError, LockLostError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { updateWithRevision } = require('../../versioning.js');
@@ -362,5 +363,51 @@ describe('background engine (integration)', () => {
     }
     assert.strictEqual(result.migrated, 1);
     assert.strictEqual((await orders.findOne({})).__v, 1, 'rolled back with the session');
+  });
+
+  it('should shrink batches while writes are slow and grow them back after', async () => {
+    await mongo.db
+      .collection('orders')
+      .insertMany(Array.from({ length: 200 }, (_, i) => ({ __v: 1, __rev: 0, address: `A${i}` })));
+    const setup = await setUp({
+      migrate: moveAddress,
+      batchSize: 40,
+      pauseMs: 0,
+      adaptive: { targetLatencyMs: 100, minBatchSize: 5 },
+    });
+    const adaptive = createAdaptive(setup.job.spec.adaptive);
+    const sizes = [];
+    const changes = [];
+    // Only the engine's writes are slowed (its own client), not the checkpoints.
+    const slow = new MongoClient(mongo.uri, { appName: 'slow-writes' });
+    await slow.connect();
+    await mongo.client.db('admin').command({
+      configureFailPoint: 'failCommand',
+      mode: { times: 3 },
+      data: {
+        failCommands: ['update'],
+        appName: 'slow-writes',
+        blockConnection: true,
+        blockTimeMS: 300,
+      },
+    });
+    try {
+      const result = await run(setup, {
+        db: slow.db(DB),
+        adaptive,
+        onBatch: ({ batchSize }) => sizes.push(batchSize),
+        onThrottle: (change) => changes.push(change),
+      });
+      assert.strictEqual(result.outcome, 'exhausted');
+      assert.strictEqual(result.counters.migrated, 200);
+    } finally {
+      await mongo.client.db('admin').command({ configureFailPoint: 'failCommand', mode: 'off' });
+      await slow.close();
+    }
+    assert.deepStrictEqual(sizes.slice(0, 4), [40, 40, 20, 10], `sizes: ${sizes}`);
+    assert.ok(sizes.at(-1) > 10, `grew back: ${sizes}`);
+    assert.strictEqual(changes[0].reason, 'slow');
+    const [partition] = await store.partitions(NAME);
+    assert.deepStrictEqual(Object.keys(partition.throttle).sort(), ['batchSize', 'pauseMs']);
   });
 });

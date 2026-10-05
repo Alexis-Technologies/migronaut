@@ -317,6 +317,16 @@ function readStepResult(result) {
   };
 }
 
+/** A write that failed for want of capacity, not for a fault of the data */
+function isOverload(error) {
+  if (error?.err !== undefined || error?.writeConcernError !== undefined) return true;
+  if (error?.result?.getWriteConcernError?.()) return true;
+  if (error?.hasErrorLabel?.('TransientTransactionError') === true) return true;
+  if (error?.hasErrorLabel?.('RetryableWriteError') === true) return true;
+  // MaxTimeMSExpired, ExceededTimeLimit.
+  return error?.code === 50 || error?.code === 262;
+}
+
 /** Elapsed milliseconds from `start`, by the injected clock */
 const since = (now, start) => now() - start;
 
@@ -352,12 +362,14 @@ async function processPartition(job, ctx) {
     const control = await readControl();
     const stop = controlOutcome(control, job, partition);
     if (stop) return { outcome: stop, counters };
-    const batchSize = ctx.batchSize?.() ?? spec.batchSize;
+    const adaptive = ctx.adaptive;
+    const batchSize = adaptive?.batchSize() ?? spec.batchSize;
     await throttle.beforeBatch({
       signal,
       generation: job.generation,
       partition: String(partition._id),
       batchSize,
+      extraPauseMs: adaptive?.pauseMs() ?? 0,
     });
     const started = now();
     let docs;
@@ -388,7 +400,22 @@ async function processPartition(job, ctx) {
         hint: job.hint,
       });
       docs = await db.collection(spec.collection).find(query.filter, query.options).toArray();
-      const result = await applyBatch(job, docs, { db });
+      const writeStarted = now();
+      let result;
+      try {
+        result = await applyBatch(job, docs, { db });
+      } catch (error) {
+        // A write concern timeout or a transient error is overload — back off before failing.
+        if (isOverload(error)) {
+          adaptive?.record({ latencyMs: since(now, writeStarted), overloaded: true });
+        }
+        throw error;
+      }
+      const change = adaptive?.record({
+        latencyMs: since(now, writeStarted),
+        overloaded: throttle.takeLagged?.() === true,
+      });
+      if (change) ctx.onThrottle?.(change);
       next = job.partitioner.advance(cursor, docs, { limit: batchSize });
       batchCounts = {
         scanned: docs.length,
@@ -405,7 +432,7 @@ async function processPartition(job, ctx) {
         badIds: result.errors.map((entry) => entry.id),
         docErrors: result.errors.map(({ error, reason }) => ({ error, reason, at: new Date() })),
         done: next === null,
-        ...(ctx.throttleState ? { throttle: ctx.throttleState() } : {}),
+        ...(adaptive ? { throttle: adaptive.state() } : {}),
       });
       if (result.errors.length > 0) {
         const total = await store.countBadIds(job.name, job.generation);
@@ -448,6 +475,7 @@ function controlOutcome(control, job, partition) {
 module.exports = {
   DOCUMENT_ERRORS,
   applyBatch,
+  isOverload,
   buildStepContext,
   controlOutcome,
   directionOf,

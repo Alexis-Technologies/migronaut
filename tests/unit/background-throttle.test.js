@@ -205,3 +205,80 @@ describe('createThrottle', () => {
     await assert.rejects(pending, /later/);
   });
 });
+
+describe('createAdaptive (AIMD)', () => {
+  const {
+    createAdaptive,
+    THROTTLE_REPORT_INTERVAL_MS,
+  } = require('../../src/core/background-throttle.js');
+  const settings = { targetLatencyMs: 100, minBatchSize: 10, maxBatchSize: 200, maxPauseMs: 1000 };
+
+  it('should warm up, halve on a slow batch and grow back additively', () => {
+    let now = 0;
+    const adaptive = createAdaptive(settings, { now: () => now });
+    assert.strictEqual(adaptive.batchSize(), 200);
+    assert.strictEqual(adaptive.record({ latencyMs: 5000 }), undefined, 'first batch warms up');
+    now += 1000;
+    const slow = adaptive.record({ latencyMs: 300 });
+    assert.deepStrictEqual(slow, { reason: 'slow', batchSize: 100, pauseMs: 0 });
+    // Not twice within one round trip.
+    now += 100;
+    adaptive.record({ latencyMs: 300 });
+    assert.strictEqual(adaptive.batchSize(), 100);
+    now += 400;
+    adaptive.record({ latencyMs: 300 });
+    assert.strictEqual(adaptive.batchSize(), 50);
+    for (let i = 0; i < 5; i++) {
+      now += 50;
+      adaptive.record({ latencyMs: 20 });
+    }
+    assert.strictEqual(adaptive.batchSize(), 100, '+10 per good batch');
+    assert.deepStrictEqual(adaptive.state(), { batchSize: 100, pauseMs: 0 });
+  });
+
+  it('should back off in time at the smallest batch, and recover the pause first', () => {
+    let now = 0;
+    const adaptive = createAdaptive(settings, {
+      now: () => now,
+      initial: { batchSize: 10, pauseMs: 0 },
+    });
+    for (const expected of [100, 200, 400, 800, 1000, 1000]) {
+      now += 2000;
+      adaptive.record({ latencyMs: 10, overloaded: true });
+      assert.strictEqual(adaptive.pauseMs(), expected);
+    }
+    now += 10;
+    adaptive.record({ latencyMs: 10 });
+    assert.strictEqual(adaptive.pauseMs(), 500);
+    assert.strictEqual(adaptive.batchSize(), 10, 'the pause recovers before the size');
+  });
+
+  it('should report at most every 10 s, the worst reason since the last report', () => {
+    let now = 0;
+    const adaptive = createAdaptive(settings, { now: () => now, initial: { batchSize: 100 } });
+    assert.strictEqual(adaptive.record({ latencyMs: 10 }).reason, 'recover');
+    now += 1000;
+    assert.strictEqual(adaptive.record({ latencyMs: 500 }), undefined, 'held back');
+    now += 1000;
+    assert.strictEqual(adaptive.record({ latencyMs: 10 }), undefined);
+    now += THROTTLE_REPORT_INTERVAL_MS;
+    assert.strictEqual(adaptive.record({ latencyMs: 10 }).reason, 'slow');
+    // Full speed and no pause: nothing to say.
+    const idle = createAdaptive(settings, { now: () => now, initial: { batchSize: 200 } });
+    assert.strictEqual(idle.record({ latencyMs: 10 }), undefined);
+  });
+});
+
+describe('isOverload', () => {
+  const { isOverload } = require('../../src/core/background-engine.js');
+  it('should tell capacity trouble from data trouble', () => {
+    assert.ok(isOverload({ err: {} }));
+    assert.ok(isOverload({ writeConcernError: {} }));
+    assert.ok(isOverload({ result: { getWriteConcernError: () => ({}) } }));
+    assert.ok(isOverload({ hasErrorLabel: (label) => label === 'TransientTransactionError' }));
+    assert.ok(isOverload({ hasErrorLabel: (label) => label === 'RetryableWriteError' }));
+    assert.ok(isOverload({ code: 50 }));
+    assert.ok(!isOverload({ code: 11000 }));
+    assert.ok(!isOverload(undefined));
+  });
+});
