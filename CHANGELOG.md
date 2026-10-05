@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
-## v2.2.0 — Unreleased
+## v2.2.0 — 2026-10-05
 
 Atlas Search and Vector Search indexes in declared collections. Additive: a definition without
 `searchIndexes` behaves exactly as in 2.1 — converge never even asks the server about Search for
