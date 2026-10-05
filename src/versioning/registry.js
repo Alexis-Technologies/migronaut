@@ -2,6 +2,7 @@ const { ConfigInvalidError, ShapeVersionError } = require('../errors/index.js');
 const { resolveVersioning } = require('./config.js');
 const { stampDocument, versionOf } = require('./document.js');
 const { isPlainObject, touchedFields } = require('./internal.js');
+const { createUpcaster } = require('./upcaster.js');
 
 /**
  * `defineShapes` — the application's view of its versioned collections, read
@@ -92,6 +93,9 @@ function defineShapes(definitions) {
     versionOf: docVersion,
     isCurrent: (name, doc) => docVersion(name, doc) === get(name).current,
     stamp,
+    /** An upcaster over this collection's versioning — see upcaster.js */
+    upcaster: (name, steps, options) =>
+      createUpcaster(get(name), steps, { ...options, collection: name }),
     /** `stamp` for one document or every document of an array — for `insertMany` */
     onInsert: (name, docs) =>
       Array.isArray(docs) ? docs.map((doc) => stamp(name, doc)) : stamp(name, docs),

@@ -12,6 +12,7 @@ const {
   updateWithRevision,
 } = require('./occ.js');
 const { defineShapes } = require('./registry.js');
+const { upcaster } = require('./upcaster.js');
 
 /**
  * `@alexify/migronaut/versioning` — document versioning and optimistic
@@ -26,6 +27,7 @@ const { defineShapes } = require('./registry.js');
 module.exports = {
   // The application's view of its versioned collections
   defineShapes,
+  upcaster,
 
   // Optimistic concurrency
   updateWithRevision,

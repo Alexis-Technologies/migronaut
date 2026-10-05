@@ -5,6 +5,7 @@ import {
   type RevisionWriteOptions,
   type RevisionWriteResult,
   type ShapeRegistry,
+  type Upcaster,
   type VersionStamp,
   RevisionConflictError,
   ShapeVersionError,
@@ -14,6 +15,7 @@ import {
   replaceWithRevision,
   retryOnConflict,
   updateWithRevision,
+  upcaster,
 } from '../../versioning.js';
 
 declare const db: Db;
@@ -71,3 +73,12 @@ expectType<ShapeRegistry>(fromList);
 // ─── Errors are the package root's classes ────────────────────────────────────
 expectType<typeof RootRevisionConflictError>(RevisionConflictError);
 expectAssignable<Error>(new ShapeVersionError('newer', { reason: 'newer' }));
+
+// ─── Upcasting ────────────────────────────────────────────────────────────────
+const lift = upcaster({ versioning: { current: 2 } }, { 1: (doc) => ({ ...doc, b: 1 }) });
+expectType<Upcaster>(lift);
+expectType<Record<string, unknown>>(lift.upcast({ __v: 1 }));
+expectType<(doc: any) => Record<string, unknown>>(lift.step(1));
+expectType<Upcaster>(upcaster({ current: 1, min: 0 }, { 0: (doc) => doc }, { newer: 'keep' }));
+expectError(upcaster({ current: 2 }, { 1: (doc: object) => doc }, { newer: 'drop' }));
+expectType<Upcaster>(shapes.upcaster('orders', { 1: (doc) => doc }));

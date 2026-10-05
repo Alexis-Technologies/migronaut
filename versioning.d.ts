@@ -175,6 +175,59 @@ export function bumpRevision<U extends UpdateLike>(
   options?: { revisionField?: string },
 ): U;
 
+// ─── Upcasting ────────────────────────────────────────────────────────────────
+
+/** One shape change: the document at version n in, the document at n + 1 out */
+export type UpcastStep = (doc: any) => Record<string, unknown>;
+
+/** `{ [fromVersion]: step }` — one step for every version from `min` to `current - 1` */
+export type UpcastSteps = Record<number, UpcastStep>;
+
+export interface UpcasterOptions {
+  /**
+   * What `upcast` does with a document newer than `current` (written by a
+   * newer release): `'throw'` a {@link ShapeVersionError} (default) or
+   * `'keep'` it as is.
+   */
+  newer?: 'throw' | 'keep';
+}
+
+/**
+ * The shape changes of one collection, usable as the `migrate` of a
+ * background migration (`step`) and — the exception — to lift a document in
+ * memory on read (`upcast`).
+ */
+export interface Upcaster {
+  readonly current: number;
+  readonly min: number;
+  readonly field: string;
+  /**
+   * The document in the current shape — a current one as is, an older one
+   * lifted on a copy (the version field set by the helper).
+   * @throws {ShapeVersionError} `'newer'`, `'below-min'` or `'invalid'`
+   */
+  upcast(doc: object): Record<string, unknown>;
+  /** Whether `upcast` would change the document */
+  needsUpcast(doc: object): boolean;
+  /**
+   * The steps from `from` to `to` (default `from + 1`) as one function — the
+   * `migrate` of a background migration
+   */
+  step(from: number, to?: number): (doc: any) => Record<string, unknown>;
+}
+
+/**
+ * An upcaster for a collection definition (`{ versioning }`) or a bare
+ * versioning block.
+ * @throws {ConfigInvalidError} when a step between `min` and `current` is
+ *   missing, goes past `current`, is async or is not a function
+ */
+export function upcaster(
+  definition: CollectionDefinitionFile | CollectionVersioning,
+  steps: UpcastSteps,
+  options?: UpcasterOptions,
+): Upcaster;
+
 // ─── The registry ─────────────────────────────────────────────────────────────
 
 /** The fields `stamp` adds — the default names */
@@ -201,6 +254,8 @@ export interface ShapeRegistry<Name extends string = string> {
   isCurrent(name: Name, doc: object): boolean;
   /** The document with the current version and revision 0 — each only when missing */
   stamp<D extends object>(name: Name, doc: D): D & VersionStamp;
+  /** An upcaster over the collection's versioning */
+  upcaster(name: Name, steps: UpcastSteps, options?: UpcasterOptions): Upcaster;
   /** `stamp` for one document or each of an array — for `insertOne` / `insertMany` */
   onInsert<D extends object>(name: Name, docs: readonly D[]): (D & VersionStamp)[];
   onInsert<D extends object>(name: Name, docs: D): D & VersionStamp;
