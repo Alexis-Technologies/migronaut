@@ -592,3 +592,32 @@ startBackgroundRunner({
   onError: () => undefined,
 });
 expectError(startBackgroundRunner({ verifyIntervalMs: true }));
+
+// ─── The live drift watcher ──────────────────────────────────────────────────
+
+const watcher = await kit.watchBackground({
+  collections: ['orders'],
+  upgrade: false,
+  maxLagMs: 30_000,
+  onError: (error, collection) => {
+    expectType<unknown>(error);
+    expectType<string | undefined>(collection);
+  },
+});
+expectType<boolean>(watcher.running);
+expectType<Promise<void>>(watcher.stop());
+const [watchRow] = watcher.status();
+expectType<boolean>(watchRow.leading);
+expectType<number>(watchRow.counters.upgraded);
+expectAssignable<string>(watchRow.state);
+expectError(kit.watchBackground({ maxLagMs: '1m' }));
+const stored = await kit.backgroundWatchStatus('orders');
+expectType<string[] | undefined>(stored?.edges);
+expectType<number | undefined>(stored?.target);
+expectType<number>((await kit.backgroundWatchStatus())[0].counters.events);
+kit.on('background:watch', (event) => {
+  expectType<string>(event.collection);
+  expectAssignable<'streaming' | 'following' | 'history-lost'>(
+    event.state as 'streaming' | 'following' | 'history-lost',
+  );
+});

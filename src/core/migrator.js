@@ -53,6 +53,8 @@ const { previewSample, previewSteps } = require('./background-dry-run.js');
 const { matchOf } = require('./background-engine.js');
 const { BackgroundStore } = require('./background-store.js');
 const { sleep } = require('./background-throttle.js');
+const { startWatch, watchOptions } = require('./background-watch.js');
+const { BackgroundWatchStore } = require('./background-watch-store.js');
 const { runBaseline } = require('./baseline.js');
 const { Changelog } = require('./changelog.js');
 const { ConvergeLog } = require('./converge-log.js');
@@ -62,6 +64,22 @@ const { buildContext } = require('./context.js');
 const { runConverge } = require('./converge.js');
 const { readServer } = require('./server-info.js');
 const { readChunks, readShardKey } = require('./shard-info.js');
+
+/** A drift watcher's stored document as its status row */
+function watchRow(row) {
+  return {
+    collection: row._id,
+    state: row.state ?? 'starting',
+    ...(row.target !== undefined ? { target: row.target } : {}),
+    edges: row.edges ?? [],
+    ...(row.leader
+      ? { leader: { host: row.leader.host, pid: row.leader.pid, at: row.leader.at } }
+      : {}),
+    counters: { events: 0, upgraded: 0, failed: 0, skipped: 0, ...row.counters },
+    ...(row.lastEventAt ? { lastEventAt: row.lastEventAt } : {}),
+    updatedAt: row.updatedAt,
+  };
+}
 
 /** How a background migration's plan used the shard key — for its status */
 function shardingView(sharding) {
@@ -173,6 +191,7 @@ class MigratorKit extends EventEmitter {
   #upDefinitions;
   /** The background migrations' store — made on first use (see #backgroundStore) */
   #backgroundStoreInstance;
+  #watchStoreInstance;
   /** Warnings about background migrations said once per kit (a missing index, no lag rights) */
   #backgroundWarned = new Set();
   /** The adaptive throttles of this process, per background migration and group */
@@ -2307,6 +2326,67 @@ class MigratorKit extends EventEmitter {
       // Definitions that do not load are converge's to report.
     }
     return undefined;
+  }
+
+  /**
+   * The live drift watcher: a change stream per collection with a completed
+   * background migration, one leader per collection across every process,
+   * upgrading each old-shape write moments after it lands. Resolves to
+   * `{ running, status(), stop() }` once it has started; on a standalone
+   * server (no change streams) it rejects with ConfigInvalidError.
+   * @experimental
+   */
+  async watchBackground(options = {}) {
+    // Checked before anything connects: a typo should not wait for a server.
+    watchOptions(options);
+    await this.#backgroundReady();
+    const db = this.#requireDb();
+    if ((await readServer(db)).topology === 'standalone') {
+      throw new ConfigInvalidError(
+        'The live drift watcher needs change streams — a replica set or a sharded cluster; ' +
+          "keep backgroundDrift: 'poll' on a standalone server",
+        { key: 'backgroundDrift' },
+      );
+    }
+    const config = this.#config;
+    const owner = this.#newId();
+    return startWatch(
+      {
+        ...this.#backgroundDeps(owner),
+        watchStore: this.#watchStore(),
+        watchLockFor: (collection) =>
+          new MigrationLock(db, config.lockCollection, config.lockTTLSeconds, {
+            id: `watch:${collection}`,
+            label: 'drift watcher lock',
+          }),
+        owner,
+        onDrift: config.backgroundOnDrift,
+      },
+      options,
+    );
+  }
+
+  /**
+   * What the live drift watchers recorded — one row per watched collection
+   * (or the one asked for, `null` when it has none): state, leader, counters,
+   * last event. Never the resume token.
+   * @experimental
+   */
+  async backgroundWatchStatus(collection) {
+    await this.#backgroundReady();
+    const rows = await this.#watchStore().status(collection);
+    if (collection !== undefined) return rows === null ? null : watchRow(rows);
+    const views = [];
+    for (const row of rows) views.push(watchRow(row));
+    return views;
+  }
+
+  #watchStore() {
+    this.#watchStoreInstance ??= new BackgroundWatchStore(
+      this.#requireDb(),
+      this.#config.backgroundCollection,
+    );
+    return this.#watchStoreInstance;
   }
 
   /**

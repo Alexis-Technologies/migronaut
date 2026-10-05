@@ -1636,6 +1636,12 @@ export interface MigronautEvents {
   'background:registered': (event: BackgroundRegisteredEvent) => void;
   'background:waiting': (event: BackgroundEvent) => void;
   'background:drift': (event: BackgroundEvent) => void;
+  /** A collection's live drift watcher changed state */
+  'background:watch': (event: {
+    runId?: string;
+    collection: string;
+    state: BackgroundWatchState;
+  }) => void;
   'background:unblocked': (event: BackgroundEvent) => void;
   'background:partitioned': (event: BackgroundEvent) => void;
   'background:pass': (event: BackgroundEvent) => void;
@@ -1979,6 +1985,86 @@ export class MigratorKit extends EventEmitter {
     onDrift?: 'reopen' | 'report';
     collections?: string[];
   }): Promise<BackgroundVerifyResult>;
+  /**
+   * The live drift watcher: a change stream per collection with a completed
+   * background migration — one leader per collection across every process —
+   * that upgrades each old-shape write moments after it lands, through the
+   * lanes' own write path. Resolves once started; rejects with
+   * ConfigInvalidError on a standalone server (no change streams).
+   * @experimental
+   */
+  watchBackground(options?: WatchBackgroundOptions): Promise<BackgroundWatcher>;
+  /** What the live drift watchers recorded for a collection — `null` when it has none @experimental */
+  backgroundWatchStatus(collection: string): Promise<BackgroundWatchStatus | null>;
+  /** What the live drift watchers recorded, one row per watched collection @experimental */
+  backgroundWatchStatus(): Promise<BackgroundWatchStatus[]>;
+}
+
+/** What a collection's live drift watcher is doing */
+export type BackgroundWatchState =
+  | 'following'
+  | 'catching-up'
+  | 'streaming'
+  | 'history-lost'
+  | 'overloaded'
+  | 'restarting'
+  | 'suspended'
+  | 'fallback'
+  | 'stopped';
+
+/** Options of {@link MigratorKit.watchBackground} */
+export interface WatchBackgroundOptions {
+  /** Only these collections. Default: every one with a completed background migration */
+  collections?: string[];
+  /** Stops the watcher when aborted */
+  signal?: AbortSignal;
+  /** `false`: only report old-shape writes, never upgrade them. Default `true` */
+  upgrade?: boolean;
+  /** How often the edges and the collections are read again (ms). Default 30000 */
+  refreshMs?: number;
+  /** The most often the resume token is saved (ms). Default 5000 */
+  checkpointMs?: number;
+  /** How often a follower tries to become the leader (ms, jittered). Default 10000 */
+  leaderRetryMs?: number;
+  /** Collections watched by this process at most; the rest stay with the poll. Default 16 */
+  maxCollections?: number;
+  /**
+   * A stream this far behind (ms) gives up on its backlog: the background
+   * migrations it serves are reopened, and it starts again from now. Default 60000
+   */
+  maxLagMs?: number;
+  /** Hears every failure (the watcher itself never throws) */
+  onError?(error: unknown, collection?: string): void;
+}
+
+/** A running live drift watcher */
+export interface BackgroundWatcher {
+  readonly running: boolean;
+  /** What each followed collection's watcher is doing in this process */
+  status(): {
+    collection: string;
+    state: BackgroundWatchState | 'starting';
+    /** Whether this process leads the collection */
+    leading: boolean;
+    counters: { events: number; upgraded: number; failed: number; skipped: number };
+    lastEventAt?: Date;
+  }[];
+  /** Close every stream, save its position, release its lock */
+  stop(): Promise<void>;
+}
+
+/** A collection's live drift watcher, as stored — never its resume token */
+export interface BackgroundWatchStatus {
+  collection: string;
+  state: BackgroundWatchState | 'starting';
+  /** The version a document should have at least */
+  target?: number;
+  /** The background migrations it upgrades with */
+  edges: string[];
+  leader?: { host: string; pid: number; at: Date };
+  counters: { events: number; upgraded: number; failed: number; skipped: number };
+  lastEventAt?: Date;
+  updatedAt: Date;
 }
 
 // ─── Background migration results ─────────────────────────────────────────────
