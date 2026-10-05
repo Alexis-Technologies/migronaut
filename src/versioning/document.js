@@ -64,6 +64,11 @@ const versionOf = (doc, field = VERSIONING_DEFAULTS.field) => countOf(doc, field
 const revisionOf = (doc, revisionField = VERSIONING_DEFAULTS.revisionField) =>
   countOf(doc, revisionField);
 
+/** Whether `doc` is at exactly `version` — a missing or `null` field is version 0 */
+function isVersion(doc, version, { field = VERSIONING_DEFAULTS.field } = {}) {
+  return versionOf(doc, field) === version;
+}
+
 /** The revision after one more write */
 const nextRevision = (revision) => (toCount(revision) ?? 0) + 1;
 
@@ -268,6 +273,7 @@ module.exports = {
   belowVersionFilter,
   cloneDocument,
   fieldNameIssue,
+  isVersion,
   nextRevision,
   occFilter,
   resolveFieldNames,

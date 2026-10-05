@@ -11,6 +11,7 @@ const {
   retryOnConflict,
   updateWithRevision,
 } = require('./occ.js');
+const { isVersion } = require('./document.js');
 const { defineShapes } = require('./registry.js');
 const { upcaster } = require('./upcaster.js');
 
@@ -28,6 +29,7 @@ module.exports = {
   // The application's view of its versioned collections
   defineShapes,
   upcaster,
+  isVersion,
 
   // Optimistic concurrency
   updateWithRevision,

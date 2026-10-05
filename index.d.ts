@@ -49,6 +49,207 @@ export interface MigrationModule {
   description?: string;
 }
 
+// ─── Document shapes and background migrations ───────────────────────────────
+
+/** The system field names of a versioned collection — `revisionField` is `null` without revisions */
+export interface ShapeFieldNames {
+  field: string;
+  revisionField: string | null;
+}
+
+/** The default system field names: `__v` and `__rev` */
+export interface DefaultShapeFieldNames {
+  field: '__v';
+  revisionField: '__rev';
+}
+
+/**
+ * A document type without its system fields (the version and the revision),
+ * distributed over a union. What a shape body is declared as, and what a
+ * background transformation returns: migronaut writes the system fields.
+ * @experimental New in 2.3
+ */
+export type Body<T, N extends ShapeFieldNames = DefaultShapeFieldNames> = T extends unknown
+  ? Omit<T, N['field'] | Extract<N['revisionField'], string>>
+  : never;
+
+/**
+ * What a background migration's transformation gets besides the document.
+ * `session`, `db` and `client` are there only in a `transaction` background
+ * migration — writes to other collections must pass `session` to commit
+ * with the batch.
+ * @experimental New in 2.3
+ */
+export interface BackgroundMigrationContext {
+  /** Aborted when the slice is stopping (lease lost, pause, shutdown) */
+  signal: AbortSignal;
+  logger: MigronautLogger;
+  direction: 'forward' | 'revert';
+  background: { name: string; generation: number; partition: string };
+  session?: ClientSession;
+  db?: Db;
+  client?: MongoClient;
+  /** True in a dry run — the writes are rolled back */
+  dryRun?: boolean;
+}
+
+/** How a background migration splits its collection into partitions */
+export interface BackgroundPartitionSettings {
+  /** Partitions per lane (default 4), so a slow partition does not hold the pass */
+  overPartition?: number;
+  /** Default 256 */
+  maxPartitions?: number;
+  /** No partition is planned smaller than this (default 4 × batchSize) */
+  minPartitionDocs?: number;
+  /** Ids sampled to place the boundaries (default min(10 000, 100 × partitions)) */
+  sampleSize?: number;
+}
+
+/** A transactional background migration's budget */
+export interface BackgroundTransactionSettings {
+  /** Per batch, ≤ 50 000 (default 10 000) */
+  timeoutMs?: number;
+  /** Retries of a batch on a transient transaction error (default 5) */
+  maxRetries?: number;
+}
+
+/** The latency-driven throttle (AIMD) */
+export interface BackgroundAdaptiveSettings {
+  /** A batch write slower than this halves the batch (default 500) */
+  targetLatencyMs?: number;
+  /** Default 10 */
+  minBatchSize?: number;
+  /** Never above `batchSize` (the default) */
+  maxBatchSize?: number;
+  /** Default 30 000 */
+  maxPauseMs?: number;
+}
+
+/** What a `throttle` hook is told before every batch */
+export interface BackgroundThrottleContext {
+  name: string;
+  collection?: string;
+  generation: number;
+  partition: string;
+  batchSize: number;
+  signal: AbortSignal;
+}
+
+/**
+ * Settings every background migration may carry, with their defaults.
+ * @experimental New in 2.3
+ */
+export interface BackgroundMigrationSettings {
+  description?: string;
+  /** Documents per batch: 500 (100 with `transaction`) */
+  batchSize?: number;
+  /** Pause between batches: 100 ms */
+  pauseMs?: number;
+  /** How long a lane holds a partition before it yields: 30 000 ms */
+  sliceMs?: number;
+  /** Default `{ w: 'majority' }` */
+  writeConcern?: { w?: number | 'majority'; j?: boolean; wtimeoutMS?: number };
+  /** Documents that may fail before the background migration does: 0 */
+  maxDocumentErrors?: number;
+  /** Passes over the remaining old-shape documents before giving up: 10 */
+  maxPasses?: number;
+  /** Re-read rounds for documents a concurrent write changed under a batch: 3 */
+  maxConflictRetries?: number;
+  /** Failed slices of one partition before it fails: 3 */
+  maxSliceFailures?: number;
+  /** Wait while a secondary lags more than this: 10 000 ms (`false`: never) */
+  maxReplicationLagMs?: number | false;
+  /** Called before every batch; a number it returns is an extra pause (ms) */
+  throttle?(ctx: BackgroundThrottleContext): number | void | Promise<number | void>;
+  /** Partitions processed at once, across every process: 1 (at most 64) */
+  maxParallel?: number;
+  partitions?: BackgroundPartitionSettings;
+  /** Batch and checkpoint in one transaction (needs a replica set or mongos): false */
+  transaction?: boolean | BackgroundTransactionSettings;
+  /** The latency-driven throttle: true */
+  adaptive?: boolean | BackgroundAdaptiveSettings;
+  /** Lanes per shard on a sharded collection: 1 */
+  shardConcurrency?: number;
+}
+
+/**
+ * A declarative background migration: every document of `collection` at
+ * version `from` (and matching `filter`) rewritten to version `to` by
+ * `migrate` (or `migrateBatch`), in partitions, behind an optimistic guard.
+ * `From` and `To` type the documents — see `BackgroundMigrationFor` in
+ * `@alexify/migronaut/versioning` for the shape-map form.
+ *
+ * The callbacks are declared as methods, so a transformation typed for the
+ * stored document (with its version) or for its body fits either way.
+ * @experimental New in 2.3
+ */
+export interface DeclarativeBackgroundMigration<
+  From extends object = Record<string, any>,
+  To extends object = Record<string, any>,
+> extends BackgroundMigrationSettings {
+  collection: string;
+  /** The version rewritten — 0 for documents without a version field */
+  from: number;
+  to: number;
+  filter?: Record<string, unknown>;
+  /** The new document for one old one; the engine sets the version and bumps the revision */
+  migrate?(doc: From, ctx: BackgroundMigrationContext): To | Promise<To>;
+  /** The new documents for a batch, aligned — an `Error` fails just that document */
+  migrateBatch?(docs: From[], ctx: BackgroundMigrationContext): (To | Error)[] | Promise<(To | Error)[]>;
+  /** The way back, for `down` */
+  revert?(doc: To, ctx: BackgroundMigrationContext): From | Promise<From>;
+  revertBatch?(docs: To[], ctx: BackgroundMigrationContext): (From | Error)[] | Promise<(From | Error)[]>;
+  /** Default: the collection's `versioning.field`, else `'__v'` */
+  versionField?: string;
+  /** Default: the collection's `versioning.revisionField`, else `'__rev'` */
+  revisionField?: string;
+  /**
+   * `'revision'` (default) guards each write with the revision; a collection
+   * without revisions must say `'version-only'` — a concurrent write that
+   * leaves the version alone is then invisible to it.
+   */
+  occ?: 'revision' | 'version-only';
+}
+
+/** What a `step` background migration gets */
+export interface BackgroundStepContext extends BackgroundMigrationContext {
+  db: Db;
+  client: MongoClient;
+  /** What the previous step returned (`null` at the start) */
+  checkpoint: unknown;
+  /** Epoch ms the step should return by — the slice ends then */
+  deadline: number;
+}
+
+/** What a `step` returns */
+export interface BackgroundStepResult {
+  /** Saved (≤ 64 KiB of BSON) and handed to the next step */
+  checkpoint: unknown;
+  /** True once there is nothing left */
+  done: boolean;
+  processed?: number;
+  migrated?: number;
+  /** For progress, when known */
+  total?: number;
+}
+
+/**
+ * A free-form background migration — the escape hatch: migronaut runs `step`
+ * again and again with its last checkpoint until it says `done`, owning the
+ * lease, the slices, the throttle and the controls. One partition only; the
+ * writes must be idempotent.
+ * @experimental New in 2.3
+ */
+export interface StepBackgroundMigration extends BackgroundMigrationSettings {
+  /** Shown in status — the collection it works on, if one */
+  collection?: string;
+  step(ctx: BackgroundStepContext): Promise<BackgroundStepResult>;
+  revertStep?(ctx: BackgroundStepContext): Promise<BackgroundStepResult>;
+}
+
+/** A background migration, as a migration file exports it: `export const background = {…}` */
+export type BackgroundMigration = DeclarativeBackgroundMigration | StepBackgroundMigration;
+
 // ─── Changelog ────────────────────────────────────────────────────────────────
 
 export type MigrationStatus = 'applied' | 'reverted' | 'failed';
@@ -496,14 +697,14 @@ export interface CollectionDefinition {
    * Every index besides `_id`. Undeclared live indexes are kept (and reported)
    * unless `prune` is on.
    */
-  indexes?: IndexDefinition[];
+  indexes?: readonly IndexDefinition[];
   /**
    * Atlas Search and Vector Search indexes (Atlas, an Atlas CLI local
    * deployment, or MongoDB 8.3+ with mongot). Undeclared live ones are kept
    * unless `prune` is on; leave the key out and they are not managed at all.
    * @experimental New in 2.2
    */
-  searchIndexes?: SearchIndexDefinition[];
+  searchIndexes?: readonly SearchIndexDefinition[];
   /**
    * A query or `{ $jsonSchema }` document; `null` (or `{}`) for no validator.
    * With `versioning`, its rules are merged in — and `null` is refused.

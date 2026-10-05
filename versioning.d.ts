@@ -11,9 +11,13 @@
  */
 
 import type {
+  Body,
   CollectionDefinition,
   CollectionDefinitionFile,
   CollectionVersioning,
+  DeclarativeBackgroundMigration,
+  DefaultShapeFieldNames,
+  ShapeFieldNames,
 } from './index.js';
 
 export {
@@ -175,6 +179,148 @@ export function bumpRevision<U extends UpdateLike>(
   options?: { revisionField?: string },
 ): U;
 
+// ─── Shapes by version (type level) ───────────────────────────────────────────
+
+/**
+ * The document shapes of each collection by version, declared once:
+ *
+ *   type Shapes = { orders: { 1: OrderV1; 2: OrderV2 } };
+ *
+ * Bodies are declared **without** the version field — the literal
+ * discriminant comes from the key, so the two can never disagree (a body that
+ * declares it anyway has it replaced). Keys may be numbers or numeric strings.
+ */
+export type ShapeMap = { [collection: string]: { [version: number]: object } };
+
+/** `'2'` → `2`; numbers stay */
+type ToVersion<K> = K extends number ? K : K extends `${infer N extends number}` ? N : never;
+
+/** A tuple `n` long — for comparing small version numbers */
+type Tuple<N extends number, T extends unknown[] = []> = T['length'] extends N
+  ? T
+  : Tuple<N, [...T, unknown]>;
+
+type GreaterThan<A extends number, B extends number> = number extends A | B
+  ? false
+  : Tuple<A> extends [...Tuple<B>, unknown, ...unknown[]]
+    ? true
+    : false;
+
+type AnyGreater<Others extends number, P extends number> = Others extends number
+  ? GreaterThan<Others, P>
+  : never;
+
+/** The largest of a union of version numbers */
+type MaxOf<K extends number> = { [P in K]: true extends AnyGreater<Exclude<K, P>, P> ? never : P }[K];
+
+/** `n + 1` */
+export type NextVersion<N extends number> = Extract<[...Tuple<N>, unknown]['length'], number>;
+
+/** The versions declared for a collection */
+export type Versions<S extends ShapeMap, C extends keyof S> = ToVersion<keyof S[C]>;
+
+/** The highest declared version — the current one */
+export type CurrentVersion<S extends ShapeMap, C extends keyof S> = MaxOf<Versions<S, C>>;
+
+/** The body declared for a version (by number or numeric-string key) */
+type BodyAt<S extends ShapeMap, C extends keyof S, V extends number> = V extends keyof S[C]
+  ? S[C][V]
+  : `${V}` extends keyof S[C]
+    ? S[C][`${V}` & keyof S[C]]
+    : never;
+
+type Simplify<T> = { [K in keyof T]: T[K] } & {};
+
+/**
+ * `T`, kept out of type-argument inference: a parameter typed with it is
+ * contextually typed from the other arguments instead of inferring from them
+ * (the built-in `NoInfer` needs TypeScript 5.4; this works from 5.0).
+ */
+type Hold<T> = [T][T extends unknown ? 0 : never];
+
+/** The version field of a document at `V` — optional and `0 | null` for version 0 */
+type VersionPart<V extends number, F extends string> = V extends 0
+  ? { [K in F]?: 0 | null }
+  : { [K in F]: V };
+
+/** The revision field — optional at version 0 (a document that predates versioning) */
+type RevisionPart<V extends number, R extends string | null> = R extends string
+  ? V extends 0
+    ? { [K in R]?: number }
+    : { [K in R]: number }
+  : unknown;
+
+/** A body at version `V`, with its system fields */
+export type VersionMember<
+  V extends number,
+  B,
+  N extends ShapeFieldNames = DefaultShapeFieldNames,
+> = B extends unknown
+  ? Simplify<Body<B, N> & VersionPart<V, N['field']> & RevisionPart<V, N['revisionField']>>
+  : never;
+
+/** A stored document of `C` at version `V` */
+export type ShapeAt<
+  S extends ShapeMap,
+  C extends keyof S,
+  V extends number,
+  N extends ShapeFieldNames = DefaultShapeFieldNames,
+> = VersionMember<V, BodyAt<S, C, V>, N>;
+
+/**
+ * Any stored document of `C` — a union discriminated by the version field, so
+ * `switch (doc.__v)` (or `isVersion`) narrows it. A driver collection typed
+ * with it (`db.collection<AnyShape<Shapes, 'orders'>>('orders')`) narrows
+ * after `find`/`findOne` too.
+ */
+export type AnyShape<
+  S extends ShapeMap,
+  C extends keyof S,
+  N extends ShapeFieldNames = DefaultShapeFieldNames,
+> = { [V in Versions<S, C>]: ShapeAt<S, C, V, N> }[Versions<S, C>];
+
+/** A stored document of `C` at the current (highest) version */
+export type CurrentShape<
+  S extends ShapeMap,
+  C extends keyof S,
+  N extends ShapeFieldNames = DefaultShapeFieldNames,
+> = ShapeAt<S, C, CurrentVersion<S, C>, N>;
+
+/** `T` with system fields at version `V` — what `stamp` returns */
+export type Stamped<
+  T,
+  V extends number = number,
+  N extends ShapeFieldNames = DefaultShapeFieldNames,
+> = VersionMember<V, T, N>;
+
+/**
+ * A declarative background migration of `C` from version `F` to `T`, typed by
+ * the shape map: `migrate` takes the body at `F` and returns the body at `T`
+ * (the engine owns the system fields); `revert` the other way. An upcaster's
+ * `step(F)` fits as `migrate`.
+ */
+export type BackgroundMigrationFor<
+  S extends ShapeMap,
+  C extends keyof S & string,
+  F extends Versions<S, C>,
+  T extends Versions<S, C>,
+  N extends ShapeFieldNames = DefaultShapeFieldNames,
+> = DeclarativeBackgroundMigration<Body<BodyAt<S, C, F>, N>, Body<BodyAt<S, C, T>, N>> & {
+  collection: C;
+  from: F;
+  to: T;
+};
+
+/**
+ * Whether `doc` is at version `version` (a missing field is version 0) — a
+ * type guard over a union of shapes.
+ */
+export function isVersion<D extends object, V extends number, F extends string = '__v'>(
+  doc: D,
+  version: V,
+  options?: { field?: F },
+): doc is Extract<D, VersionPart<V, F>>;
+
 // ─── Upcasting ────────────────────────────────────────────────────────────────
 
 /** One shape change: the document at version n in, the document at n + 1 out */
@@ -252,6 +398,8 @@ export interface ShapeRegistry<Name extends string = string> {
   versionOf(name: Name, doc: object): number;
   /** Whether a document is at the current version */
   isCurrent(name: Name, doc: object): boolean;
+  /** Whether a document is at `version` (a missing field is 0) */
+  isVersion(name: Name, doc: object, version: number): boolean;
   /** The document with the current version and revision 0 — each only when missing */
   stamp<D extends object>(name: Name, doc: D): D & VersionStamp;
   /** An upcaster over the collection's versioning */
@@ -266,6 +414,135 @@ export interface ShapeRegistry<Name extends string = string> {
   stampUpsert<U extends Record<string, unknown>>(name: Name, update: U): U;
 }
 
+// ─── The typed registry ───────────────────────────────────────────────────────
+
+/** The definitions a shape map asks for — one versioned definition per collection */
+export type ShapeDefinitions<S extends ShapeMap> = {
+  [C in keyof S]: CollectionDefinitionFile & { versioning: CollectionVersioning };
+};
+
+type VersioningIn<D, C> = C extends keyof D
+  ? D[C] extends { versioning: infer V }
+    ? V
+    : never
+  : never;
+
+/** The system field names a definition declares */
+export type FieldNamesOf<D, C> = {
+  field: VersioningIn<D, C> extends { field: infer F extends string } ? F : '__v';
+  revisionField: VersioningIn<D, C> extends { revision: false }
+    ? null
+    : VersioningIn<D, C> extends { revisionField: infer R extends string }
+      ? R
+      : '__rev';
+};
+
+/**
+ * A literal `current` must be the highest version of the shape map (the
+ * error reads "Type '3' is not assignable to type '2'"); a widened `number`
+ * cannot be checked and is accepted.
+ */
+type CurrentCheck<S extends ShapeMap, D> = {
+  [C in keyof S]: {
+    versioning: {
+      current: number extends VersioningIn<D, C>['current' & keyof VersioningIn<D, C>]
+        ? number
+        : CurrentVersion<S, C>;
+    };
+  };
+};
+
+/** No collection the shape map does not know */
+type NoExtraCollections<S extends ShapeMap, D> = { [K in Exclude<keyof D, keyof S>]: never };
+
+/** The versions an upcaster needs a step from: every declared one but the current */
+type StepVersions<S extends ShapeMap, C extends keyof S> = Exclude<
+  Versions<S, C>,
+  CurrentVersion<S, C>
+>;
+
+/** Steps typed by the shape map: the document at `v` in, the body at `v + 1` out */
+export type UpcastStepsFor<
+  S extends ShapeMap,
+  C extends keyof S,
+  N extends ShapeFieldNames = DefaultShapeFieldNames,
+> = {
+  [V in StepVersions<S, C>]: (doc: ShapeAt<S, C, V, N>) => Body<BodyAt<S, C, NextVersion<V>>, N>;
+};
+
+/** A document newer than any declared shape — what `newer: 'keep'` may hand back */
+export type NewerShape<N extends ShapeFieldNames = DefaultShapeFieldNames> = {
+  [K in N['field']]: number;
+} & Record<string, unknown>;
+
+/** An upcaster typed by the shape map */
+export interface TypedUpcaster<
+  S extends ShapeMap,
+  C extends keyof S,
+  N extends ShapeFieldNames = DefaultShapeFieldNames,
+  Keep extends boolean = false,
+> extends Upcaster {
+  readonly current: CurrentVersion<S, C>;
+  readonly field: N['field'];
+  upcast(
+    doc: AnyShape<S, C, N>,
+  ): Keep extends true ? CurrentShape<S, C, N> | NewerShape<N> : CurrentShape<S, C, N>;
+  upcast(doc: object): Record<string, unknown>;
+  step<F extends StepVersions<S, C>>(
+    from: F,
+  ): (doc: ShapeAt<S, C, F, N>) => ShapeAt<S, C, NextVersion<F>, N>;
+  step<F extends StepVersions<S, C>, T extends Versions<S, C>>(
+    from: F,
+    to: T,
+  ): (doc: ShapeAt<S, C, F, N>) => ShapeAt<S, C, T, N>;
+}
+
+/** The registry typed by a shape map — what `defineShapes<Shapes>()(definitions)` returns */
+export interface TypedShapeRegistry<S extends ShapeMap, D> extends Omit<
+  ShapeRegistry<Extract<keyof S, string>>,
+  'current' | 'stamp' | 'isCurrent' | 'isVersion' | 'upcaster'
+> {
+  current<C extends Extract<keyof S, string>>(name: C): CurrentVersion<S, C>;
+  /** The body stamped at the current version */
+  stamp<C extends Extract<keyof S, string>>(
+    name: C,
+    body: Body<BodyAt<S, C, CurrentVersion<S, C>>, FieldNamesOf<D, C>>,
+  ): CurrentShape<S, C, FieldNamesOf<D, C>>;
+  /** Whether the document is at the current version — a type guard */
+  isCurrent<C extends Extract<keyof S, string>>(
+    name: C,
+    doc: AnyShape<S, C, FieldNamesOf<D, C>>,
+  ): doc is CurrentShape<S, C, FieldNamesOf<D, C>>;
+  isCurrent(name: Extract<keyof S, string>, doc: object): boolean;
+  /** Whether the document is at `version` — a type guard */
+  isVersion<C extends Extract<keyof S, string>, V extends Versions<S, C>>(
+    name: C,
+    doc: AnyShape<S, C, FieldNamesOf<D, C>>,
+    version: V,
+  ): doc is ShapeAt<S, C, V, FieldNamesOf<D, C>>;
+  isVersion(name: Extract<keyof S, string>, doc: object, version: number): boolean;
+  /** An upcaster whose steps the shape map types — a missing or wrong step does not compile */
+  upcaster<C extends Extract<keyof S, string>>(
+    name: C,
+    steps: Hold<UpcastStepsFor<S, C, FieldNamesOf<D, C>>>,
+    options: { newer: 'keep' },
+  ): TypedUpcaster<S, C, FieldNamesOf<D, C>, true>;
+  upcaster<C extends Extract<keyof S, string>>(
+    name: C,
+    steps: Hold<UpcastStepsFor<S, C, FieldNamesOf<D, C>>>,
+    options?: { newer?: 'throw' },
+  ): TypedUpcaster<S, C, FieldNamesOf<D, C>>;
+}
+
+/**
+ * The registry typed by a shape map. Curried, so the shape map is given and
+ * the definitions are inferred: `defineShapes<Shapes>()(definitions)`. The
+ * definitions must cover exactly the shape map's collections, each with a
+ * `current` that is its highest version (when literal — `as const`).
+ */
+export function defineShapes<S extends ShapeMap>(): <const D extends ShapeDefinitions<S>>(
+  definitions: D & Hold<NoExtraCollections<S, D> & CurrentCheck<S, D>>,
+) => TypedShapeRegistry<S, D>;
 /**
  * The registry of the versioned collections among `definitions` — the same
  * definition files converge declares them with, as `{ name: definition }` or
@@ -276,4 +553,4 @@ export function defineShapes<const D extends Record<string, CollectionDefinition
 ): ShapeRegistry<Extract<keyof D, string>>;
 export function defineShapes(definitions: readonly CollectionDefinition[]): ShapeRegistry;
 
-export type { CollectionVersioning };
+export type { Body, CollectionVersioning, DefaultShapeFieldNames, ShapeFieldNames };

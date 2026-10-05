@@ -47,7 +47,13 @@ function entriesOf(definitions) {
   return entries;
 }
 
+/**
+ * Called without arguments — `defineShapes<Shapes>()(definitions)` — it
+ * returns itself: TypeScript then takes the shape map from the first call
+ * and infers the definitions from the second. Nothing changes at run time.
+ */
 function defineShapes(definitions) {
+  if (arguments.length === 0) return (defs) => defineShapes(defs);
   const registry = new Map();
   for (const [name, definition] of entriesOf(definitions)) {
     if (registry.has(name)) {
@@ -92,6 +98,7 @@ function defineShapes(definitions) {
     current: (name) => get(name).current,
     versionOf: docVersion,
     isCurrent: (name, doc) => docVersion(name, doc) === get(name).current,
+    isVersion: (name, doc, version) => docVersion(name, doc) === version,
     stamp,
     /** An upcaster over this collection's versioning — see upcaster.js */
     upcaster: (name, steps, options) =>

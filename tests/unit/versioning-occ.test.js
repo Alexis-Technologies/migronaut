@@ -8,6 +8,7 @@ const {
 const {
   bumpRevision,
   defineShapes,
+  isVersion,
   findOneAndUpdateWithRevision,
   replaceWithRevision,
   retryOnConflict,
@@ -425,5 +426,24 @@ describe('defineShapes', () => {
     assert.throws(() => shapes.stampUpsert('orders', [{ $set: {} }]), /not a pipeline/);
     assert.throws(() => shapes.stampUpsert('orders', { a: 1 }), /not a replacement/);
     assert.throws(() => shapes.stampUpsert('orders', { $inc: { __rev: 1 } }), /revision field/);
+  });
+});
+
+describe('isVersion and the typed form of defineShapes', () => {
+  it('should compare a document version, a missing field being 0', () => {
+    assert.ok(isVersion({}, 0));
+    assert.ok(isVersion({ __v: null }, 0));
+    assert.ok(isVersion({ __v: 2 }, 2));
+    assert.ok(!isVersion({ __v: 2 }, 1));
+    assert.ok(isVersion({ schemaVersion: 3 }, 3, { field: 'schemaVersion' }));
+    assert.ok(!isVersion({ __v: 'x' }, 0));
+  });
+
+  it('should return itself when called without arguments, for defineShapes<Shapes>()(…)', () => {
+    const typed = defineShapes()({ orders: { versioning: { current: 2 } } });
+    assert.strictEqual(typed.current('orders'), 2);
+    assert.ok(typed.isVersion('orders', { __v: 1 }, 1));
+    assert.ok(!typed.isVersion('orders', { __v: 1 }, 2));
+    assert.throws(() => defineShapes(undefined), ConfigInvalidError);
   });
 });
