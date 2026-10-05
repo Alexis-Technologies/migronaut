@@ -203,6 +203,11 @@ pnpm run size                            # esbuild bundle-size report (library, 
 #   docker run --rm -d -p 27018:27017 -e DO_NOT_TRACK=1 mongodb/mongodb-atlas-local:8.0
 #   MIGRONAUT_TEST_ATLAS_URI="mongodb://127.0.0.1:27018/?directConnection=true" \
 #     node --test tests/integration/search-atlas.test.js
+# The sharded-cluster suite is opt-in and manual too — after shard-aware changes:
+#   docker run --rm -d --name migronaut-sharded -p 27019:27017 \
+#     -v "$PWD/tests/fixtures/sharded:/s:ro" mongo:8.0 bash /s/start.sh
+#   MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admin" \
+#     node --test tests/integration/sharded.test.js
 pnpm run bench                           # ops/sec micro-benchmarks (bench/bench.js), manual only, not in CI
 pnpm run docs:dev                        # vitepress dev docs
 ```
@@ -239,12 +244,15 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
   transactions work).
 - `node:test` uses `before`/`after`, not `beforeAll`/`afterAll` (those are Vitest/Jest names —
   don't reintroduce them).
-- Silence the logger (`logger: null`) in tests. No committed `.only`/`.skip` — with two
-  sanctioned exceptions, both environment-capability skips with a reason, not disabled tests:
+- Silence the logger (`logger: null`) in tests. No committed `.only`/`.skip` — with three
+  sanctioned exceptions, all environment-capability skips with a reason, not disabled tests:
   `tests/integration/bullmq-redis.test.js` when `MIGRONAUT_TEST_REDIS_URL` is unset (CI sets it),
-  and `tests/integration/search-atlas.test.js` when `MIGRONAUT_TEST_ATLAS_URI` is unset (CI never
+  `tests/integration/search-atlas.test.js` when `MIGRONAUT_TEST_ATLAS_URI` is unset (CI never
   does — run it by hand after changing `search-index-spec.js`, `converge-search.js` or the search
-  planner; the unit fake carries the coverage, but only a real `mongot` proves the fixed point).
+  planner; the unit fake carries the coverage, but only a real `mongot` proves the fixed point),
+  and `tests/integration/sharded.test.js` when `MIGRONAUT_TEST_SHARDED_URI` is unset (CI never
+  does — run it by hand after changing the shard-aware code; its `[probe]` cases pin what
+  ARCHITECTURE §6.8 says a mongos does).
 - The queue adapter is tested against `tests/helpers/fake-bullmq.js`, an in-memory double — that
   is where its coverage comes from, so the gate passes with no Redis. The scenarios live once, in
   `tests/helpers/bullmq-scenarios.js`, and run against both the fake and (in the opt-in file) the

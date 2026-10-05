@@ -1021,6 +1021,44 @@ pending; on failure the migration rows are attached as `context.results`, the co
 `context.converge` — never the other way round, because `#withLock` and `reportError` read
 `results` as migration rows.
 
+### 6.8 Background migrations on a sharded cluster
+
+The shard-aware side of background migrations rests on what a mongos and the `config` database
+actually do — so those assumptions were probed on a real cluster before anything was built on
+them (`tests/integration/sharded.test.js`, the `[probe]` cases; MongoDB 8.0, two shards behind a
+mongos). What they established, and what follows from each:
+
+- **Where the layout lives.** `config.collections` holds a sharded collection's `key`, `uuid` and
+  `timestamp` (the epoch); `config.chunks` lists its chunks **by `uuid`** — a 5.0+ chunk carries
+  no `ns` — each with `min`, `max` and `shard`, the first from `MinKey`, the last to `MaxKey`.
+- **8.0 tracks unsharded collections too.** A collection moved with `moveCollection` appears in
+  `config.collections` as `unsplittable: true` with the key `{ _id: 1 }`. It is on one shard and
+  has no key to partition or target by: read it as **not sharded**.
+- **Hashed bounds are 64-bit.** The bounds of a hashed chunk are `NumberLong`s — which the driver
+  turns into plain numbers by default (`promoteLongs`), losing precision past 2^53. Chunks are read
+  with `promoteLongs: false`.
+- **`min`/`max` do not target; a predicate does.** A `find` bounded by `min`/`max` alone (with the
+  hint they need) goes to every shard. A range predicate on the shard key alongside them targets
+  the one shard that owns it, and through the mongos `min`/`max` still return exactly that range,
+  merged in index order when sorted by the index. So a batch query keeps the exact `min`/`max`
+  bounds and adds the targeting predicate where its bounds are finite and of one BSON type — no
+  `$or` decomposition of the range is needed.
+- **Missing and `null` keys.** A document without the shard key lives with the `null` ones, in the
+  chunk that holds `null`; `{ key: null }` targets that one shard and matches both.
+- **Writes.** An update filtered by the whole shard key (plus `_id`) goes to one shard; one
+  filtered by `_id` alone goes to all of them. The OCC filter of a targeted write carries the
+  shard key.
+- **Nothing refuses a shard-key change.** With retryable writes — the driver's default — an update
+  that changes a document's shard key value is carried out: the mongos moves the document to its
+  new shard. Only with `retryWrites: false` is it refused. So a transform that rewrites the shard
+  key is caught by migronaut's own guard (`shard-key-changed`, a document error) or not at all;
+  where the key cannot be read (no `clusterMonitor`), there is no guard, and that is documented.
+- **`distinct` in a transaction** on a sharded collection is refused (263,
+  `OperationNotSupportedInTransaction`) — one more reason the dry-run sandbox refuses it there.
+- **Privileges.** A user with `readWrite` on the application database is refused (13) on both
+  `config.collections` and `config.chunks`: the shard-aware mode needs `clusterMonitor`, and falls
+  back without it.
+
 ---
 
 ## 7. Cross-cutting conventions
@@ -1229,11 +1267,15 @@ The high-impact ones for code changes:
   opt-in, manual `tests/integration/search-atlas.test.js` (`mongodb/mongodb-atlas-local`): every
   scenario ends at a fixed point, which is the only proof that the comparison rules match what a
   real `mongot` reports.
+- **Sharded clusters:** the opt-in, manual `tests/integration/sharded.test.js` runs against a
+  whole cluster in one `mongo:8.0` container (`tests/fixtures/sharded/start.sh`: config servers,
+  two shards, a mongos, access control on). Its `[probe]` cases pin what §6.8 relies on.
 - **Rules:** every feature ships with tests in the same PR. Silence the logger (`logger:null`). No
-  `.only`/`.skip` committed — the two sanctioned exceptions are `bullmq-redis.test.js` and
-  `search-atlas.test.js`, which skip themselves *with a reason* when `MIGRONAUT_TEST_REDIS_URL` /
-  `MIGRONAUT_TEST_ATLAS_URI` is unset: environment-capability skips (CI sets the Redis variable via
-  a Redis service and never the Atlas one), not disabled tests. The coverage gate must pass
+  `.only`/`.skip` committed — the three sanctioned exceptions are `bullmq-redis.test.js`,
+  `search-atlas.test.js` and `sharded.test.js`, which skip themselves *with a reason* when
+  `MIGRONAUT_TEST_REDIS_URL` / `MIGRONAUT_TEST_ATLAS_URI` / `MIGRONAUT_TEST_SHARDED_URI` is unset:
+  environment-capability skips (CI sets the Redis variable via a Redis service and never the
+  other two), not disabled tests. The coverage gate must pass
   without them. Test file names mirror source names. Coverage gate: **90% lines / 90%
   funcs / 90% branches**, enforced via `c8` (`pnpm run test:coverage`).
 - **Gotcha:** Node caches dynamic `import()` by path. A test that rewrites the *same* migration
@@ -1276,6 +1318,9 @@ MIGRONAUT_TEST_REDIS_URL=redis://127.0.0.1:6379 node --test tests/integration/bu
 # opt-in, manual: declared search indexes against Atlas Search (CI does not run this)
 docker run --rm -d -p 27018:27017 -e DO_NOT_TRACK=1 mongodb/mongodb-atlas-local:8.0
 MIGRONAUT_TEST_ATLAS_URI="mongodb://127.0.0.1:27018/?directConnection=true" node --test tests/integration/search-atlas.test.js
+# opt-in, manual: a sharded cluster in one container (CI does not run this)
+docker run --rm -d --name migronaut-sharded -p 27019:27017 -v "$PWD/tests/fixtures/sharded:/s:ro" mongo:8.0 bash /s/start.sh
+MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admin" node --test tests/integration/sharded.test.js
 ```
 
 ## 10. No build, lint, release
