@@ -11,7 +11,7 @@ const { errorText } = require('../utils/error.js');
 const { versionIndexKey } = require('../versioning/document.js');
 const { matchOf, processPartition } = require('./background-engine.js');
 const { idRangePartitioner } = require('./background-partition.js');
-const { createShardPartitioner } = require('./background-shard.js');
+const { createShardPartitioner, withShardKey } = require('./background-shard.js');
 const { TERMINAL, matchHash, transition } = require('./background-spec.js');
 const { MAX_BAD_IDS, STATE_SCHEMA } = require('./background-store.js');
 const { createAdaptive, createThrottle } = require('./background-throttle.js');
@@ -72,6 +72,22 @@ function sameIndexKey(live, wanted) {
 }
 
 const hasIndex = (keys, wanted) => keys.some((key) => sameIndexKey(key, wanted));
+
+/**
+ * What a drift probe hints: the version index — or, on a sharded collection,
+ * the version index that carries the shard key (any index led by the version
+ * field ascending serves an equality probe on it).
+ */
+async function probeHint(deps, spec) {
+  const keys = await indexKeys(deps, spec.collection);
+  const exact = versionIndexKey(spec);
+  if (hasIndex(keys, exact)) return exact;
+  for (const key of keys) {
+    const [first] = Object.entries(key);
+    if (first !== undefined && first[0] === spec.field && Number(first[1]) === 1) return key;
+  }
+  return versionHint(deps, spec, keys);
+}
 
 /** Say something once per process — `deps.warned` remembers */
 function warnOnce(deps, id, message, fields) {
@@ -177,6 +193,8 @@ async function partitionerFor(deps, spec, direction) {
   }
   const indexKey = shardedVersionIndexKey(spec, sharding.key);
   if (!hasIndex(keys, indexKey)) {
+    // The key is known: writes are still targeted, and the guard holds.
+    const untargeted = await byId('untargeted');
     warnOnce(
       deps,
       `shard:${spec.collection}:index`,
@@ -185,7 +203,11 @@ async function partitionerFor(deps, spec, direction) {
         'definition and converge)',
       where,
     );
-    return byId('untargeted');
+    return {
+      ...untargeted,
+      partitioner: withShardKey(idRangePartitioner, sharding.key),
+      sharding: { mode: 'untargeted', key: sharding.key },
+    };
   }
   return {
     partitioner: createShardPartitioner({
@@ -193,10 +215,23 @@ async function partitionerFor(deps, spec, direction) {
       field: spec.field,
       source: direction === 'revert' ? spec.to : spec.from,
       readChunks: () => deps.chunksOf(spec.collection, sharding),
+      epoch: sharding,
     }),
     hint: indexKey,
     sharding: { mode: 'shard', key: sharding.key },
   };
+}
+
+/** The shard-aware facts a plan records, for status: how it split, by which key, into how many groups */
+function shardingOf(job, plan) {
+  if (job.sharding === undefined || job.sharding.mode === 'off') return undefined;
+  if (job.sharding.mode === 'untargeted') {
+    return { mode: 'untargeted', ...(job.sharding.key ? { key: job.sharding.key } : {}) };
+  }
+  const groups = new Set();
+  for (const partition of plan.partitions)
+    if (partition.group !== undefined) groups.add(partition.group);
+  return { mode: plan.method, key: job.sharding.key, groups: groups.size };
 }
 
 // ─── The coordinator ──────────────────────────────────────────────────────────
@@ -288,6 +323,20 @@ async function coordinateStep(deps, name, { signal, driver }) {
 
   for (let guard = 0; guard < job.spec.maxPasses + 2; guard++) {
     if (signal?.aborted) return retrySoon(deps, 'stopping');
+    // Resharded (or its key refined) since this plan: its ranges mean nothing
+    // now — re-split the same pass (safe: the version filter skips what is done).
+    if (state.phase === 'process' && job.partitioner.stale?.(state.plan?.epoch)) {
+      deps.logger.warn(
+        `⚠ ${name}: ${job.spec.collection} was resharded since its plan — replanning`,
+        deps.fields({ background: name }),
+      );
+      state =
+        (await store.cas(
+          name,
+          { phase: 'process', 'plan.token': state.plan.token },
+          { $set: { phase: 'replan' } },
+        )) ?? (await store.get(name));
+    }
     // A replan re-splits the same pass; it is not a new one.
     const replanning = state.phase === 'replan';
     if (replanning && state.plan !== undefined) {
@@ -358,6 +407,7 @@ async function planPass(deps, job, state, hash, { newPass = true } = {}) {
     });
   }
   const pass = (state.pass ?? 0) + (newPass ? 1 : 0);
+  const sharding = spec.mode === 'step' ? undefined : shardingOf(job, plan);
   const committed = await store.commitPlan(state._id, {
     generation: state.generation,
     previousToken: state.plan?.token,
@@ -368,6 +418,8 @@ async function planPass(deps, job, state, hash, { newPass = true } = {}) {
       estimate: plan.estimate,
       match: hash,
       ...(plan.degraded ? { degraded: plan.degraded } : {}),
+      ...(plan.epoch ? { epoch: plan.epoch } : {}),
+      ...(sharding !== undefined ? { sharding } : {}),
     },
     partitions: plan.partitions,
     fields: {
@@ -589,6 +641,8 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
   }
   const job = await jobFor(deps, name, state);
   job.generation = state.generation;
+  // A plan made before a reshard: the coordinator must re-split first.
+  if (job.partitioner.stale?.(state.plan.epoch)) return { outcome: 'stale', counters: {} };
   await assertTransactions(deps, name, job.spec);
   const now = deps.now ?? Date.now;
   const deadline = now() + (sliceMs ?? job.spec.sliceMs);
@@ -958,7 +1012,7 @@ async function verify(deps, { onDrift = 'reopen', collections } = {}) {
       result.skipped += 1;
       continue;
     }
-    const hint = await versionHint(deps, spec);
+    const hint = await probeHint(deps, spec);
     if (hint === undefined) {
       result.skipped += 1;
       continue;
@@ -1066,7 +1120,7 @@ async function auditFindings(deps, { now = Date.now() } = {}) {
         );
       }
       if (state.spec?.mode === 'declarative' && state.direction !== 'revert') {
-        const hint = await versionHint(deps, state.spec);
+        const hint = await probeHint(deps, state.spec);
         if (
           hint !== undefined &&
           (await probeOldShape(deps, state, hint).catch(() => null)) !== null
@@ -1114,6 +1168,8 @@ module.exports = {
   failedError,
   finalize,
   jobFor,
+  partitionerFor,
+  probeHint,
   repin,
   runSlice,
   tryUnblock,

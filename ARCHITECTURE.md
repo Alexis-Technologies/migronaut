@@ -1039,10 +1039,13 @@ mongos). What they established, and what follows from each:
   with `promoteLongs: false`.
 - **`min`/`max` do not target; a predicate does.** A `find` bounded by `min`/`max` alone (with the
   hint they need) goes to every shard. A range predicate on the shard key alongside them targets
-  the one shard that owns it, and through the mongos `min`/`max` still return exactly that range,
+  the shards that own it, and through the mongos `min`/`max` still return exactly that range,
   merged in index order when sorted by the index. So a batch query keeps the exact `min`/`max`
   bounds and adds the targeting predicate where its bounds are finite and of one BSON type — no
-  `$or` decomposition of the range is needed.
+  `$or` decomposition of the range is needed. One catch: choosing shards, the mongos takes a
+  `$lt` bound as inclusive, so a range that ends exactly at a chunk boundary also reaches the next
+  chunk's shard. A partition — which ends where its run of chunks does — therefore reads from at
+  most two shards, its own and its neighbour's, instead of all of them.
 - **Missing and `null` keys.** A document without the shard key lives with the `null` ones, in the
   chunk that holds `null`; `{ key: null }` targets that one shard and matches both.
 - **Writes.** An update filtered by the whole shard key (plus `_id`) goes to one shard; one

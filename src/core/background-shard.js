@@ -15,8 +15,10 @@ const { shardedVersionIndexKey } = require('./versioning-spec.js');
  * the version index of a sharded collection (`{ __v, …shard key, _id }`,
  * converge's) with `min`/`max` — exact index bounds — plus, when both ends of
  * the first key field are finite and of one BSON type, a predicate on it
- * that lets the mongos target the owning shard (ARCHITECTURE §6.8: `min`/
- * `max` alone are broadcast).
+ * that lets the mongos target the owning shard — and, as a run ends at a
+ * chunk boundary, the next chunk's (ARCHITECTURE §6.8: `min`/`max` alone are
+ * broadcast, and a `$lt` is inclusive when the mongos picks shards). Writes
+ * carry the shard key, so each goes to one shard.
  *
  * A ranged key keeps a keyset cursor (the last index tuple read). A hashed
  * key cannot — the hash of the last document is the server's to compute — so
@@ -88,6 +90,80 @@ function valueAt(doc, path) {
 }
 
 /** The hashed field of a shard key, if it has one */
+/**
+ * The shard-key fields of a document as a write filter — next to the
+ * optimistic filter, they send the write to the one shard that owns the
+ * document (and keep it off orphans). `_id` is already in that filter.
+ */
+function shardKeyFilter(key, doc) {
+  const filter = {};
+  for (const field of Object.keys(key)) if (field !== '_id') filter[field] = valueAt(doc, field);
+  return filter;
+}
+
+/**
+ * The shard-key guard: a transform that changes a document's shard key is a
+ * document error. Nothing else refuses it — with retryable writes the mongos
+ * moves the document (ARCHITECTURE §6.8) — and moving documents between
+ * shards is not what a background migration is for.
+ */
+function shardKeyGuard(key, prev, next) {
+  const changed = [];
+  for (const field of Object.keys(key)) {
+    if (!sameKeyValue(valueAt(prev, field), valueAt(next, field))) changed.push(field);
+  }
+  if (changed.length === 0) return null;
+  return {
+    reason: 'shard-key-changed',
+    fields: changed,
+    message:
+      `the transform changes the shard key (${changed.join(', ')}) — change a shard key with an ` +
+      'ordinary migration in a transaction, or with reshardCollection',
+  };
+}
+
+/**
+ * Whether two shard-key values route the same: numbers by value whatever
+ * their type (a Long 5 is an int 5 to a chunk, and to a hash), the rest
+ * BSON-aware. A value it cannot prove equal counts as changed.
+ */
+function sameKeyValue(a, b) {
+  if (classOf(a) === 'number' && classOf(b) === 'number') return numberText(a) === numberText(b);
+  return sameValue(a, b);
+}
+
+const numberText = (value) =>
+  typeof value === 'bigint' || value?._bsontype === 'Long' || value?._bsontype === 'Decimal128'
+    ? value.toString()
+    : String(Number(value));
+
+/** Whether a plan's epoch is not the collection's any more — resharded, or its key refined */
+function staleEpoch(planned, current) {
+  if (!planned || !current) return false;
+  if (bytesOf(planned.uuid) !== bytesOf(current.uuid)) return true;
+  return JSON.stringify(planned.key) !== JSON.stringify(current.key);
+}
+
+/** A uuid's bytes as hex — the same for a `Binary` and a `UUID` of them */
+function bytesOf(uuid) {
+  return uuid?.buffer instanceof Uint8Array
+    ? Buffer.from(uuid.buffer).toString('hex')
+    : String(uuid);
+}
+
+/**
+ * The `_id` partitioner on a sharded collection whose key is known but whose
+ * version index does not carry it: reads stay broadcast, but writes are
+ * targeted and the guard holds.
+ */
+function withShardKey(partitioner, key) {
+  return Object.freeze({
+    ...partitioner,
+    writeFilter: (doc) => shardKeyFilter(key, doc),
+    checkTransform: (prev, next) => shardKeyGuard(key, prev, next),
+  });
+}
+
 function hashedFieldOf(key) {
   for (const [field, value] of Object.entries(key)) if (value === 'hashed') return field;
   return undefined;
@@ -242,7 +318,7 @@ function largestFirst(partitions) {
  * the `0` one), and how to read the chunks (`undefined` when config may not
  * be read: the plan then samples the whole key space, ungrouped).
  */
-function createShardPartitioner({ key, field, source, readChunks }) {
+function createShardPartitioner({ key, field, source, readChunks, epoch }) {
   const fields = Object.keys(key);
   const hashed = hashedFieldOf(key);
   const drain = hashed !== undefined;
@@ -271,7 +347,11 @@ function createShardPartitioner({ key, field, source, readChunks }) {
     if (isBound(lo) || isBound(hi)) return undefined;
     const kind = classOf(lo);
     if (kind === undefined || kind !== classOf(hi)) return undefined;
-    return { [first]: { $gte: lo, $lte: hi } };
+    // The range ends before `max`: before its first field's value too, when
+    // the rest of `max` is MinKey — `$lte` would draw in the next chunk's shard.
+    let open = true;
+    for (let i = 1; i < fields.length; i++) if (!isMinKey(scope.max[fields[i]])) open = false;
+    return { [first]: open ? { $gte: lo, $lt: hi } : { $gte: lo, $lte: hi } };
   }
 
   async function plan({ collection, match, hint, maxParallel, settings, shardConcurrency = 1 }) {
@@ -281,7 +361,8 @@ function createShardPartitioner({ key, field, source, readChunks }) {
       ...(hint ? { hint } : {}),
       ...READ_OPTIONS,
     });
-    if (count === 0) return { epoch: null, method: 'empty', estimate: 0, partitions: [] };
+    const planned = epoch ? { uuid: epoch.uuid, key } : null;
+    if (count === 0) return { epoch: planned, method: 'empty', estimate: 0, partitions: [] };
     const { MaxKey, MinKey } = loadBson();
     const chunks = await readChunks();
     const grouped = chunks !== undefined && chunks.length > 0;
@@ -320,7 +401,7 @@ function createShardPartitioner({ key, field, source, readChunks }) {
       }
     }
     return {
-      epoch: null,
+      epoch: planned,
       method: grouped ? 'chunks' : 'sampled',
       estimate: count,
       partitions: largestFirst(slices),
@@ -394,10 +475,10 @@ function createShardPartitioner({ key, field, source, readChunks }) {
     batchQuery,
     advance,
     past,
-    /** Nothing yet — targeted writes come with the shard-key guard */
-    writeFilter: () => ({}),
-    checkTransform: () => null,
-    stale: () => false,
+    writeFilter: (doc) => shardKeyFilter(key, doc),
+    checkTransform: (prev, next) => shardKeyGuard(key, prev, next),
+    /** A plan made for another epoch: resharded, or its key refined since */
+    stale: (planned) => staleEpoch(planned, epoch ? { uuid: epoch.uuid, key } : undefined),
   });
 }
 
@@ -416,6 +497,10 @@ module.exports = {
   createShardPartitioner,
   hashAt,
   runsOf,
+  shardKeyFilter,
+  shardKeyGuard,
+  staleEpoch,
+  withShardKey,
   splitHashed,
   valueAt,
 };

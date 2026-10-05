@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
 const { after, before, describe, it } = require('node:test');
+const { createShardPartitioner } = require('../../src/core/background-shard.js');
+const { BackgroundFailedError } = require('../../src/errors/index.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
 const SHARDED_URI = process.env.MIGRONAUT_TEST_SHARDED_URI;
@@ -50,10 +52,10 @@ describe(
     const kits = [];
     let project;
 
-    /** A kit on the cluster, declaring `collections` */
-    function kitWith(collections) {
+    /** A kit on the cluster, declaring `collections` — as root, or as the user in `uri` */
+    function kitWith(collections, uri = SHARDED_URI) {
       project ??= makeProject();
-      const kit = makeMigrator(SHARDED_URI, DB, project.dir, { collections });
+      const kit = makeMigrator(uri, DB, project.dir, { collections });
       kits.push(kit);
       return kit;
     }
@@ -62,7 +64,9 @@ describe(
       for (const kit of kits) await kit.disconnect();
       project?.cleanup();
       await db?.dropDatabase().catch(() => undefined);
-      await admin?.command({ dropUser: 'limited' }).catch(() => undefined);
+      for (const user of ['limited', 'limited_bg']) {
+        await admin?.command({ dropUser: user }).catch(() => undefined);
+      }
       await client?.close();
     });
 
@@ -189,6 +193,27 @@ describe(
         .max({ __v: 1, sk: 700, _id: new mongodb.MinKey() })
         .explain('queryPlanner');
       assert.strictEqual(shardsOf(both).length, 1, 'min/max with the predicate target');
+    });
+
+    it('[probe] should send a range that ends at a chunk boundary to the next chunk too', async () => {
+      const coll = await sharded(
+        'edges',
+        { k: 1 },
+        {
+          docs: docs(300, (i) => ({ k: i })),
+          splits: [{ k: 100 }, { k: 200 }],
+        },
+      );
+      const owner = await chunkOwner('edges', { k: 100 });
+      await admin.command({
+        moveRange: ns('edges'),
+        min: { k: 100 },
+        toShard: shards.find((shard) => shard !== owner),
+      });
+      const reached = async (filter) => shardsOf(await coll.find(filter).explain('queryPlanner'));
+      assert.strictEqual((await reached({ k: { $gte: 120, $lt: 180 } })).length, 1, 'inside');
+      // `$lt` at the boundary is taken as inclusive when the mongos picks shards.
+      assert.strictEqual((await reached({ k: { $gte: 100, $lt: 200 } })).length, 2, 'at the edge');
     });
 
     it('[probe] should return exactly the min/max range through mongos, merged in index order', async () => {
@@ -438,6 +463,126 @@ describe(
       assert.strictEqual(
         await db.collection('bg_ranged').countDocuments({ __v: 2, __rev: 1, done: true }),
         2000,
+      );
+      assert.deepStrictEqual(status.sharding, {
+        mode: 'chunks',
+        shardKey: { region: 1 },
+        hashed: false,
+        groups: 2,
+      });
+      // A partition with finite ends of one type reads from its own shard —
+      // and, ending at a chunk boundary, the next chunk's (see the probe).
+      const partitioner = createShardPartitioner({ key: { region: 1 }, field: '__v', source: 1 });
+      let targeted = 0;
+      for (const partition of await kit.backgroundPartitions('0001-bg-ranged.js')) {
+        const { min, max } = partition.scope;
+        if (typeof min.region !== 'string' || typeof max.region !== 'string') continue;
+        const query = partitioner.batchQuery(partition.scope, {}, { limit: 10, match: { __v: 1 } });
+        const explain = await db
+          .collection('bg_ranged')
+          .find(query.filter, query.options)
+          .explain('queryPlanner');
+        const reached = shardsOf(explain);
+        assert.ok(reached.includes(partition.group), `${min.region}..${max.region}: its own shard`);
+        assert.ok(reached.length <= 2, `${min.region}..${max.region}: ${reached}`);
+        targeted += 1;
+      }
+      assert.ok(targeted >= 1, 'at least one finite partition');
+    });
+
+    it('should finish exactly once while the balancer moves a range mid-migration', async () => {
+      const regions = ['ap', 'eu', 'sa', 'us'];
+      await sharded(
+        'bg_moving',
+        { region: 1 },
+        {
+          docs: docs(3000, (i) => ({ region: regions[i % 4] })),
+          splits: [{ region: 'eu' }, { region: 'sa' }, { region: 'us' }],
+        },
+      );
+      const kit = kitWith([{ name: 'bg_moving', versioning: { current: 2, min: 1 } }]);
+      await kit.converge();
+      project.write(
+        '0003-bg-moving.js',
+        backgroundSpec('bg_moving').replace(
+          'migrate: (doc) => ({ ...doc, done: true }),',
+          `migrateBatch: async (docs) => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return docs.map((doc) => ({ ...doc, done: true }));
+  },`,
+        ),
+      );
+      await kit.up();
+      const running = kit.runBackground('0003-bg-moving.js', { concurrency: 2 });
+      const deadline = Date.now() + 30_000;
+      while ((await db.collection('bg_moving').countDocuments({ __v: 2 })) === 0) {
+        if (Date.now() > deadline) throw new Error('no progress');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const owner = await chunkOwner('bg_moving', { region: 'sa' });
+      await admin.command({
+        moveRange: ns('bg_moving'),
+        min: { region: 'sa' },
+        toShard: shards.find((shard) => shard !== owner),
+      });
+      const status = await running;
+      assert.strictEqual(status.status, 'completed');
+      const coll = db.collection('bg_moving');
+      assert.strictEqual(await coll.countDocuments({ __v: 2, __rev: 1, done: true }), 3000);
+      assert.strictEqual(await coll.countDocuments({ __rev: { $gt: 1 } }), 0, 'none written twice');
+    });
+
+    it('should refuse a transform that changes the shard key, as a document error', async () => {
+      await sharded(
+        'bg_rekey',
+        { region: 1 },
+        {
+          docs: docs(20, (i) => ({ region: i % 2 ? 'eu' : 'us' })),
+        },
+      );
+      const kit = kitWith([{ name: 'bg_rekey', versioning: { current: 2, min: 1 } }]);
+      await kit.converge();
+      project.write(
+        '0004-bg-rekey.js',
+        backgroundSpec('bg_rekey').replace(
+          'migrate: (doc) => ({ ...doc, done: true }),',
+          "migrate: (doc) => ({ ...doc, region: 'moved' }),",
+        ),
+      );
+      await kit.up();
+      await assert.rejects(kit.runBackground('0004-bg-rekey.js'), BackgroundFailedError);
+      const status = await kit.backgroundStatus('0004-bg-rekey.js');
+      assert.strictEqual(status.status, 'failed');
+      assert.strictEqual(await db.collection('bg_rekey').countDocuments({ region: 'moved' }), 0);
+      assert.match(status.lastError, /changes the shard key \(region\)/);
+    });
+
+    it('should stay untargeted for a user who may not read config, and still finish', async () => {
+      await sharded(
+        'bg_limited',
+        { region: 1 },
+        {
+          docs: docs(300, (i) => ({ region: i % 2 ? 'eu' : 'us' })),
+        },
+      );
+      await db.collection('bg_limited').createIndex({ __v: 1, _id: 1 });
+      await admin.command({
+        createUser: 'limited_bg',
+        pwd: 'limited_bg',
+        roles: [{ role: 'readWrite', db: DB }],
+      });
+      const url = new URL(SHARDED_URI);
+      url.username = 'limited_bg';
+      url.password = 'limited_bg';
+      const kit = kitWith(undefined, url.toString());
+      project.write('0005-bg-limited.js', backgroundSpec('bg_limited'));
+      await kit.up();
+      const status = await kit.runBackground('0005-bg-limited.js', { concurrency: 2 });
+      assert.strictEqual(status.status, 'completed');
+      assert.deepStrictEqual(status.sharding, { mode: 'untargeted' });
+      assert.strictEqual(
+        await db.collection('bg_limited').countDocuments({ __v: 2, __rev: 1, done: true }),
+        300,
       );
     });
 

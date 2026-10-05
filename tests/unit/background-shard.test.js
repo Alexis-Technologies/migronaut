@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { describe, it, mock } = require('node:test');
 const { Decimal128, Int32, Long, MaxKey, MinKey, ObjectId } = require('mongodb');
+const { idRangePartitioner } = require('../../src/core/background-partition.js');
 const {
   MAX_STUCK,
   capRuns,
@@ -8,9 +9,14 @@ const {
   createShardPartitioner,
   hashAt,
   runsOf,
+  shardKeyFilter,
+  shardKeyGuard,
   splitHashed,
+  staleEpoch,
   valueAt,
+  withShardKey,
 } = require('../../src/core/background-shard.js');
+const { partitionerFor, probeHint } = require('../../src/core/background.js');
 
 const MIN = new MinKey();
 const MAX = new MaxKey();
@@ -106,7 +112,16 @@ describe('createShardPartitioner — batch queries', () => {
 
   it('should bound the version index exactly and target the owning shard', () => {
     const query = ranged.batchQuery(scope, {}, { limit: 50, match });
-    assert.deepStrictEqual(query.filter, { $and: [match, { k: { $gte: 10, $lte: 20 } }] });
+    assert.deepStrictEqual(query.filter, { $and: [match, { k: { $gte: 10, $lt: 20 } }] });
+    const compound = createShardPartitioner({ key: { k: 1, j: 1 }, field: '__v', source: 1 });
+    const upTo = (j) =>
+      compound.batchQuery(
+        { kind: 'key-range', min: { k: 10, j: MIN }, max: { k: 20, j } },
+        {},
+        { limit: 1, match },
+      ).filter.$and[1];
+    assert.deepStrictEqual(upTo(MIN), { k: { $gte: 10, $lt: 20 } }, 'ends before k: 20');
+    assert.deepStrictEqual(upTo(5), { k: { $gte: 10, $lte: 20 } }, 'takes in k: 20, j < 5');
     assert.deepStrictEqual(query.options.hint, { __v: 1, k: 1, _id: 1 });
     assert.deepStrictEqual(Object.keys(query.options.min), ['__v', 'k', '_id']);
     assert.strictEqual(query.options.min.k, 10);
@@ -358,5 +373,152 @@ describe('createShardPartitioner — planning', () => {
     assert.strictEqual(plan.method, 'sampled');
     assert.strictEqual(plan.partitions.length, 8, 'the hash space split arithmetically');
     for (const partition of plan.partitions) assert.strictEqual(partition.group, undefined);
+  });
+});
+
+describe('targeted writes and the shard-key guard', () => {
+  it('should add the shard key to a write, never _id twice', () => {
+    assert.deepStrictEqual(shardKeyFilter({ region: 1, 'a.b': 1 }, { region: 'eu', a: { b: 2 } }), {
+      region: 'eu',
+      'a.b': 2,
+    });
+    assert.deepStrictEqual(shardKeyFilter({ region: 1 }, {}), { region: null }, 'missing as null');
+    assert.deepStrictEqual(shardKeyFilter({ tenant: 1, _id: 1 }, { _id: 3, tenant: 't' }), {
+      tenant: 't',
+    });
+  });
+
+  it('should refuse a transform that changes the shard key, BSON-aware', () => {
+    const key = { region: 1, uid: 'hashed' };
+    assert.strictEqual(
+      shardKeyGuard(key, { region: 'eu', uid: Long.fromNumber(5) }, { region: 'eu', uid: 5 }),
+      null,
+      'the same value in another numeric type is no change',
+    );
+    const refused = shardKeyGuard(key, { region: 'eu', uid: 1 }, { region: 'us', uid: 1 });
+    assert.strictEqual(refused.reason, 'shard-key-changed');
+    assert.deepStrictEqual(refused.fields, ['region']);
+    assert.match(refused.message, /changes the shard key \(region\).*reshardCollection/);
+    assert.deepStrictEqual(shardKeyGuard(key, { region: 'eu' }, {}).fields, ['region']);
+  });
+
+  it('should find a plan stale once the collection is resharded or its key refined', () => {
+    const uuid = new ObjectId();
+    const epoch = { uuid: { buffer: new Uint8Array([1, 2]) }, key: { a: 1 } };
+    assert.strictEqual(staleEpoch(epoch, { ...epoch }), false);
+    assert.strictEqual(
+      staleEpoch(epoch, { uuid: { buffer: new Uint8Array([3]) }, key: { a: 1 } }),
+      true,
+    );
+    assert.strictEqual(staleEpoch(epoch, { uuid: epoch.uuid, key: { a: 1, b: 1 } }), true);
+    assert.strictEqual(staleEpoch(undefined, epoch), false, 'a plan from before epochs');
+    assert.strictEqual(staleEpoch({ uuid, key: {} }, { uuid, key: {} }), false);
+  });
+
+  it('should target the writes and guard the key of a shard partitioner — and of _id ranges', () => {
+    const epoch = { uuid: { buffer: new Uint8Array([7]) }, key: { region: 1 } };
+    const partitioner = createShardPartitioner({
+      key: { region: 1 },
+      field: '__v',
+      source: 1,
+      epoch,
+    });
+    assert.deepStrictEqual(partitioner.writeFilter({ region: 'eu' }), { region: 'eu' });
+    assert.strictEqual(
+      partitioner.checkTransform({ region: 'eu' }, { region: 'us' }).reason,
+      'shard-key-changed',
+    );
+    assert.strictEqual(
+      partitioner.stale({ uuid: { buffer: new Uint8Array([7]) }, key: { region: 1 } }),
+      false,
+    );
+    assert.strictEqual(
+      partitioner.stale({ uuid: { buffer: new Uint8Array([8]) }, key: { region: 1 } }),
+      true,
+    );
+    const byId = withShardKey(idRangePartitioner, { region: 1 });
+    assert.strictEqual(byId.id, 'id');
+    assert.strictEqual(byId.batchQuery, idRangePartitioner.batchQuery);
+    assert.deepStrictEqual(byId.writeFilter({ region: 'ap' }), { region: 'ap' });
+    assert.strictEqual(byId.checkTransform({ region: 'ap' }, { region: 'ap', x: 1 }), null);
+  });
+});
+
+describe('partitionerFor — which partitioner a collection gets', () => {
+  const spec = { collection: 'orders', field: '__v', from: 1, to: 2, mode: 'declarative' };
+  function deps(overrides = {}) {
+    const warnings = [];
+    const indexes = overrides.indexes ?? [{ key: { _id: 1 } }, { key: { __v: 1, _id: 1 } }];
+    return {
+      warnings,
+      db: {
+        collection: () => ({ listIndexes: () => ({ toArray: async () => indexes }) }),
+      },
+      logger: { warn: (message) => warnings.push(message) },
+      fields: (extra) => extra,
+      warned: new Set(),
+      shardAware: 'auto',
+      topology: async () => 'sharded',
+      shardKeyOf: async () => ({ key: { region: 1 }, uuid: 'u' }),
+      chunksOf: async () => [],
+      ...overrides,
+    };
+  }
+
+  it('should keep _id ranges off a sharded cluster, with shard-awareness off, or for a step', async () => {
+    for (const [what, overrides, stepSpec] of [
+      ['a replica set', { topology: async () => 'replicaSet' }],
+      ['shard-awareness off', { shardAware: 'off' }],
+      ['no shard key reader', { shardKeyOf: undefined }],
+      ['an unsharded collection', { shardKeyOf: async () => null }],
+      ['a step migration', {}, { ...spec, mode: 'step' }],
+    ]) {
+      const chosen = await partitionerFor(deps(overrides), stepSpec ?? spec, 'forward');
+      assert.strictEqual(chosen.partitioner, idRangePartitioner, what);
+      assert.strictEqual(chosen.sharding.mode, 'off', what);
+    }
+  });
+
+  it('should stay untargeted, once said, when the key cannot be read', async () => {
+    const d = deps({ shardKeyOf: async () => undefined });
+    const chosen = await partitionerFor(d, spec, 'forward');
+    assert.strictEqual(chosen.partitioner, idRangePartitioner);
+    assert.deepStrictEqual(chosen.hint, { __v: 1, _id: 1 });
+    assert.strictEqual(chosen.sharding.mode, 'untargeted');
+    await partitionerFor(d, spec, 'forward');
+    assert.strictEqual(d.warnings.length, 1);
+    assert.match(d.warnings[0], /needs clusterMonitor/);
+  });
+
+  it('should target writes and guard the key when the version index lacks the shard key', async () => {
+    const d = deps();
+    const chosen = await partitionerFor(d, spec, 'forward');
+    assert.strictEqual(chosen.partitioner.id, 'id');
+    assert.deepStrictEqual(chosen.partitioner.writeFilter({ region: 'eu' }), { region: 'eu' });
+    assert.deepStrictEqual(chosen.sharding, { mode: 'untargeted', key: { region: 1 } });
+    assert.match(d.warnings[0], /no \{"__v":1,"region":1,"_id":1\} index/);
+  });
+
+  it('should split along the shard key, reading the version it starts from', async () => {
+    const d = deps({ indexes: [{ key: { __v: 1, region: 1, _id: 1 } }] });
+    const forward = await partitionerFor(d, spec, 'forward');
+    assert.strictEqual(forward.partitioner.id, 'shard');
+    assert.deepStrictEqual(forward.hint, { __v: 1, region: 1, _id: 1 });
+    const scope = { kind: 'key-range', min: { region: 'a' }, max: { region: 'b' } };
+    const query = (chosen) => chosen.partitioner.batchQuery(scope, {}, { limit: 1, match: {} });
+    assert.strictEqual(query(forward).options.min.__v, 1);
+    const back = await partitionerFor(d, spec, 'revert');
+    assert.strictEqual(query(back).options.min.__v, 2);
+  });
+
+  it('should hint a drift probe at the version index, or one led by the version field', async () => {
+    assert.deepStrictEqual(await probeHint(deps(), spec), { __v: 1, _id: 1 });
+    const sharded = deps({
+      indexes: [{ key: { region: 1 } }, { key: { __v: 1, region: 1, _id: 1 } }],
+    });
+    assert.deepStrictEqual(await probeHint(sharded, spec), { __v: 1, region: 1, _id: 1 });
+    const none = deps({ indexes: [{ key: { region: 1 } }] });
+    assert.strictEqual(await probeHint(none, spec), undefined);
+    assert.match(none.warnings[0], /has no \{ __v: 1, _id: 1 \} index/);
   });
 });

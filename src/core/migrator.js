@@ -62,6 +62,17 @@ const { buildContext } = require('./context.js');
 const { runConverge } = require('./converge.js');
 const { readServer } = require('./server-info.js');
 const { readChunks, readShardKey } = require('./shard-info.js');
+
+/** How a background migration's plan used the shard key — for its status */
+function shardingView(sharding) {
+  let hashed = false;
+  for (const value of Object.values(sharding.key ?? {})) if (value === 'hashed') hashed = true;
+  return {
+    mode: sharding.mode,
+    ...(sharding.key !== undefined ? { shardKey: sharding.key, hashed } : {}),
+    ...(sharding.groups !== undefined ? { groups: sharding.groups } : {}),
+  };
+}
 const { runImport } = require('./import-runner.js');
 const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
 const {
@@ -2649,6 +2660,7 @@ class MigratorKit extends EventEmitter {
             },
           }
         : {}),
+      ...(state.plan?.sharding ? { sharding: shardingView(state.plan.sharding) } : {}),
       registeredAt: state.registeredAt,
       ...(state.startedAt ? { startedAt: state.startedAt } : {}),
       ...(state.completedAt ? { completedAt: state.completedAt } : {}),

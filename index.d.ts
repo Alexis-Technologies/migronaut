@@ -2087,6 +2087,19 @@ export interface BackgroundStatus {
    */
   coordinator?: { kind: string; round?: number; at: Date };
   plan?: { method: string; estimate: number; partitions: number; degraded?: string };
+  /**
+   * On a sharded collection, how the plan used the shard key: `chunks` (a
+   * partition per run of chunks on one shard), `sampled` (the key space
+   * sampled — the chunks could not be read), or `untargeted` (partitions by
+   * `_id`: the key could not be read, or the version index does not carry it)
+   */
+  sharding?: {
+    mode: 'chunks' | 'sampled' | 'empty' | 'untargeted';
+    shardKey?: Record<string, 1 | 'hashed'>;
+    hashed?: boolean;
+    /** Shards the partitions are grouped by */
+    groups?: number;
+  };
   registeredAt: Date;
   startedAt?: Date;
   completedAt?: Date;
