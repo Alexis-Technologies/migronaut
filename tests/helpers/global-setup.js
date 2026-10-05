@@ -1,5 +1,8 @@
 const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
+/** Test commands on — see TEST_ARGS in ./mongo.js (not required here: it sets the version) */
+const TEST_ARGS = ['--setParameter', 'enableTestCommands=1'];
+
 /**
  * node:test --test-global-setup module: boot ONE in-memory replica set for the
  * whole integration run instead of one per file (17 serial boot+shutdown
@@ -22,7 +25,7 @@ async function globalSetup() {
   // Local runs and CI must test the same server version — CI's explicit
   // MONGOMS_VERSION still wins.
   process.env.MONGOMS_VERSION ??= '7.0.14';
-  replSet = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
+  replSet = await MongoMemoryReplSet.create({ replSet: { count: 1, args: TEST_ARGS } });
   process.env.MIGRONAUT_TEST_MONGO_URI = replSet.getUri();
 }
 
