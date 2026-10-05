@@ -42,6 +42,7 @@ function fakeDb(
     lag = 0,
     normalize = (definition) => definition,
     readyAfter,
+    below = {},
   } = {},
 ) {
   const state = {};
@@ -224,6 +225,16 @@ function fakeDb(
       return { ok: 1 };
     },
     collection: (name) => ({
+      // The version floor probe. `below[name]`: a boolean, an Error to throw,
+      // or a function of how many probes came before it.
+      findOne: async (filter, options) => {
+        reads.push(['findOne', name, filter, options]);
+        const probes = reads.filter((read) => read[0] === 'findOne' && read[1] === name).length;
+        let answer = below[name] ?? false;
+        if (typeof answer === 'function') answer = answer(probes);
+        if (answer instanceof Error) throw answer;
+        return answer ? { _id: 'hidden' } : null;
+      },
       aggregate: (pipeline, options) => ({
         toArray: async () => {
           reads.push(['aggregate', name, options]);
@@ -2349,5 +2360,134 @@ describe('runConverge — waiting for search indexes', () => {
     for (const lines of [skip.lines, nothing.lines]) {
       assert.ok(!lines.some((line) => /Waiting for/.test(line.message)));
     }
+  });
+});
+
+describe('runConverge — raising versioning.min', () => {
+  const FLOOR_0 = {
+    validator: {
+      $jsonSchema: {
+        properties: {
+          __v: { bsonType: 'int', minimum: 0 },
+          __rev: { bsonType: ['int', 'long'], minimum: 0 },
+        },
+      },
+    },
+    validationLevel: 'moderate',
+  };
+  const VERSION_INDEX = { v: 2, key: { __v: 1, _id: 1 }, name: '__v_1__id_1' };
+  const orders = { name: 'orders', versioning: { current: 1 } };
+
+  it('should refuse the raise before any write while documents are below it', async () => {
+    const reads = [];
+    const db = fakeDb(
+      { orders: { options: FLOOR_0, indexes: [VERSION_INDEX] } },
+      { reads, below: { orders: true } },
+    );
+    const { deps } = makeDeps(db);
+    await assert.rejects(
+      runConverge(deps, { definitions: definitions(orders) }, undefined),
+      (error) => {
+        assert.ok(error instanceof ConvergeFailedError);
+        assert.strictEqual(error.context.phase, 'plan');
+        assert.strictEqual(error.context.conflicts[0].target, 'validator');
+        assert.match(error.context.conflicts[0].reason, /documents below version 1 remain/);
+        assert.ok(!error.message.includes('hidden'), 'no document id in the message');
+        return true;
+      },
+    );
+    assert.deepStrictEqual(db.ops, []);
+    const probe = reads.find((read) => read[0] === 'findOne');
+    assert.deepStrictEqual(probe[2], { __v: { $not: { $gte: 1 } } });
+    assert.strictEqual(probe[3].hint, '__v_1__id_1');
+    assert.deepStrictEqual(probe[3].projection, { _id: 1 });
+    assert.strictEqual(probe[3].readPreference, 'primary');
+  });
+
+  it('should raise it once the data is clean, without a hint when the index is missing', async () => {
+    const reads = [];
+    const db = fakeDb({ orders: { options: FLOOR_0 } }, { reads });
+    const { deps } = makeDeps(db);
+    const result = await runConverge(deps, { definitions: definitions(orders) }, undefined);
+    assert.strictEqual(result.inSync, true);
+    assert.ok(db.ops.includes('collMod orders validator'));
+    const probe = reads.find((read) => read[0] === 'findOne');
+    assert.strictEqual(probe[3].hint, undefined);
+    // The verify read sees the raised floor and does not probe again.
+    assert.strictEqual(reads.filter((read) => read[0] === 'findOne').length, 2);
+  });
+
+  it('should refuse when the probe cannot tell', async () => {
+    const db = fakeDb(
+      { orders: { options: FLOOR_0 } },
+      { below: { orders: serverError(50, 'operation exceeded time limit') } },
+    );
+    const { deps } = makeDeps(db);
+    const result = await runConverge(
+      deps,
+      { definitions: definitions(orders), dryRun: true },
+      undefined,
+    );
+    assert.strictEqual(result.inSync, false);
+    const [row] = result.collections[0].actions;
+    assert.strictEqual(row.action, 'conflict');
+    assert.match(row.reason, /could not check .*exceeded time limit/);
+  });
+
+  it('should probe nothing in the steady state, for min 0 or a new collection', async () => {
+    const reads = [];
+    const floor1 = {
+      validator: {
+        $jsonSchema: {
+          required: ['__v', '__rev'],
+          properties: {
+            __v: { bsonType: 'int', minimum: 1 },
+            __rev: { bsonType: ['int', 'long'], minimum: 0 },
+          },
+        },
+      },
+      validationLevel: 'moderate',
+    };
+    const db = fakeDb(
+      { orders: { options: floor1, indexes: [VERSION_INDEX] }, legacy: {} },
+      { reads, below: { orders: true, legacy: true } },
+    );
+    const { deps } = makeDeps(db);
+    const result = await runConverge(
+      deps,
+      {
+        definitions: definitions(
+          orders,
+          { name: 'legacy', versioning: { current: 1, min: 0 } },
+          { name: 'fresh', versioning: { current: 1 } },
+        ),
+        dryRun: true,
+      },
+      undefined,
+    );
+    assert.ok(!reads.some((read) => read[0] === 'findOne'));
+    assert.ok(!result.collections[0].actions.some((action) => action.action === 'conflict'));
+  });
+
+  it('should warn when old-shape documents appeared while the floor was raised', async () => {
+    const db = fakeDb(
+      { orders: { options: FLOOR_0, indexes: [VERSION_INDEX] } },
+      { below: { orders: (probe) => probe > 1 } },
+    );
+    const { deps, lines } = makeDeps(db);
+    await runConverge(deps, { definitions: definitions(orders) }, undefined);
+    const warning = lines.find((line) => line.level === 'warn');
+    assert.match(warning.message, /documents below version 1 were written while converge/);
+    assert.strictEqual(warning.fields.collection, 'orders');
+  });
+
+  it('should stay quiet when the breach check itself fails', async () => {
+    const db = fakeDb(
+      { orders: { options: FLOOR_0, indexes: [VERSION_INDEX] } },
+      { below: { orders: (probe) => (probe > 1 ? serverError(6, 'host unreachable') : false) } },
+    );
+    const { deps, lines } = makeDeps(db);
+    await runConverge(deps, { definitions: definitions(orders) }, undefined);
+    assert.ok(!lines.some((line) => line.level === 'warn'));
   });
 });

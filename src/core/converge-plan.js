@@ -1,4 +1,5 @@
 const { deepEqual } = require('../utils/canonical.js');
+const { versionFloorConflict } = require('./versioning-spec.js');
 const { compareIndex, normalizeLiveIndex, restoreSpec, sameSignature } = require('./index-spec.js');
 const {
   compareSearchIndex,
@@ -568,8 +569,8 @@ function planSearchIndexes(declaredList, live, { prune, search }, row, submit, d
 /**
  * Plan one collection. `definition` is a normalized definition (see
  * collections.js); `live` is `{ exists, type?, options?, indexes,
- * searchIndexes? }` as converge.js reads it. Returns `{ name, actions, steps }`:
- * `actions` are the result rows (status `'planned'`), `steps` the operations
+ * searchIndexes?, shardKey?, versionFloor? }` as converge.js reads it.
+ * Returns `{ name, actions, steps }`: `actions` are the result rows (status `'planned'`), `steps` the operations
  * that carry them out, in execution order, each pointing at the rows it
  * settles. `search` is `{ available, onUnavailable }` — whether the server has
  * Atlas Search, and what a declared search index becomes when it does not.
@@ -669,7 +670,14 @@ function planCollectionSteps(
   }
 
   if (desired !== undefined) {
-    planValidator(name, desired, liveValidator(live.options), row, steps);
+    // Raising versioning.min over documents still below it: refused, so the
+    // whole run stops before its first write (see versionFloorToCheck).
+    const refused = versionFloorConflict(live.versionFloor);
+    if (refused) {
+      row({ target: 'validator', name, action: 'conflict', reason: refused, to: desired });
+    } else {
+      planValidator(name, desired, liveValidator(live.options), row, steps);
+    }
   }
   if (declaredIndexes !== undefined) {
     const partial = definition.indexesPartial === true;

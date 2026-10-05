@@ -1,5 +1,6 @@
 const { isPlainObject } = require('../utils/canonical.js');
 const { versionIndexKey } = require('../versioning/document.js');
+const { toCount } = require('../versioning/internal.js');
 
 /**
  * What a collection's `versioning` block asks of the database: the validator
@@ -107,8 +108,55 @@ function isVersioningIndexKey(key, versioning) {
   return true;
 }
 
+/**
+ * The version floor the live validator enforces — the `minimum` of the version
+ * field's `$jsonSchema` rule — or `null` when it enforces none.
+ */
+function liveVersionFloor(options, versioning) {
+  const schema = options?.validator?.$jsonSchema;
+  const rule = isPlainObject(schema?.properties) ? schema.properties[versioning.field] : undefined;
+  return isPlainObject(rule) ? toCount(rule.minimum) : null;
+}
+
+/**
+ * The `min` converge must check the data against before it raises the floor,
+ * or `null` when there is nothing to check: no versioning, `min: 0`, a
+ * collection that does not exist yet (no documents), or a floor already that
+ * high. Only a rising floor costs a read — the steady state costs nothing.
+ */
+function versionFloorToCheck(definition, live) {
+  const versioning = definition.versioning;
+  if (!versioning || versioning.min === 0 || !live.exists) return null;
+  if (live.type !== undefined && live.type !== 'collection') return null;
+  const floor = liveVersionFloor(live.options, versioning);
+  return floor !== null && floor >= versioning.min ? null : versioning.min;
+}
+
+/**
+ * Why the version floor cannot be raised — `live.versionFloor` is what
+ * converge read: `{ min, below: true | false | 'unknown', error? }` — or
+ * `undefined` when it can. The document ids are never named: they may be PII.
+ */
+function versionFloorConflict(floor) {
+  if (!floor || floor.below === false) return undefined;
+  if (floor.below === true) {
+    return (
+      `documents below version ${floor.min} remain — raising versioning.min would leave them ` +
+      'invalid; let the background migration that upgrades them finish (migronaut background ' +
+      'status), then converge again'
+    );
+  }
+  return (
+    `could not check for documents below version ${floor.min} (${floor.error}) — converge ` +
+    'with the old min first so the version index exists, then raise it'
+  );
+}
+
 module.exports = {
   isVersioningIndexKey,
+  liveVersionFloor,
+  versionFloorConflict,
+  versionFloorToCheck,
   mergeVersioningValidator,
   validatorVersioningIssues,
   versioningIndex,

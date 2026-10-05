@@ -29,6 +29,8 @@ const {
   warnIgnored,
 } = require('./converge-search-run.js');
 const { inPlaceCapabilities } = require('./index-spec.js');
+const { belowVersionFilter } = require('../versioning/document.js');
+const { isVersioningIndexKey, versionFloorToCheck } = require('./versioning-spec.js');
 const {
   INDEX_NOT_FOUND,
   NAMESPACE_NOT_FOUND,
@@ -73,6 +75,53 @@ const HINTS = {
     'existing documents hold duplicate values for this key — deduplicate them in a migration ' +
     'first (the index was left as it was)',
 };
+
+/**
+ * How long the version floor probe may scan. With the version index it reads
+ * one key; without it (the index is created by the same converge that raises
+ * the floor) it may have to scan the collection — bounded, and a timeout
+ * refuses the raise rather than risk it.
+ */
+const FLOOR_PROBE_TIMEOUT_MS = 60_000;
+
+/**
+ * Before converge raises `versioning.min`: is any document still below it?
+ * Sets `live.versionFloor` to `{ min, below }` (`below: 'unknown'` with
+ * `error` when the probe failed) for the planner to refuse the raise on. One
+ * `findOne` with only `_id` projected — nothing about the document is kept.
+ */
+async function probeVersionFloor(db, definition, live) {
+  const min = versionFloorToCheck(definition, live);
+  if (min === null) return;
+  const { versioning } = definition;
+  let hint;
+  for (const index of live.indexes) {
+    if (isVersioningIndexKey(index.key, versioning)) {
+      hint = index.name;
+      break;
+    }
+  }
+  try {
+    const found = await db
+      .collection(definition.name)
+      .findOne(belowVersionFilter(versioning, min), {
+        projection: { _id: 1 },
+        maxTimeMS: FLOOR_PROBE_TIMEOUT_MS,
+        ...(hint !== undefined ? { hint } : {}),
+        ...READ_OPTIONS,
+      });
+    live.versionFloor = { min, below: found !== null };
+  } catch (error) {
+    live.versionFloor = { min, below: 'unknown', error: errorText(error) };
+  }
+}
+
+/** Probe every versioned collection whose floor would rise — a few at a time */
+async function probeVersionFloors(db, definitions, live) {
+  await mapLimit([...definitions.keys()], READ_CONCURRENCY, (position) =>
+    probeVersionFloor(db, definitions[position], live[position]),
+  );
+}
 
 /** Shard key of each named collection, behind a mongos — when `config.collections` may be read */
 async function readShardKeys(deps, names) {
@@ -577,6 +626,7 @@ async function readAndPlan(deps, options) {
     }
   }
   if (search.declared) await readSearch(deps, server, definitions, live, search);
+  await probeVersionFloors(db, definitions, live);
   const plans = new Array(definitions.length);
   const ignored = [];
   for (const [position, definition] of definitions.entries()) {
@@ -636,6 +686,7 @@ async function readFresh(run, position, phase) {
   ) {
     fresh.searchIndexes = await readSearchIndexes(deps, definition.name, phase);
   }
+  await probeVersionFloor(deps.db, definition, fresh);
   return fresh;
 }
 
@@ -841,6 +892,42 @@ async function applyCollection(deps, plan, result, signal, search) {
 }
 
 /**
+ * After a run raised `versioning.min`: old-shape documents written while it
+ * ran (an old pod still deploying) got past the probe. Converge cannot undo
+ * the validator, so it says so — those documents now fail validation on
+ * their next strict write, and a background migration has to pick them up.
+ */
+async function warnFloorBreach(run, position) {
+  const { deps, definitions, live, result } = run;
+  const floor = live[position].versionFloor;
+  if (floor?.below !== false) return;
+  const raised = result.collections[position].actions.some(
+    (action) => action.target === 'validator' && action.status === 'applied',
+  );
+  if (!raised) return;
+  const definition = definitions[position];
+  let found;
+  try {
+    found = await deps.db
+      .collection(definition.name)
+      .findOne(belowVersionFilter(definition.versioning, floor.min), {
+        projection: { _id: 1 },
+        maxTimeMS: FLOOR_PROBE_TIMEOUT_MS,
+        ...READ_OPTIONS,
+      });
+  } catch {
+    return;
+  }
+  if (found === null) return;
+  deps.logger.warn(
+    `⚠ ${definition.name}: documents below version ${floor.min} were written while converge ` +
+      'raised versioning.min — an old release is still writing; run the background migration ' +
+      'again once it is gone',
+    deps.fields({ collection: definition.name, min: floor.min }),
+  );
+}
+
+/**
  * The verify phase — the fixed-point check: what was just applied must now
  * compare as unchanged. Anything that does not would be "changed" again on
  * every run — a comparison rule that disagrees with this server version — so
@@ -864,6 +951,7 @@ async function verifyFixedPoint(run, position, kept, signal) {
     after = planFor(definition, await readFresh(run, position, 'apply'));
   }
   refreshBuilds(rows, after.actions);
+  await warnFloorBreach(run, position);
   for (const action of after.actions) {
     if (!CHANGE_ACTIONS.has(action.action)) continue;
     if (action.action === 'drop' && kept.has(action.name)) continue;

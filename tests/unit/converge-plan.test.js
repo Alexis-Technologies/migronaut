@@ -880,6 +880,26 @@ describe('planCollection — versioning', () => {
     assert.ok(rows(plan).includes('index:a_1:drop:not declared'));
   });
 
+  it('should refuse raising the floor over documents below it, or when that is unknown', () => {
+    const live = existing([{ key: { __v: 1, _id: 1 }, name: '__v_1__id_1' }]);
+    const refused = planCollection(definition({ versioning: { current: 1 } }), {
+      ...live,
+      versionFloor: { min: 1, below: true },
+    });
+    assert.deepStrictEqual(steps(refused), []);
+    assert.match(rows(refused)[0], /^validator:c:conflict:documents below version 1 remain/);
+    const unknown = planCollection(definition({ versioning: { current: 1 } }), {
+      ...live,
+      versionFloor: { min: 1, below: 'unknown', error: 'timeout' },
+    });
+    assert.match(rows(unknown)[0], /could not check for documents below version 1 \(timeout\)/);
+    const clean = planCollection(definition({ versioning: { current: 1 } }), {
+      ...live,
+      versionFloor: { min: 1, below: false },
+    });
+    assert.deepStrictEqual(rows(clean), ['validator:c:create', 'index:__v_1__id_1:unchanged']);
+  });
+
   it('should create a missing collection with the versioning validator and index', () => {
     const plan = planCollection(definition({ versioning: { current: 2 } }), MISSING);
     assert.deepStrictEqual(steps(plan), ['createCollection', 'create __v_1__id_1']);

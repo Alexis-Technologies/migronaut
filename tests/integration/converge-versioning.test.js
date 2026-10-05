@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
+const { ConvergeFailedError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
@@ -114,8 +115,11 @@ describe('converge (integration) — versioning', () => {
   });
 
   it('should keep a legacy document updatable under the synthesized moderate level', async () => {
-    await mongo.db.collection('orders').insertOne({ _id: 1, name: 'legacy' });
     await convergeToFixedPoint([{ name: 'orders', versioning: { current: 1 } }]);
+    // A document that predates the rules (here: one that bypassed them).
+    await mongo.db
+      .collection('orders')
+      .insertOne({ _id: 1, name: 'legacy' }, { bypassDocumentValidation: true });
     const result = await mongo.db
       .collection('orders')
       .updateOne({ _id: 1 }, { $set: { name: 'still legacy' } });
@@ -152,5 +156,52 @@ describe('converge (integration) — versioning', () => {
     await convergeToFixedPoint([{ name: 'orders', versioning: { current: 2, min: 1 } }]);
     const { validator } = await optionsOf('orders');
     assert.strictEqual(validator.$jsonSchema.properties.__v.minimum, 1);
+  });
+
+  it('should refuse adopting versioning with min 1 over unversioned documents, writing nothing', async () => {
+    await mongo.db.collection('orders').insertMany([{ name: 'a' }, { name: 'b' }]);
+    await assert.rejects(
+      kitWith({ collections: [{ name: 'orders', versioning: { current: 1 } }] }).converge(),
+      (error) => {
+        assert.ok(error instanceof ConvergeFailedError);
+        assert.strictEqual(error.context.phase, 'plan');
+        assert.match(error.message, /documents below version 1 remain/);
+        return true;
+      },
+    );
+    assert.strictEqual((await optionsOf('orders')).validator, undefined);
+    assert.deepStrictEqual(await indexNames('orders'), []);
+  });
+
+  it('should adopt with min 0, then raise min once every document is upgraded', async () => {
+    const orders = mongo.db.collection('orders');
+    await orders.insertMany([{ name: 'a' }, { name: 'b', __v: 0 }]);
+    await convergeToFixedPoint([{ name: 'orders', versioning: { current: 1, min: 0 } }]);
+
+    // `converge --check` is a dry run: a floor that cannot rise yet is drift.
+    const check = await kitWith({
+      collections: [{ name: 'orders', versioning: { current: 1, min: 1 } }],
+    }).converge({ dryRun: true });
+    assert.strictEqual(check.inSync, false);
+    assert.ok(rows(check).includes('orders/validator:orders:conflict'));
+
+    await orders.updateMany({}, { $set: { __v: 1 }, $inc: { __rev: 1 } });
+    await convergeToFixedPoint([{ name: 'orders', versioning: { current: 1, min: 1 } }]);
+    assert.ok(!(await accepts('orders', { name: 'c', __v: 0, __rev: 0 })));
+  });
+
+  it('should refuse raising min while one document of a large collection lags behind', async () => {
+    const orders = mongo.db.collection('orders');
+    await convergeToFixedPoint([{ name: 'orders', versioning: { current: 2, min: 1 } }]);
+    const docs = [];
+    for (let i = 0; i < 500; i++) docs.push({ i, __v: 2, __rev: 0 });
+    docs.push({ i: 500, __v: 1, __rev: 3 });
+    await orders.insertMany(docs);
+    const plan = await kitWith({
+      collections: [{ name: 'orders', versioning: { current: 2, min: 2 } }],
+    }).converge({ dryRun: true });
+    assert.ok(rows(plan).includes('orders/validator:orders:conflict'));
+    await orders.updateOne({ i: 500 }, { $set: { __v: 2 }, $inc: { __rev: 1 } });
+    await convergeToFixedPoint([{ name: 'orders', versioning: { current: 2, min: 2 } }]);
   });
 });
