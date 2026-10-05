@@ -81,6 +81,8 @@ export interface BullMQQueueLike {
   upsertJobScheduler?(id: string, repeat: any, template?: any): Promise<unknown>;
   /** BullMQ ≥ 5.16 — needed by `unschedule()` */
   removeJobScheduler?(id: string): Promise<boolean>;
+  /** BullMQ ≥ 5.16 — whether the drift watch's schedule exists already */
+  getJobScheduler?(id: string): Promise<unknown>;
 }
 
 /** See {@link BullMQJobLike} for why this is structural */
@@ -1094,9 +1096,14 @@ export interface BackgroundQueueOptions {
   stallMs?: number;
   /**
    * The drift watch's schedule, registered by `startBackgroundWorker()` (ms,
-   * ≥ 1000). Default 600000 (10 minutes); `false` registers none.
+   * ≥ 1000). Default 600000 (10 minutes) — registered only when no schedule
+   * exists yet, so one set with `schedule({ job: 'background-verify' })`
+   * stays; given explicitly, it is re-registered at every start. `false`
+   * registers none.
    */
   verifyIntervalMs?: number | false;
+  /** See {@link CreateBackgroundProcessorOptions.maxLaneRetries} */
+  maxLaneRetries?: number;
   /**
    * Host the live drift watcher in the background worker's process — `true`,
    * or its options. Default: when the kit's `backgroundDrift` is `'stream'`

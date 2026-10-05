@@ -57,6 +57,7 @@ const BACKGROUND_KEYS = new Set([
   'stallMs',
   'verifyIntervalMs',
   'watch',
+  'maxLaneRetries',
 ]);
 
 /**
@@ -114,7 +115,15 @@ function resolveBackground(background, { queueName, QueueSource }) {
   if (watch !== undefined && typeof watch !== 'boolean' && !isPlainObject(watch)) {
     throw new ConfigInvalidError('background.watch must be a boolean or the watcher options');
   }
-  return { ...options, name, queueIsInstance, verifyIntervalMs };
+  // Said explicitly, the interval is re-registered at every start; left to its
+  // default, a schedule set with schedule({ job: 'background-verify' }) stays.
+  return {
+    ...options,
+    name,
+    queueIsInstance,
+    verifyIntervalMs,
+    verifyIntervalGiven: options.verifyIntervalMs !== undefined,
+  };
 }
 
 function assertBackgroundConcurrency(concurrency) {
@@ -365,10 +374,30 @@ class MigrationQueue {
     });
   }
 
+  /** Whether the drift watch's schedule exists already — false when that cannot be told */
+  static async #hasScheduler(queue) {
+    if (typeof queue.getJobScheduler === 'function') {
+      return Boolean(await queue.getJobScheduler(DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID));
+    }
+    if (typeof queue.getJobSchedulers === 'function') {
+      for (const scheduler of await queue.getJobSchedulers()) {
+        if ((scheduler.id ?? scheduler.key) === DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID) return true;
+      }
+    }
+    return false;
+  }
+
   /** The background processor's options out of the resolved `background` option */
   static #backgroundProcessorOptions(settings) {
     const picked = {};
-    for (const key of ['jobOptions', 'sliceMs', 'children', 'pollIntervalMs', 'stallMs']) {
+    for (const key of [
+      'jobOptions',
+      'sliceMs',
+      'children',
+      'pollIntervalMs',
+      'stallMs',
+      'maxLaneRetries',
+    ]) {
       if (settings[key] !== undefined) picked[key] = settings[key];
     }
     return picked;
@@ -745,8 +774,12 @@ class MigrationQueue {
   async #startBackgroundWorker(overrides) {
     await this.#kit.connect();
     const queue = this.#backgroundQueue;
-    const { verifyIntervalMs, workerOptions = {} } = this.#background;
-    if (verifyIntervalMs !== false && typeof queue.upsertJobScheduler === 'function') {
+    const { verifyIntervalMs, verifyIntervalGiven, workerOptions = {} } = this.#background;
+    if (
+      verifyIntervalMs !== false &&
+      typeof queue.upsertJobScheduler === 'function' &&
+      (verifyIntervalGiven || !(await MigrationQueue.#hasScheduler(queue)))
+    ) {
       await queue.upsertJobScheduler(
         DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
         { every: verifyIntervalMs },

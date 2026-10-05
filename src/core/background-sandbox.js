@@ -422,6 +422,22 @@ function proxyCollection(state, raw) {
         return (...args) => readOp(state, raw, property, args);
       }
       // A promise-returning method refuses with a rejected promise, as the driver fails.
+      // `distinct` asks first whether the collection is sharded — where the
+      // server refuses it inside a transaction (263); a clearer refusal here.
+      if (property === 'distinct') {
+        return (...args) =>
+          settle(async () => {
+            if (await state.options.isSharded?.(name)) {
+              throw refuse(
+                state,
+                property,
+                'distinct cannot run in a transaction on a sharded collection',
+                name,
+              );
+            }
+            return readOp(state, raw, property, args);
+          });
+      }
       if (COLLECTION_READS.has(property)) {
         return (...args) => settle(() => readOp(state, raw, property, args));
       }
@@ -447,14 +463,6 @@ function settle(fn) {
 function readOp(state, raw, method, args) {
   const name = raw.collectionName;
   if (method === 'aggregate') checkPipeline(state, method, name, args[0]);
-  if (method === 'distinct' && state.options.sharded) {
-    throw refuse(
-      state,
-      method,
-      'distinct cannot run in a transaction on a sharded collection',
-      name,
-    );
-  }
   if (method === 'find' || method === 'aggregate') {
     const optionsIndex = 1;
     const options = sandboxOptions(state, method, name, args[optionsIndex]);

@@ -137,6 +137,27 @@ describe('dry-run sandbox (integration)', () => {
     }
   });
 
+  it('should refuse distinct on a sharded collection, asking only about that one', async () => {
+    const asked = [];
+    const isSharded = async (name) => {
+      asked.push(name);
+      return name === 'orders';
+    };
+    const report = await sandbox(
+      async (handles) => {
+        await handles.db
+          .collection('orders')
+          .distinct('status')
+          .catch(() => undefined);
+        return handles.db.collection('customers').distinct('name');
+      },
+      { isSharded },
+    );
+    assert.deepStrictEqual(asked, ['orders', 'customers']);
+    assert.strictEqual(report.refusals.length, 1);
+    assert.match(report.refusals[0].reason, /distinct cannot run in a transaction on a sharded/);
+  });
+
   it('should serialize concurrent operations and never be thenable', async () => {
     const report = await sandbox(async (handles) => {
       const same = await handles.db;

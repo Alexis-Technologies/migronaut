@@ -130,6 +130,35 @@ describe('createMigrationQueue background option', () => {
     assert.strictEqual(worker.closed, true);
   });
 
+  it('should keep a drift-watch schedule set with schedule(), unless an interval is given', async () => {
+    const { mq } = make();
+    await mq.schedule({ job: 'background-verify', pattern: '0 3 * * *' });
+    await mq.startBackgroundWorker({ autorun: false });
+    const [kept] = await mq.backgroundQueue.getJobSchedulers();
+    assert.deepStrictEqual(kept.repeat, { pattern: '0 3 * * *' });
+    await mq.close();
+
+    const connection = createFakeConnection();
+    const first = createMigrationQueue({
+      bullmq: fakeBullmq(),
+      connection,
+      kit: backgroundKit(),
+      background: true,
+    });
+    await first.schedule({ job: 'background-verify', pattern: '0 3 * * *' });
+    await first.close();
+    const second = createMigrationQueue({
+      bullmq: fakeBullmq(),
+      connection,
+      kit: backgroundKit(),
+      background: { verifyIntervalMs: 60_000, maxLaneRetries: 2 },
+    });
+    await second.startBackgroundWorker({ autorun: false });
+    const [replaced] = await second.backgroundQueue.getJobSchedulers();
+    assert.deepStrictEqual(replaced.repeat, { every: 60_000 }, 'said explicitly, it wins');
+    await second.close();
+  });
+
   it('should refuse a background worker it cannot build', async () => {
     const { mq } = make({ bullmq: { Queue: fakeBullmq().Queue } });
     await assert.rejects(mq.startBackgroundWorker(), /needs the Worker class/);
