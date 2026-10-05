@@ -354,6 +354,112 @@ describe(
       assert.strictEqual(index.name, '__v_1__id_1');
     });
 
+    // ─── Background migrations ───────────────────────────────────────────────
+
+    const PARTITIONS = '_migronaut_background_partitions';
+
+    /** A background migration v1 → v2 over `collection`, from `from` */
+    const backgroundSpec = (
+      collection,
+      { from = 1, extra = '' } = {},
+    ) => `export const background = {
+  collection: '${collection}',
+  from: ${from},
+  to: 2,
+  pauseMs: 0,
+  batchSize: 50,
+  maxParallel: 4,
+  partitions: { minPartitionDocs: 50 },
+  migrate: (doc) => ({ ...doc, done: true }),
+  ${extra}
+};
+`;
+
+    /** Run a background migration to the end with four lanes, sampling the leases per shard */
+    async function runSharded(kit, name) {
+      await kit.up();
+      const sampling = { on: true, peakPerShard: 0, peak: 0 };
+      const sampler = (async () => {
+        while (sampling.on) {
+          const leased = await db
+            .collection(PARTITIONS)
+            .find({ background: name, lease: { $exists: true } }, { projection: { group: 1 } })
+            .toArray();
+          const perShard = new Map();
+          for (const partition of leased) {
+            perShard.set(partition.group, (perShard.get(partition.group) ?? 0) + 1);
+          }
+          for (const count of perShard.values()) {
+            sampling.peakPerShard = Math.max(sampling.peakPerShard, count);
+          }
+          sampling.peak = Math.max(sampling.peak, leased.length);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      })();
+      try {
+        return { status: await kit.runBackground(name, { concurrency: 4 }), sampling };
+      } finally {
+        sampling.on = false;
+        await sampler;
+      }
+    }
+
+    it('should partition a ranged shard key by chunk runs, one lane per shard', async () => {
+      const regions = ['ap', 'eu', 'sa', 'us'];
+      await sharded(
+        'bg_ranged',
+        { region: 1 },
+        {
+          docs: docs(2000, (i) => ({ region: regions[i % 4] })),
+          splits: [{ region: 'eu' }, { region: 'sa' }, { region: 'us' }],
+        },
+      );
+      const [, toMove] = await chunks('bg_ranged');
+      const owner = toMove.shard;
+      await admin.command({
+        moveRange: ns('bg_ranged'),
+        min: { region: 'eu' },
+        toShard: shards.find((shard) => shard !== owner),
+      });
+      const kit = kitWith([{ name: 'bg_ranged', versioning: { current: 2, min: 1 } }]);
+      await kit.converge();
+      project.write('0001-bg-ranged.js', backgroundSpec('bg_ranged'));
+      const { status, sampling } = await runSharded(kit, '0001-bg-ranged.js');
+      assert.strictEqual(status.status, 'completed');
+      assert.strictEqual(status.plan.method, 'chunks');
+      assert.strictEqual(status.totals.migrated, 2000);
+      assert.ok(sampling.peakPerShard <= 1, `one lane per shard, saw ${sampling.peakPerShard}`);
+      const groups = new Set();
+      for (const partition of await kit.backgroundPartitions('0001-bg-ranged.js')) {
+        groups.add(partition.group);
+        assert.strictEqual(partition.scope.kind, 'key-range');
+      }
+      assert.strictEqual(groups.size, 2, 'partitions on both shards');
+      assert.strictEqual(
+        await db.collection('bg_ranged').countDocuments({ __v: 2, __rev: 1, done: true }),
+        2000,
+      );
+    });
+
+    it('should drain a hashed shard key, from version 0', async () => {
+      await sharded('bg_hashed', { uid: 'hashed' });
+      await db
+        .collection('bg_hashed')
+        .insertMany(
+          Array.from({ length: 1500 }, (_, i) => ({ uid: i, ...(i % 2 ? { __v: 0 } : {}) })),
+        );
+      const kit = kitWith([{ name: 'bg_hashed', versioning: { current: 2, min: 0 } }]);
+      await kit.converge();
+      project.write('0002-bg-hashed.js', backgroundSpec('bg_hashed', { from: 0 }));
+      const { status } = await runSharded(kit, '0002-bg-hashed.js');
+      assert.strictEqual(status.status, 'completed');
+      assert.strictEqual(status.totals.migrated, 1500);
+      assert.strictEqual(
+        await db.collection('bg_hashed').countDocuments({ __v: 2, done: true }),
+        1500,
+      );
+    });
+
     it('[probe] should refuse config reads to a user with readWrite only', async () => {
       await sharded('limited', { sk: 1 }, { docs: docs(10) });
       await admin.command({

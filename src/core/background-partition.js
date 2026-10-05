@@ -13,8 +13,9 @@ const { READ_CONCURRENCY, READ_OPTIONS } = require('./server-info.js');
  * are kept apart by the optimistic guard on every write. So the planner may
  * sample, round and degrade freely; it only has to stay cheap.
  *
- * Every partitioner has the same shape (the shard-aware one, D1, too):
- * `{ id, plan(ctx), writeFilter(prev), checkTransform(prev, next), stale(ctx, epoch) }`.
+ * Every partitioner has the same shape (the shard-aware one too):
+ * `{ id, plan(ctx), batchQuery(scope, cursor, opts), advance(cursor, docs, opts),
+ * past(cursor, docs), writeFilter(prev), checkTransform(prev, next), stale(ctx, epoch) }`.
  */
 
 /** Server error: the operation ran out of its `maxTimeMS` */
@@ -250,6 +251,11 @@ function idRangeBatchQuery(scope, cursor, { limit, match, hint }) {
 /** The cursor after a batch: the last id read — `null` when the partition is done */
 function idRangeAdvance(cursor, docs, { limit }) {
   if (docs.length < limit) return null;
+  return idRangePast(cursor, docs);
+}
+
+/** The cursor just past `docs` — where a batch cut short (or a document stepped over) ends */
+function idRangePast(cursor, docs) {
   return { ...cursor, lastId: docs[docs.length - 1]._id };
 }
 
@@ -258,6 +264,7 @@ const idRangePartitioner = Object.freeze({
   plan: planIdRanges,
   batchQuery: idRangeBatchQuery,
   advance: idRangeAdvance,
+  past: idRangePast,
   /** Nothing to add to the optimistic filter — `_id` is already in it */
   writeFilter: () => ({}),
   /** Every transformation is fine: `_id` is checked by stampedDiff itself */

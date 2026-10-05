@@ -61,7 +61,7 @@ const { backgroundCollectionNames, loadConfig } = require('./config.js');
 const { buildContext } = require('./context.js');
 const { runConverge } = require('./converge.js');
 const { readServer } = require('./server-info.js');
-const { readShardKey } = require('./shard-info.js');
+const { readChunks, readShardKey } = require('./shard-info.js');
 const { runImport } = require('./import-runner.js');
 const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
 const {
@@ -2273,6 +2273,10 @@ class MigratorKit extends EventEmitter {
         ),
       onCompleted: (name) => this.#unblockDependents(name),
       topology: () => (this.#topology ??= readServer(db).then((server) => server.topology)),
+      shardAware: config.backgroundShardAware,
+      shardKeyOf: (collection) => readShardKey(this.#client, db.databaseName, collection),
+      chunksOf: (collection, sharding) =>
+        readChunks(this.#client, db.databaseName, collection, sharding),
       versioningOf: (collection) => this.#versioningOf(collection),
     };
   }

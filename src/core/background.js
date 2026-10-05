@@ -11,11 +11,13 @@ const { errorText } = require('../utils/error.js');
 const { versionIndexKey } = require('../versioning/document.js');
 const { matchOf, processPartition } = require('./background-engine.js');
 const { idRangePartitioner } = require('./background-partition.js');
+const { createShardPartitioner } = require('./background-shard.js');
 const { TERMINAL, matchHash, transition } = require('./background-spec.js');
 const { MAX_BAD_IDS, STATE_SCHEMA } = require('./background-store.js');
 const { createAdaptive, createThrottle } = require('./background-throttle.js');
 const { runWithLock } = require('./lock.js');
 const { READ_OPTIONS } = require('./server-info.js');
+const { shardedVersionIndexKey } = require('./versioning-spec.js');
 
 /**
  * Background migrations, orchestrated: the coordinator's steps (plan the
@@ -44,21 +46,45 @@ const retrySoon = (deps, reason) => ({
   retryAfterMs: Math.max(1, Math.floor(deps.ttlMs / 2)),
 });
 
+/** The keys of a collection's indexes — none for one that does not exist yet */
+async function indexKeys(deps, collection) {
+  try {
+    const indexes = await deps.db.collection(collection).listIndexes(READ_OPTIONS).toArray();
+    const keys = [];
+    for (const index of indexes) keys.push(index.key);
+    return keys;
+  } catch {
+    return [];
+  }
+}
+
+/** Whether a live index key is `wanted` — same fields, same order, same directions or `hashed` */
+function sameIndexKey(live, wanted) {
+  const a = Object.entries(live);
+  const b = Object.entries(wanted);
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i][0] !== b[i][0]) return false;
+    const [x, y] = [a[i][1], b[i][1]];
+    if (x === 'hashed' || y === 'hashed' ? x !== y : Number(x) !== Number(y)) return false;
+  }
+  return true;
+}
+
+const hasIndex = (keys, wanted) => keys.some((key) => sameIndexKey(key, wanted));
+
+/** Say something once per process — `deps.warned` remembers */
+function warnOnce(deps, id, message, fields) {
+  if (deps.warned?.has(id)) return;
+  deps.warned?.add(id);
+  deps.logger.warn(message, deps.fields(fields));
+}
+
 /** The version index of a collection, when it has one — every scan hints it */
-async function versionHint(deps, spec) {
+async function versionHint(deps, spec, keys) {
   if (spec.mode === 'step') return undefined;
   const key = versionIndexKey(spec);
-  try {
-    const indexes = await deps.db.collection(spec.collection).listIndexes(READ_OPTIONS).toArray();
-    for (const index of indexes) {
-      const fields = Object.keys(index.key);
-      if (fields.length === 2 && fields[0] === spec.field && fields[1] === '_id') {
-        if (Number(index.key[spec.field]) === 1 && Number(index.key._id) === 1) return key;
-      }
-    }
-  } catch {
-    // A collection that does not exist yet has no index — and nothing to scan.
-  }
+  if (hasIndex(keys ?? (await indexKeys(deps, spec.collection)), key)) return key;
   if (!deps.warned?.has(`index:${spec.collection}`)) {
     deps.warned?.add(`index:${spec.collection}`);
     deps.logger.warn(
@@ -111,10 +137,65 @@ async function jobFor(deps, name, state, { direction } = {}) {
     spec,
     fns: loaded.fns,
     direction: dir === 'revert' ? 'revert' : 'forward',
-    partitioner: idRangePartitioner,
     match,
-    hint: await versionHint(deps, spec),
+    ...(await partitionerFor(deps, spec, dir)),
     logger: deps.logger,
+  };
+}
+
+/**
+ * How a background migration's collection is split: along the shard key on
+ * a sharded collection whose key can be read and whose version index carries
+ * it (`sharding.mode` `chunks` or `sampled`, decided at plan time), by `_id`
+ * everywhere else — `untargeted` when the collection is sharded but that is
+ * all that is known, said once per process. `backgroundShardAware: 'off'`
+ * keeps every collection on `_id`.
+ */
+async function partitionerFor(deps, spec, direction) {
+  const keys = spec.mode === 'step' ? [] : await indexKeys(deps, spec.collection);
+  const byId = async (mode) => ({
+    partitioner: idRangePartitioner,
+    hint: await versionHint(deps, spec, keys),
+    sharding: { mode },
+  });
+  if (spec.mode === 'step' || deps.shardAware === 'off' || deps.shardKeyOf === undefined) {
+    return byId('off');
+  }
+  if ((await deps.topology?.()) !== 'sharded') return byId('off');
+  const sharding = await deps.shardKeyOf(spec.collection);
+  if (sharding === null) return byId('off');
+  const where = { background: spec.collection, collection: spec.collection };
+  if (sharding === undefined) {
+    warnOnce(
+      deps,
+      `shard:${spec.collection}:privileges`,
+      `⚠ ${spec.collection}: its shard key cannot be read (config needs clusterMonitor) — ` +
+        'background migrations over it are not shard-aware',
+      where,
+    );
+    return byId('untargeted');
+  }
+  const indexKey = shardedVersionIndexKey(spec, sharding.key);
+  if (!hasIndex(keys, indexKey)) {
+    warnOnce(
+      deps,
+      `shard:${spec.collection}:index`,
+      `⚠ ${spec.collection} is sharded but has no ${JSON.stringify(indexKey)} index — ` +
+        'background migrations over it are not shard-aware (declare versioning in its ' +
+        'definition and converge)',
+      where,
+    );
+    return byId('untargeted');
+  }
+  return {
+    partitioner: createShardPartitioner({
+      key: sharding.key,
+      field: spec.field,
+      source: direction === 'revert' ? spec.to : spec.from,
+      readChunks: () => deps.chunksOf(spec.collection, sharding),
+    }),
+    hint: indexKey,
+    sharding: { mode: 'shard', key: sharding.key },
   };
 }
 
@@ -273,6 +354,7 @@ async function planPass(deps, job, state, hash, { newPass = true } = {}) {
       hint: job.hint,
       maxParallel: spec.maxParallel,
       settings: spec.partitions,
+      shardConcurrency: spec.shardConcurrency,
     });
   }
   const pass = (state.pass ?? 0) + (newPass ? 1 : 0);
@@ -528,6 +610,8 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
       maxParallel: job.spec.maxParallel,
       ttlMs: deps.ttlMs,
       owner,
+      // Lanes per shard, on partitions that belong to one.
+      ...(job.partitioner.id === 'shard' ? { shardConcurrency: job.spec.shardConcurrency } : {}),
       onReaped: (count) => deps.telemetry?.backgroundLeasesReclaimed({ name, count }),
     });
     if (claimed.exhausted) return { outcome: 'exhausted', counters };

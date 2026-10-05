@@ -235,6 +235,42 @@ describe('BackgroundStore — leases and slots (integration)', () => {
     assert.match(first.partition.lease.groupSlot, /^shard[AB]#0$/);
     assert.deepStrictEqual(await store.claim(NAME, args), { exhausted: true });
   });
+
+  it('should answer racing claims on full shards as exhausted, not busy', async () => {
+    await store.register(NAME, { status: 'pending' });
+    const partitions = [];
+    for (let i = 0; i < 4; i++) partitions.push({ scope: { kind: 'step' }, group: 'shardA' });
+    for (let i = 0; i < 4; i++) partitions.push({ scope: { kind: 'step' }, group: 'shardB' });
+    const state = await store.commitPlan(NAME, {
+      generation: 0,
+      plan: { partitioner: 'shard' },
+      partitions,
+    });
+    const args = claimArgs(state, { maxParallel: 6, shardConcurrency: 1 });
+    const results = await Promise.all(Array.from({ length: 6 }, () => store.claim(NAME, args)));
+    const groups = new Set();
+    let exhausted = 0;
+    for (const result of results) {
+      if (result.partition) groups.add(result.partition.group);
+      else if (result.exhausted) exhausted += 1;
+      else assert.fail(`unexpected ${JSON.stringify(result)}`);
+    }
+    assert.deepStrictEqual([...groups].sort(), ['shardA', 'shardB']);
+    assert.strictEqual(exhausted, 4);
+  });
+
+  it('should share one set of group slots among partitions with no group', async () => {
+    await store.register(NAME, { status: 'pending' });
+    const state = await store.commitPlan(NAME, {
+      generation: 0,
+      plan: { partitioner: 'shard' },
+      partitions: [{ scope: { kind: 'step' } }, { scope: { kind: 'step' } }],
+    });
+    const args = claimArgs(state, { shardConcurrency: 1 });
+    const first = await store.claim(NAME, args);
+    assert.strictEqual(first.partition.lease.groupSlot, '#0');
+    assert.deepStrictEqual(await store.claim(NAME, args), { exhausted: true });
+  });
 });
 
 describe('BackgroundStore — checkpoints, failures and roll-up (integration)', () => {

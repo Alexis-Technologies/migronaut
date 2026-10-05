@@ -578,39 +578,51 @@ class BackgroundStore {
       startedAt: { $ifNull: ['$startedAt', '$$NOW'] },
       updatedAt: '$$NOW',
     };
+    const sort = { status: -1, seq: 1 };
     if (shardConcurrency === undefined) {
       return this.#partitions.findOneAndUpdate(filter, [{ $set: set }], {
-        sort: { status: -1, seq: 1 },
+        sort,
         returnDocument: 'after',
         ...READ_OPTIONS,
       });
     }
-    // Per group (shard): a second unique slot, `<group>#<k>`.
-    for (let k = 0; k < shardConcurrency; k++) {
-      try {
-        return await this.#partitions.findOneAndUpdate(
-          filter,
-          [
-            {
-              $set: {
-                ...set,
-                lease: {
-                  ...lease,
-                  groupSlot: { $concat: [{ $toString: { $ifNull: ['$group', ''] } }, `#${k}`] },
-                },
-              },
-            },
-          ],
-          { sort: { status: -1, seq: 1 }, returnDocument: 'after', ...READ_OPTIONS },
-        );
-      } catch (error) {
-        if (error?.code !== DUPLICATE_KEY || /lease_slot/.test(String(error?.message))) throw error;
+    // Per group (shard): a second unique slot, `<group>#<k>`. The candidate is
+    // picked first, so a group found full is known by name — and left out of
+    // the next pick, rather than ending the claim as busy. Each round either
+    // claims, finds the candidate taken, or rules out one more group.
+    const full = new Set(fullGroups);
+    let ungroupedFull = false;
+    for (;;) {
+      const pick = { ...filter };
+      if (full.size > 0) pick.group = { $nin: [...full] };
+      // Partitions without a group share one set of group slots (`#k`).
+      if (ungroupedFull) pick.group = { ...pick.group, $exists: true };
+      const candidate = await this.#partitions.findOne(pick, {
+        sort,
+        projection: { group: 1 },
+        ...READ_OPTIONS,
+      });
+      if (candidate === null) return null;
+      let taken = false;
+      for (let k = 0; k < shardConcurrency && !taken; k++) {
+        try {
+          const claimed = await this.#partitions.findOneAndUpdate(
+            { ...filter, _id: candidate._id },
+            [{ $set: { ...set, lease: { ...lease, groupSlot: `${candidate.group ?? ''}#${k}` } } }],
+            { returnDocument: 'after', ...READ_OPTIONS },
+          );
+          if (claimed !== null) return claimed;
+          // Claimed by someone else between the pick and the write: pick again.
+          taken = true;
+        } catch (error) {
+          if (error?.code !== DUPLICATE_KEY || /lease_slot/.test(String(error?.message)))
+            throw error;
+        }
       }
+      if (taken) continue;
+      if (candidate.group === undefined) ungroupedFull = true;
+      else full.add(candidate.group);
     }
-    // Every group slot of the partition this claim would take is held.
-    const duplicate = new Error('group slots taken');
-    duplicate.code = DUPLICATE_KEY;
-    throw duplicate;
   }
 
   /**

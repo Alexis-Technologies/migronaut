@@ -209,7 +209,8 @@ async function applyBatch(
   const spec = job.spec;
   const collection = db.collection(spec.collection);
   const { source, target } = directionOf(spec, job.fns, job.direction);
-  const counts = { migrated: 0, skipped: 0, conflicts: 0, retried: 0, errors: [] };
+  // `left`: documents read and not rewritten — a draining partition steps over them.
+  const counts = { migrated: 0, skipped: 0, conflicts: 0, retried: 0, errors: [], left: [] };
   const ctx = transformContext(job, ctxExtra);
   let pending = docs;
   for (let round = 0; pending.length > 0; round++) {
@@ -291,6 +292,7 @@ async function applyBatch(
     if (retry.length === 0) return counts;
     if (round >= spec.maxConflictRetries) {
       counts.conflicts += retry.length;
+      for (const doc of retry) counts.left.push(doc._id);
       return counts;
     }
     counts.retried += retry.length;
@@ -465,7 +467,9 @@ async function plainBatch(job, ctx, cursor, batchSize) {
     overloaded: throttle.takeLagged?.() === true,
   });
   if (change) ctx.onThrottle?.(change);
-  const next = job.partitioner.advance(cursor, docs, { limit: batchSize });
+  const left = [...result.left];
+  for (const entry of result.errors) left.push(entry.id);
+  const next = job.partitioner.advance(cursor, docs, { limit: batchSize, left });
   const counts = countsOf(docs, result);
   await store.checkpoint(lease, {
     cursor: next ?? cursor,
@@ -572,13 +576,15 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
               abortOnConflict: true,
               strict: true,
             })
-          : { migrated: 0, skipped: 0, conflicts: 0, retried: 0, errors: [] };
+          : { migrated: 0, skipped: 0, conflicts: 0, retried: 0, errors: [], left: [] };
       const errors = [...excluded.values()];
       result.errors = errors;
+      const left = [];
+      for (const entry of errors) left.push(entry.id);
       const next =
         docs.length < fetched.length
-          ? { ...cursor, lastId: docs[docs.length - 1]._id }
-          : job.partitioner.advance(cursor, fetched, { limit: size });
+          ? job.partitioner.past(cursor, docs, { left })
+          : job.partitioner.advance(cursor, fetched, { limit: size, left });
       const counts = countsOf(docs, result, txnRetries > 0 ? { txnRetries } : {});
       // The last write of the transaction: only the lease holder's commits.
       await store.checkpoint(
@@ -623,7 +629,7 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
         }
         if (conflict) {
           // Alone and still in the way: past it — the next pass takes it.
-          const next = { ...cursor, lastId: doc._id };
+          const next = job.partitioner.past(cursor, [doc], { left: [doc._id] });
           const counts = { scanned: 1, conflicts: 1, batches: 1, txnRetries };
           await store.checkpoint(lease, { cursor: next, counters: counts });
           return {
