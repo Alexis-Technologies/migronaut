@@ -25,16 +25,23 @@ const READ_CONCURRENCY = 8;
 
 /**
  * What the server is: a mongos in front of shards (its shard keys matter to
- * prune), and its version (what it can change in place). Best-effort — a
+ * prune), its topology (`replicaSet`, `sharded`, `standalone` — transactions
+ * need one of the first two), and its version (what it can change in place). Best-effort — a
  * server that refuses to say gets the conservative answer: no in-place
  * extras, no shard-key handling.
  */
 async function readServer(db) {
-  const server = { mongos: false, version: undefined };
+  const server = { mongos: false, version: undefined, topology: undefined };
   if (typeof db.admin !== 'function') return server;
   try {
     const hello = await db.admin().command({ hello: 1 });
     server.mongos = hello?.msg === 'isdbgrid';
+    // What transactions need: a replica set member or a mongos.
+    server.topology = server.mongos
+      ? 'sharded'
+      : typeof hello?.setName === 'string'
+        ? 'replicaSet'
+        : 'standalone';
   } catch {
     // Unknown — treated as a replica set or standalone.
   }

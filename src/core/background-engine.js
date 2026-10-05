@@ -1,4 +1,8 @@
-const { BackgroundConflictError, BackgroundFailedError } = require('../errors/index.js');
+const {
+  BackgroundConflictError,
+  BackgroundFailedError,
+  LockLostError,
+} = require('../errors/index.js');
 const { canonical, isPlainObject } = require('../utils/canonical.js');
 const { errorText } = require('../utils/error.js');
 const {
@@ -108,6 +112,9 @@ async function transformAll(job, docs, ctx) {
     try {
       results[i] = { doc: docs[i], next: await one(cloneDocument(docs[i]), ctx) };
     } catch (error) {
+      // A side write that hit a transient transaction error is the batch's,
+      // not the document's: the whole transaction is retried.
+      if (isTransientTransaction(error)) throw error;
       results[i] = { doc: docs[i], error };
     }
   }
@@ -193,7 +200,11 @@ async function writeOps(collection, ops, { writeConcern, session }) {
  * every write joins it (the transactional mode, the sandbox) and a document
  * a concurrent write moved aborts the batch instead (`abortOnConflict`).
  */
-async function applyBatch(job, docs, { db, session, ctxExtra, abortOnConflict = false } = {}) {
+async function applyBatch(
+  job,
+  docs,
+  { db, session, ctxExtra, abortOnConflict = false, strict = false } = {},
+) {
   const spec = job.spec;
   const collection = db.collection(spec.collection);
   const { source, target } = directionOf(spec, job.fns, job.direction);
@@ -203,11 +214,20 @@ async function applyBatch(job, docs, { db, session, ctxExtra, abortOnConflict = 
   for (let round = 0; pending.length > 0; round++) {
     const transformed = await transformAll(job, pending, ctx);
     const { ops, owners, errors } = buildOps(job, transformed);
+    // Strict (a transaction): one bad document aborts the batch, to be retried
+    // without it — its side writes must not commit with the others.
+    if (strict && errors.length > 0) throw documentError(errors[0]);
     counts.errors.push(...errors);
     const { matched, failed } = await writeOps(collection, ops, {
       writeConcern: spec.writeConcern,
       session,
     });
+    if (strict && failed.size > 0) {
+      const [[index, writeError]] = failed;
+      throw documentError(
+        docError(owners[index], writeError.errmsg ?? writeError.message, 'write'),
+      );
+    }
     for (const [index, writeError] of failed) {
       counts.errors.push(docError(owners[index], writeError.errmsg ?? writeError.message, 'write'));
     }
@@ -277,6 +297,14 @@ async function applyBatch(job, docs, { db, session, ctxExtra, abortOnConflict = 
   return counts;
 }
 
+/** A document that fails a strict (transactional) batch — caught by transactionalBatch */
+function documentError(entry) {
+  return new BackgroundFailedError(`A document failed: ${entry.error}`, {
+    reason: 'document',
+    document: entry,
+  });
+}
+
 /**
  * The context of a `step` background migration: the database and client
  * (and, in a transaction or a dry run, the session), its last checkpoint,
@@ -338,6 +366,305 @@ function addCounters(into, from) {
 }
 
 /**
+ * One call of a step migration and its checkpoint — in one transaction when
+ * the spec asks for it (the step's writes take `ctx.session` and commit with
+ * the checkpoint; a transient error runs the step again, up to `maxRetries`).
+ */
+async function runStep(job, ctx, cursor) {
+  const { store, lease, db, client, signal } = ctx;
+  const fn = job.direction === 'revert' ? job.fns.revertStep : job.fns.step;
+  const save = async (result, session) => {
+    const next = result.done ? null : { checkpoint: result.checkpoint };
+    const counts = { ...result.counters, batches: 1 };
+    await store.checkpoint(
+      lease,
+      { cursor: next ?? { checkpoint: result.checkpoint }, counters: counts, done: result.done },
+      session ? { session } : {},
+    );
+    return { next, counts };
+  };
+  const stepContext = (session) =>
+    buildStepContext(job, {
+      db,
+      client,
+      checkpoint: cursor.checkpoint,
+      deadline: ctx.deadline,
+      ...(session ? { session } : {}),
+    });
+  if (!job.spec.transaction) return save(readStepResult(await fn(stepContext())));
+  for (let attempt = 0; ; attempt++) {
+    const session = client.startSession();
+    try {
+      session.startTransaction({
+        readConcern: { level: 'snapshot' },
+        writeConcern: { w: 'majority' },
+        readPreference: 'primary',
+        maxCommitTimeMS: job.spec.transaction.timeoutMs,
+      });
+      const saved = await save(readStepResult(await fn(stepContext(session))), session);
+      await commit(session);
+      return saved;
+    } catch (error) {
+      await session.abortTransaction().catch(() => undefined);
+      if (!isTransientTransaction(error) || attempt >= job.spec.transaction.maxRetries) throw error;
+      await sleepFor(Math.random() * Math.min(2000, 50 * 2 ** (attempt + 1)), signal);
+    } finally {
+      await session.endSession().catch(() => undefined);
+    }
+  }
+}
+
+/** The counters of one written batch */
+function countsOf(docs, result, extra = {}) {
+  return {
+    scanned: docs.length,
+    migrated: result.migrated,
+    skipped: result.skipped,
+    conflicts: result.conflicts,
+    retried: result.retried,
+    failed: result.errors.length,
+    batches: 1,
+    ...extra,
+  };
+}
+
+const errorEntries = (errors) =>
+  errors.map(({ error, reason }) => ({ error, reason, at: new Date() }));
+
+/**
+ * One batch without a transaction: read, transform, write, then the fenced
+ * checkpoint — a crash between the writes and the checkpoint replays the
+ * batch, which the version filter makes a no-op. The adaptive throttle judges
+ * the write.
+ */
+async function plainBatch(job, ctx, cursor, batchSize) {
+  const { store, lease, partition, db, throttle } = ctx;
+  const now = ctx.now ?? Date.now;
+  const adaptive = ctx.adaptive;
+  const query = job.partitioner.batchQuery(partition.scope, cursor, {
+    limit: batchSize,
+    match: job.match,
+    hint: job.hint,
+  });
+  const docs = await db.collection(job.spec.collection).find(query.filter, query.options).toArray();
+  const writeStarted = now();
+  let result;
+  try {
+    result = await applyBatch(job, docs, { db });
+  } catch (error) {
+    // A write concern timeout or a transient error is overload — back off before failing.
+    if (isOverload(error)) {
+      adaptive?.record({ latencyMs: since(now, writeStarted), overloaded: true });
+    }
+    throw error;
+  }
+  const change = adaptive?.record({
+    latencyMs: since(now, writeStarted),
+    overloaded: throttle.takeLagged?.() === true,
+  });
+  if (change) ctx.onThrottle?.(change);
+  const next = job.partitioner.advance(cursor, docs, { limit: batchSize });
+  const counts = countsOf(docs, result);
+  await store.checkpoint(lease, {
+    cursor: next ?? cursor,
+    counters: counts,
+    badIds: result.errors.map((entry) => entry.id),
+    docErrors: errorEntries(result.errors),
+    done: next === null,
+    ...(adaptive ? { throttle: adaptive.state() } : {}),
+  });
+  return { result, next, counts };
+}
+
+/** The server's ceiling on what one batch reads into a transaction — well under 16 MiB */
+const MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
+
+/** Errors that mean "the batch took too long or grew too big" — halve it and retry */
+const TIME_OR_SIZE = new Set([50, 262, 290, 334, 10334, 17419]);
+
+const isTransientTransaction = (error) =>
+  error?.hasErrorLabel?.('TransientTransactionError') === true ||
+  error?.code === 112 ||
+  error?.code === 251 ||
+  error?.code === 24;
+
+const isUnknownCommit = (error) =>
+  error?.hasErrorLabel?.('UnknownTransactionCommitResult') === true;
+
+/** The leading documents of `docs` whose BSON fits in `bytes` — at least one */
+function fitting(docs, bytes) {
+  let total = 0;
+  for (let i = 0; i < docs.length; i++) {
+    total += bsonSize(docs[i]);
+    if (total > bytes && i > 0) return docs.slice(0, i);
+  }
+  return docs;
+}
+
+async function commit(session) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await session.commitTransaction();
+      return;
+    } catch (error) {
+      // The commit may have landed: commit again — it is idempotent.
+      if (!isUnknownCommit(error) || attempt >= 2) throw error;
+    }
+  }
+}
+
+/**
+ * One batch in a transaction: the read (snapshot), the transformations —
+ * with `ctx.session` for their own side writes — the guarded writes and the
+ * fenced checkpoint all commit together, or not at all. So the counters are
+ * exact, a stale lease holder cannot commit (its checkpoint matches nothing),
+ * and a side write happens once per document that is migrated.
+ *
+ * A document that fails (its transformation, the validator, a duplicate key)
+ * aborts the batch, which is retried without it; a document a concurrent
+ * write moved aborts it too, and is read again in the retry. Transient
+ * transaction errors back off (full jitter, 50 ms · 2ⁿ up to 2 s) up to
+ * `maxRetries`, halving the batch after half of them; a batch that ran out of
+ * time or room is halved at once. Alone in a batch, a conflicting document is
+ * skipped (the next pass takes it) and one too big or too slow is a document
+ * error. Clean batches grow back ×1.5.
+ */
+async function transactionalBatch(job, ctx, cursor, batchSize) {
+  const { store, lease, partition, db, client, signal } = ctx;
+  const spec = job.spec;
+  const { timeoutMs, maxRetries } = spec.transaction;
+  const collection = db.collection(spec.collection);
+  ctx.txn ??= { size: batchSize, clean: 0 };
+  let size = Math.min(ctx.txn.size, batchSize);
+  let attempts = 0;
+  let txnRetries = 0;
+  const excluded = new Map();
+  for (;;) {
+    if (signal?.aborted) throw signal.reason;
+    const session = client.startSession();
+    let docs = [];
+    try {
+      session.startTransaction({
+        readConcern: { level: 'snapshot' },
+        writeConcern: { w: 'majority' },
+        readPreference: 'primary',
+        maxCommitTimeMS: timeoutMs,
+      });
+      const query = job.partitioner.batchQuery(partition.scope, cursor, {
+        limit: size,
+        match: job.match,
+        hint: job.hint,
+      });
+      const fetched = await collection
+        .find(query.filter, { ...query.options, session, maxTimeMS: timeoutMs })
+        .toArray();
+      docs = fitting(fetched, MAX_TRANSACTION_BYTES);
+      const work = [];
+      for (const doc of docs) if (!excluded.has(idKey(doc._id))) work.push(doc);
+      const result =
+        work.length > 0
+          ? await applyBatch(job, work, {
+              db,
+              session,
+              ctxExtra: { session, db, client },
+              abortOnConflict: true,
+              strict: true,
+            })
+          : { migrated: 0, skipped: 0, conflicts: 0, retried: 0, errors: [] };
+      const errors = [...excluded.values()];
+      result.errors = errors;
+      const next =
+        docs.length < fetched.length
+          ? { ...cursor, lastId: docs[docs.length - 1]._id }
+          : job.partitioner.advance(cursor, fetched, { limit: size });
+      const counts = countsOf(docs, result, txnRetries > 0 ? { txnRetries } : {});
+      // The last write of the transaction: only the lease holder's commits.
+      await store.checkpoint(
+        lease,
+        {
+          cursor: next ?? cursor,
+          counters: counts,
+          badIds: errors.map((entry) => entry.id),
+          docErrors: errorEntries(errors),
+          done: next === null,
+        },
+        { session },
+      );
+      await commit(session);
+      ctx.txn.clean += 1;
+      if (ctx.txn.clean >= 5 && size < batchSize) {
+        ctx.txn.size = Math.min(batchSize, Math.ceil(size * 1.5));
+        ctx.txn.clean = 0;
+      } else {
+        ctx.txn.size = size;
+      }
+      if (txnRetries > 0) ctx.onTransactionRetries?.(txnRetries);
+      return { result, next, counts };
+    } catch (error) {
+      await session.abortTransaction().catch(() => undefined);
+      if (error instanceof LockLostError) throw error;
+      if (error?.context?.reason === 'document') {
+        const entry = error.context.document;
+        excluded.set(idKey(entry.id), entry);
+        continue;
+      }
+      const conflict = error?.context?.reason === 'write-conflict';
+      const timeOrSize = TIME_OR_SIZE.has(error?.code);
+      if (!conflict && !timeOrSize && !isTransientTransaction(error)) throw error;
+      txnRetries += 1;
+      ctx.txn.clean = 0;
+      if (size === 1 && docs.length === 1) {
+        const [doc] = docs;
+        if (timeOrSize) {
+          excluded.set(idKey(doc._id), docError(doc, errorText(error), 'transaction'));
+          continue;
+        }
+        if (conflict) {
+          // Alone and still in the way: past it — the next pass takes it.
+          const next = { ...cursor, lastId: doc._id };
+          const counts = { scanned: 1, conflicts: 1, batches: 1, txnRetries };
+          await store.checkpoint(lease, { cursor: next, counters: counts });
+          return {
+            result: { migrated: 0, skipped: 0, conflicts: 1, retried: 0, errors: [] },
+            next,
+            counts,
+          };
+        }
+      }
+      attempts += 1;
+      if (timeOrSize) {
+        size = Math.max(1, Math.floor(size / 2));
+        continue;
+      }
+      if (attempts > maxRetries) throw error;
+      if (attempts > maxRetries / 2) size = Math.max(1, Math.floor(size / 2));
+      await sleepFor(Math.random() * Math.min(2000, 50 * 2 ** attempts), signal);
+    } finally {
+      await session.endSession().catch(() => undefined);
+    }
+  }
+}
+
+/** Sleep, cut short by the signal */
+function sleepFor(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
  * Work one partition until it is done, the slice's deadline passes, a
  * control or a new plan says stop, or the lease is lost. `ctx`:
  * `{ store, lease, partition, db, client, signal, deadline, throttle,
@@ -351,7 +678,7 @@ function addCounters(into, from) {
  * throws LockLostError; a failure of the slice itself throws.
  */
 async function processPartition(job, ctx) {
-  const { store, lease, partition, db, signal, throttle, readControl } = ctx;
+  const { store, partition, signal, throttle, readControl } = ctx;
   const now = ctx.now ?? Date.now;
   const spec = job.spec;
   const counters = {};
@@ -372,68 +699,19 @@ async function processPartition(job, ctx) {
       extraPauseMs: adaptive?.pauseMs() ?? 0,
     });
     const started = now();
-    let docs;
     let next;
     let batchCounts;
     if (spec.mode === 'step') {
-      const result = readStepResult(
-        await (job.direction === 'revert' ? job.fns.revertStep : job.fns.step)(
-          buildStepContext(job, {
-            db,
-            client: ctx.client,
-            checkpoint: cursor.checkpoint,
-            deadline: ctx.deadline,
-          }),
-        ),
-      );
-      next = result.done ? null : { checkpoint: result.checkpoint };
-      batchCounts = { ...result.counters, batches: 1 };
-      await store.checkpoint(lease, {
-        cursor: next ?? { checkpoint: result.checkpoint },
-        counters: batchCounts,
-        done: result.done,
-      });
+      const stepped = await runStep(job, ctx, cursor);
+      next = stepped.next;
+      batchCounts = stepped.counts;
     } else {
-      const query = job.partitioner.batchQuery(partition.scope, cursor, {
-        limit: batchSize,
-        match: job.match,
-        hint: job.hint,
-      });
-      docs = await db.collection(spec.collection).find(query.filter, query.options).toArray();
-      const writeStarted = now();
-      let result;
-      try {
-        result = await applyBatch(job, docs, { db });
-      } catch (error) {
-        // A write concern timeout or a transient error is overload — back off before failing.
-        if (isOverload(error)) {
-          adaptive?.record({ latencyMs: since(now, writeStarted), overloaded: true });
-        }
-        throw error;
-      }
-      const change = adaptive?.record({
-        latencyMs: since(now, writeStarted),
-        overloaded: throttle.takeLagged?.() === true,
-      });
-      if (change) ctx.onThrottle?.(change);
-      next = job.partitioner.advance(cursor, docs, { limit: batchSize });
-      batchCounts = {
-        scanned: docs.length,
-        migrated: result.migrated,
-        skipped: result.skipped,
-        conflicts: result.conflicts,
-        retried: result.retried,
-        failed: result.errors.length,
-        batches: 1,
-      };
-      await store.checkpoint(lease, {
-        cursor: next ?? cursor,
-        counters: batchCounts,
-        badIds: result.errors.map((entry) => entry.id),
-        docErrors: result.errors.map(({ error, reason }) => ({ error, reason, at: new Date() })),
-        done: next === null,
-        ...(adaptive ? { throttle: adaptive.state() } : {}),
-      });
+      const batch = spec.transaction
+        ? await transactionalBatch(job, ctx, cursor, batchSize)
+        : await plainBatch(job, ctx, cursor, batchSize);
+      const { result } = batch;
+      next = batch.next;
+      batchCounts = batch.counts;
       if (result.errors.length > 0) {
         const total = await store.countBadIds(job.name, job.generation);
         if (total > spec.maxDocumentErrors) {

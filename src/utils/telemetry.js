@@ -486,8 +486,8 @@ function createTelemetry(telemetry, { dbName } = {}) {
     backgroundDrift({ name, count = 1 }) {
       add(backgroundDrift, count, { [ATTRIBUTES.BACKGROUND_NAME]: name });
     },
-    backgroundTransactionRetried({ name, reason }) {
-      add(backgroundTransactionRetries, 1, {
+    backgroundTransactionRetried({ name, reason, count = 1 }) {
+      add(backgroundTransactionRetries, count, {
         [ATTRIBUTES.BACKGROUND_NAME]: name,
         [ATTRIBUTES.BACKGROUND_REASON]: reason,
       });

@@ -55,6 +55,7 @@ const { resolveDefinitions } = require('./collections.js');
 const { backgroundCollectionNames, loadConfig } = require('./config.js');
 const { buildContext } = require('./context.js');
 const { runConverge } = require('./converge.js');
+const { readServer } = require('./server-info.js');
 const { runImport } = require('./import-runner.js');
 const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
 const {
@@ -161,6 +162,8 @@ class MigratorKit extends EventEmitter {
   #adaptiveCache = new Map();
   /** Declared collections, for background specs — resolved once unless migrations reload */
   #backgroundDefinitions;
+  /** The server's topology, read once — transactional background migrations need it */
+  #topology;
 
   constructor(config = {}, options = {}) {
     super();
@@ -2188,6 +2191,7 @@ class MigratorKit extends EventEmitter {
           },
         ),
       onCompleted: (name) => this.#unblockDependents(name),
+      topology: () => (this.#topology ??= readServer(db).then((server) => server.topology)),
     };
   }
 

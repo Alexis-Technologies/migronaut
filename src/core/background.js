@@ -5,6 +5,7 @@ const {
   LockAlreadyHeldError,
   LockLostError,
   MigronautError,
+  TransactionsUnsupportedError,
 } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { versionIndexKey } = require('../versioning/document.js');
@@ -67,6 +68,23 @@ async function versionHint(deps, spec) {
     );
   }
   return undefined;
+}
+
+/**
+ * A transactional background migration needs a replica set or a mongos —
+ * checked once per process (`deps.topology()` caches the answer).
+ *
+ * @throws {TransactionsUnsupportedError} on a standalone server
+ */
+async function assertTransactions(deps, name, spec) {
+  if (!spec.transaction || typeof deps.topology !== 'function') return;
+  if ((await deps.topology()) === 'standalone') {
+    throw new TransactionsUnsupportedError(
+      `Background migration ${name} asks for transactions, which need a replica set or a ` +
+        'mongos — this server is standalone (run it with transaction: false)',
+      { migration: name, background: true },
+    );
+  }
 }
 
 /** The job a lane or a coordinator works with: the spec, the functions, and what they scan */
@@ -178,6 +196,12 @@ async function coordinateStep(deps, name, { signal, driver }) {
       return retrySoon(deps, 'checksum');
     }
     throw error;
+  }
+  try {
+    await assertTransactions(deps, name, job.spec);
+  } catch (error) {
+    // Not something a retry fixes: the deployment cannot do it.
+    return failState(deps, state, error.message);
   }
   const hash = matchHash(job.spec, job.direction === 'revert' ? 'revert' : 'forward');
 
@@ -483,6 +507,7 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
   }
   const job = await jobFor(deps, name, state);
   job.generation = state.generation;
+  await assertTransactions(deps, name, job.spec);
   const now = deps.now ?? Date.now;
   const deadline = now() + (sliceMs ?? job.spec.sliceMs);
   const counters = {};
@@ -559,6 +584,8 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
               ...info,
             });
           },
+          onTransactionRetries: (count) =>
+            deps.telemetry?.backgroundTransactionRetried({ name, reason: 'transient', count }),
           onThrottle: (change) => {
             deps.telemetry?.backgroundThrottled({ name, reason: change.reason });
             deps.emit('background:throttle', {
