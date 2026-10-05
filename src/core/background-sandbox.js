@@ -529,8 +529,9 @@ function writeOp(state, raw, method, args) {
       });
       return result;
     } catch (error) {
-      // A write error aborts the transaction on the server: nothing after it can run.
-      state.failed = error;
+      // A write error aborts the transaction on the server: nothing after it
+      // can run. A transient one (a write conflict) runs the whole sandbox again.
+      if (!isTransient(error)) state.failed = error;
       record(state, { collection: name, method, error: errorText(error) });
       throw error;
     }

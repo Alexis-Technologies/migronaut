@@ -3,8 +3,10 @@ const { errorText } = require('../utils/error.js');
 const { cloneDocument, stampedDiff } = require('../versioning/document.js');
 const {
   applyBatch,
+  buildStepContext,
   idKey,
   matchOf,
+  readStepResult,
   transformAll,
   transformContext,
 } = require('./background-engine.js');
@@ -234,4 +236,99 @@ async function validateRows(deps, job, docs) {
   };
 }
 
-module.exports = { MAX_SAMPLE, previewSample };
+const MAX_STEPS = 50;
+
+/**
+ * Dry-run a step migration: up to `steps` calls of `step` in one sandbox —
+ * one transaction, always aborted — each handed the checkpoint the one
+ * before returned, so a step sees what the earlier ones wrote. It starts
+ * from the checkpoint the background migration is at (`checkpoint`), or
+ * from none (`fromStart`, or not registered). No lock, no lease, no state.
+ */
+async function previewSteps(deps, name, loaded, options = {}) {
+  const { spec, fns } = loaded;
+  const direction = options.direction === 'revert' ? 'revert' : 'forward';
+  const fn = direction === 'revert' ? fns.revertStep : fns.step;
+  if (typeof fn !== 'function') {
+    throw new ConfigInvalidError(`${name} declares no revertStep`, { migration: name });
+  }
+  if (options.validate || options.sample !== undefined || options.first !== undefined) {
+    throw new ConfigInvalidError(
+      `${name} is a step background migration — dry-run it by steps, not on a sample`,
+      { migration: name },
+    );
+  }
+  const steps = options.steps ?? 1;
+  if (!Number.isSafeInteger(steps) || steps < 1 || steps > MAX_STEPS) {
+    throw new ConfigInvalidError(`steps must be 1 to ${MAX_STEPS}`, { steps });
+  }
+  const job = {
+    name,
+    spec,
+    fns,
+    direction,
+    generation: 0,
+    partitionId: 'dry-run',
+    logger: deps.logger,
+  };
+  const log = [];
+  let stoppedBy = 'steps';
+  const deadlineMs = options.deadlineMs ?? 50_000;
+  const report = await runSandbox(
+    {
+      client: deps.client,
+      db: deps.db,
+      forbidden: deps.forbidden,
+      topology: await deps.topology(),
+      deadlineMs,
+      ...(options.maxDocuments !== undefined ? { maxDocuments: options.maxDocuments } : {}),
+    },
+    async (handles) => {
+      let checkpoint = options.fromStart ? null : (options.checkpoint ?? null);
+      log.length = 0;
+      for (let step = 1; step <= steps; step++) {
+        handles.nextStep();
+        const entry = { step, checkpointIn: ejson(checkpoint) };
+        log.push(entry);
+        const ctx = {
+          ...buildStepContext(job, {
+            db: handles.db,
+            client: handles.client,
+            session: handles.session,
+            checkpoint,
+            deadline: Date.now() + deadlineMs,
+            dryRun: true,
+          }),
+          mongoose: handles.mongoose,
+        };
+        let result;
+        try {
+          result = readStepResult(await fn(ctx));
+        } catch (error) {
+          entry.error = errorText(error);
+          throw error;
+        }
+        entry.checkpointOut = ejson(result.checkpoint);
+        entry.done = result.done;
+        if (result.counters.processed !== undefined) entry.processed = result.counters.processed;
+        if (result.counters.migrated !== undefined) entry.migrated = result.counters.migrated;
+        if (result.done) {
+          stoppedBy = 'done';
+          return;
+        }
+        checkpoint = result.checkpoint;
+      }
+    },
+  );
+  const { value: _value, ...rest } = report;
+  return {
+    mode: 'step',
+    migration: name,
+    direction,
+    ...rest,
+    stoppedBy: report.stoppedBy ?? stoppedBy,
+    steps: log,
+  };
+}
+
+module.exports = { MAX_SAMPLE, MAX_STEPS, previewSample, previewSteps };

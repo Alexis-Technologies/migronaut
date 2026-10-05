@@ -47,7 +47,7 @@ const {
   waitForLanes,
 } = require('./background.js');
 const { resolveBackgroundSpec } = require('./background-spec.js');
-const { previewSample } = require('./background-dry-run.js');
+const { previewSample, previewSteps } = require('./background-dry-run.js');
 const { matchOf } = require('./background-engine.js');
 const { BackgroundStore } = require('./background-store.js');
 const { sleep } = require('./background-throttle.js');
@@ -2746,7 +2746,16 @@ class MigratorKit extends EventEmitter {
           { migration: name },
         );
       }
-      throw new ConfigInvalidError('Step dry runs are not available yet', { migration: name });
+      // From where the background migration is, unless asked to start over.
+      let checkpoint = null;
+      const state = await this.#backgroundStore().get(name);
+      if (state !== null && !options.fromStart) {
+        const [partition] = await this.#backgroundStore().partitions(name, {
+          generation: state.generation,
+        });
+        checkpoint = partition?.cursor?.checkpoint ?? null;
+      }
+      return previewSteps(deps, name, loaded, { ...options, checkpoint });
     }
     return previewSample(deps, name, loaded, options);
   }

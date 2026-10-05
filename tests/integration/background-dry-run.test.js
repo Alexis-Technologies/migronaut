@@ -146,3 +146,154 @@ describe('dry runs of background migrations (integration)', () => {
     await assert.rejects(kit.dryRunBackground('missing.js'), /not found/i);
   });
 });
+
+describe('dry runs of step migrations (integration)', () => {
+  const STEP = `export const background = {
+  collection: 'orders',
+  step: async ({ checkpoint, db }) => {
+    const n = checkpoint ?? 0;
+    const orders = db.collection('orders');
+    // Each step sees what the one before wrote, in the same transaction.
+    const seen = await orders.countDocuments({ touched: true });
+    await orders.updateOne({ _id: n }, { $set: { touched: true, seen } });
+    if (n === 0) {
+      await orders.updateMany({ i: { $gte: 8 } }, { $set: { tail: true } });
+      await orders.replaceOne({ _id: 5 }, { __v: 2, replaced: true });
+      await orders.deleteMany({ i: { $in: [6, 7] } });
+      await orders.insertMany([{ _id: 100 }, { _id: 101 }]);
+      await orders.bulkWrite([
+        { updateOne: { filter: { _id: 4 }, update: { $set: { bulk: 1 } } } },
+        { insertOne: { document: { _id: 102 } } },
+      ]);
+      await orders.findOneAndUpdate({ _id: 3 }, { $set: { found: true } });
+      await orders.updateOne({ _id: 200 }, { $set: { upserted: true } }, { upsert: true });
+    }
+    return { checkpoint: n + 1, done: n === 4, processed: 1 };
+  },
+};
+`;
+
+  it('should chain checkpoints over steps that see their own writes, leaving the collection as it was', async () => {
+    const kit = kitWith();
+    project.write(NAME, STEP);
+    const before = await raw();
+    const report = await kit.dryRunBackground(NAME, { steps: 3, maxDocuments: 50 });
+    assert.strictEqual(report.mode, 'step');
+    assert.strictEqual(report.ok, true, report.error);
+    assert.strictEqual(report.stoppedBy, 'steps');
+    assert.deepStrictEqual(
+      report.steps.map((entry) => [entry.checkpointIn, entry.checkpointOut, entry.done]),
+      [
+        [null, 1, false],
+        [1, 2, false],
+        [2, 3, false],
+      ],
+    );
+    const byKey = new Map(report.documents.map((doc) => [JSON.stringify(doc._id), doc]));
+    assert.strictEqual(byKey.get('0').op, 'update');
+    assert.strictEqual(byKey.get('2').after.seen, 2, 'the third step saw the two before it');
+    assert.strictEqual(byKey.get('5').after.replaced, true);
+    assert.strictEqual(byKey.get('6').op, 'delete');
+    assert.strictEqual(byKey.get('100').op, 'insert');
+    assert.strictEqual(byKey.get('102').op, 'insert');
+    assert.strictEqual(byKey.get('4').after.bulk, 1);
+    assert.strictEqual(byKey.get('3').after.found, true);
+    assert.strictEqual(byKey.get('200').after.upserted, true);
+    assert.strictEqual(byKey.get('8').after.tail, true);
+    assert.deepStrictEqual(await raw(), before, 'byte for byte the same collection');
+    const done = await kit.dryRunBackground(NAME, { steps: 10 });
+    assert.strictEqual(done.stoppedBy, 'done');
+    assert.strictEqual(done.steps.length, 5);
+  });
+
+  it('should start from the pinned checkpoint, or from the start', async () => {
+    const kit = kitWith();
+    project.write(NAME, STEP);
+    await kit.up();
+    await kit.coordinateBackground(NAME);
+    await kit.runBackgroundSlice(NAME, { sliceMs: 1000 });
+    const status = await kit.backgroundStatus(NAME);
+    assert.strictEqual(status.status, 'running');
+    const resumed = await kit.dryRunBackground(NAME);
+    assert.notStrictEqual(resumed.steps[0].checkpointIn, null);
+    const fresh = await kit.dryRunBackground(NAME, { fromStart: true });
+    assert.strictEqual(fresh.steps[0].checkpointIn, null);
+  });
+
+  it('should refuse DDL in a step, and stop at a thrown error or the deadline', async () => {
+    const kit = kitWith({ reloadMigrations: true });
+    project.write(
+      NAME,
+      `export const background = {
+  step: async ({ db }) => {
+    await db.collection('orders').createIndex({ i: 1 }).catch(() => undefined);
+    return { checkpoint: null, done: true };
+  },
+};
+`,
+    );
+    const refused = await kit.dryRunBackground(NAME);
+    assert.strictEqual(refused.ok, false);
+    assert.strictEqual(refused.refusals[0].method, 'collection.createIndex');
+    const indexes = await mongo.db.collection('orders').indexes();
+    assert.deepStrictEqual(
+      indexes.map((index) => index.name),
+      ['_id_'],
+      'no index was created',
+    );
+
+    project.write(
+      NAME,
+      `export const background = { step: async () => { throw new Error('step broke'); } };\n`,
+    );
+    const broke = await kit.dryRunBackground(NAME);
+    assert.strictEqual(broke.ok, false);
+    assert.strictEqual(broke.steps[0].error, 'step broke');
+
+    project.write(
+      NAME,
+      `export const background = {
+  step: () => new Promise((resolve) => setTimeout(() => resolve({ checkpoint: 1, done: false }), 5000)),
+};
+`,
+    );
+    const slow = await kit.dryRunBackground(NAME, { deadlineMs: 100 });
+    assert.strictEqual(slow.stoppedBy, 'deadline');
+    await assert.rejects(kit.dryRunBackground(NAME, { steps: 51 }), /1 to 50/);
+    await assert.rejects(kit.dryRunBackground(NAME, { validate: true }), /by steps/);
+  });
+
+  it('should run the whole sandbox again after a write conflict', async () => {
+    const kit = kitWith();
+    project.write(
+      NAME,
+      `export const background = {
+  step: async ({ db }) => {
+    const orders = db.collection('orders');
+    await orders.findOne({ _id: 0 });
+    if (!globalThis.__conflicted) {
+      globalThis.__conflicted = true;
+      await globalThis.__outside();
+    }
+    await orders.updateOne({ _id: 0 }, { $set: { inside: true } });
+    return { checkpoint: null, done: true };
+  },
+};
+`,
+    );
+    globalThis.__outside = () =>
+      mongo.db.collection('orders').updateOne({ _id: 0 }, { $set: { outside: true } });
+    try {
+      const report = await kit.dryRunBackground(NAME);
+      assert.strictEqual(report.attempts, 2);
+      assert.strictEqual(report.ok, true, report.error);
+      assert.strictEqual(
+        (await mongo.db.collection('orders').findOne({ _id: 0 })).inside,
+        undefined,
+      );
+    } finally {
+      delete globalThis.__outside;
+      delete globalThis.__conflicted;
+    }
+  });
+});
