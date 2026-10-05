@@ -3,6 +3,9 @@ const { MigratorKit } = require('./core/migrator.js');
 const { pendingMigrations, runMigrations } = require('./core/run.js');
 const { createLogger } = require('./utils/logger.js');
 const {
+  BackgroundConflictError,
+  BackgroundFailedError,
+  BackgroundPendingError,
   ChecksumMismatchError,
   ConfigFileExistsError,
   ConfigInvalidError,
@@ -27,7 +30,10 @@ const {
   OutOfOrderMigrationError,
   QueueJobFailedError,
   QueueJobInvalidError,
+  RevisionConflictError,
   RunAbortedError,
+  SandboxRefusedError,
+  ShapeVersionError,
 } = require('./errors/index.js');
 
 module.exports = {
@@ -47,6 +53,9 @@ module.exports = {
   EXIT_CODES,
 
   // Error classes
+  BackgroundConflictError,
+  BackgroundFailedError,
+  BackgroundPendingError,
   ChecksumMismatchError,
   ConfigFileExistsError,
   ConfigInvalidError,
@@ -71,5 +80,8 @@ module.exports = {
   OutOfOrderMigrationError,
   QueueJobFailedError,
   QueueJobInvalidError,
+  RevisionConflictError,
   RunAbortedError,
+  SandboxRefusedError,
+  ShapeVersionError,
 };

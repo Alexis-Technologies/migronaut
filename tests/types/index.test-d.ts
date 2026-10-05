@@ -11,6 +11,9 @@ import { pino } from 'pino';
 import { expectAssignable, expectError, expectNotAssignable, expectType } from 'tsd';
 import {
   type AuditReport,
+  BackgroundConflictError,
+  BackgroundFailedError,
+  BackgroundPendingError,
   type BaselineSummary,
   type CollectionDefinition,
   type CollectionDefinitionFile,
@@ -43,14 +46,17 @@ import {
   type ProgressReporter,
   QueueJobFailedError,
   QueueJobInvalidError,
+  RevisionConflictError,
   RunAbortedError,
   type RunEndEvent,
   type RunResult,
   type RunStartEvent,
+  SandboxRefusedError,
   type SearchIndexBuild,
   type SearchIndexDefinition,
   type SearchIndexStatus,
   type SearchIndexType,
+  ShapeVersionError,
   type StatusRow,
   TransactionsUnsupportedError,
   createLogger,
@@ -518,3 +524,22 @@ expectAssignable<MigronautErrorCode>('CONVERGE_FAILED');
 expectType<MigronautError>(new ConvergeFailedError('refused', { phase: 'plan' }));
 expectType<number>(EXIT_CODES.CONVERGE_FAILED);
 expectType<number>(EXIT_CODES.COLLECTIONS_DRIFT);
+
+// ─── Document versioning and background migration errors ─────────────────────
+for (const code of [
+  'REVISION_CONFLICT',
+  'SHAPE_VERSION_UNSUPPORTED',
+  'BACKGROUND_PENDING',
+  'BACKGROUND_FAILED',
+  'BACKGROUND_CONFLICT',
+  'SANDBOX_REFUSED',
+] as const) {
+  expectAssignable<MigronautErrorCode>(code);
+  expectType<number>(EXIT_CODES[code]);
+}
+expectType<MigronautError>(new RevisionConflictError('conflict', { reason: 'conflict' }));
+expectType<MigronautError>(new ShapeVersionError('newer', { reason: 'newer' }));
+expectType<MigronautError>(new BackgroundPendingError('pending', { waitsFor: [] }));
+expectType<MigronautError>(new BackgroundFailedError('failed'));
+expectType<MigronautError>(new BackgroundConflictError('conflict', { action: 'pause' }));
+expectType<MigronautError>(new SandboxRefusedError('refused', { method: 'createIndex' }));

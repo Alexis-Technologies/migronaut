@@ -160,4 +160,10 @@ working unchanged. The full map is also exported from the package root as
 | `26` | `QUEUE_JOB_FAILED` — a queue group's `wait()` saw a job fail or time out |
 | `27` | `CONVERGE_FAILED` — [`converge`](/commands/converge) refused a conflicting plan, a step failed, or `--wait-search` gave up |
 | `28` | `COLLECTIONS_DRIFT` — `converge --check` found the database out of step with the declarations, or a search index that failed to build |
+| `29` | `REVISION_CONFLICT` — a revision-guarded write lost a race (library only) |
+| `30` | `SHAPE_VERSION_UNSUPPORTED` — an upcaster met a document it cannot read (library only) |
+| `31` | `BACKGROUND_PENDING` — a migration waits for a [background migration](/commands/background), or `background status --check` / `background verify` found work |
+| `32` | `BACKGROUND_FAILED` — a background migration failed |
+| `33` | `BACKGROUND_CONFLICT` — a background control action did not fit its state |
+| `34` | `SANDBOX_REFUSED` — a background dry run reached for something the sandbox refuses |
 | `130` / `143` | Killed by a second SIGINT / SIGTERM |
