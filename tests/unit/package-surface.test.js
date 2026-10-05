@@ -206,6 +206,123 @@ describe('bullmq subpath', () => {
   });
 });
 
+describe('versioning subpath', () => {
+  /** Every `require('…')` target in a source file */
+  const requiresOf = (file) =>
+    [...stripComments(readRepoFile(file)).matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map(
+      (match) => match[1],
+    );
+
+  it('should expose the runtime through its own entry point', () => {
+    const versioning = require(path.join(repoRoot, 'versioning.js'));
+    for (const name of [
+      'defineShapes',
+      'updateWithRevision',
+      'replaceWithRevision',
+      'findOneAndUpdateWithRevision',
+      'retryOnConflict',
+      'bumpRevision',
+    ]) {
+      assert.strictEqual(typeof versioning[name], 'function', `${name} missing`);
+    }
+  });
+
+  it('should re-export the very error classes of the package root', () => {
+    // `instanceof` must agree whichever entry point a caller imported from.
+    const api = require(path.join(repoRoot, 'index.js'));
+    const versioning = require(path.join(repoRoot, 'versioning.js'));
+    for (const name of [
+      'MigronautError',
+      'ConfigInvalidError',
+      'RevisionConflictError',
+      'ShapeVersionError',
+    ]) {
+      assert.strictEqual(versioning[name], api[name], `${name} is a different class`);
+    }
+  });
+
+  it('should require nothing but its own modules and the error classes', () => {
+    // The point of the subpath: a repository layer that loads it pays for no
+    // engine, no driver and no mongoose.
+    const files = sourceFiles('src/versioning');
+    assert.ok(files.length >= 6, 'expected the versioning sources');
+    for (const file of files) {
+      for (const target of requiresOf(file)) {
+        assert.ok(
+          /^\.\/[\w-]+\.js$/.test(target) || target === '../errors/index.js',
+          `${file} requires ${target}`,
+        );
+      }
+    }
+  });
+
+  it('should keep the engine from being required by the subpath, only the other way round', () => {
+    for (const file of sourceFiles('src/versioning')) {
+      assert.ok(!requiresOf(file).some((target) => target.includes('core/')), file);
+    }
+    assert.ok(!/require\(['"]\.\/versioning/.test(stripComments(readRepoFile('src/index.js'))));
+  });
+
+  it('should declare every runtime export in versioning.d.ts — and nothing that is not exported', () => {
+    const versioning = require(path.join(repoRoot, 'versioning.js'));
+    const dts = readRepoFile('versioning.d.ts');
+    const reexported = new Set(
+      /export \{([^}]*)\} from '\.\/index\.js'/
+        .exec(dts)[1]
+        .split(',')
+        .map((name) => name.trim())
+        .filter(Boolean),
+    );
+    for (const name of Object.keys(versioning)) {
+      assert.ok(
+        reexported.has(name) ||
+          dts.includes(`export function ${name}`) ||
+          dts.includes(`export const ${name}`),
+        `${name} is exported at runtime but missing from versioning.d.ts`,
+      );
+    }
+    for (const [, name] of dts.matchAll(/^export (?:class|function|const) (\w+)/gm)) {
+      assert.notStrictEqual(versioning[name], undefined, `${name} is declared but not exported`);
+    }
+  });
+
+  it('should not import the driver or mongoose from versioning.d.ts', () => {
+    const code = stripComments(readRepoFile('versioning.d.ts'));
+    assert.ok(!/from ['"](mongodb|mongoose|bson)['"]/.test(code));
+    assert.ok(!/from ['"]\.\/versioning/.test(stripComments(readRepoFile('index.d.ts'))));
+  });
+
+  it('should publish the subpath in the exports map, types first', () => {
+    assert.deepStrictEqual(packageJson.exports['./versioning'], {
+      types: './versioning.d.ts',
+      default: './versioning.js',
+    });
+    for (const entry of ['versioning.js', 'versioning.d.ts']) {
+      assert.ok(packageJson.files.includes(entry), `${entry} must be in "files"`);
+    }
+    assert.match(packageJson.scripts['check:dts'], /versioning\.d\.ts/);
+  });
+});
+
+describe('peer dependencies', () => {
+  it('should never require mongoose from src, and the driver only where it is a peer by design', () => {
+    // mongoose is an optional peer the caller injects; the driver is loaded
+    // lazily, from the one place that connects.
+    const allowed = new Set(['src/core/migrator.js']);
+    const offenders = [];
+    for (const file of sourceFiles('src')) {
+      for (const target of [
+        ...stripComments(readRepoFile(file)).matchAll(
+          /(?:require\(|import\()\s*['"](mongodb|mongoose|bson)['"]/g,
+        ),
+      ].map((match) => match[1])) {
+        if (target !== 'mongodb' || !allowed.has(file)) offenders.push(`${file}: ${target}`);
+      }
+    }
+    assert.deepStrictEqual(offenders, []);
+  });
+});
+
 describe('OpenTelemetry', () => {
   // Injected like everything else: the tracer and the meter arrive through the
   // `telemetry` option, and BullMQ's telemetry object through `bullmq.telemetry`.

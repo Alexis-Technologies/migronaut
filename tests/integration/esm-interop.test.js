@@ -182,4 +182,82 @@ export const ok: Kit = true;
       );
     });
   });
+
+  describe('the ./versioning subpath', () => {
+    const tsc = require.resolve('typescript/bin/tsc');
+
+    before(() => {
+      writeFileSync(
+        path.join(dir, 'versioning.mjs'),
+        `import versioning from '@alexify/migronaut/versioning';
+import {
+  defineShapes,
+  updateWithRevision,
+  retryOnConflict,
+  RevisionConflictError,
+} from '@alexify/migronaut/versioning';
+import { RevisionConflictError as RootError } from '@alexify/migronaut';
+
+if (typeof defineShapes !== 'function') throw new Error('defineShapes missing');
+if (typeof updateWithRevision !== 'function') throw new Error('updateWithRevision missing');
+if (typeof retryOnConflict !== 'function') throw new Error('retryOnConflict missing');
+if (RevisionConflictError !== RootError) throw new Error('two RevisionConflictError classes');
+if (versioning.defineShapes !== defineShapes) throw new Error('default and named exports disagree');
+console.log('versioning-esm-ok');
+`,
+      );
+      writeFileSync(
+        path.join(dir, 'versioning-only.cjs'),
+        // A repository layer that loads the runtime must not load the engine,
+        // the driver or mongoose.
+        `require('@alexify/migronaut/versioning');
+const loaded = Object.keys(require.cache).filter(
+  (file) =>
+    /[\\/]src[\\/](core|cli|bullmq|utils)[\\/]/.test(file) ||
+    /[\\/]node_modules[\\/](mongodb|mongoose|bson)[\\/]/.test(file),
+);
+if (loaded.length > 0) throw new Error('the subpath loaded: ' + loaded.join(', '));
+console.log('versioning-only-ok');
+`,
+      );
+      writeFileSync(
+        path.join(dir, 'versioning-types.mts'),
+        `import type { ShapeRegistry, RevisionWriteOptions } from '@alexify/migronaut/versioning';
+import { defineShapes } from '@alexify/migronaut/versioning';
+
+const shapes: ShapeRegistry<'orders'> = defineShapes({ orders: { versioning: { current: 2 } } });
+export const options: RevisionWriteOptions = { verify: false };
+export const current: number = shapes.current('orders');
+`,
+      );
+    });
+
+    it('should resolve from an ESM consumer, with the root error classes', async () => {
+      const { stdout } = await run(process.execPath, [path.join(dir, 'versioning.mjs')]);
+      assert.match(stdout, /versioning-esm-ok/);
+    });
+
+    it('should load neither the engine nor the driver', async () => {
+      const { stdout } = await run(process.execPath, [path.join(dir, 'versioning-only.cjs')]);
+      assert.match(stdout, /versioning-only-ok/);
+    });
+
+    it('should resolve its types for a nodenext consumer', async () => {
+      await run(
+        process.execPath,
+        [
+          tsc,
+          '--noEmit',
+          '--strict',
+          '--module',
+          'nodenext',
+          '--moduleResolution',
+          'nodenext',
+          '--skipLibCheck',
+          path.join(dir, 'versioning-types.mts'),
+        ],
+        { cwd: dir },
+      );
+    });
+  });
 });
