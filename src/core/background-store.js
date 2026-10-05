@@ -390,6 +390,26 @@ class BackgroundStore {
     return (state?.badIds?.length ?? 0) + (rows[0]?.n ?? 0);
   }
 
+  /**
+   * How many documents a background migration has rewritten so far: the
+   * rolled-up totals plus the partitions not rolled up yet. 0 for one that
+   * is not registered.
+   */
+  async migratedSoFar(name) {
+    const state = await this.get(name);
+    if (state === null) return 0;
+    const [row] = await this.#partitions
+      .aggregate(
+        [
+          { $match: { background: name, generation: { $gt: state.rolledGeneration ?? 0 } } },
+          { $group: { _id: null, migrated: { $sum: { $ifNull: ['$counters.migrated', 0] } } } },
+        ],
+        READ_OPTIONS,
+      )
+      .toArray();
+    return (state.totals?.migrated ?? 0) + (row?.migrated ?? 0);
+  }
+
   /** Delete the partitions of generations up to `generation` — `keep` spares one */
   async dropGenerations(name, generation, { keep } = {}) {
     const filter = { background: name, generation: { $lte: generation } };

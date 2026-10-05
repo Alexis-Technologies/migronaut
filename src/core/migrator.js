@@ -13,6 +13,7 @@ const {
   IrreversibleMigrationError,
   LockAlreadyHeldError,
   MigrationFileNotFoundError,
+  MigrationInvalidExportError,
   MigrationInvalidNameError,
   MigronautError,
   NotAppliedError,
@@ -35,11 +36,13 @@ const {
 } = require('../utils/template.js');
 const { safeUsername } = require('../utils/user.js');
 const { runAudit } = require('./audit.js');
+const { resolveBackgroundSpec } = require('./background-spec.js');
+const { BackgroundStore } = require('./background-store.js');
 const { runBaseline } = require('./baseline.js');
 const { Changelog } = require('./changelog.js');
 const { ConvergeLog } = require('./converge-log.js');
 const { resolveDefinitions } = require('./collections.js');
-const { loadConfig } = require('./config.js');
+const { backgroundCollectionNames, loadConfig } = require('./config.js');
 const { buildContext } = require('./context.js');
 const { runConverge } = require('./converge.js');
 const { runImport } = require('./import-runner.js');
@@ -140,6 +143,8 @@ class MigratorKit extends EventEmitter {
    * poll that the module cache never frees. Cleared by any other outcome.
    */
   #upDefinitions;
+  /** The background migrations' store — made on first use (see #backgroundStore) */
+  #backgroundStoreInstance;
 
   constructor(config = {}, options = {}) {
     super();
@@ -825,9 +830,16 @@ class MigratorKit extends EventEmitter {
       context,
       { direction, index, total },
     ]);
-    const migration = await loadMigrationFile(this.#filepath(name), {
+    const loaded = await loadMigrationFile(this.#filepath(name), {
       reload: config.reloadMigrations,
+      allowBackground: true,
     });
+    let migration = loaded;
+    if (loaded.kind === 'background') {
+      // Indexes cannot be created inside a transaction — the registration may run in one.
+      await this.#backgroundStore().ensureIndexes();
+      migration = await this.#asBackground(name, loaded, direction);
+    }
     const useTransaction = migration.useTransaction ?? config.useTransaction;
     span.set({ [ATTRIBUTES.MIGRATION_TRANSACTION]: useTransaction });
 
@@ -854,11 +866,21 @@ class MigratorKit extends EventEmitter {
         ...batchField,
         durationMs: duration,
       });
-      const label = direction === 'up' ? '✔ Applied ' : '↩ Reverted';
+      const label =
+        migration.kind === 'background'
+          ? direction === 'up'
+            ? '⧗ Registered'
+            : '⧗ Reverting'
+          : direction === 'up'
+            ? '✔ Applied '
+            : '↩ Reverted';
       logger.info(
         `${label} ${name}   [${duration}ms]`,
         this.#fields({ migration: name, direction, ...batchField, durationMs: duration }),
       );
+      if (migration.registered) {
+        this.#emit('background:registered', { migration: name, ...migration.registered });
+      }
       results.push({
         file: name,
         status: direction === 'up' ? 'applied' : 'reverted',
@@ -1163,6 +1185,7 @@ class MigratorKit extends EventEmitter {
                 duration: elapsed,
                 ...(this.#runId ? { runId: this.#runId } : {}),
                 ...(migration.description ? { description: migration.description } : {}),
+                ...(migration.kind === 'background' ? { kind: 'background' } : {}),
                 ...actorFields(options),
               },
               session,
@@ -1707,6 +1730,7 @@ class MigratorKit extends EventEmitter {
       duration: isApplied && record ? record.duration : null,
       checksumOk,
       ...(record?.description ? { description: record.description } : {}),
+      ...(record?.kind === 'background' ? { kind: 'background' } : {}),
       ...this.#auditFields(record),
     };
   }
@@ -1928,8 +1952,186 @@ class MigratorKit extends EventEmitter {
         : {}),
       extensions: config.fileExtensions,
       reload: config.reloadMigrations,
-      reserved: [config.migrationsCollection, config.lockCollection, config.convergeLogCollection],
+      reserved: this.#bookkeepingNames(),
     });
+  }
+
+  /** Every collection migronaut keeps its own records in — never a declared one */
+  #bookkeepingNames() {
+    const config = this.#config;
+    const names = [
+      config.migrationsCollection,
+      config.lockCollection,
+      config.convergeLogCollection,
+    ];
+    if (config.backgroundCollection !== undefined) {
+      const background = backgroundCollectionNames(config.backgroundCollection);
+      names.push(background.state, background.partitions, background.watch);
+    }
+    return names;
+  }
+
+  // ─── Background migrations ──────────────────────────────────────────────────
+
+  /** The store of background migration state, over this kit's database */
+  #backgroundStore() {
+    this.#backgroundStoreInstance ??= new BackgroundStore(
+      this.#requireDb(),
+      this.#config.backgroundCollection,
+    );
+    return this.#backgroundStoreInstance;
+  }
+
+  /**
+   * A background migration file as the run loop sees a migration: its `up`
+   * registers the background migration (the documents are rewritten later,
+   * in partitions, without the migration lock); its `down` sets off the way
+   * back — or, when it has none, withdraws it while nothing was rewritten yet.
+   * Everything around them is the regular path: hooks, span, transaction,
+   * changelog (with `kind: 'background'`).
+   */
+  async #asBackground(name, loaded, direction) {
+    // Validated before it runs: an invalid file is reported as itself, not as
+    // a failed execution — and nothing is written.
+    const { spec } = await this.#backgroundSpec(name, loaded);
+    if (direction === 'up') await this.#assertRequiresAreBackground(name, loaded.requires ?? []);
+    const migration = {
+      kind: 'background',
+      ...(loaded.description !== undefined ? { description: loaded.description } : {}),
+      up: async (ctx) => {
+        migration.registered = await this.#registerBackground(name, loaded, spec, ctx.session);
+      },
+      down: async (ctx) => {
+        migration.registered = await this.#revertBackground(name, spec, ctx.session);
+      },
+    };
+    return migration;
+  }
+
+  /**
+   * The spec of a background migration file, resolved against the
+   * collection's declared versioning (when it has one).
+   */
+  async #backgroundSpec(name, loaded) {
+    const raw = loaded.background;
+    let versioning;
+    const collection = raw?.collection;
+    if (typeof collection === 'string') {
+      if (this.#bookkeepingNames().includes(collection)) {
+        throw new MigrationInvalidExportError(
+          `Background migration ${name} targets "${collection}", one of migronaut's own collections`,
+          { name, collection },
+        );
+      }
+      const config = this.#config;
+      if (config.collections !== undefined || config.collectionsDir !== undefined) {
+        for (const definition of await this.#resolveCollections()) {
+          if (definition.name === collection) {
+            versioning = definition.versioning;
+            break;
+          }
+        }
+      }
+    }
+    return resolveBackgroundSpec(raw, { name, versioning });
+  }
+
+  /**
+   * What a file's `requires` names must be: background migration files of
+   * the sequence. The order is the loader's to check (each sorts before the
+   * file); whether they are done is the caller's.
+   */
+  async #assertRequiresAreBackground(name, requires) {
+    if (requires.length === 0) return;
+    const sequence = new Set(await this.#listMigrationFiles());
+    for (const required of requires) {
+      if (!sequence.has(required)) {
+        throw new MigrationInvalidExportError(
+          `${name} requires ${required}, which is not a migration of the sequence`,
+          { name, requires: required },
+        );
+      }
+      const loaded = await loadMigrationFile(this.#filepath(required), {
+        reload: this.#config.reloadMigrations,
+        allowBackground: true,
+      });
+      if (loaded.kind !== 'background') {
+        throw new MigrationInvalidExportError(
+          `${name} requires ${required}, which is not a background migration — requires ` +
+            'waits for background migrations only (regular ones already run in order)',
+          { name, requires: required },
+        );
+      }
+    }
+  }
+
+  /** The required background migrations not completed yet, in order */
+  async #waitsFor(requires) {
+    const store = this.#backgroundStore();
+    const waitsFor = [];
+    for (const required of requires) {
+      if ((await store.get(required))?.status !== 'completed') waitsFor.push(required);
+    }
+    return waitsFor;
+  }
+
+  /** Register a background migration (again): `blocked` while what it requires is not done */
+  async #registerBackground(name, loaded, spec, session) {
+    const requires = loaded.requires ?? [];
+    const waitsFor = await this.#waitsFor(requires);
+    const status = waitsFor.length > 0 ? 'blocked' : 'pending';
+    await this.#backgroundStore().register(
+      name,
+      {
+        status,
+        mode: spec.mode,
+        direction: 'forward',
+        spec,
+        checksum: await computeChecksum(this.#filepath(name)),
+        requires,
+        waitsFor,
+        ...(spec.collection !== undefined ? { collection: spec.collection } : {}),
+        ...(loaded.description !== undefined ? { description: loaded.description } : {}),
+      },
+      { session },
+    );
+    return { status, direction: 'forward', ...(waitsFor.length > 0 ? { waitsFor } : {}) };
+  }
+
+  /**
+   * `down` of a background migration: with a `revert`, the forward one is
+   * replaced by the way back (registered to run like any other); without one,
+   * it is withdrawn — but only while no document has been rewritten, since
+   * nothing could put them back.
+   */
+  async #revertBackground(name, spec, session) {
+    const store = this.#backgroundStore();
+    if (spec.reversible) {
+      await store.register(
+        name,
+        {
+          status: 'pending',
+          mode: spec.mode,
+          direction: 'revert',
+          spec,
+          checksum: await computeChecksum(this.#filepath(name)),
+          requires: [],
+          waitsFor: [],
+          ...(spec.collection !== undefined ? { collection: spec.collection } : {}),
+        },
+        { session },
+      );
+      return { status: 'pending', direction: 'revert' };
+    }
+    if ((await store.migratedSoFar(name)) > 0) {
+      throw new IrreversibleMigrationError(
+        `Background migration ${name} has already rewritten documents and declares no revert — ` +
+          'write a background migration back instead',
+        { names: [name] },
+      );
+    }
+    await store.remove(name, { session });
+    return { status: 'withdrawn', direction: 'forward' };
   }
 
   /** How converge treats search indexes: the config, and a call's own `waitForSearchIndexes` */

@@ -294,6 +294,12 @@ export interface MigrationRecord {
    * `migronaut import` — these are not reversible by migronaut. Absent for native records.
    */
   origin?: MigrationOrigin;
+  /**
+   * `'background'` for a background migration file — applying it registered
+   * the background migration; its documents are rewritten later.
+   * @experimental New in 2.3
+   */
+  kind?: 'background';
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -1213,6 +1219,8 @@ export interface StatusRow {
   origin?: MigrationOrigin;
   /** Redacted message of the last failed attempt (status `'failed'` only) */
   error?: string;
+  /** `'background'` for a background migration file (applied = registered) */
+  kind?: 'background';
   /** When the last failed attempt was recorded (status `'failed'` only) */
   failedAt?: Date;
   /**
