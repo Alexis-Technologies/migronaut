@@ -179,7 +179,20 @@ function joinReasons(first, second) {
   return first ? `${first}; ${second}` : second;
 }
 
-function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities }, row, steps) {
+/**
+ * Plan the declared indexes of one collection against its live ones. With
+ * `partial` (only the version index of `versioning` is declared, not the
+ * collection's own list) the other live indexes are not managed at all: never
+ * listed, never dropped — prune does not reach them.
+ */
+function planIndexes(
+  declaredIndexes,
+  live,
+  { prune: pruneOption, rebuildUnique, capabilities, partial = false },
+  row,
+  steps,
+) {
+  const prune = pruneOption && !partial;
   const defaultCollation = live.options?.collation;
   const liveIndexes = [];
   for (const raw of live.indexes) {
@@ -361,6 +374,7 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities
   if (group.actions.length > 0) steps.push(group);
 
   // Last, so an index is only ever removed once everything declared exists.
+  if (partial) return;
   for (const index of liveIndexes) {
     if (consumed.has(index.name) || declaredNames.has(index.name)) continue;
     if (prune && backsShardKey(index, live.shardKey)) {
@@ -658,7 +672,14 @@ function planCollectionSteps(
     planValidator(name, desired, liveValidator(live.options), row, steps);
   }
   if (declaredIndexes !== undefined) {
-    planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities }, row, indexSteps);
+    const partial = definition.indexesPartial === true;
+    planIndexes(
+      declaredIndexes,
+      live,
+      { prune, rebuildUnique, capabilities, partial },
+      row,
+      indexSteps,
+    );
   }
   if (declaredSearch !== undefined) {
     planSearchIndexes(declaredSearch, live, { prune, search }, row, searchSubmit, searchDrops);

@@ -17,6 +17,7 @@ import {
   type BaselineSummary,
   type CollectionDefinition,
   type CollectionDefinitionFile,
+  type CollectionVersioning,
   type ConvergeActionKind,
   ConvergeFailedError,
   type ConvergeResult,
@@ -543,3 +544,12 @@ expectType<MigronautError>(new BackgroundPendingError('pending', { waitsFor: [] 
 expectType<MigronautError>(new BackgroundFailedError('failed'));
 expectType<MigronautError>(new BackgroundConflictError('conflict', { action: 'pause' }));
 expectType<MigronautError>(new SandboxRefusedError('refused', { method: 'createIndex' }));
+
+// ─── Collection versioning ───────────────────────────────────────────────────
+expectAssignable<CollectionDefinition>({ name: 'orders', versioning: { current: 2 } });
+expectAssignable<CollectionDefinitionFile>({
+  versioning: { current: 3, min: 0, field: 'schemaVersion', revision: false, index: false },
+});
+expectAssignable<CollectionVersioning>({ current: 1, revisionField: 'rev' });
+expectError<CollectionVersioning>({ min: 1 });
+expectNotAssignable<CollectionVersioning>({ current: 1, maximum: 3 });

@@ -504,17 +504,57 @@ export interface CollectionDefinition {
    * @experimental New in 2.2
    */
   searchIndexes?: SearchIndexDefinition[];
-  /** A query or `{ $jsonSchema }` document; `null` (or `{}`) for no validator */
+  /**
+   * A query or `{ $jsonSchema }` document; `null` (or `{}`) for no validator.
+   * With `versioning`, its rules are merged in — and `null` is refused.
+   */
   validator?: Record<string, unknown> | null;
-  /** Default: 'strict'. Only with a validator */
+  /**
+   * Default: 'strict' — 'moderate' when the only rules are the ones
+   * `versioning` adds. Only with a validator (or `versioning`)
+   */
   validationLevel?: ValidationLevel;
-  /** Default: 'error'. Only with a validator */
+  /** Default: 'error'. Only with a validator (or `versioning`) */
   validationAction?: ValidationAction;
   /**
    * Drop live indexes (and search indexes, when `searchIndexes` is declared)
-   * this definition does not declare. Default: the call's `prune`, else false
+   * this definition does not declare. Default: the call's `prune`, else false.
+   * With `versioning` and no `indexes`, only the version index is managed —
+   * prune leaves the others alone.
    */
   prune?: boolean;
+  /**
+   * Document shape versioning: the version (and revision) field typed and
+   * required by the validator, and the version index background migrations
+   * scan. The source of truth `defineShapes` reads too.
+   * @experimental New in 2.3
+   */
+  versioning?: CollectionVersioning;
+}
+
+/**
+ * The `versioning` block of a collection definition.
+ * @experimental New in 2.3
+ */
+export interface CollectionVersioning {
+  /** The shape version new documents are written at (≥ 1) */
+  current: number;
+  /**
+   * The oldest shape still allowed (default 1, ≤ `current`). `0` types the
+   * fields without requiring them — for a collection that predates
+   * versioning. Converge refuses to raise it while documents below it remain.
+   * There is deliberately no maximum: a newer release may write ahead of the
+   * declaration during a rolling deploy.
+   */
+  min?: number;
+  /** The version field. Default `'__v'` */
+  field?: string;
+  /** Also manage a revision field for optimistic concurrency. Default `true` */
+  revision?: boolean;
+  /** The revision field. Default `'__rev'` */
+  revisionField?: string;
+  /** Declare the `{ <field>: 1, _id: 1 }` index. Default `true` */
+  index?: boolean;
 }
 
 /** What a `collectionsDir` file exports: a definition whose name defaults to the file name */

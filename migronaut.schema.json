@@ -206,6 +206,11 @@
           "required": [
             "searchIndexes"
           ]
+        },
+        {
+          "required": [
+            "versioning"
+          ]
         }
       ],
       "properties": {
@@ -246,7 +251,7 @@
             "strict",
             "moderate"
           ],
-          "description": "How the validator applies to updates. Defaults to 'strict'"
+          "description": "How the validator applies to updates. Defaults to 'strict' — 'moderate' when the only rules are the ones versioning adds"
         },
         "validationAction": {
           "enum": [
@@ -259,6 +264,56 @@
         "prune": {
           "type": "boolean",
           "description": "Drop indexes (and search indexes, when declared) this definition does not declare — otherwise they are kept and reported"
+        },
+        "versioning": {
+          "$ref": "#/definitions/versioning"
+        }
+      }
+    },
+    "versioning": {
+      "type": "object",
+      "required": [
+        "current"
+      ],
+      "additionalProperties": false,
+      "description": "Document shape versioning: a validator rule and an index for the version field (and the revision field, for optimistic concurrency). Experimental",
+      "properties": {
+        "current": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The shape version new documents are written at"
+        },
+        "min": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1,
+          "description": "The oldest shape version still allowed — 0 types the fields without requiring them. Converge refuses to raise it while documents below it remain"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(?!\\$)(?!_id$)[^.\\u0000]+$",
+          "default": "__v",
+          "description": "The version field"
+        },
+        "revision": {
+          "type": "boolean",
+          "default": true,
+          "description": "Also manage a revision field for optimistic concurrency"
+        },
+        "revisionField": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(?!\\$)(?!_id$)[^.\\u0000]+$",
+          "default": "__rev",
+          "description": "The revision field"
+        },
+        "index": {
+          "type": "boolean",
+          "default": true,
+          "description": "Declare the { <field>: 1, _id: 1 } index background migrations scan"
         }
       }
     },

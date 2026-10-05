@@ -8,6 +8,13 @@ const { errorText } = require('../utils/error.js');
 const { importUserFile, tsLoadMessageOrNull } = require('../utils/loader.js');
 const { indexIssues, normalizeDeclaredIndex, sameDeclaredSignature } = require('./index-spec.js');
 const { normalizeDeclaredSearchIndex, searchIndexIssues } = require('./search-index-spec.js');
+const { resolveVersioning, versioningIssues } = require('../versioning/config.js');
+const {
+  isVersioningIndexKey,
+  mergeVersioningValidator,
+  validatorVersioningIssues,
+  versioningIndex,
+} = require('./versioning-spec.js');
 
 /**
  * Declared collections: validating a definition, normalizing it for the
@@ -29,6 +36,7 @@ const DEFINITION_KEYS = [
   'validationLevel',
   'validationAction',
   'prune',
+  'versioning',
 ];
 const DEFINITION_KEY_SET = new Set(DEFINITION_KEYS);
 const VALIDATION_LEVELS = ['off', 'strict', 'moderate'];
@@ -109,6 +117,40 @@ function searchIndexListIssues(searchIndexes, base, issues) {
 }
 
 /**
+ * Validate the `versioning` key and how it fits the rest of the definition:
+ * a declared validator must leave the managed fields to it, and a declared
+ * index must not duplicate the version index. Returns whether the definition
+ * is versioned (valid or not), so the validator checks below know a
+ * validator is coming.
+ */
+function versioningDefinitionIssues(definition, base, issues) {
+  if (definition.versioning === undefined) return false;
+  const path = join(base, 'versioning');
+  const found = versioningIssues(definition.versioning, path);
+  issues.push(...found);
+  if (found.length > 0) return true;
+  const versioning = resolveVersioning(definition.versioning);
+  if (isPlainObject(definition.validator) || definition.validator === null) {
+    for (const message of validatorVersioningIssues(definition.validator, versioning)) {
+      issues.push({ path: join(base, 'validator'), message });
+    }
+  }
+  if (versioning.index && Array.isArray(definition.indexes)) {
+    for (const [position, index] of definition.indexes.entries()) {
+      if (isPlainObject(index) && isVersioningIndexKey(index.key, versioning)) {
+        issues.push({
+          path: `${join(base, 'indexes')}[${position}]`,
+          message:
+            'is the version index, which versioning declares itself — remove it, or set ' +
+            'versioning.index: false',
+        });
+      }
+    }
+  }
+  return true;
+}
+
+/**
  * Validate one collection definition, returning `{ path, message }` issues
  * (empty when valid). `path` prefixes every issue (`collections[2]`, or
  * `users.ts:` for a file); `reserved` are migronaut's own collection names;
@@ -149,17 +191,19 @@ function definitionIssues(definition, { path: base, reserved = [], fallbackName 
   if (
     definition.indexes === undefined &&
     definition.searchIndexes === undefined &&
-    definition.validator === undefined
+    definition.validator === undefined &&
+    definition.versioning === undefined
   ) {
     issues.push({
       path: self,
-      message: 'declares no indexes, searchIndexes or validator — nothing to manage',
+      message: 'declares no indexes, searchIndexes, validator or versioning — nothing to manage',
     });
   }
   if (definition.indexes !== undefined) indexListIssues(definition.indexes, base, issues);
   if (definition.searchIndexes !== undefined) {
     searchIndexListIssues(definition.searchIndexes, base, issues);
   }
+  const versioning = versioningDefinitionIssues(definition, base, issues);
 
   const { validator } = definition;
   if (validator !== undefined && validator !== null) {
@@ -170,7 +214,8 @@ function definitionIssues(definition, { path: base, reserved = [], fallbackName 
       if (reason) report('validator', reason);
     }
   }
-  const hasValidator = isPlainObject(validator) && !isEmptyObject(validator);
+  // The versioning rules are a validator of their own.
+  const hasValidator = (isPlainObject(validator) && !isEmptyObject(validator)) || versioning;
   for (const [key, allowed] of [
     ['validationLevel', VALIDATION_LEVELS],
     ['validationAction', VALIDATION_ACTIONS],
@@ -222,13 +267,38 @@ function collectionsIssues(list, { reserved = [] } = {}) {
  * names, server-form keys, the spec to send), search indexes with their
  * default name and type, the validator cleaned for the wire.
  * `indexes`/`searchIndexes`/`validator` stay `undefined` when not managed.
+ * `versioning` is resolved and folded in: its rules merged into the
+ * validator, its index appended to `indexes` — with `indexesPartial` when it
+ * is the only index declared, so the others stay unmanaged.
  */
 function normalizeDefinition(definition, { name, source } = {}) {
   const { validator } = definition;
+  let wireValidator = validator === undefined || validator === null ? validator : toWire(validator);
+  let indexes = definition.indexes?.map((index) => normalizeDeclaredIndex(index));
+  let validationLevel = definition.validationLevel;
+  let versioning;
+  let indexesPartial = false;
+  if (definition.versioning !== undefined) {
+    // Folded into an ordinary validator and an ordinary index, so the planner
+    // needs to know nothing about versioning.
+    versioning = resolveVersioning(definition.versioning);
+    // A validator synthesized for versioning alone applies `moderate`: an
+    // update to a legacy document that predates the rules stays possible.
+    if (wireValidator === undefined || isEmptyObject(wireValidator)) validationLevel ??= 'moderate';
+    wireValidator = mergeVersioningValidator(wireValidator, versioning);
+    if (versioning.index) {
+      const index = normalizeDeclaredIndex(versioningIndex(versioning));
+      // Declaring the version index alone must not make every other index of
+      // the collection "undeclared" — and so a candidate for prune.
+      indexesPartial = indexes === undefined;
+      indexes = [...(indexes ?? []), index];
+    }
+  }
   return {
     name: definition.name ?? name,
     source,
-    indexes: definition.indexes?.map((index) => normalizeDeclaredIndex(index)),
+    indexes,
+    ...(indexesPartial ? { indexesPartial } : {}),
     ...(definition.searchIndexes !== undefined
       ? {
           searchIndexes: definition.searchIndexes.map((index) =>
@@ -236,14 +306,13 @@ function normalizeDefinition(definition, { name, source } = {}) {
           ),
         }
       : {}),
-    validator: validator === undefined || validator === null ? validator : toWire(validator),
-    ...(definition.validationLevel !== undefined
-      ? { validationLevel: definition.validationLevel }
-      : {}),
+    validator: wireValidator,
+    ...(validationLevel !== undefined ? { validationLevel } : {}),
     ...(definition.validationAction !== undefined
       ? { validationAction: definition.validationAction }
       : {}),
     ...(definition.prune !== undefined ? { prune: definition.prune } : {}),
+    ...(versioning !== undefined ? { versioning } : {}),
   };
 }
 

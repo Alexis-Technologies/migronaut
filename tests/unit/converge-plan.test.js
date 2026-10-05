@@ -842,3 +842,47 @@ describe('isDestructive', () => {
     assert.ok(!isDestructive({ target: 'validator', action: 'drop' }));
   });
 });
+
+describe('planCollection — versioning', () => {
+  it('should manage only the version index when versioning declares it alone', () => {
+    const plan = planCollection(
+      definition({ versioning: { current: 1 } }),
+      existing([{ key: { a: 1 }, name: 'a_1' }]),
+      { prune: true },
+    );
+    assert.deepStrictEqual(rows(plan), ['validator:c:create', 'index:__v_1__id_1:create']);
+    assert.deepStrictEqual(steps(plan), ['collMod validator', 'create __v_1__id_1']);
+  });
+
+  it('should accept the version index under another name, and refuse a colliding one', () => {
+    const same = planCollection(
+      definition({ versioning: { current: 1 } }),
+      existing([{ key: { __v: 1, _id: 1 }, name: 'by_version' }]),
+    );
+    assert.ok(rows(same).includes('index:__v_1__id_1:unchanged:exists as "by_version"@by_version'));
+    const different = planCollection(
+      definition({ versioning: { current: 1 } }),
+      existing([{ key: { __v: 1, _id: 1 }, name: 'by_version', sparse: true }]),
+      { prune: true },
+    );
+    assert.match(
+      rows(different).find((line) => line.startsWith('index:')),
+      /conflict/,
+    );
+  });
+
+  it('should still prune undeclared indexes when indexes are declared too', () => {
+    const plan = planCollection(
+      definition({ versioning: { current: 1 }, indexes: [] }),
+      existing([{ key: { a: 1 }, name: 'a_1' }]),
+      { prune: true },
+    );
+    assert.ok(rows(plan).includes('index:a_1:drop:not declared'));
+  });
+
+  it('should create a missing collection with the versioning validator and index', () => {
+    const plan = planCollection(definition({ versioning: { current: 2 } }), MISSING);
+    assert.deepStrictEqual(steps(plan), ['createCollection', 'create __v_1__id_1']);
+    assert.strictEqual(plan.steps[0].options.validationLevel, 'moderate');
+  });
+});
