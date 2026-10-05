@@ -41,6 +41,12 @@ export interface MigrationContext {
 export interface MigrationModule {
   up: (ctx: MigrationContext) => Promise<void>;
   down: (ctx: MigrationContext) => Promise<void>;
+  /**
+   * Background migrations (file names, each sorting before this file) that
+   * must have completed before this migration runs.
+   * @experimental New in 2.3
+   */
+  requires?: readonly string[];
   /** If true, wraps this migration in a MongoDB session + transaction */
   useTransaction?: boolean;
   /** Overrides `MigronautConfig.timeoutMs` for this migration only */
@@ -249,6 +255,14 @@ export interface StepBackgroundMigration extends BackgroundMigrationSettings {
 
 /** A background migration, as a migration file exports it: `export const background = {…}` */
 export type BackgroundMigration = DeclarativeBackgroundMigration | StepBackgroundMigration;
+
+/** Shape of a background migration file module — no `up`/`down` */
+export interface BackgroundMigrationModule {
+  background: BackgroundMigration;
+  /** Background migrations that must complete first (each sorting before this file) */
+  requires?: readonly string[];
+  description?: string;
+}
 
 // ─── Changelog ────────────────────────────────────────────────────────────────
 
@@ -1241,6 +1255,12 @@ export interface StatusRow {
    * (`up(file, { checksum })`).
    */
   checksum?: string;
+  /** `dryRun('up')` rows: a background migration file (applied = registered) */
+  background?: true;
+  /** `dryRun('up')` rows: the background migrations the file requires */
+  requires?: string[];
+  /** `dryRun('up')` rows: those of `requires` not completed yet */
+  waitsFor?: string[];
   /** Who asked for the apply, and why — when the run said (`requestedBy` / `reason` options) */
   requestedBy?: string;
   reason?: string;
@@ -1409,6 +1429,14 @@ export interface UpOptions {
    * with a filename or `to`.
    */
   converge?: boolean;
+  /**
+   * What the run does at a migration that `requires` a background migration
+   * not completed yet: `'error'` (default) throws {@link BackgroundPendingError};
+   * `'stop'` ends the run there, cleanly (`background:waiting`). Either way
+   * that migration fires no hook and leaves no failed trace.
+   * @experimental New in 2.3
+   */
+  onBackgroundPending?: 'error' | 'stop';
   /**
    * Who asked for this run (≤ 128 characters) — stamped on the changelog
    * records it writes. `executedBy` is the OS user that ran it; on a queue
@@ -1606,6 +1634,8 @@ export interface MigronautEvents {
   'converge:wait': (event: ConvergeWaitEvent) => void;
   'converge:end': (event: ConvergeEndEvent) => void;
   'background:registered': (event: BackgroundRegisteredEvent) => void;
+  'background:waiting': (event: BackgroundEvent) => void;
+  'background:drift': (event: BackgroundEvent) => void;
   'background:unblocked': (event: BackgroundEvent) => void;
   'background:partitioned': (event: BackgroundEvent) => void;
   'background:pass': (event: BackgroundEvent) => void;
@@ -2096,6 +2126,13 @@ export interface RunMigrationsOptions extends MigratorKitOptions {
   /** Skip lock acquisition (dev only — never in production) */
   noLock?: boolean;
   /**
+   * At a migration that requires an unfinished background migration: throw
+   * (`'error'`, default) or stop the run there (`'stop'`, listed in
+   * `waiting`) — `'stop'` lets an app boot while a background migration runs.
+   * @experimental New in 2.3
+   */
+  onBackgroundPending?: 'error' | 'stop';
+  /**
    * How to react when another process already holds the migration lock — the
    * typical case when several app instances boot at once.
    * - `'throw'` (default): propagate {@link LockAlreadyHeldError}.
@@ -2149,6 +2186,12 @@ export interface MigrationSummary {
   attempts: number;
   /** The converge that ended the run — present only when `convergeAfterUp` converged */
   converge?: ConvergeResult;
+  /**
+   * With `onBackgroundPending: 'stop'`: the migration the run stopped at and
+   * the background migrations it waits for.
+   * @experimental New in 2.3
+   */
+  waiting?: { migration: string; waitsFor: { migration: string; status: string }[] }[];
 }
 
 /**

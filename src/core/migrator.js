@@ -6,6 +6,7 @@ const path = require('node:path');
 // and pulls in ~150 modules, which `--help`, `--version`, `init` and `create`
 // have no use for.
 const {
+  BackgroundPendingError,
   ChecksumMismatchError,
   ConfigInvalidError,
   ConnectionFailedError,
@@ -46,6 +47,7 @@ const {
   waitForLanes,
 } = require('./background.js');
 const { resolveBackgroundSpec } = require('./background-spec.js');
+const { matchOf } = require('./background-engine.js');
 const { BackgroundStore } = require('./background-store.js');
 const { sleep } = require('./background-throttle.js');
 const { runBaseline } = require('./baseline.js');
@@ -164,6 +166,8 @@ class MigratorKit extends EventEmitter {
   #backgroundDefinitions;
   /** The server's topology, read once — transactional background migrations need it */
   #topology;
+  /** Migration modules read ahead of a run (requires, kind), by checksum */
+  #moduleCache = new Map();
 
   constructor(config = {}, options = {}) {
     super();
@@ -758,6 +762,8 @@ class MigratorKit extends EventEmitter {
         this.#assertNotAborted(signal, results);
         const outcome = await execute(name, index, results);
         if (outcome === 'done') doneCount += 1;
+        // A clean stop: what follows waits for a background migration.
+        if (outcome === 'stop') break;
       }
     } catch (error) {
       failure = error;
@@ -1180,6 +1186,25 @@ class MigratorKit extends EventEmitter {
           );
         }
 
+        // Before beforeEach: a migration that cannot run yet fires no hook and
+        // leaves no failed trace.
+        const waiting = await this.#requiresGuard(name, signal);
+        if (waiting.length > 0) {
+          const list = waiting.map((entry) => `${entry.migration} (${entry.status})`).join(', ');
+          if ((options.onBackgroundPending ?? 'error') === 'stop') {
+            logger.info(
+              `⧗ Waiting   ${name} — requires ${list}`,
+              this.#fields({ migration: name, direction: 'up', waitsFor: waiting.length }),
+            );
+            this.#emit('background:waiting', { migration: name, waitsFor: waiting });
+            return 'stop';
+          }
+          throw new BackgroundPendingError(
+            `${name} requires background migration(s) that have not completed: ${list}`,
+            { migration: name, waitsFor: waiting },
+          );
+        }
+
         const batch = options.step ? baseBatch + appliedCount : baseBatch;
         await this.#executeMigration({
           name,
@@ -1215,6 +1240,9 @@ class MigratorKit extends EventEmitter {
           failureFields: { checksum, ...actorFields(options) },
         });
         appliedCount += 1;
+        if (this.#config.backgroundInline && (await this.#peek(name))?.kind === 'background') {
+          await this.#runInline(name, signal);
+        }
         return 'done';
       },
     });
@@ -1522,6 +1550,8 @@ class MigratorKit extends EventEmitter {
       const { records, preserveOrder } = await this.#selectDownTargets(filename, options);
       for (const record of records) {
         recordByName.set(record.name, record);
+        // The refusal a real `down` of a one-way background migration meets.
+        if (record.kind === 'background') await this.#assertBackgroundRevertible(record.name);
       }
       names = revertOrder(records, preserveOrder);
     }
@@ -1532,6 +1562,7 @@ class MigratorKit extends EventEmitter {
       // later (a queue job) can insist on exactly this version of the file.
       if (direction === 'up' && !row.invalid) {
         row.checksum = await this.#cachedChecksum(this.#filepath(name));
+        await this.#annotateBackground(row, name);
       }
       return row;
     });
@@ -1554,6 +1585,30 @@ class MigratorKit extends EventEmitter {
       );
     }
     return rows;
+  }
+
+  /**
+   * A preview row's background facts: a background file, what it requires,
+   * and what of that is not done yet — read without writing anything. A file
+   * that does not load is left for the real run to report.
+   */
+  async #annotateBackground(row, name) {
+    let loaded;
+    try {
+      loaded = await this.#peek(name);
+    } catch {
+      return;
+    }
+    if (loaded === null) return;
+    if (loaded.kind === 'background') {
+      row.background = true;
+      row.kind = 'background';
+    }
+    const requires = loaded.requires ?? [];
+    if (requires.length === 0) return;
+    row.requires = requires;
+    const waiting = await this.#unsatisfied(requires, { reopen: false }).catch(() => []);
+    if (waiting.length > 0) row.waitsFor = waiting.map((entry) => entry.migration);
   }
 
   /** Full migration status for all known files and records */
@@ -2120,6 +2175,21 @@ class MigratorKit extends EventEmitter {
     return { status, direction: 'forward', ...(waitsFor.length > 0 ? { waitsFor } : {}) };
   }
 
+  /** What a `down` of a background migration would refuse — for a preview to refuse it too */
+  async #assertBackgroundRevertible(name) {
+    const loaded = await this.#peek(name);
+    if (loaded === null || loaded.kind !== 'background') return;
+    const { spec } = await this.#backgroundSpec(name, loaded);
+    if (spec.reversible) return;
+    if ((await this.#backgroundStore().migratedSoFar(name)) > 0) {
+      throw new IrreversibleMigrationError(
+        `Background migration ${name} has already rewritten documents and declares no revert — ` +
+          'write a background migration back instead',
+        { names: [name] },
+      );
+    }
+  }
+
   /**
    * `down` of a background migration: with a `revert`, the forward one is
    * replaced by the way back (registered to run like any other); without one,
@@ -2145,13 +2215,7 @@ class MigratorKit extends EventEmitter {
       );
       return { status: 'pending', direction: 'revert' };
     }
-    if ((await store.migratedSoFar(name)) > 0) {
-      throw new IrreversibleMigrationError(
-        `Background migration ${name} has already rewritten documents and declares no revert — ` +
-          'write a background migration back instead',
-        { names: [name] },
-      );
-    }
+    await this.#assertBackgroundRevertible(name);
     await store.remove(name, { session });
     return { status: 'withdrawn', direction: 'forward' };
   }
@@ -2216,6 +2280,140 @@ class MigratorKit extends EventEmitter {
     const deps = this.#backgroundDeps();
     for (const state of await store.list({ requires: name, status: 'blocked' })) {
       await tryUnblock(deps, state);
+    }
+  }
+
+  /**
+   * A migration module read ahead of its run — for its `requires` and its
+   * kind — cached by checksum, so a long-lived kit imports an edited file
+   * again and an unchanged one never twice. `null` when it cannot be read.
+   */
+  async #peek(name) {
+    let checksum;
+    try {
+      checksum = await this.#cachedChecksum(this.#filepath(name));
+    } catch {
+      return null;
+    }
+    const cached = this.#moduleCache.get(name);
+    if (cached?.checksum === checksum) return cached.loaded;
+    const loaded = await loadMigrationFile(this.#filepath(name), {
+      reload: this.#config.reloadMigrations,
+      allowBackground: true,
+    });
+    this.#moduleCache.set(name, { checksum, loaded });
+    return loaded;
+  }
+
+  /**
+   * Whether a completed background migration's collection is still clean:
+   * one indexed `findOne` for a document in the old shape. A step migration
+   * cannot be probed — its state is all there is.
+   */
+  async #stillDirty(state) {
+    const spec = state.spec;
+    if (!spec || spec.mode !== 'declarative' || state.direction === 'revert') return false;
+    const badIds = state.badIds ?? [];
+    const match = matchOf(spec, 'forward');
+    const found = await this.#requireDb()
+      .collection(spec.collection)
+      .findOne(badIds.length > 0 ? { $and: [match, { _id: { $nin: badIds } }] } : match, {
+        projection: { _id: 1 },
+        readPreference: 'primary',
+      });
+    return found !== null;
+  }
+
+  /**
+   * The background migrations of `requires` not done yet:
+   * `[{ migration, status }]`. A `baseline` or imported record counts as
+   * done (that history predates migronaut). A completed one is checked
+   * against its data — and, unless this is only a preview, reopened when old
+   * shapes reappeared.
+   */
+  async #unsatisfied(requires, { reopen = true } = {}) {
+    const store = this.#backgroundStore();
+    const changelog = this.#requireChangelog();
+    const db = this.#requireDb();
+    const waiting = [];
+    for (const required of requires) {
+      const record = await changelog.getByName(db, required);
+      if (
+        record?.status === 'applied' &&
+        (record.origin === 'baseline' || record.origin === 'migrate-mongo')
+      ) {
+        continue;
+      }
+      const state = await store.get(required);
+      if (state === null) {
+        waiting.push({ migration: required, status: 'unregistered' });
+      } else if (state.direction === 'revert') {
+        waiting.push({ migration: required, status: 'reverted' });
+      } else if (state.status !== 'completed') {
+        waiting.push({ migration: required, status: state.status });
+      } else if (await this.#stillDirty(state)) {
+        if (reopen) {
+          await controlBackground(this.#backgroundDeps(), required, 'retry', {
+            reason: 'old-shape documents reappeared',
+          });
+          this.#emit('background:drift', {
+            migration: required,
+            source: 'requires',
+            action: 'reopened',
+          });
+        }
+        waiting.push({ migration: required, status: reopen ? 'running' : 'completed' });
+      }
+    }
+    return waiting;
+  }
+
+  /**
+   * The background migrations a pending regular migration waits for — run
+   * first, under this run's lock, in inline mode. Empty when it may run.
+   */
+  async #requiresGuard(name, signal) {
+    const loaded = await this.#peek(name);
+    if (loaded === null || loaded.kind === 'background') return [];
+    const requires = loaded.requires ?? [];
+    if (requires.length === 0) return [];
+    await this.#assertRequiresAreBackground(name, requires);
+    await this.#backgroundStore().ensureIndexes();
+    let waiting = await this.#unsatisfied(requires);
+    if (waiting.length > 0 && this.#config.backgroundInline) {
+      for (const entry of waiting) {
+        if (entry.status !== 'unregistered') await this.#runInline(entry.migration, signal);
+      }
+      waiting = await this.#unsatisfied(requires);
+    }
+    return waiting;
+  }
+
+  /**
+   * Inline mode: drive a background migration to the end right here, under
+   * the run's lock — what it requires first.
+   *
+   * @throws {BackgroundFailedError} when it fails; RunAbortedError on stop()
+   */
+  async #runInline(name, signal) {
+    const state = await this.#backgroundStore().get(name);
+    if (state === null) return;
+    for (const required of state.status === 'blocked' ? (state.waitsFor ?? []) : []) {
+      await this.#runInline(required, signal);
+    }
+    this.#logger.info(
+      `⧗ Running   ${name} inline`,
+      this.#fields({ background: name, inline: true }),
+    );
+    const status = await this.runBackground(name, {
+      signal,
+      concurrency: state.spec?.maxParallel ?? 1,
+    });
+    if (status.status === 'blocked') {
+      throw new BackgroundPendingError(
+        `Background migration ${name} cannot run inline: it waits for ${status.waitsFor.join(', ')}`,
+        { migration: name, waitsFor: status.waitsFor.map((migration) => ({ migration })) },
+      );
     }
   }
 

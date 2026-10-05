@@ -194,6 +194,8 @@ export const background = { collection: 'orders', from: 1, to: 2, migrate: (doc)
     await mongo.db
       .collection('_migronaut_background')
       .updateOne({ _id: '0001-orders.js' }, { $set: { 'totals.migrated': 5 } });
+    // The preview refuses exactly what the real down refuses.
+    await assert.rejects(kit.dryRun('down'), IrreversibleMigrationError);
     await assert.rejects(kit.down(), (error) => {
       assert.ok(
         error instanceof IrreversibleMigrationError ||

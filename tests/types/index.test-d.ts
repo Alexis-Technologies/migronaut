@@ -31,6 +31,7 @@ import {
   LockLostError,
   MigrationBlockedError,
   type MigrationEvent,
+  type MigrationModule,
   MigratorKit,
   MigronautError,
   type MigronautConfig,
@@ -81,6 +82,7 @@ expectType<
     waitedMs: number;
     attempts: number;
     converge?: ConvergeResult;
+    waiting?: { migration: string; waitsFor: { migration: string; status: string }[] }[];
   }>
 >(runMigrations({ uri: 'mongodb://localhost:27017', dbName: 'test' }));
 expectType<Promise<StatusRow[]>>(
@@ -231,6 +233,7 @@ expectType<
     waitedMs: number;
     attempts: number;
     converge?: ConvergeResult;
+    waiting?: { migration: string; waitsFor: { migration: string; status: string }[] }[];
   }>
 >(runMigrations({}, { onLockHeld: 'wait', lockWaitTimeoutMs: 90_000, lockPollIntervalMs: 250 }));
 expectError(runMigrations({}, { onLockHeld: 'retry' }));
@@ -563,3 +566,12 @@ expectAssignable<Partial<MigronautConfig>>({
   backgroundShardAware: 'off',
 });
 expectNotAssignable<Partial<MigronautConfig>>({ backgroundDrift: 'never' });
+
+// ─── requires and onBackgroundPending ─────────────────────────────────────────
+expectAssignable<MigrationModule>({
+  up: async () => undefined,
+  down: async () => undefined,
+  requires: ['0001-orders.js'],
+});
+expectType<Promise<RunResult[]>>(kit.up(undefined, { onBackgroundPending: 'stop' }));
+expectError(kit.up(undefined, { onBackgroundPending: 'wait' }));
