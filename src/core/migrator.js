@@ -38,12 +38,14 @@ const {
 const { safeUsername } = require('../utils/user.js');
 const { runAudit } = require('./audit.js');
 const {
+  auditFindings,
   control: controlBackground,
   coordinate,
   failedError,
   repin: repinBackgroundState,
   runSlice,
   tryUnblock,
+  verify: verifyDrift,
   waitForLanes,
 } = require('./background.js');
 const { resolveBackgroundSpec } = require('./background-spec.js');
@@ -1656,6 +1658,18 @@ class MigratorKit extends EventEmitter {
       inspectLock: () => this.#buildLock().inspect(),
       status: () => this.status(),
       definitions: () => this.#resolveCollections(),
+      background: async () => {
+        const deps = this.#backgroundDeps();
+        return auditFindings({
+          ...deps,
+          checksumOf: (name) => computeChecksum(this.#filepath(name)),
+          backgroundRecords: () =>
+            this.#requireDb()
+              .collection(this.#config.migrationsCollection)
+              .find({ kind: 'background', status: 'applied' }, { projection: { name: 1 } })
+              .toArray(),
+        });
+      },
     });
   }
 
@@ -2257,7 +2271,44 @@ class MigratorKit extends EventEmitter {
         ),
       onCompleted: (name) => this.#unblockDependents(name),
       topology: () => (this.#topology ??= readServer(db).then((server) => server.topology)),
+      versioningOf: (collection) => this.#versioningOf(collection),
     };
+  }
+
+  /** A declared collection's versioning, or `undefined` — for the drift watch */
+  async #versioningOf(collection) {
+    const config = this.#config;
+    if (config.collections === undefined && config.collectionsDir === undefined) return undefined;
+    try {
+      const definitions = config.reloadMigrations
+        ? await this.#resolveCollections()
+        : (this.#backgroundDefinitions ??= await this.#resolveCollections());
+      for (const definition of definitions) {
+        if (definition.name === collection) return definition.versioning;
+      }
+    } catch {
+      // Definitions that do not load are converge's to report.
+    }
+    return undefined;
+  }
+
+  /**
+   * The drift watch, once: old-shape documents that appeared after a
+   * background migration completed are found with one indexed probe each,
+   * and reopen it (`onDrift: 'reopen'`, the `backgroundOnDrift` default) or
+   * are only reported (`'report'`). `collections` narrows it.
+   * @experimental
+   */
+  async verifyBackground(options = {}) {
+    await this.#backgroundReady();
+    const onDrift = options.onDrift ?? this.#config.backgroundOnDrift;
+    if (onDrift !== 'reopen' && onDrift !== 'report') {
+      throw new ConfigInvalidError("onDrift must be 'reopen' or 'report'", { onDrift });
+    }
+    return verifyDrift(this.#backgroundDeps(), {
+      onDrift,
+      ...(options.collections !== undefined ? { collections: options.collections } : {}),
+    });
   }
 
   /** A background migration file, loaded and resolved: `{ spec, fns, checksum }` */

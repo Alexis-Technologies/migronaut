@@ -823,6 +823,198 @@ async function waitForLanes(deps, name, { signal, timeoutMs = 120_000, pollMs = 
   }
 }
 
+// ─── Drift ────────────────────────────────────────────────────────────────────
+
+/** How long one drift probe may run */
+const DRIFT_PROBE_MS = 5_000;
+
+/** Statuses still at work on a collection — its drift is not drift yet */
+const ACTIVE = new Set(['blocked', 'pending', 'running', 'paused']);
+
+/** One indexed look for a document of a completed forward migration's old shape */
+async function probeOldShape(deps, state, hint) {
+  const spec = state.spec;
+  const badIds = state.badIds ?? [];
+  const match = matchOf(spec, 'forward');
+  return deps.db
+    .collection(spec.collection)
+    .findOne(badIds.length > 0 ? { $and: [match, { _id: { $nin: badIds } }] } : match, {
+      projection: { _id: 1 },
+      hint,
+      maxTimeMS: DRIFT_PROBE_MS,
+      ...READ_OPTIONS,
+    });
+}
+
+/**
+ * The drift watch: old-shape documents that appeared after a background
+ * migration completed — an old pod, a forgotten worker, another service.
+ * One indexed probe per completed forward (declarative) migration; skipped
+ * where another one is still at work on the collection, where the validator
+ * already refuses the old shape (`to ≤ versioning.min`), and where the
+ * version index is missing. With `onDrift: 'reopen'` a finding reopens it —
+ * a new pass over what is left, not a reset — and with `'report'` it is only
+ * said. Chains (v1→v2→v3) converge on their own. No document id is reported.
+ */
+async function verify(deps, { onDrift = 'reopen', collections } = {}) {
+  const states = await deps.store.list();
+  const active = new Set();
+  for (const state of states) {
+    if (ACTIVE.has(state.status) && state.spec?.collection) active.add(state.spec.collection);
+  }
+  const wanted = collections === undefined ? undefined : new Set(collections);
+  const result = { checked: 0, skipped: 0, drift: [] };
+  for (const state of states) {
+    const spec = state.spec;
+    if (state.status !== 'completed' || state.direction === 'revert') continue;
+    if (spec?.mode !== 'declarative') continue;
+    if (wanted !== undefined && !wanted.has(spec.collection)) continue;
+    const versioning = await deps.versioningOf?.(spec.collection);
+    if (active.has(spec.collection) || (versioning && spec.to <= versioning.min)) {
+      result.skipped += 1;
+      continue;
+    }
+    const hint = await versionHint(deps, spec);
+    if (hint === undefined) {
+      result.skipped += 1;
+      continue;
+    }
+    let found;
+    try {
+      found = await probeOldShape(deps, state, hint);
+    } catch (error) {
+      deps.logger.warn(
+        `⚠ Drift check of ${state._id} failed: ${errorText(error)}`,
+        deps.fields({ background: state._id }),
+      );
+      result.skipped += 1;
+      continue;
+    }
+    result.checked += 1;
+    if (found === null) continue;
+    const action = onDrift === 'reopen' ? 'reopened' : 'reported';
+    if (action === 'reopened') {
+      await control(deps, state._id, 'retry', { reason: 'old-shape documents reappeared' });
+    }
+    deps.telemetry?.backgroundDrift({ name: state._id });
+    deps.emit('background:drift', {
+      migration: state._id,
+      collection: spec.collection,
+      source: 'poll',
+      action,
+    });
+    deps.logger.warn(
+      `⚠ ${spec.collection}: old-shape documents appeared after ${state._id} completed — ` +
+        (action === 'reopened' ? 'reopened it' : 'an old release may still be writing'),
+      deps.fields({ background: state._id, collection: spec.collection, action }),
+    );
+    result.drift.push({ migration: state._id, collection: spec.collection, action });
+  }
+  return result;
+}
+
+/** How long a background migration may sit in `pending`, or `running` without progress, before audit warns */
+const STALL_MS = 15 * 60_000;
+
+/**
+ * What `audit` says about background migrations: `{ status, detail }` with
+ * the worst finding — or `null` when none is registered. `deps.checksumOf`
+ * reads the file on disk; `deps.backgroundRecords` the changelog's
+ * background records.
+ */
+async function auditFindings(deps, { now = Date.now() } = {}) {
+  const states = await deps.store.list();
+  const records = await deps.backgroundRecords();
+  if (states.length === 0 && records.length === 0) return null;
+  const failures = [];
+  const warnings = [];
+  const byName = new Map(states.map((state) => [state._id, state]));
+  const counts = {};
+  for (const state of states) {
+    const name = state._id;
+    counts[state.status] = (counts[state.status] ?? 0) + 1;
+    if (state.status === 'failed') {
+      failures.push(`${name} failed${state.lastError ? ` (${state.lastError})` : ''}`);
+      continue;
+    }
+    const registeredAt = new Date(state.registeredAt).getTime();
+    const progressAt = new Date(
+      state.lastProgressAt ?? state.startedAt ?? state.registeredAt,
+    ).getTime();
+    if (state.status === 'pending' && now - registeredAt > STALL_MS) {
+      warnings.push(
+        `${name} has been pending since ${new Date(registeredAt).toISOString()} — is a runner up?`,
+      );
+    }
+    if (state.status === 'paused') warnings.push(`${name} is paused`);
+    if (state.status === 'running') {
+      const { live } = await deps.store.leases(name);
+      if (live === 0 && now - progressAt > STALL_MS) {
+        warnings.push(
+          `${name} is running but stalled — no lane for ${Math.round((now - progressAt) / 60_000)} min`,
+        );
+      }
+    }
+    if (state.status === 'blocked') {
+      for (const required of state.waitsFor ?? []) {
+        if (byName.get(required)?.status === 'failed') {
+          warnings.push(`${name} is blocked by ${required}, which failed`);
+        }
+      }
+    }
+    if (state.plan !== undefined) {
+      const current = await deps.store.partitionCounts(name, {
+        generation: state.generation,
+        plan: state.plan.token,
+      });
+      if (current.failed > 0 && state.status !== 'failed') {
+        warnings.push(`${name} has ${current.failed} failed partition(s)`);
+      }
+      const all = await deps.store.partitions(name);
+      let orphaned = 0;
+      for (const partition of all) if (partition.plan !== state.plan.token) orphaned += 1;
+      if (orphaned > 0) warnings.push(`${name} keeps ${orphaned} partition(s) of an old plan`);
+    }
+    if (state.status === 'completed') {
+      if ((state.badIds ?? []).length > 0) {
+        warnings.push(
+          `${name} completed with ${state.badIds.length} document(s) it could not migrate`,
+        );
+      }
+      if (state.spec?.mode === 'declarative' && state.direction !== 'revert') {
+        const hint = await versionHint(deps, state.spec);
+        if (
+          hint !== undefined &&
+          (await probeOldShape(deps, state, hint).catch(() => null)) !== null
+        ) {
+          warnings.push(
+            `${state.spec.collection} holds old-shape documents again (${name} completed)`,
+          );
+        }
+      }
+    }
+    try {
+      const checksum = await deps.checksumOf(name);
+      if (state.checksum !== undefined && checksum !== state.checksum) {
+        warnings.push(`${name} changed on disk since it was registered (repin it)`);
+      }
+    } catch {
+      warnings.push(`${name} is registered but its file is missing`);
+    }
+  }
+  for (const record of records) {
+    if (!byName.has(record.name)) {
+      warnings.push(`${record.name} is applied but its background migration is not registered`);
+    }
+  }
+  const summary = Object.entries(counts)
+    .map(([status, n]) => `${n} ${status}`)
+    .join(', ');
+  if (failures.length > 0) return { status: 'fail', detail: [...failures, ...warnings].join('; ') };
+  if (warnings.length > 0) return { status: 'warn', detail: warnings.join('; ') };
+  return { status: 'pass', detail: `${states.length} background migration(s): ${summary}` };
+}
+
 /** Why a failed state failed, for a thrown error */
 function failedError(state) {
   return new BackgroundFailedError(
@@ -832,6 +1024,7 @@ function failedError(state) {
 }
 
 module.exports = {
+  auditFindings,
   coordinate,
   control,
   failedError,
@@ -840,6 +1033,7 @@ module.exports = {
   repin,
   runSlice,
   tryUnblock,
+  verify,
   versionHint,
   waitForLanes,
 };

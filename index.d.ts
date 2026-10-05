@@ -1653,8 +1653,9 @@ export interface MigronautEvents {
 export interface AuditCheck {
   /**
    * e.g. 'config', 'connection', 'transactions', 'indexes', 'lock', 'checksums',
-   * 'pending', 'ordering', 'runtime' — and 'search' when declared collections
-   * hold search indexes
+   * 'pending', 'ordering', 'runtime' — 'search' when declared collections
+   * hold search indexes, and 'background' when background migrations are
+   * registered
    */
   name: string;
   status: 'pass' | 'warn' | 'fail';
@@ -1960,6 +1961,16 @@ export class MigratorKit extends EventEmitter {
    * path in a transaction that is always aborted. @experimental
    */
   dryRunBackground(name: string, options?: BackgroundDryRunOptions): Promise<BackgroundDryRun>;
+  /**
+   * The drift watch, once: one indexed probe per completed background
+   * migration for documents of its old shape that appeared since; a finding
+   * reopens it (`onDrift: 'reopen'`, the `backgroundOnDrift` default) or is
+   * only reported. No document id is returned. @experimental
+   */
+  verifyBackground(options?: {
+    onDrift?: 'reopen' | 'report';
+    collections?: string[];
+  }): Promise<BackgroundVerifyResult>;
 }
 
 // ─── Background migration results ─────────────────────────────────────────────
@@ -2104,6 +2115,15 @@ export interface BackgroundControlResult {
   status: BackgroundState;
   /** `wait`: whether every lane stopped in time */
   stopped?: boolean;
+}
+
+/** What {@link MigratorKit.verifyBackground} found */
+export interface BackgroundVerifyResult {
+  /** Completed background migrations probed */
+  checked: number;
+  /** Skipped: another one at work on the collection, the validator guards it, no version index */
+  skipped: number;
+  drift: { migration: string; collection: string; action: 'reopened' | 'reported' }[];
 }
 
 /** Options of {@link MigratorKit.dryRunBackground} */
