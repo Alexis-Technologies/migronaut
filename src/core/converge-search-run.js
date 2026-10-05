@@ -39,21 +39,25 @@ async function pause(ms, signal) {
 }
 
 /**
- * The run's word on Search, when search indexes are declared: whether the
- * server has it (and how that was told — `evidence`), every declared index
- * that exists but does not serve its latest definition yet — building,
- * updating, stale or failed — and how a wait for them ended (`wait`).
+ * A row's entry in the result's `notReady` — a declared search index that
+ * exists but does not serve its latest definition yet (building, updating,
+ * stale or failed) — or undefined. Asked of every row by the report's one
+ * pass over them.
  */
-function searchSummary(result, search) {
-  const notReady = [];
-  for (const collection of result.collections) {
-    for (const action of collection.actions) {
-      if (action.target !== 'searchIndex' || action.build === undefined) continue;
-      if (!SERVED_ACTIONS.has(action.action)) continue;
-      if (searchBuildState(action.build) === 'serving') continue;
-      notReady.push({ collection: collection.name, name: action.name, ...action.build });
-    }
-  }
+function notReadyEntry(collection, action) {
+  if (action.target !== 'searchIndex' || action.build === undefined) return undefined;
+  if (!SERVED_ACTIONS.has(action.action)) return undefined;
+  if (searchBuildState(action.build) === 'serving') return undefined;
+  return { collection, name: action.name, ...action.build };
+}
+
+/**
+ * The run's word on Search, when search indexes are declared: whether the
+ * server has it (and how that was told — `evidence`), the declared indexes
+ * not serving yet (`notReady`, gathered by the report), and how a wait for
+ * them ended (`wait`).
+ */
+function searchSummary(search, notReady) {
   return {
     available: search.available,
     ...(search.evidence !== undefined ? { evidence: search.evidence } : {}),
@@ -63,18 +67,12 @@ function searchSummary(result, search) {
 }
 
 /**
- * One line for every search index whose server-reported options the
- * comparison left out — the declarations do not set them, and migronaut knows
- * no default for them (a newer mongot's). Not a problem; worth knowing.
+ * One line naming every search index whose server-reported options the
+ * comparison left out (`found`: `collection.index (paths)`, gathered while
+ * the plans were reviewed) — the declarations do not set them, and migronaut
+ * knows no default for them (a newer mongot's). Not a problem; worth knowing.
  */
-function warnIgnored(deps, plans) {
-  const found = [];
-  for (const plan of plans) {
-    for (const action of plan.actions) {
-      if (action.target !== 'searchIndex' || !action.ignored) continue;
-      found.push(`${plan.name}.${action.name} (${action.ignored.join(', ')})`);
-    }
-  }
+function warnIgnored(deps, found) {
   if (found.length === 0) return;
   deps.logger.warn(
     `⚠ The server reports search index options the declarations do not set, with no default ` +
@@ -116,14 +114,18 @@ function searchReadFailure(error, collection, phase) {
  * none are never asked — a run without `searchIndexes` makes no search call.
  */
 async function readSearch(deps, server, definitions, live, search) {
-  const declaring = [];
+  // One pass: the declaring collections that exist as regular ones (a view or
+  // a time-series collection is refused by the planner anyway), and the first
+  // declaring one that does not exist yet — the probe's fallback.
+  const existing = [];
+  let missing;
   for (const [position, definition] of definitions.entries()) {
-    if (definition.searchIndexes !== undefined) declaring.push(position);
+    if (definition.searchIndexes === undefined) continue;
+    const state = live[position];
+    if (state.exists && state.type === 'collection') existing.push(position);
+    else if (!state.exists && missing === undefined) missing = position;
   }
-  const isRegular = (position) => live[position].exists && live[position].type === 'collection';
-  const existing = declaring.filter(isRegular);
-  // A view or a time-series collection is refused by the planner anyway.
-  const target = existing[0] ?? declaring.find((position) => !live[position].exists);
+  const target = existing[0] ?? missing;
   if (target === undefined) return;
   const targetName = definitions[target].name;
   let probe;
@@ -213,15 +215,21 @@ function waitTargets(run) {
   const { definitions, plans, result } = run;
   const targets = [];
   for (const [position, definition] of definitions.entries()) {
-    const rows = result.collections[position].actions;
-    for (const declared of definition.searchIndexes ?? []) {
-      const row = rows.find(
-        (action) => action.target === 'searchIndex' && action.name === declared.name,
-      );
+    if (definition.searchIndexes === undefined) continue;
+    // The collection's search index rows and update steps by name, read once —
+    // not searched again for every declared index.
+    const rows = new Map();
+    for (const action of result.collections[position].actions) {
+      if (action.target === 'searchIndex') rows.set(action.name, action);
+    }
+    const updates = new Map();
+    for (const step of plans[position].steps) {
+      if (step.op === 'updateSearchIndex') updates.set(step.name, step);
+    }
+    for (const declared of definition.searchIndexes) {
+      const row = rows.get(declared.name);
       if (!row || !SERVED_ACTIONS.has(row.action)) continue;
-      const update = plans[position].steps.find(
-        (step) => step.op === 'updateSearchIndex' && step.name === declared.name,
-      );
+      const update = updates.get(declared.name);
       targets.push({
         collection: definition.name,
         name: declared.name,
@@ -250,8 +258,7 @@ function describeNotReady(notReady) {
 
 /** Why a wait ran out, and what to do — a STALE index will not get there by waiting longer */
 function timeoutAdvice(notReady) {
-  const stale = notReady.filter((index) => searchBuildState(index) === 'stale');
-  if (stale.length === notReady.length) {
+  if (notReady.every((index) => searchBuildState(index) === 'stale')) {
     return 'a STALE index is queryable but no longer replicating from the collection — see troubleshooting';
   }
   return 'the server goes on building; converge again to wait more, or raise searchIndexWaitTimeoutMs';
@@ -365,7 +372,7 @@ function settleWait(deps, targets, outcome, wait, result) {
   const failed = outcome.outcome === 'failed';
   throw new ConvergeFailedError(
     failed
-      ? `Search index build failed: ${describeNotReady(outcome.notReady.filter((index) => index.status === 'FAILED'))} — fix the definition or the data, then converge again`
+      ? `Search index build failed: ${describeNotReady(outcome.failed)} — fix the definition or the data, then converge again`
       : `Search index(es) not queryable after ${Math.round(outcome.waitedMs / 1000)}s: ` +
           `${describeNotReady(outcome.notReady)} — ${timeoutAdvice(outcome.notReady)}`,
     {
@@ -381,33 +388,39 @@ function settleWait(deps, targets, outcome, wait, result) {
 
 /** Closing lines about search indexes that do not serve their declaration yet */
 function reportNotReady(deps, result) {
-  const notReady = result.search?.notReady ?? [];
-  const building = notReady.filter(
-    (index) => !['stale', 'failed'].includes(searchBuildState(index)),
-  );
+  // One pass sorts them: the building ones into one line, the stale and the
+  // failed into a warning each — said after that line.
+  const building = [];
+  const warnings = [];
+  for (const index of result.search?.notReady ?? []) {
+    const state = searchBuildState(index);
+    const detail = index.message ? `: ${index.message}` : '';
+    if (state === 'stale') {
+      warnings.push([
+        index,
+        `is STALE — queryable, but no longer replicating from the collection, so its results ` +
+          `may be out of date${detail}`,
+      ]);
+    } else if (state === 'failed') {
+      warnings.push([
+        index,
+        `failed to build${detail} — converge does not resubmit an unchanged definition; fix ` +
+          'the definition or the data',
+      ]);
+    } else {
+      building.push(`${index.collection}.${index.name}`);
+    }
+  }
   if (building.length > 0) {
     deps.logger.info(
       `• ${building.length} search index(es) still building on the server: ` +
-        building.map((index) => `${index.collection}.${index.name}`).join(', ') +
-        ' — waitForSearchIndexes (CLI: --wait-search) waits for them',
+        `${building.join(', ')} — waitForSearchIndexes (CLI: --wait-search) waits for them`,
       deps.fields({ building: building.length }),
     );
   }
-  for (const index of notReady) {
-    if (searchBuildState(index) === 'stale') {
-      deps.logger.warn(
-        `⚠ ${index.collection}: search index "${index.name}" is STALE — queryable, but no ` +
-          'longer replicating from the collection, so its results may be out of date' +
-          `${index.message ? `: ${index.message}` : ''}`,
-        deps.fields({ collection: index.collection, searchIndex: index.name }),
-      );
-      continue;
-    }
-    if (searchBuildState(index) !== 'failed') continue;
+  for (const [index, what] of warnings) {
     deps.logger.warn(
-      `⚠ ${index.collection}: search index "${index.name}" failed to build` +
-        `${index.message ? `: ${index.message}` : ''} — converge does not resubmit an unchanged ` +
-        'definition; fix the definition or the data',
+      `⚠ ${index.collection}: search index "${index.name}" ${what}`,
       deps.fields({ collection: index.collection, searchIndex: index.name }),
     );
   }
@@ -415,6 +428,7 @@ function reportNotReady(deps, result) {
 
 module.exports = {
   SEARCH_SETTLE_DELAYS_MS,
+  notReadyEntry,
   pause,
   readSearch,
   readSearchIndexes,

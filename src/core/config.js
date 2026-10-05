@@ -4,6 +4,9 @@ const { pathToFileURL } = require('node:url');
 const { ConfigInvalidError } = require('../errors/index.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
+
+/** The keys a `telemetry` object may hold — a Set, read once per key */
+const TELEMETRY_KEY_SET = new Set(TELEMETRY_KEYS);
 const { applyEnvFile } = require('../utils/env.js');
 const { errorText } = require('../utils/error.js');
 const { resolveLogger } = require('../utils/logger.js');
@@ -550,7 +553,7 @@ async function loadConfig(options = {}) {
   // (`trace`, `metrics`) instead of a tracer and a meter turns it off silently.
   if (config.telemetry) {
     for (const key in config.telemetry) {
-      if (!TELEMETRY_KEYS.includes(key)) (unknown ??= []).push(`telemetry.${key}`);
+      if (!TELEMETRY_KEY_SET.has(key)) (unknown ??= []).push(`telemetry.${key}`);
     }
   }
   if (unknown) {

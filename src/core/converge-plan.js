@@ -166,9 +166,17 @@ function dropsUniqueConstraint(declared, drops) {
  */
 function backsShardKey(index, shardKey) {
   if (!shardKey) return false;
-  const shardFields = Object.keys(shardKey);
-  const fields = index.serverKey.map(([field]) => field);
-  return shardFields.every((field, position) => fields[position] === field);
+  let position = 0;
+  for (const field of Object.keys(shardKey)) {
+    if (index.serverKey[position]?.[0] !== field) return false;
+    position += 1;
+  }
+  return true;
+}
+
+/** `first; second`, or `second` alone when there is no first */
+function joinReasons(first, second) {
+  return first ? `${first}; ${second}` : second;
 }
 
 function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities }, row, steps) {
@@ -293,9 +301,7 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities
       }
       drops.push(...blockers);
       action.action = 'recreate';
-      action.reason = identical
-        ? 'name'
-        : [item.reason, `replaces ${names}`].filter(Boolean).join('; ');
+      action.reason = identical ? 'name' : joinReasons(item.reason, `replaces ${names}`);
     }
 
     if (drops.length === 0) {
@@ -304,7 +310,7 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities
       // Not done unasked: the CLI asks with --rebuild-unique, while the paths
       // nobody watches (after up, a queue job) never get this far on their own.
       action.action = 'conflict';
-      action.reason = [action.reason, UNIQUE_REBUILD_REASON].filter(Boolean).join('; ');
+      action.reason = joinReasons(action.reason, UNIQUE_REBUILD_REASON);
     } else {
       rebuilds.push({ declared, action, drops });
     }
@@ -313,16 +319,16 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities
   // A create that collides with an index another rebuild is about to drop has
   // to wait for that drop — and two rebuilds that swap keys each wait for the
   // other. Such entangled ones run as one group: every drop, then every create.
-  const doomed = new Map();
+  // Each doomed index keeps its rebuild and itself, so no lookup is needed below.
+  const doomed = [];
   for (const rebuild of rebuilds) {
-    for (const index of rebuild.drops) doomed.set(index.name, rebuild);
+    for (const index of rebuild.drops) doomed.push({ owner: rebuild, index });
   }
   const entangled = new Set();
-  for (const item of [...creates, ...rebuilds]) {
-    for (const [name, owner] of doomed) {
-      if (owner === item) continue;
-      const index = owner.drops.find((drop) => drop.name === name);
-      if (collides(item.declared, index)) {
+  for (const list of [creates, rebuilds]) {
+    for (const item of list) {
+      for (const { owner, index } of doomed) {
+        if (owner === item || !collides(item.declared, index)) continue;
         entangled.add(item);
         entangled.add(owner);
       }
@@ -339,16 +345,18 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities
   }
   steps.push(...modifies);
   const group = { op: 'rebuild', drops: [], creates: [], actions: [] };
-  for (const item of [...rebuilds, ...waiting]) {
-    const step = entangled.has(item)
-      ? group
-      : { op: 'rebuild', drops: [], creates: [], actions: [] };
-    for (const index of item.drops ?? []) {
-      step.drops.push({ name: index.name, restore: restoreSpec(index.raw) });
+  for (const list of [rebuilds, waiting]) {
+    for (const item of list) {
+      const step = entangled.has(item)
+        ? group
+        : { op: 'rebuild', drops: [], creates: [], actions: [] };
+      for (const index of item.drops ?? []) {
+        step.drops.push({ name: index.name, restore: restoreSpec(index.raw) });
+      }
+      step.creates.push({ spec: item.declared.spec, action: item.action });
+      step.actions.push(item.action);
+      if (step !== group) steps.push(step);
     }
-    step.creates.push({ spec: item.declared.spec, action: item.action });
-    step.actions.push(item.action);
-    if (step !== group) steps.push(step);
   }
   if (group.actions.length > 0) steps.push(group);
 
@@ -429,22 +437,24 @@ function planSearchIndexes(declaredList, live, { prune, search }, row, submit, d
     }
     return;
   }
-  const liveIndexes = (live.searchIndexes ?? []).map((raw) => normalizeLiveSearchIndex(raw));
+  // Normalized and indexed by name in one pass; the map's order is the server's.
   const byName = new Map();
-  for (const index of liveIndexes) byName.set(index.name, index);
+  for (const raw of live.searchIndexes ?? []) {
+    const index = normalizeLiveSearchIndex(raw);
+    byName.set(index.name, index);
+  }
   const declaredNames = new Set();
-  for (const declared of declaredList) declaredNames.add(declared.name);
 
-  const creates = [];
+  const specs = [];
+  const created = [];
   const updates = [];
   for (const declared of declaredList) {
+    declaredNames.add(declared.name);
     const current = byName.get(declared.name);
     const to = searchIndexValue(declared);
     if (!current) {
-      creates.push({
-        declared,
-        action: row({ target: 'searchIndex', name: declared.name, action: 'create', to }),
-      });
+      specs.push(searchIndexSpec(declared));
+      created.push(row({ target: 'searchIndex', name: declared.name, action: 'create', to }));
       continue;
     }
     const from = searchIndexValue(current);
@@ -501,16 +511,10 @@ function planSearchIndexes(declaredList, live, { prune, search }, row, submit, d
       });
     }
   }
-  if (creates.length > 0) {
-    submit.push({
-      op: 'createSearchIndexes',
-      specs: creates.map(({ declared }) => searchIndexSpec(declared)),
-      actions: creates.map(({ action }) => action),
-    });
-  }
+  if (specs.length > 0) submit.push({ op: 'createSearchIndexes', specs, actions: created });
   submit.push(...updates);
 
-  for (const index of liveIndexes) {
+  for (const index of byName.values()) {
     if (declaredNames.has(index.name)) continue;
     const from = searchIndexValue(index);
     const build = searchBuild(index);
@@ -665,24 +669,6 @@ function planCollectionSteps(
   return { name, actions, steps };
 }
 
-/** Counts over planned (or executed) collections */
-function summarize(collections) {
-  let changes = 0;
-  let applied = 0;
-  let conflicts = 0;
-  let destructive = 0;
-  for (const collection of collections) {
-    for (const action of collection.actions) {
-      if (action.action === 'conflict') conflicts += 1;
-      if (!CHANGE_ACTIONS.has(action.action)) continue;
-      changes += 1;
-      if (action.status === 'applied') applied += 1;
-      if (isDestructive(action)) destructive += 1;
-    }
-  }
-  return { changes, applied, conflicts, destructive };
-}
-
 module.exports = {
   CHANGE_ACTIONS,
   SEARCH_UNAVAILABLE_REASON,
@@ -697,5 +683,4 @@ module.exports = {
   needsConfirmation,
   liveValidator,
   planCollection,
-  summarize,
 };

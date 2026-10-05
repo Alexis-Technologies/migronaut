@@ -132,6 +132,9 @@ function failureText(error) {
 
 /** The parts of `telemetry` — anything else in it is a typo, mentioned at debug level */
 const TELEMETRY_KEYS = Object.freeze(['tracer', 'meter', 'attributes']);
+
+/** The types a static attribute's value may have */
+const ATTRIBUTE_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
 /** Static attributes are dimensions: a handful at most */
 const MAX_STATIC_ATTRIBUTES = 20;
 
@@ -186,7 +189,7 @@ function telemetryIssues(telemetry) {
       }
       for (const key of keys) {
         const value = attributes[key];
-        if (!['string', 'number', 'boolean'].includes(typeof value)) {
+        if (!ATTRIBUTE_VALUE_TYPES.has(typeof value)) {
           issues.push({
             path: `telemetry.attributes.${key}`,
             message: 'must be a string, a number or a boolean',

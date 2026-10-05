@@ -172,20 +172,28 @@ const AUDIT_READ_CONCURRENCY = 8;
  */
 async function auditSearch(deps, db, config, record) {
   if (typeof deps.definitions !== 'function') return;
-  let declaring;
+  let definitions;
   try {
-    declaring = (await deps.definitions()).filter(
-      (definition) => definition.searchIndexes !== undefined,
-    );
+    definitions = await deps.definitions();
   } catch {
     return;
   }
+  // One pass: the collections that declare search indexes, the names each
+  // declares, and how many there are in all.
+  const declaring = [];
+  let declared = 0;
+  for (const definition of definitions) {
+    if (definition.searchIndexes === undefined) continue;
+    const names = new Set();
+    for (const index of definition.searchIndexes) names.add(index.name);
+    declaring.push({ definition, names });
+    declared += definition.searchIndexes.length;
+  }
   if (declaring.length === 0) return;
-  const declared = declaring.reduce((sum, definition) => sum + definition.searchIndexes.length, 0);
   const counted = `${declared} search index(es) declared in ${declaring.length} collection(s)`;
   try {
     const probe = await probeSearch(db, await readServer(db), {
-      collection: declaring[0].name,
+      collection: declaring[0].definition.name,
       readOptions: READ_OPTIONS,
     });
     if (!probe.available) {
@@ -203,11 +211,10 @@ async function auditSearch(deps, db, config, record) {
     const failed = [];
     const stale = [];
     // One list per collection, a few at a time; reported in declaration order.
-    const lists = await mapLimit(declaring, AUDIT_READ_CONCURRENCY, (definition) =>
+    const lists = await mapLimit(declaring, AUDIT_READ_CONCURRENCY, ({ definition }) =>
       listSearchIndexes(db, definition.name, READ_OPTIONS),
     );
-    for (const [position, definition] of declaring.entries()) {
-      const names = new Set(definition.searchIndexes.map((index) => index.name));
+    for (const [position, { definition, names }] of declaring.entries()) {
       for (const raw of lists[position]) {
         const index = normalizeLiveSearchIndex(raw);
         if (!names.has(index.name)) continue;

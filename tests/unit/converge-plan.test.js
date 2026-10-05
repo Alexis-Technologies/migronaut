@@ -9,7 +9,6 @@ const {
   liveValidator,
   needsConfirmation,
   planCollection,
-  summarize,
 } = require('../../src/core/converge-plan.js');
 
 const ID_INDEX = { v: 2, key: { _id: 1 }, name: '_id_' };
@@ -832,33 +831,13 @@ describe('needsConfirmation', () => {
   });
 });
 
-describe('summarize / isDestructive', () => {
-  it('should count changes, applied changes, conflicts and destructive rows', () => {
-    const collections = [
-      {
-        actions: [
-          { target: 'index', action: 'create', status: 'applied' },
-          { target: 'index', action: 'recreate', status: 'planned' },
-          { target: 'index', action: 'drop', status: 'planned' },
-          { target: 'validator', action: 'drop', status: 'planned' },
-          { target: 'index', action: 'keep', status: 'planned' },
-          { target: 'index', action: 'conflict', status: 'planned' },
-          { target: 'searchIndex', action: 'modify', status: 'planned' },
-          { target: 'searchIndex', action: 'drop', status: 'planned' },
-          { target: 'searchIndex', action: 'skip', status: 'planned' },
-          { target: 'searchIndex', action: 'conflict', status: 'planned' },
-        ],
-      },
-    ];
-    assert.deepStrictEqual(summarize(collections), {
-      changes: 6,
-      applied: 1,
-      conflicts: 2,
-      destructive: 3,
-    });
+describe('isDestructive', () => {
+  it('should take a dropped or rebuilt index, and a dropped search index, for destructive', () => {
     assert.ok(isDestructive({ target: 'searchIndex', action: 'drop' }));
     assert.ok(!isDestructive({ target: 'searchIndex', action: 'modify' }));
     assert.ok(isDestructive({ target: 'index', action: 'recreate' }));
+    assert.ok(isDestructive({ target: 'index', action: 'drop' }));
+    assert.ok(!isDestructive({ target: 'index', action: 'create' }));
     // Removing a validator was declared outright and loses no data.
     assert.ok(!isDestructive({ target: 'validator', action: 'drop' }));
   });

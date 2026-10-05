@@ -122,10 +122,7 @@ function registerConverge(program) {
             );
           }
           logger.info(renderConvergeTable(plan));
-          const uniqueRebuilds = destructive.filter(
-            (action) => action.action === 'recreate' && opts.rebuildUnique,
-          );
-          if (uniqueRebuilds.length > 0) {
+          if (opts.rebuildUnique && destructive.some((action) => action.action === 'recreate')) {
             logger.warn(
               '⚠ --rebuild-unique: a rebuilt unique index enforces nothing until it is built ' +
                 'again — a duplicate written in between makes it unbuildable',
@@ -169,17 +166,17 @@ function registerConverge(program) {
       if (!opts.check || result === undefined) return;
       // A search index that failed to build serves nothing, whatever its
       // definition says — the gate fails on it too, though converge cannot fix it.
-      const failed = (result.search?.notReady ?? []).filter(
-        (index) => searchBuildState(index) === 'failed',
-      );
-      if (result.inSync && failed.length === 0) return;
       // .error writes to stderr, so JSON stdout stays a single clean document.
-      for (const index of failed) {
+      let failed = 0;
+      for (const index of result.search?.notReady ?? []) {
+        if (searchBuildState(index) !== 'failed') continue;
+        failed += 1;
         logger.error(
           `✖ Search index ${index.collection} "${index.name}" failed to build` +
             `${index.message ? `: ${index.message}` : ''}`,
         );
       }
+      if (result.inSync && failed === 0) return;
       if (!result.inSync) logger.error('✖ The database differs from the declared collections');
       // A dedicated code: a CI gate must tell "out of step" (act: converge)
       // from "the check itself crashed" (act: page).

@@ -496,8 +496,8 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **Responsibility:** `planCollection(definition, live, { prune, search })` → `{ name, actions,
   steps }`: result rows (`create`/`modify`/`recreate`/`drop`/`keep`/`unchanged`/`conflict`/`skip`)
   and the steps that carry them out, in execution order, each pointing at the rows it settles.
-  `planSearchIndexes` plans the `searchIndex` rows. Plus `summarize`, `isDestructive`, the
-  validator helpers.
+  `planSearchIndexes` plans the `searchIndex` rows. Plus `isDestructive`, `needsConfirmation`,
+  `SERVED_ACTIONS`, `TARGET_LABELS`, the validator helpers.
 
 ### `src/core/converge.js` — the converge flow
 - **Responsibility:** `runConverge(deps, options, signal)`, in phases that are functions of their
@@ -506,8 +506,11 @@ Each entry: **responsibility · key exports · nuances you must know.**
   (`refuseConflicts`), then per collection *re-plan* (`replan`), *apply* (`applyCollection` — the
   steps one by one, an abort check between them) and *verify* (`verifyFixedPoint`), and finally
   *report* (`reportSuccess` / `reportFailure` — closing lines, the history entry, `converge:end`).
-- **Key exports:** `runConverge`, `readLiveState`, `readLiveStates`, `READ_OPTIONS`. Same
-  `runX(deps)` injection pattern as audit, import and baseline.
+  Everything the report needs — `changed`/`inSync`, collections touched, undeclared indexes kept,
+  the per-action `counts`, the history rows, the search indexes not serving — comes from one pass
+  over the rows (`tally`, behind `finalize`), which also settles the rows never reached.
+- **Key exports:** `runConverge`, `readLiveState`, `readLiveStates` (`READ_OPTIONS` lives in
+  `server-info.js`). Same `runX(deps)` injection pattern as audit, import and baseline.
 
 ### `src/core/converge-log.js` — the converge history
 - **Responsibility:** `ConvergeLog` — `append(db, entry)` (creates the `startedAt` index on first

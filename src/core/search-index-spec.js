@@ -288,19 +288,30 @@ function effectiveVectorField(field) {
   return filled;
 }
 
-/** Fields in one order — they are a set to the server: by type, then path, then content */
-function sortFields(fields) {
-  const keyed = fields.map((field) => ({
-    field,
-    type: String(field?.type ?? ''),
-    path: String(field?.path ?? ''),
-    text: JSON.stringify(canonical(field)),
-  }));
+/**
+ * Fields in one order — they are a set to the server: by type, then path,
+ * then content. `transform`, when given, is applied to each field in the same
+ * pass that computes its sort key.
+ */
+function sortFields(fields, transform) {
+  const keyed = new Array(fields.length);
+  for (let position = 0; position < fields.length; position++) {
+    const field = transform ? transform(fields[position]) : fields[position];
+    keyed[position] = {
+      field,
+      type: String(field?.type ?? ''),
+      path: String(field?.path ?? ''),
+      text: JSON.stringify(canonical(field)),
+    };
+  }
   keyed.sort(
     (a, b) =>
       compareText(a.type, b.type) || compareText(a.path, b.path) || compareText(a.text, b.text),
   );
-  return keyed.map(({ field }) => field);
+  for (let position = 0; position < keyed.length; position++) {
+    keyed[position] = keyed[position].field;
+  }
+  return keyed;
 }
 
 const compareText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -312,9 +323,7 @@ const compareText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
  * order), so it is sorted.
  */
 function effectiveFieldMapping(mapping) {
-  if (Array.isArray(mapping)) {
-    return sortMappings(mapping.map((item) => effectiveFieldMapping(item)));
-  }
+  if (Array.isArray(mapping)) return sortMappings(mapping, effectiveFieldMapping);
   if (!isPlainObject(mapping)) return mapping;
   const defaults = FIELD_DEFAULTS[mapping.type];
   const filled = defaults ? withDefaults(mapping, defaults) : { ...mapping };
@@ -323,12 +332,21 @@ function effectiveFieldMapping(mapping) {
   return filled;
 }
 
-/** The mappings of one field, in one order — the server reports them in its own */
-function sortMappings(mappings) {
-  return mappings
-    .map((item) => ({ item, text: JSON.stringify(canonical(item)) }))
-    .sort((a, b) => compareText(a.text, b.text))
-    .map(({ item }) => item);
+/**
+ * The mappings of one field, in one order — the server reports them in its
+ * own. `transform`, when given, is applied to each in the pass that keys it.
+ */
+function sortMappings(mappings, transform) {
+  const keyed = new Array(mappings.length);
+  for (let position = 0; position < mappings.length; position++) {
+    const item = transform ? transform(mappings[position]) : mappings[position];
+    keyed[position] = { item, text: JSON.stringify(canonical(item)) };
+  }
+  keyed.sort((a, b) => compareText(a.text, b.text));
+  for (let position = 0; position < keyed.length; position++) {
+    keyed[position] = keyed[position].item;
+  }
+  return keyed;
 }
 
 /** `{ name: mapping }` with every mapping's defaults filled in */
@@ -350,7 +368,7 @@ function effectiveDefinition(type, definition) {
   if (type === 'vectorSearch') {
     const filled = withDefaults(definition, { storedSource: false });
     if (Array.isArray(filled.fields)) {
-      filled.fields = sortFields(filled.fields.map((field) => effectiveVectorField(field)));
+      filled.fields = sortFields(filled.fields, effectiveVectorField);
     }
     return filled;
   }
@@ -365,24 +383,33 @@ function effectiveDefinition(type, definition) {
   return filled;
 }
 
-/** The autoEmbed fields of an effective vector definition, by path */
-function autoEmbedFields(definition) {
-  const out = new Map();
+/**
+ * The embedding fields of an effective vector definition, by path, in one
+ * pass: `autoEmbed` the automated-embedding ones, `all` those and the vector
+ * ones — to tell a vector field turning into an autoEmbed one.
+ */
+function embeddingFields(definition) {
+  const all = new Map();
+  const autoEmbed = new Map();
   for (const field of Array.isArray(definition?.fields) ? definition.fields : []) {
-    if (isPlainObject(field) && field.type === AUTO_EMBED) out.set(field.path, field);
-  }
-  return out;
-}
-
-/** Fields by path, whatever their type — to tell a vector field turning into an autoEmbed one */
-function fieldsByPath(definition) {
-  const out = new Map();
-  for (const field of Array.isArray(definition?.fields) ? definition.fields : []) {
-    if (isPlainObject(field) && (field.type === VECTOR || field.type === AUTO_EMBED)) {
-      out.set(field.path, field);
+    if (!isPlainObject(field)) continue;
+    if (field.type === AUTO_EMBED) {
+      autoEmbed.set(field.path, field);
+      all.set(field.path, field);
+    } else if (field.type === VECTOR) {
+      all.set(field.path, field);
     }
   }
-  return out;
+  return { all, autoEmbed };
+}
+
+/** Whether two maps hold the same keys */
+function sameKeys(a, b) {
+  if (a.size !== b.size) return false;
+  for (const key of a.keys()) {
+    if (!b.has(key)) return false;
+  }
+  return true;
 }
 
 /**
@@ -391,12 +418,10 @@ function fieldsByPath(definition) {
  * `path.attribute` entries (`plot.model`, `plot.type`, `path`), or none.
  */
 function immutableChanges(declared, live) {
-  const wanted = autoEmbedFields(declared);
-  const have = autoEmbedFields(live);
+  const { all: wantedAll, autoEmbed: wanted } = embeddingFields(declared);
+  const { all: haveAll, autoEmbed: have } = embeddingFields(live);
   if (wanted.size === 0 && have.size === 0) return [];
   const changes = [];
-  const wantedAll = fieldsByPath(declared);
-  const haveAll = fieldsByPath(live);
   for (const [path, field] of wantedAll) {
     const current = haveAll.get(path);
     if (current && current.type !== field.type && (wanted.has(path) || have.has(path))) {
@@ -404,9 +429,7 @@ function immutableChanges(declared, live) {
     }
   }
   if (changes.length > 0) return changes;
-  const wantedPaths = [...wanted.keys()].sort();
-  const havePaths = [...have.keys()].sort();
-  if (have.size > 0 && !deepEqual(wantedPaths, havePaths)) return ['path'];
+  if (have.size > 0 && !sameKeys(wanted, have)) return ['path'];
   for (const [path, field] of wanted) {
     const current = have.get(path);
     if (!current) continue;
@@ -458,14 +481,16 @@ function trimFieldMap(want, have, path, ignored) {
  */
 function trimFieldMapping(want, have, path, ignored) {
   if (Array.isArray(want) && Array.isArray(have)) {
-    const paired = have.map((item) => {
-      const match = want.find(
-        (candidate) =>
-          isPlainObject(candidate) && isPlainObject(item) && candidate.type === item.type,
-      );
+    const byType = new Map();
+    for (const candidate of want) {
+      if (isPlainObject(candidate) && !byType.has(candidate.type)) {
+        byType.set(candidate.type, candidate);
+      }
+    }
+    return sortMappings(have, (item) => {
+      const match = isPlainObject(item) ? byType.get(item.type) : undefined;
       return match ? trimFieldMapping(match, item, `${path}[${item.type}]`, ignored) : item;
     });
-    return sortMappings(paired);
   }
   if (!isPlainObject(want) || !isPlainObject(have) || want.type !== have.type) return have;
   const out = trimOptions(want, have, path, ignored);
@@ -481,14 +506,13 @@ function trimFieldMapping(want, have, path, ignored) {
 function trimVectorDefinition(want, have, ignored) {
   const out = trimOptions(want, have, '', ignored);
   if (!Array.isArray(out.fields) || !Array.isArray(want.fields)) return out;
-  const fields = out.fields.map((field) => {
-    const match = want.fields.find(
-      (candidate) =>
-        isPlainObject(candidate) &&
-        isPlainObject(field) &&
-        candidate.type === field.type &&
-        candidate.path === field.path,
-    );
+  const wanted = new Map();
+  for (const candidate of want.fields) {
+    const id = isPlainObject(candidate) ? `${candidate.type}\u0000${candidate.path}` : undefined;
+    if (id !== undefined && !wanted.has(id)) wanted.set(id, candidate);
+  }
+  out.fields = sortFields(out.fields, (field) => {
+    const match = isPlainObject(field) ? wanted.get(`${field.type}\u0000${field.path}`) : undefined;
     if (!match) return field;
     const path = `fields[${field.type}:${field.path}]`;
     const trimmed = trimOptions(match, field, path, ignored);
@@ -502,7 +526,6 @@ function trimVectorDefinition(want, have, ignored) {
     }
     return trimmed;
   });
-  out.fields = sortFields(fields);
   return out;
 }
 
@@ -554,29 +577,45 @@ function tolerateServerOptions(type, want, have) {
 /** How many differing paths a comparison names — enough to tell what differs */
 const MAX_DIFF_PATHS = 5;
 
-/**
- * The dotted paths at which `want` and `have` differ, depth first, into
- * `out` (at most {@link MAX_DIFF_PATHS} — `total` counts them all). Objects
- * are walked key by key, lists of the same length item by item; anything
- * else that differs is a path of its own.
- */
-function diffPaths(want, have, path, out) {
-  if (deepEqual(want, have)) return;
-  const walk = (keys, at) => {
-    for (const key of keys) diffPaths(at(want, key), at(have, key), joinPath(path, key), out);
-  };
-  if (isPlainObject(want) && isPlainObject(have)) {
-    walk([...new Set([...Object.keys(want), ...Object.keys(have)])].sort(), (value, key) =>
-      Object.hasOwn(value, key) ? value[key] : undefined,
-    );
-    return;
+/** The keys of `a` and `b`, once each, sorted */
+function unionKeys(a, b) {
+  const keys = Object.keys(a);
+  for (const key of Object.keys(b)) {
+    if (!Object.hasOwn(a, key)) keys.push(key);
   }
-  if (Array.isArray(want) && Array.isArray(have) && want.length === have.length && path) {
-    for (const [position] of want.entries()) {
-      diffPaths(want[position], have[position], `${path}[${position}]`, out);
+  return keys.sort();
+}
+
+/**
+ * Walk `want` against `have` once, recording every path at which they differ
+ * into `out`: `top` the top-level keys (all of them), `paths` the first
+ * {@link MAX_DIFF_PATHS} dotted paths, depth first, and `total` how many there
+ * are. Objects are walked key by key, lists of the same length item by item;
+ * anything else is a leaf — the same value is the same, and only where `===`
+ * cannot tell is it compared under {@link canonical} (an `Int32` and a number).
+ */
+function walkDiff(want, have, path, top, out) {
+  if (want === have) return;
+  if (isPlainObject(want) && isPlainObject(have)) {
+    for (const key of unionKeys(want, have)) {
+      walkDiff(
+        Object.hasOwn(want, key) ? want[key] : undefined,
+        Object.hasOwn(have, key) ? have[key] : undefined,
+        joinPath(path, key),
+        top ?? key,
+        out,
+      );
     }
     return;
   }
+  if (Array.isArray(want) && Array.isArray(have) && want.length === have.length) {
+    for (let position = 0; position < want.length; position++) {
+      walkDiff(want[position], have[position], `${path}[${position}]`, top, out);
+    }
+    return;
+  }
+  if (deepEqual(want, have)) return;
+  out.top.add(top);
   out.total += 1;
   if (out.paths.length < MAX_DIFF_PATHS) out.paths.push(path);
 }
@@ -610,13 +649,10 @@ function compareSearchIndex(declared, live) {
     want,
     effectiveDefinition(live.type, live.definition),
   );
-  const keys = new Set([...Object.keys(want), ...Object.keys(have)]);
-  const diffs = [];
-  for (const key of [...keys].sort()) {
-    if (!deepEqual(want[key], have[key])) diffs.push(key);
-  }
-  const found = { paths: [], total: 0 };
-  if (diffs.length > 0) diffPaths(want, have, '', found);
+  // One walk: the top-level keys that differ, and the paths within them.
+  const found = { top: new Set(), paths: [], total: 0 };
+  walkDiff(want, have, '', undefined, found);
+  const diffs = [...found.top];
   const immutable =
     diffs.length > 0 && declared.type === 'vectorSearch' ? immutableChanges(want, have) : [];
   return {

@@ -252,10 +252,13 @@ async function planDownJobs(kit, options = {}) {
  * that will do the work. All false on a queue that cannot read jobs back.
  */
 async function foreignJobs(queue, ids, groupId) {
-  if (typeof queue.getJob !== 'function') return ids.map(() => false);
-  // A first deploy can enqueue hundreds of jobs: read them back a few at a time.
-  const stored = await mapLimit(ids, LOOKUP_CONCURRENCY, (id) => queue.getJob(id));
-  return stored.map((job) => Boolean(job && job.data?.groupId !== groupId));
+  if (typeof queue.getJob !== 'function') return new Array(ids.length).fill(false);
+  // A first deploy can enqueue hundreds of jobs: read them back a few at a time,
+  // each answered as it arrives.
+  return mapLimit(ids, LOOKUP_CONCURRENCY, async (id) => {
+    const job = await queue.getJob(id);
+    return Boolean(job && job.data?.groupId !== groupId);
+  });
 }
 
 /**
@@ -299,16 +302,16 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
         expected: specs.length,
       });
     }
-    jobs = plan.migrations.map((migration, index) => ({
-      id: String(added[index].id),
-      migration,
-      index,
-    }));
-    const foreign = await foreignJobs(
-      queue,
-      added.map((job) => String(job.id)),
-      groupId,
-    );
+    // The ids of every job added, and the migration ones as jobs — one pass.
+    const ids = new Array(added.length);
+    jobs = new Array(plan.migrations.length);
+    for (const [index, job] of added.entries()) {
+      ids[index] = String(job.id);
+      if (index < jobs.length) {
+        jobs[index] = { id: ids[index], migration: plan.migrations[index], index };
+      }
+    }
+    const foreign = await foreignJobs(queue, ids, groupId);
     for (const job of jobs) {
       if (foreign[job.index]) deduplicated.push(job.migration);
     }

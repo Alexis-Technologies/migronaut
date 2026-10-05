@@ -315,7 +315,7 @@ async function readAll(collections, read) {
  * `onReadError(error, inARow)` every read failure ridden out. Returns
  * `{ outcome: 'ready' | 'timeout' | 'failed', notReady, preexisting,
  * waitedMs }`, `notReady` holding `{ collection, name, ...build }` (the
- * failed ones first).
+ * failed ones first — and, on `'failed'`, in `failed` too).
  */
 async function awaitSearchIndexes({
   targets,
@@ -328,7 +328,14 @@ async function awaitSearchIndexes({
   onReadError = () => undefined,
 }) {
   const startedAt = now();
-  const collections = [...new Set(targets.map((target) => target.collection))];
+  // Each collection once, in the order the targets name them.
+  const seen = new Set();
+  const collections = [];
+  for (const target of targets) {
+    if (seen.has(target.collection)) continue;
+    seen.add(target.collection);
+    collections.push(target.collection);
+  }
   const remaining = () => (timeoutMs === undefined ? Infinity : timeoutMs - (now() - startedAt));
   let failedReads = 0;
   for (let attempt = 0; ; attempt++) {
@@ -368,7 +375,13 @@ async function awaitSearchIndexes({
     }
     const waitedMs = now() - startedAt;
     if (failed.length > 0) {
-      return { outcome: 'failed', notReady: [...failed, ...notReady], preexisting, waitedMs };
+      return {
+        outcome: 'failed',
+        notReady: [...failed, ...notReady],
+        failed,
+        preexisting,
+        waitedMs,
+      };
     }
     if (notReady.length === 0) return { outcome: 'ready', notReady, preexisting, waitedMs };
     const remainingMs = remaining();

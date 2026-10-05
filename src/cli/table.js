@@ -370,11 +370,15 @@ function renderConvergeTable(result, { all = false } = {}) {
   if (counts.skip > 0) {
     parts.push(colors.yellow(`${counts.skip} search index(es) skipped — Search unavailable`));
   }
-  const notReady = result.search?.notReady ?? [];
-  const inState = (state) => notReady.filter((index) => searchBuildState(index) === state).length;
-  const failed = inState('failed');
-  const stale = inState('stale');
-  const building = notReady.length - failed - stale;
+  let building = 0;
+  let stale = 0;
+  let failed = 0;
+  for (const index of result.search?.notReady ?? []) {
+    const state = searchBuildState(index);
+    if (state === 'failed') failed += 1;
+    else if (state === 'stale') stale += 1;
+    else building += 1;
+  }
   if (building > 0) parts.push(`${building} search index(es) building`);
   if (stale > 0) parts.push(colors.yellow(`${stale} search index(es) stale`));
   if (failed > 0) parts.push(colors.red(`${failed} search index(es) failed`));
