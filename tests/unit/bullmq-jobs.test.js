@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const {
+  BACKGROUND_FORBIDDEN_JOB_OPTIONS,
+  DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
   DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
@@ -10,14 +12,19 @@ const {
   JOB_NAMES,
   MIGRATION_JOB_OPTIONS,
   MIN_JOB_DATA_VERSION,
+  backgroundQueueName,
+  buildBackgroundJob,
+  buildBackgroundVerifyJobTemplate,
   buildConvergeJob,
   buildConvergeJobTemplate,
+  buildLaneJob,
   buildMigrationJob,
   buildSyncJobTemplate,
   TICK_RETENTION,
   convergeDedupId,
   dedupId,
   migrationJobOptions,
+  parseBackgroundJobData,
   parseJobData,
 } = require('../../src/bullmq/jobs.js');
 const { QueueJobInvalidError } = require('../../src/errors/index.js');
@@ -39,9 +46,18 @@ describe('job contract constants', () => {
     assert.ok(Object.isFrozen(JOB_NAMES));
     assert.ok(Object.isFrozen(MIGRATION_JOB_OPTIONS));
     assert.ok(Object.isFrozen(FORBIDDEN_JOB_OPTIONS));
+    assert.ok(Object.isFrozen(BACKGROUND_FORBIDDEN_JOB_OPTIONS));
     assert.deepStrictEqual(
       { ...JOB_NAMES },
-      { UP: 'up', DOWN: 'down', SYNC: 'sync', CONVERGE: 'converge' },
+      {
+        UP: 'up',
+        DOWN: 'down',
+        SYNC: 'sync',
+        CONVERGE: 'converge',
+        BACKGROUND: 'background',
+        BACKGROUND_LANE: 'background-lane',
+        BACKGROUND_VERIFY: 'background-verify',
+      },
     );
     assert.strictEqual(JOB_DATA_VERSION, 1);
   });
@@ -50,6 +66,8 @@ describe('job contract constants', () => {
     assert.ok(!DEFAULT_QUEUE_NAME.includes(':'));
     assert.ok(!DEFAULT_SCHEDULER_ID.includes(':'));
     assert.ok(!DEFAULT_CONVERGE_SCHEDULER_ID.includes(':'));
+    assert.ok(!DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID.includes(':'));
+    assert.strictEqual(backgroundQueueName('migronaut'), 'migronaut-background');
   });
 
   it('should give migration jobs exactly one attempt', () => {
@@ -484,5 +502,177 @@ describe('converge jobs', () => {
     ]) {
       assert.throws(() => parseJobData(job('converge', data)), QueueJobInvalidError);
     }
+  });
+});
+
+describe('background job contract', () => {
+  const lane = (overrides = {}) => ({
+    v: 1,
+    kind: 'background-lane',
+    migration: '0001-orders.js',
+    registration: 'reg-1',
+    generation: 2,
+    round: 1,
+    spawn: 1,
+    lane: 0,
+    ...overrides,
+  });
+
+  // Payloads exactly as a 2.3.0 producer writes them — kept accepted for as
+  // long as MIN_JOB_DATA_VERSION is 1.
+  const GOLDEN_V1 = [
+    ['background', { v: 1, kind: 'background', migration: '0001-orders.js' }],
+    [
+      'background',
+      {
+        v: 1,
+        kind: 'background',
+        migration: '0001-orders.js',
+        round: 3,
+        spawn: 7,
+        takeover: true,
+        requestedBy: 'ops',
+        reason: 'stalled',
+      },
+    ],
+    ['background-lane', lane()],
+    ['background-lane', lane({ retry: 2 })],
+    ['background-verify', { v: 1, kind: 'background-verify' }],
+  ];
+  for (const [name, data] of GOLDEN_V1) {
+    it(`should keep accepting a v1 ${name} payload (${Object.keys(data).join(', ')})`, () => {
+      assert.doesNotThrow(() => parseBackgroundJobData(job(name, data)));
+    });
+  }
+
+  it('should normalize what it accepts', () => {
+    assert.deepStrictEqual(parseBackgroundJobData(job('background-lane', lane())), {
+      kind: 'background-lane',
+      migration: '0001-orders.js',
+      registration: 'reg-1',
+      generation: 2,
+      round: 1,
+      spawn: 1,
+      lane: 0,
+      retry: 0,
+    });
+    assert.deepStrictEqual(
+      parseBackgroundJobData(
+        job('background', { v: 1, kind: 'background', migration: 'a.js', round: 0 }),
+      ),
+      { kind: 'background', migration: 'a.js', round: 0 },
+    );
+  });
+
+  const invalid = [
+    ['a non-object job', () => 'background', /not an object/],
+    ['a migration job name', () => job('up', upData()), /unknown background job name/],
+    ['a kind of another name', () => job('background', lane()), /kind does not match/],
+    ['an unknown field', () => job('background-lane', lane({ x: 1 })), /unknown field "x"/],
+    [
+      'a newer version',
+      () => job('background-verify', { v: 2, kind: 'background-verify' }),
+      /newer than this worker/,
+    ],
+    ['a path', () => job('background-lane', lane({ migration: '../x.js' })), /bare filename/],
+    ['a lane out of range', () => job('background-lane', lane({ lane: 64 })), /lane is not/],
+    ['a negative round', () => job('background-lane', lane({ round: -1 })), /round is not/],
+    [
+      'a missing generation',
+      () => job('background-lane', lane({ generation: undefined })),
+      /generation is missing/,
+    ],
+    [
+      'a long registration',
+      () => job('background-lane', lane({ registration: 'r'.repeat(129) })),
+      /registration/,
+    ],
+    [
+      'a takeover that is not true',
+      () => job('background', { v: 1, kind: 'background', migration: 'a.js', takeover: false }),
+      /takeover/,
+    ],
+    [
+      'an over-long reason',
+      () =>
+        job('background', { v: 1, kind: 'background', migration: 'a.js', reason: 'r'.repeat(600) }),
+      /reason/,
+    ],
+  ];
+  for (const [what, make, pattern] of invalid) {
+    it(`should refuse ${what}`, () => {
+      assert.throws(
+        () => parseBackgroundJobData(make()),
+        (error) => {
+          assert.ok(error instanceof QueueJobInvalidError);
+          assert.match(error.message, pattern);
+          return true;
+        },
+      );
+    });
+  }
+
+  it('should refuse background names on the migration queue', () => {
+    assert.throws(
+      () => parseJobData(job('background', { v: 1, kind: 'background', migration: 'a.js' })),
+      /unknown job name/,
+    );
+  });
+
+  it('should deduplicate a coordinator on its migration, and a takeover per round', () => {
+    const plain = buildBackgroundJob({ migration: 'a b.js' });
+    assert.deepStrictEqual(plain.opts.deduplication, { id: 'bg-a~20b.js' });
+    assert.strictEqual(plain.opts.attempts, 3);
+    assert.deepStrictEqual(plain.data, { v: 1, kind: 'background', migration: 'a b.js' });
+    const takeover = buildBackgroundJob({ migration: 'a.js', takeoverOf: 4, requestedBy: 'x' });
+    assert.deepStrictEqual(takeover.opts.deduplication, { id: 'bg-a.js-t4' });
+    assert.strictEqual(takeover.data.takeover, true);
+    assert.strictEqual(takeover.data.requestedBy, 'x');
+    assert.doesNotThrow(() => parseBackgroundJobData(job(takeover.name, takeover.data)));
+  });
+
+  it('should give a child lane a new id per spawn, and a parentless one a dedup id per slot', () => {
+    const parent = { id: '9', queue: 'bull:migronaut-background' };
+    const child = buildLaneJob({
+      migration: 'a.js',
+      registration: 'r:1',
+      generation: 2,
+      round: 3,
+      spawn: 4,
+      lane: 1,
+      parent,
+      jobOptions: { removeOnComplete: 5 },
+    });
+    assert.strictEqual(child.opts.jobId, 'bgl-a.js-r~3A1-g2-r3-s4-l1');
+    assert.ok(!child.opts.jobId.includes(':'));
+    assert.strictEqual(child.opts.ignoreDependencyOnFailure, true);
+    assert.strictEqual(child.opts.removeOnComplete, 5, 'the caller retention wins');
+    assert.strictEqual(child.opts.deduplication, undefined, 'BullMQ refuses dedup with a parent');
+    assert.doesNotThrow(() => parseBackgroundJobData(job(child.name, child.data)));
+    const orphan = buildLaneJob({
+      migration: 'a.js',
+      registration: 'r1',
+      generation: 2,
+      round: 3,
+      spawn: 4,
+      lane: 1,
+    });
+    assert.deepStrictEqual(orphan.opts.deduplication, { id: 'bgl-a.js-r1-g2-l1' });
+    assert.strictEqual(orphan.opts.parent, undefined);
+    assert.deepStrictEqual(orphan.opts.removeOnComplete, TICK_RETENTION.removeOnComplete);
+  });
+
+  it('should build the drift-watch tick like the other ticks', () => {
+    const template = buildBackgroundVerifyJobTemplate({ jobOptions: { keepLogs: 3 } });
+    assert.strictEqual(template.name, 'background-verify');
+    assert.deepStrictEqual(template.data, { v: 1, kind: 'background-verify' });
+    assert.strictEqual(template.opts.keepLogs, 3);
+    assert.strictEqual(template.opts.telemetry.omitContext, true);
+  });
+
+  it('should hold field lists for the three background names', () => {
+    assert.ok(JOB_FIELDS['background-lane'].has('registration'));
+    assert.ok(!JOB_FIELDS.background.has('parent'));
+    assert.ok(BACKGROUND_FORBIDDEN_JOB_OPTIONS.includes('ignoreDependencyOnFailure'));
   });
 });

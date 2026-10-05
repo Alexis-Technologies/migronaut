@@ -25,14 +25,28 @@ const MIN_JOB_DATA_VERSION = 1;
 /**
  * One job name per kind of work — `up`/`down` carry one migration each, `sync`
  * plans and enqueues what is pending, `converge` brings the declared
- * collections to their declared state.
+ * collections to their declared state. The background names live on a queue
+ * of their own (`<queueName>-background`): `background` is a background
+ * migration's coordinator, `background-lane` one of its lanes (a child of the
+ * coordinator), `background-verify` the drift watch.
  */
-const JOB_NAMES = Object.freeze({ UP: 'up', DOWN: 'down', SYNC: 'sync', CONVERGE: 'converge' });
+const JOB_NAMES = Object.freeze({
+  UP: 'up',
+  DOWN: 'down',
+  SYNC: 'sync',
+  CONVERGE: 'converge',
+  BACKGROUND: 'background',
+  BACKGROUND_LANE: 'background-lane',
+  BACKGROUND_VERIFY: 'background-verify',
+});
 
 const DEFAULT_QUEUE_NAME = 'migronaut';
 /** No `:` — BullMQ rejects it in custom ids */
 const DEFAULT_SCHEDULER_ID = 'migronaut-sync';
 const DEFAULT_CONVERGE_SCHEDULER_ID = 'migronaut-converge';
+const DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID = 'migronaut-background-verify';
+/** The background queue is named after the migration queue it serves */
+const BACKGROUND_QUEUE_SUFFIX = '-background';
 
 /**
  * Forced onto every migration job, over anything the caller configured. A
@@ -55,7 +69,21 @@ const FORBIDDEN_JOB_OPTIONS = Object.freeze([
   'parent',
 ]);
 
+/**
+ * Refused in a background queue's `jobOptions` too: what a coordinator or a
+ * lane does when its children fail is the adapter's design, not a knob.
+ */
+const BACKGROUND_FORBIDDEN_JOB_OPTIONS = Object.freeze([
+  ...FORBIDDEN_JOB_OPTIONS,
+  'failParentOnFailure',
+  'continueParentOnFailure',
+  'ignoreDependencyOnFailure',
+  'removeDependencyOnFailure',
+]);
+
 const MAX_MIGRATION_NAME_LENGTH = 255;
+/** At most this many lanes — a background migration's `maxParallel` cap */
+const MAX_LANES = 64;
 /** A file checksum as migronaut computes it: a SHA-256 hex digest */
 const CHECKSUM_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -77,6 +105,28 @@ const JOB_FIELDS = Object.freeze({
   ]),
   sync: new Set(['v', 'kind', 'to']),
   converge: new Set(['v', 'kind', 'groupId', 'ordered', 'requestedBy', 'reason']),
+  background: new Set([
+    'v',
+    'kind',
+    'migration',
+    'round',
+    'spawn',
+    'takeover',
+    'requestedBy',
+    'reason',
+  ]),
+  'background-lane': new Set([
+    'v',
+    'kind',
+    'migration',
+    'registration',
+    'generation',
+    'round',
+    'spawn',
+    'lane',
+    'retry',
+  ]),
+  'background-verify': new Set(['v', 'kind']),
 });
 /** The limit every migronaut id is minted under — a producer's own check and this one agree */
 const MAX_GROUP_ID_LENGTH = MAX_ID_LENGTH;
@@ -84,6 +134,7 @@ const MAX_GROUP_ID_LENGTH = MAX_ID_LENGTH;
 const isPlainObject = (value) =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 const isPositiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
+const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
 
 /**
  * A migration name as an id fragment: letters, digits, `.`, `_` and `-` as
@@ -309,6 +360,87 @@ function parseJobData(job) {
   };
 }
 
+/** The version and field checks every job shares — then the fields of `kind` */
+function assertEnvelope(job, kind) {
+  const { data } = job;
+  if (!isPlainObject(data)) throw invalid(job, 'data is not an object');
+  if (!Number.isSafeInteger(data.v) || data.v < MIN_JOB_DATA_VERSION) {
+    throw invalid(job, 'unsupported job data version');
+  }
+  if (data.v > JOB_DATA_VERSION) {
+    throw invalid(
+      job,
+      `job data version ${data.v} is newer than this worker supports (${JOB_DATA_VERSION}) — ` +
+        'roll the workers out before the producers',
+    );
+  }
+  if (data.kind !== kind) throw invalid(job, 'kind does not match the job name');
+  for (const key of Object.keys(data)) {
+    if (!JOB_FIELDS[kind].has(key)) throw invalid(job, `unknown field "${key}"`);
+  }
+}
+
+/**
+ * Validate a job read back from a background queue and return a normalized
+ * copy — as untrusted as any other: the migration name becomes a path.
+ */
+function parseBackgroundJobData(job) {
+  if (!isPlainObject(job)) throw invalid(job, 'job is not an object');
+  const { name } = job;
+  if (
+    name !== JOB_NAMES.BACKGROUND &&
+    name !== JOB_NAMES.BACKGROUND_LANE &&
+    name !== JOB_NAMES.BACKGROUND_VERIFY
+  ) {
+    throw invalid(job, 'unknown background job name');
+  }
+  assertEnvelope(job, name);
+  const { data } = job;
+  if (name === JOB_NAMES.BACKGROUND_VERIFY) return { kind: name };
+  if (!isBareFilename(data.migration) || data.migration.length > MAX_MIGRATION_NAME_LENGTH) {
+    throw invalid(job, 'migration is not a bare filename');
+  }
+  for (const key of ['round', 'spawn', 'generation', 'retry']) {
+    if (data[key] !== undefined && !isCount(data[key])) {
+      throw invalid(job, `${key} is not a non-negative integer`);
+    }
+  }
+  if (name === JOB_NAMES.BACKGROUND) {
+    for (const key of ['requestedBy', 'reason']) {
+      const issue = actorIssue(key, data[key]);
+      if (issue) throw invalid(job, issue);
+    }
+    if (data.takeover !== undefined && data.takeover !== true) {
+      throw invalid(job, 'takeover is only valid as `true`');
+    }
+    return {
+      kind: name,
+      migration: data.migration,
+      ...(data.round !== undefined ? { round: data.round } : {}),
+      ...(data.spawn !== undefined ? { spawn: data.spawn } : {}),
+      ...(data.takeover ? { takeover: true } : {}),
+      ...pickActor(data),
+    };
+  }
+  if (!isGroupId(data.registration)) throw invalid(job, 'registration is not a short string');
+  for (const key of ['generation', 'round', 'spawn']) {
+    if (data[key] === undefined) throw invalid(job, `${key} is missing`);
+  }
+  if (!Number.isSafeInteger(data.lane) || data.lane < 0 || data.lane >= MAX_LANES) {
+    throw invalid(job, `lane is not an integer from 0 to ${MAX_LANES - 1}`);
+  }
+  return {
+    kind: name,
+    migration: data.migration,
+    registration: data.registration,
+    generation: data.generation,
+    round: data.round,
+    spawn: data.spawn,
+    lane: data.lane,
+    retry: data.retry ?? 0,
+  };
+}
+
 /**
  * Build one `up`/`down` job spec, ready for `queue.addBulk`. `ordered` is
  * always written: a job must say how it is to run, not leave it to whatever
@@ -427,8 +559,112 @@ function buildConvergeJobTemplate({ jobOptions } = {}) {
   };
 }
 
+/** The background queue that serves a migration queue */
+function backgroundQueueName(queueName) {
+  return `${queueName}${BACKGROUND_QUEUE_SUFFIX}`;
+}
+
+/**
+ * Options of a background queue's own jobs: the caller's passthrough, then a
+ * bounded retention where they set none — a lane per partition per spawn adds
+ * up — then what the contract owns.
+ */
+function backgroundJobOptions(jobOptions = {}, owned = {}) {
+  return {
+    removeOnComplete: TICK_RETENTION.removeOnComplete,
+    removeOnFail: TICK_RETENTION.removeOnFail,
+    ...jobOptions,
+    ...owned,
+  };
+}
+
+/**
+ * The coordinator job of a background migration. Deduplicated on its name, so
+ * every pod's heal and every sync tick collapse into the one coordinator
+ * chain that is alive (waiting, delayed or waiting for its lanes); a takeover
+ * of a stalled one gets an id of its own per round. A few attempts with a long
+ * backoff are the outer safety net — what it decides is all in MongoDB.
+ */
+function buildBackgroundJob({ migration, takeoverOf, jobOptions, requestedBy, reason }) {
+  const fragment = idFragment(migration);
+  return {
+    name: JOB_NAMES.BACKGROUND,
+    data: {
+      v: JOB_DATA_VERSION,
+      kind: JOB_NAMES.BACKGROUND,
+      migration,
+      ...(takeoverOf !== undefined ? { takeover: true } : {}),
+      ...pickActor({ requestedBy, reason }),
+    },
+    opts: backgroundJobOptions(jobOptions, {
+      attempts: 3,
+      backoff: { type: 'fixed', delay: 30_000 },
+      deduplication: {
+        id: takeoverOf === undefined ? `bg-${fragment}` : `bg-${fragment}-t${takeoverOf}`,
+      },
+    }),
+  };
+}
+
+/**
+ * One lane of a background migration. Under a coordinator (`parent`) its id
+ * must be new for every spawn — BullMQ will not move an existing job to
+ * another parent, and a job it already finished would never wake this one;
+ * with no parent (`children: false`) the id is deduplicated per lane slot.
+ */
+function buildLaneJob({
+  migration,
+  registration,
+  generation,
+  round,
+  spawn,
+  lane,
+  parent,
+  jobOptions,
+}) {
+  const base = `bgl-${idFragment(migration)}-${idFragment(registration)}-g${generation}`;
+  return {
+    name: JOB_NAMES.BACKGROUND_LANE,
+    data: {
+      v: JOB_DATA_VERSION,
+      kind: JOB_NAMES.BACKGROUND_LANE,
+      migration,
+      registration,
+      generation,
+      round,
+      spawn,
+      lane,
+    },
+    opts: backgroundJobOptions(
+      jobOptions,
+      parent === undefined
+        ? { attempts: 1, deduplication: { id: `${base}-l${lane}` } }
+        : {
+            attempts: 1,
+            jobId: `${base}-r${round}-s${spawn}-l${lane}`,
+            parent,
+            // A lane that fails still wakes its coordinator — which decides
+            // from MongoDB, never from how its lanes ended.
+            ignoreDependencyOnFailure: true,
+          },
+    ),
+  };
+}
+
+/** The job a drift-watch schedule produces — a tick like the `sync` one */
+function buildBackgroundVerifyJobTemplate({ jobOptions } = {}) {
+  return {
+    name: JOB_NAMES.BACKGROUND_VERIFY,
+    data: { v: JOB_DATA_VERSION, kind: JOB_NAMES.BACKGROUND_VERIFY },
+    opts: tickJobOptions(jobOptions),
+  };
+}
+
 module.exports = {
+  BACKGROUND_FORBIDDEN_JOB_OPTIONS,
+  BACKGROUND_QUEUE_SUFFIX,
   DEFAULT_ALLOW,
+  DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
   DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
@@ -439,15 +675,22 @@ module.exports = {
   MIN_JOB_DATA_VERSION,
   MIGRATION_JOB_OPTIONS,
   TICK_RETENTION,
+  MAX_LANES,
   assertAllowed,
+  backgroundQueueName,
+  buildBackgroundJob,
+  buildBackgroundVerifyJobTemplate,
   buildConvergeJob,
   buildConvergeJobTemplate,
   buildMigrationJob,
+  buildLaneJob,
   buildSyncJobTemplate,
   convergeDedupId,
   dedupId,
+  idFragment,
   isPlainObject,
   migrationJobOptions,
+  parseBackgroundJobData,
   parseJobData,
   permissionsNeeded,
   resolveAllow,

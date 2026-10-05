@@ -2611,6 +2611,7 @@ class MigratorKit extends EventEmitter {
       status: state.status,
       phase: state.phase,
       direction: state.direction ?? 'forward',
+      registration: state.registration,
       mode: state.mode ?? spec.mode,
       ...(state.collection !== undefined ? { collection: state.collection } : {}),
       ...(spec.from !== undefined ? { from: spec.from, to: spec.to } : {}),
@@ -2624,6 +2625,15 @@ class MigratorKit extends EventEmitter {
       waitsFor: state.waitsFor ?? [],
       ...(counts ? { partitions: counts } : {}),
       liveLeases: leases.live,
+      ...(state.coordinator
+        ? {
+            coordinator: {
+              kind: state.coordinator.kind,
+              ...(state.coordinator.round !== undefined ? { round: state.coordinator.round } : {}),
+              at: state.coordinator.at,
+            },
+          }
+        : {}),
       ...(state.plan
         ? {
             plan: {

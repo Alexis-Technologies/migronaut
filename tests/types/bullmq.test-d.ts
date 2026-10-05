@@ -2,6 +2,14 @@ import { Job, type Processor, Queue, QueueEvents, Worker } from 'bullmq';
 import { BullMQOtel } from 'bullmq-otel';
 import { expectAssignable, expectError, expectNotAssignable, expectType } from 'tsd';
 import {
+  type BackgroundEnqueueResult,
+  type BackgroundJobData,
+  type BackgroundJobResult,
+  type BackgroundLaneJobData,
+  type BackgroundLaneJobResult,
+  type BackgroundProcessor,
+  type BackgroundVerifyJobData,
+  type BackgroundVerifyJobResult,
   type BullMQJobLike,
   type BullMQQueueEventsLike,
   type BullMQQueueLike,
@@ -10,6 +18,7 @@ import {
   type ConvergeJobData,
   type ConvergeJobResult,
   type ConvergeJobSpec,
+  DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
   DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
@@ -27,17 +36,22 @@ import {
   type MigrationPlan,
   type MigrationProcessor,
   MigrationQueue,
+  type ParsedBackgroundJobData,
   type ParsedJobData,
   RETRYABLE_CODES,
   type SyncJobData,
   type SyncJobResult,
+  backgroundQueueName,
+  createBackgroundProcessor,
   createMigrationProcessor,
   createMigrationQueue,
   dedupId,
+  enqueueBackground,
   enqueueConverge,
   enqueueDown,
   enqueueUp,
   isRetryableError,
+  parseBackgroundJobData,
   parseJobData,
   planDownJobs,
   planUpJobs,
@@ -45,6 +59,8 @@ import {
 } from '../../bullmq.js';
 import {
   type AuditReport,
+  type BackgroundStatus,
+  type BackgroundVerifyResult,
   type LockInfo,
   MigratorKit,
   type MigronautErrorCode,
@@ -271,3 +287,86 @@ expectType<Promise<void>>(mq.schedule({ job: 'converge', every: 60_000, id: 'nig
 expectError(mq.schedule({ job: 'converge', every: 60_000, to: '0005-x.js' }));
 expectError(mq.schedule({ job: 'migrate', every: 60_000 }));
 expectType<Promise<boolean>>(mq.unschedule(DEFAULT_CONVERGE_SCHEDULER_ID));
+
+// ─── Background migrations on their own queue ────────────────────────────────
+
+// The moves a background job makes exist on the real Job, and the real Queue
+// has the qualifiedName a child's `parent` names.
+declare const realBackgroundJob: Job<BackgroundJobData, BackgroundJobResult>;
+expectAssignable<BullMQJobLike<BackgroundJobData, BackgroundJobResult>>(realBackgroundJob);
+expectType<string>(realQueue.qualifiedName);
+
+expectType<'background'>(JOB_NAMES.BACKGROUND);
+expectType<'background-lane'>(JOB_NAMES.BACKGROUND_LANE);
+expectType<'background-verify'>(JOB_NAMES.BACKGROUND_VERIFY);
+expectType<'migronaut-background-verify'>(DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID);
+expectType<string>(backgroundQueueName('migronaut'));
+expectType<ParsedBackgroundJobData>(parseBackgroundJobData(realBackgroundJob));
+
+const withBackground = createMigrationQueue<Queue, Worker, QueueEvents>({
+  bullmq: { Queue, Worker, QueueEvents },
+  connection,
+  config,
+  background: {
+    jobOptions: { removeOnComplete: { count: 50 } },
+    workerOptions: { concurrency: 4 },
+    sliceMs: 10_000,
+    children: 'auto',
+    stallMs: 600_000,
+    verifyIntervalMs: false,
+  },
+});
+createMigrationQueue({ bullmq: { Queue, Worker }, connection, config, background: true });
+expectError(
+  createMigrationQueue({
+    bullmq: { Queue },
+    connection,
+    background: { jobOptions: { ignoreDependencyOnFailure: true } },
+  }),
+);
+expectError(
+  createMigrationQueue({ bullmq: { Queue }, connection, background: { children: true } }),
+);
+expectType<Promise<Worker>>(withBackground.startBackgroundWorker({ concurrency: 3 }));
+expectType<Worker | undefined>(withBackground.backgroundWorker);
+expectType<BackgroundProcessor | undefined>(withBackground.backgroundProcessor);
+expectType<BullMQQueueLike | undefined>(withBackground.backgroundQueue);
+expectType<Promise<BackgroundEnqueueResult>>(withBackground.enqueueBackground());
+expectType<Promise<BackgroundEnqueueResult>>(
+  withBackground.enqueueBackground('0001-orders.js', { requestedBy: 'ops' }),
+);
+expectType<Promise<BackgroundStatus | null>>(withBackground.backgroundStatus('0001-orders.js'));
+expectType<Promise<BackgroundStatus[]>>(withBackground.backgroundStatus());
+expectType<Promise<BackgroundVerifyResult>>(withBackground.verifyBackground({ onDrift: 'report' }));
+expectType<Promise<void>>(withBackground.schedule({ job: 'background-verify', every: 300_000 }));
+expectError(withBackground.schedule({ job: 'background-verify', every: 1, to: '0005-x.js' }));
+
+const backgroundProcessor = createBackgroundProcessor({
+  config,
+  queue: realQueue,
+  maxLaneRetries: 4,
+});
+expectType<BackgroundProcessor>(backgroundProcessor);
+expectAssignable<
+  Processor<
+    BackgroundJobData | BackgroundLaneJobData | BackgroundVerifyJobData,
+    BackgroundJobResult | BackgroundLaneJobResult | BackgroundVerifyJobResult
+  >
+>(backgroundProcessor);
+expectType<Promise<BackgroundEnqueueResult>>(backgroundProcessor.heal());
+expectError(createBackgroundProcessor({ config }));
+expectType<Promise<BackgroundEnqueueResult>>(
+  enqueueBackground(realQueue, ownKit, { migration: '0001-orders.js', stallMs: 60_000 }),
+);
+
+declare const laneResult: BackgroundLaneJobResult;
+expectAssignable<string>(laneResult.outcome);
+declare const verifyResult: BackgroundVerifyJobResult;
+expectType<number>(verifyResult.enqueued);
+declare const heldSync: SyncJobResult;
+expectType<string[] | undefined>(heldSync.held?.waitsFor);
+expectType<{ enqueued: number } | undefined>(heldSync.background);
+declare const registeringUp: MigrationJobResult;
+expectType<{ migration: string; jobId: string }[] | undefined>(registeringUp.background);
+declare const cutPlan: MigrationPlan;
+expectType<{ migration: string; waitsFor: string[] } | undefined>(cutPlan.waiting);

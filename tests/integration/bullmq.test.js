@@ -1,4 +1,5 @@
 const { after, before, describe } = require('node:test');
+const { defineBullMQBackgroundScenarios } = require('../helpers/bullmq-background-scenarios.js');
 const { defineBullMQFidelityScenarios } = require('../helpers/bullmq-fidelity.js');
 const { defineBullMQScenarios } = require('../helpers/bullmq-scenarios.js');
 const { createFakeConnection, fakeBullmq } = require('../helpers/fake-bullmq.js');
@@ -39,4 +40,8 @@ describe('BullMQ adapter (integration, fake BullMQ)', () => {
 
 describe('fake BullMQ fidelity', () => {
   defineBullMQFidelityScenarios(harness);
+});
+
+describe('background queue (integration, fake BullMQ)', () => {
+  defineBullMQBackgroundScenarios(harness);
 });

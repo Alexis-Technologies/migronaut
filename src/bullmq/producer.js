@@ -1,11 +1,18 @@
-const { ConfigInvalidError, MigrationBlockedError } = require('../errors/index.js');
+const {
+  BackgroundPendingError,
+  ConfigInvalidError,
+  MigrationBlockedError,
+  NotAppliedError,
+} = require('../errors/index.js');
 const { actorIssue, pickActor } = require('../utils/actor.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { assertId, randomId } = require('../utils/id.js');
 const { assertMigrationName } = require('../utils/migration-name.js');
 const {
+  BACKGROUND_FORBIDDEN_JOB_OPTIONS,
   FORBIDDEN_JOB_OPTIONS,
   JOB_NAMES,
+  buildBackgroundJob,
   buildConvergeJob,
   buildMigrationJob,
   isPlainObject,
@@ -32,6 +39,27 @@ function assertJobOptions(jobOptions) {
       throw new ConfigInvalidError(
         `jobOptions.${key} is not configurable — migration jobs run strictly first-in, ` +
           'first-out with a single attempt',
+        { key },
+      );
+    }
+  }
+}
+
+/**
+ * A background queue's `jobOptions`: the same passthrough, minus what decides
+ * how its coordinators and lanes are retried, ordered and woken.
+ */
+function assertBackgroundJobOptions(jobOptions) {
+  if (jobOptions === undefined) return;
+  if (!isPlainObject(jobOptions)) {
+    throw new ConfigInvalidError('background jobOptions must be an object', {
+      jobOptions: typeof jobOptions,
+    });
+  }
+  for (const key of BACKGROUND_FORBIDDEN_JOB_OPTIONS) {
+    if (jobOptions[key] !== undefined) {
+      throw new ConfigInvalidError(
+        `background jobOptions.${key} is not configurable — coordinators and lanes set their own`,
         { key },
       );
     }
@@ -124,16 +152,38 @@ async function planUpJobs(kit, options = {}) {
   const migrations = [];
   /** The version of each file the plan was made from — a worker refuses any other */
   const checksums = new Map();
+  /**
+   * The first migration that requires a background migration not completed
+   * yet — the plan ends before it. (A background file that requires one is
+   * not held: it registers as blocked, and starts once it is unblocked.)
+   */
+  let waiting;
   for (const row of rows) {
-    if (row.status !== 'applied' || force) {
-      migrations.push(row.file);
-      if (typeof row.checksum === 'string') checksums.set(row.file, row.checksum);
+    if (row.status === 'applied' && !force) continue;
+    if (row.kind !== 'background' && Array.isArray(row.waitsFor) && row.waitsFor.length > 0) {
+      waiting = { migration: row.file, waitsFor: row.waitsFor };
+      break;
     }
+    migrations.push(row.file);
+    if (typeof row.checksum === 'string') checksums.set(row.file, row.checksum);
+  }
+  if (waiting !== undefined && filename !== undefined) {
+    // Asked for by name: say why now, rather than enqueue a job that can only fail.
+    throw new BackgroundPendingError(
+      `${waiting.migration} requires background migration(s) that have not completed: ` +
+        waiting.waitsFor.join(', '),
+      {
+        migration: waiting.migration,
+        waitsFor: waiting.waitsFor.map((migration) => ({ migration })),
+      },
+    );
   }
   const groupId = await newGroupId(kit);
+  const tail = waiting !== undefined ? { waiting } : {};
   if (migrations.length === 0) {
-    const plan = { groupId, direction: JOB_NAMES.UP, batch: null, migrations, jobs: [] };
-    if (converge && !(await kit.converge({ dryRun: true })).inSync) {
+    const plan = { groupId, direction: JOB_NAMES.UP, batch: null, migrations, jobs: [], ...tail };
+    // A group cut short of the head never converges — nor does it with nothing to run.
+    if (waiting === undefined && converge && !(await kit.converge({ dryRun: true })).inSync) {
       plan.converge = buildConvergeJob({ groupId, ordered, jobOptions, ...actor });
     }
     return plan;
@@ -158,8 +208,8 @@ async function planUpJobs(kit, options = {}) {
       opts: migrationJobOptions(jobOptions, JOB_NAMES.UP, migration, { force }),
     });
   }
-  const plan = { groupId, direction: JOB_NAMES.UP, batch, migrations, jobs };
-  if (converge) {
+  const plan = { groupId, direction: JOB_NAMES.UP, batch, migrations, jobs, ...tail };
+  if (converge && waiting === undefined) {
     plan.converge = buildConvergeJob({
       groupId,
       ordered,
@@ -335,12 +385,22 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
     );
   }
 
+  if (plan.waiting !== undefined) {
+    kit.logger.info(
+      `⧗ ${plan.waiting.migration} waits for background migration(s): ` +
+        `${plan.waiting.waitsFor.join(', ')} — not enqueued yet`,
+      { groupId, migration: plan.waiting.migration, waitsFor: plan.waiting.waitsFor.length },
+    );
+  }
+
   return {
     groupId,
     direction,
     batch,
-    // "No migration to run" — a converge-only group is still up to date.
-    upToDate: jobs.length === 0,
+    // "No migration to run" — a converge-only group is still up to date; one
+    // cut short by a background migration is not.
+    upToDate: jobs.length === 0 && plan.waiting === undefined,
+    ...(plan.waiting !== undefined ? { waiting: plan.waiting } : {}),
     jobs,
     deduplicated,
     converge,
@@ -408,6 +468,96 @@ async function enqueueUp(queue, kit, options = {}, internals = {}) {
   });
 }
 
+/** How long a running background migration may show no sign of life before a takeover */
+const DEFAULT_STALL_MS = 15 * 60_000;
+
+/** The latest sign of life of a background migration: a checkpoint, a coordinator step, its start */
+function lastActivity(status) {
+  let latest = 0;
+  for (const at of [
+    status.lastProgressAt,
+    status.coordinator?.at,
+    status.startedAt,
+    status.registeredAt,
+  ]) {
+    const time = at instanceof Date ? at.getTime() : 0;
+    if (time > latest) latest = time;
+  }
+  return latest;
+}
+
+/**
+ * Enqueue the coordinator of one background migration — or, with no
+ * `migration`, of every one with work to do (unblocking those whose requires
+ * are met on the way). Safe to call from every pod, as often as you like: a
+ * coordinator chain that is alive absorbs the add. A background migration
+ * nothing has moved for `stallMs` (no live lease, no checkpoint, no
+ * coordinator step) also gets a takeover coordinator — one per round, however
+ * many pods ask — whose newer round retires the stuck one.
+ */
+async function enqueueBackground(queue, kit, options = {}) {
+  if (!isPlainObject(options)) {
+    throw new ConfigInvalidError('enqueueBackground options must be an object');
+  }
+  const { migration, jobOptions, stallMs = DEFAULT_STALL_MS } = options;
+  assertQueue(queue);
+  assertBackgroundJobOptions(jobOptions);
+  if (!Number.isSafeInteger(stallMs) || stallMs < 1000) {
+    throw new ConfigInvalidError('stallMs must be an integer of at least 1000', { stallMs });
+  }
+  const actor = actorOf(options);
+  const targets = [];
+  if (migration !== undefined) {
+    assertMigrationName(migration);
+    const status = await kit.backgroundStatus(migration);
+    if (status === null) {
+      throw new NotAppliedError(
+        `Background migration ${migration} is not registered — run up first`,
+        { migration },
+      );
+    }
+    targets.push(status);
+  } else {
+    for (const entry of await kit.runnableBackground()) {
+      targets.push(
+        entry.status === 'pending'
+          ? entry
+          : ((await kit.backgroundStatus(entry.migration)) ?? entry),
+      );
+    }
+  }
+  const specs = [];
+  const now = Date.now();
+  for (const status of targets) {
+    specs.push(buildBackgroundJob({ migration: status.migration, jobOptions, ...actor }));
+    const stalled =
+      status.status === 'running' &&
+      status.liveLeases === 0 &&
+      now - lastActivity(status) > stallMs;
+    if (stalled) {
+      specs.push(
+        buildBackgroundJob({
+          migration: status.migration,
+          takeoverOf: status.coordinator?.round ?? 0,
+          jobOptions,
+          ...actor,
+        }),
+      );
+    }
+  }
+  if (specs.length === 0) return { jobs: [] };
+  const added = await queue.addBulk(specs);
+  const jobs = [];
+  for (const [index, job] of added.entries()) {
+    jobs.push({
+      migration: specs[index].data.migration,
+      id: String(job.id),
+      ...(specs[index].data.takeover ? { takeover: true } : {}),
+    });
+  }
+  return { jobs };
+}
+
 /** Enqueue a rollback (last batch, a `batch`, `steps`, back `to`, or one `filename`) */
 async function enqueueDown(queue, kit, options = {}, internals = {}) {
   const { queueEvents, ...planOptions } = options;
@@ -418,7 +568,10 @@ async function enqueueDown(queue, kit, options = {}, internals = {}) {
 }
 
 module.exports = {
+  DEFAULT_STALL_MS,
+  assertBackgroundJobOptions,
   assertJobOptions,
+  enqueueBackground,
   enqueueConverge,
   enqueueDown,
   enqueueUp,

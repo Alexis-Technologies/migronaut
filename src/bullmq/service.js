@@ -4,18 +4,32 @@ const { errorText } = require('../utils/error.js');
 const { isBareFilename } = require('../utils/migration-name.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
 const {
+  DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
   DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
   JOB_NAMES,
+  backgroundQueueName,
+  buildBackgroundVerifyJobTemplate,
   buildConvergeJobTemplate,
   permissionsNeeded,
   resolveAllow,
   buildSyncJobTemplate,
   isPlainObject,
 } = require('./jobs.js');
+const {
+  createBackgroundProcessor,
+  resolveBackgroundProcessorOptions,
+} = require('./background-processor.js');
 const { createMigrationProcessor, resolveProcessorOptions } = require('./processor.js');
-const { assertJobOptions, enqueueConverge, enqueueDown, enqueueUp } = require('./producer.js');
+const {
+  DEFAULT_STALL_MS,
+  assertJobOptions,
+  enqueueBackground,
+  enqueueConverge,
+  enqueueDown,
+  enqueueUp,
+} = require('./producer.js');
 
 /**
  * Twice BullMQ's default job lock: its renewal (every half) then survives a
@@ -27,6 +41,84 @@ const DEFAULT_LOCK_DURATION_MS = 60_000;
 const DEFAULT_MAX_STALLED_COUNT = 1;
 /** The shortest interval `schedule({ every })` accepts */
 const MIN_SCHEDULE_EVERY_MS = 1000;
+/** Background jobs run side by side — a lane and a coordinator need not take turns */
+const DEFAULT_BACKGROUND_CONCURRENCY = 2;
+/** How often the drift watch runs on the background queue by default */
+const DEFAULT_BACKGROUND_VERIFY_MS = 600_000;
+/** Every key the `background` option accepts */
+const BACKGROUND_KEYS = new Set([
+  'queueName',
+  'queue',
+  'jobOptions',
+  'workerOptions',
+  'sliceMs',
+  'children',
+  'pollIntervalMs',
+  'stallMs',
+  'verifyIntervalMs',
+]);
+
+/**
+ * The `background` option, checked and filled in — or undefined when the
+ * queue has no background side. `true` takes every default.
+ */
+function resolveBackground(background, { queueName, QueueSource }) {
+  if (background === undefined || background === false) return undefined;
+  const options = background === true ? {} : background;
+  if (!isPlainObject(options)) {
+    throw new ConfigInvalidError('background must be true or an object');
+  }
+  for (const key of Object.keys(options)) {
+    if (!BACKGROUND_KEYS.has(key)) {
+      throw new ConfigInvalidError(`background.${key} is not a known option`, { key });
+    }
+  }
+  const queueIsInstance =
+    options.queue !== undefined &&
+    isPlainObject(options.queue) &&
+    typeof options.queue.addBulk === 'function';
+  if (options.queue !== undefined && !queueIsInstance) {
+    throw new ConfigInvalidError('background.queue must be a Queue instance');
+  }
+  if (!queueIsInstance && !isClass(QueueSource)) {
+    throw new ConfigInvalidError(
+      'background needs bullmq.Queue as a class to build its queue — or a background.queue',
+    );
+  }
+  const name =
+    options.queueName ??
+    (queueIsInstance ? options.queue.name : undefined) ??
+    backgroundQueueName(queueName);
+  assertName(name, 'background.queueName');
+  if (name === queueName) {
+    throw new ConfigInvalidError('background.queueName must differ from the migration queue', {
+      queueName: name,
+    });
+  }
+  if (options.workerOptions !== undefined && !isPlainObject(options.workerOptions)) {
+    throw new ConfigInvalidError('background.workerOptions must be an object');
+  }
+  assertBackgroundConcurrency(options.workerOptions?.concurrency);
+  const verifyIntervalMs = options.verifyIntervalMs ?? DEFAULT_BACKGROUND_VERIFY_MS;
+  if (
+    verifyIntervalMs !== false &&
+    (!Number.isSafeInteger(verifyIntervalMs) || verifyIntervalMs < MIN_SCHEDULE_EVERY_MS)
+  ) {
+    throw new ConfigInvalidError(
+      `background.verifyIntervalMs must be false or an integer ≥ ${MIN_SCHEDULE_EVERY_MS}`,
+      { verifyIntervalMs },
+    );
+  }
+  return { ...options, name, queueIsInstance, verifyIntervalMs };
+}
+
+function assertBackgroundConcurrency(concurrency) {
+  if (concurrency !== undefined && (!Number.isSafeInteger(concurrency) || concurrency < 1)) {
+    throw new ConfigInvalidError('background worker concurrency must be a positive integer', {
+      concurrency,
+    });
+  }
+}
 
 const isClass = (value) => typeof value === 'function';
 
@@ -90,6 +182,12 @@ class MigrationQueue {
   #globalConcurrency;
   #allow;
   #closing;
+  #background;
+  #backgroundQueue;
+  #ownsBackgroundQueue = false;
+  #backgroundProcessor;
+  #backgroundWorker;
+  #backgroundStarting;
 
   constructor(options) {
     if (!isPlainObject(options)) {
@@ -108,6 +206,7 @@ class MigrationQueue {
       globalConcurrency = true,
       lockWait,
       allow,
+      background,
     } = options;
 
     if (!isPlainObject(bullmq)) {
@@ -190,6 +289,17 @@ class MigrationQueue {
       ...(allow !== undefined ? { allow } : {}),
     });
     this.#allow = resolveAllow(allow);
+    const backgroundSettings = resolveBackground(background, {
+      queueName: resolvedName,
+      QueueSource: Queue,
+    });
+    if (backgroundSettings !== undefined) {
+      // Validated against a stand-in queue: the real one does not exist yet.
+      resolveBackgroundProcessorOptions({
+        ...MigrationQueue.#backgroundProcessorOptions(backgroundSettings),
+        queue: { addBulk() {} },
+      });
+    }
 
     this.#ownsKit = kit === undefined;
     this.#kit = kit ?? new MigratorKit(config ?? {}, kitOptions);
@@ -207,6 +317,28 @@ class MigrationQueue {
         error: errorText(error),
       }),
     );
+    if (backgroundSettings !== undefined) {
+      this.#background = backgroundSettings;
+      this.#ownsBackgroundQueue = !backgroundSettings.queueIsInstance;
+      this.#backgroundQueue = backgroundSettings.queueIsInstance
+        ? backgroundSettings.queue
+        : new Queue(backgroundSettings.name, {
+            connection,
+            ...(resolvedPrefix !== undefined ? { prefix: resolvedPrefix } : {}),
+            ...(telemetry !== undefined ? { telemetry } : {}),
+          });
+      this.#listen(this.#backgroundQueue, 'error', (error) =>
+        this.#kit.logger.error(`✖ Background queue error: ${errorText(error)}`, {
+          queue: backgroundSettings.name,
+          error: errorText(error),
+        }),
+      );
+      this.#backgroundProcessor = createBackgroundProcessor({
+        kit: this.#kit,
+        queue: this.#backgroundQueue,
+        ...MigrationQueue.#backgroundProcessorOptions(backgroundSettings),
+      });
+    }
     this.#processor = createMigrationProcessor({
       kit: this.#kit,
       // `sync` jobs (and the converge jobs they add) enqueue into the queue
@@ -215,7 +347,41 @@ class MigrationQueue {
       ...(lockWait !== undefined ? { lockWait } : {}),
       ...(jobOptions !== undefined ? { jobOptions } : {}),
       ...(allow !== undefined ? { allow } : {}),
+      // What an `up` registers starts on the background queue at once.
+      ...(this.#backgroundQueue !== undefined
+        ? {
+            background: {
+              queue: this.#backgroundQueue,
+              ...MigrationQueue.#backgroundEnqueueOptions(backgroundSettings),
+            },
+          }
+        : {}),
     });
+  }
+
+  /** The background processor's options out of the resolved `background` option */
+  static #backgroundProcessorOptions(settings) {
+    const picked = {};
+    for (const key of ['jobOptions', 'sliceMs', 'children', 'pollIntervalMs', 'stallMs']) {
+      if (settings[key] !== undefined) picked[key] = settings[key];
+    }
+    return picked;
+  }
+
+  /** What every coordinator enqueue from this object carries */
+  static #backgroundEnqueueOptions(settings) {
+    return {
+      ...(settings.jobOptions !== undefined ? { jobOptions: settings.jobOptions } : {}),
+      stallMs: settings.stallMs ?? DEFAULT_STALL_MS,
+    };
+  }
+
+  #assertBackground(method) {
+    if (this.#background === undefined) {
+      throw new ConfigInvalidError(
+        `${method} needs the background queue — pass background: true to createMigrationQueue`,
+      );
+    }
   }
 
   /**
@@ -301,6 +467,21 @@ class MigrationQueue {
     return this.#processor;
   }
 
+  /** The background queue (`background` option), if any */
+  get backgroundQueue() {
+    return this.#backgroundQueue;
+  }
+
+  /** The background worker started by {@link startBackgroundWorker}, if any */
+  get backgroundWorker() {
+    return this.#backgroundWorker;
+  }
+
+  /** The background queue's processor, for a Worker you construct yourself */
+  get backgroundProcessor() {
+    return this.#backgroundProcessor;
+  }
+
   #ensureQueueEvents() {
     if (this.#queueEvents) return this.#queueEvents;
     // A connection opened after close() would have nobody to close it.
@@ -379,6 +560,48 @@ class MigrationQueue {
       { ...options, jobOptions: this.#jobOptions },
       this.#internals(),
     );
+  }
+
+  /**
+   * Enqueue the coordinator of one background migration — or of every one with
+   * work to do. Idempotent: a coordinator already alive absorbs the add.
+   * @experimental
+   */
+  async enqueueBackground(name, options = {}) {
+    this.#assertOpen();
+    this.#assertBackground('enqueueBackground()');
+    if (!isPlainObject(options)) {
+      throw new ConfigInvalidError('enqueueBackground options must be an object');
+    }
+    return enqueueBackground(this.#backgroundQueue, this.#kit, {
+      ...MigrationQueue.#backgroundEnqueueOptions(this.#background),
+      ...options,
+      ...(name !== undefined ? { migration: name } : {}),
+    });
+  }
+
+  /** A background migration's status (or every one's) — read from MongoDB */
+  async backgroundStatus(name) {
+    this.#assertOpen();
+    return this.#kit.backgroundStatus(name);
+  }
+
+  /**
+   * The drift watch, now — and, on a queue with a background side, a
+   * coordinator for whatever it reopened.
+   * @experimental
+   */
+  async verifyBackground(options = {}) {
+    this.#assertOpen();
+    const result = await this.#kit.verifyBackground(options);
+    if (this.#background !== undefined && result.drift.length > 0) {
+      await enqueueBackground(
+        this.#backgroundQueue,
+        this.#kit,
+        MigrationQueue.#backgroundEnqueueOptions(this.#background),
+      );
+    }
+    return result;
   }
 
   /** Full migration status — read straight from MongoDB, not from the queue */
@@ -481,6 +704,75 @@ class MigrationQueue {
     return worker;
   }
 
+  /**
+   * Start the background worker: coordinators and lanes of background
+   * migrations, side by side (concurrency 2 by default). Connects to MongoDB
+   * first, registers the drift watch's schedule (`verifyIntervalMs`), and
+   * heals — a coordinator for every background migration with work to do.
+   * Calling it again returns the same worker.
+   * @experimental
+   */
+  async startBackgroundWorker(overrides = {}) {
+    this.#assertOpen();
+    this.#assertBackground('startBackgroundWorker()');
+    if (!isPlainObject(overrides)) {
+      throw new ConfigInvalidError('startBackgroundWorker options must be an object');
+    }
+    assertBackgroundConcurrency(overrides.concurrency);
+    if (!this.#WorkerClass) {
+      throw new ConfigInvalidError(
+        'startBackgroundWorker() needs the Worker class — pass bullmq: { Queue, Worker }',
+      );
+    }
+    this.#backgroundStarting ??= this.#startBackgroundWorker(overrides).catch((error) => {
+      this.#backgroundStarting = undefined;
+      throw error;
+    });
+    return this.#backgroundStarting;
+  }
+
+  async #startBackgroundWorker(overrides) {
+    await this.#kit.connect();
+    const queue = this.#backgroundQueue;
+    const { verifyIntervalMs, workerOptions = {} } = this.#background;
+    if (verifyIntervalMs !== false && typeof queue.upsertJobScheduler === 'function') {
+      await queue.upsertJobScheduler(
+        DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
+        { every: verifyIntervalMs },
+        buildBackgroundVerifyJobTemplate({ jobOptions: this.#background.jobOptions }),
+      );
+    }
+    this.#assertOpen();
+    const Worker = this.#WorkerClass;
+    const worker = new Worker(this.#background.name, this.#backgroundProcessor, {
+      connection: this.#connection,
+      ...(this.#prefix !== undefined ? { prefix: this.#prefix } : {}),
+      lockDuration: DEFAULT_LOCK_DURATION_MS,
+      maxStalledCount: DEFAULT_MAX_STALLED_COUNT,
+      ...(this.#telemetry !== undefined ? { telemetry: this.#telemetry } : {}),
+      concurrency: DEFAULT_BACKGROUND_CONCURRENCY,
+      ...workerOptions,
+      ...overrides,
+    });
+    this.#backgroundWorker = worker;
+    const fields = { queue: this.#background.name };
+    this.#listen(worker, 'error', (error) =>
+      this.#kit.logger.error(`✖ Background worker error: ${errorText(error)}`, {
+        ...fields,
+        error: errorText(error),
+      }),
+    );
+    this.#listen(worker, 'failed', (job, error) =>
+      this.#kit.logger.warn(
+        `✖ Background job failed${job?.id !== undefined ? ` (${job.id})` : ''}: ${errorText(error)}`,
+        { ...fields, ...failedJobFields(job, error), error: errorText(error) },
+      ),
+    );
+    await worker.waitUntilReady?.();
+    await this.#backgroundProcessor.heal();
+    return worker;
+  }
+
   /** Stop workers from picking up new jobs. The job in flight finishes */
   async pause() {
     this.#assertOpen();
@@ -536,13 +828,28 @@ class MigrationQueue {
       throw new ConfigInvalidError('schedule options must be an object');
     }
     const { job = JOB_NAMES.SYNC, every, pattern, tz, to } = options;
-    if (job !== JOB_NAMES.SYNC && job !== JOB_NAMES.CONVERGE) {
-      throw new ConfigInvalidError("schedule job must be 'sync' or 'converge'", { job });
+    if (
+      job !== JOB_NAMES.SYNC &&
+      job !== JOB_NAMES.CONVERGE &&
+      job !== JOB_NAMES.BACKGROUND_VERIFY
+    ) {
+      throw new ConfigInvalidError(
+        "schedule job must be 'sync', 'converge' or 'background-verify'",
+        { job },
+      );
     }
     const converge = job === JOB_NAMES.CONVERGE;
-    const { id = converge ? DEFAULT_CONVERGE_SCHEDULER_ID : DEFAULT_SCHEDULER_ID } = options;
+    const verify = job === JOB_NAMES.BACKGROUND_VERIFY;
+    if (verify) this.#assertBackground("schedule({ job: 'background-verify' })");
+    const {
+      id = verify
+        ? DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID
+        : converge
+          ? DEFAULT_CONVERGE_SCHEDULER_ID
+          : DEFAULT_SCHEDULER_ID,
+    } = options;
     assertName(id, 'id');
-    if (converge && to !== undefined) {
+    if (job !== JOB_NAMES.SYNC && to !== undefined) {
       throw new ConfigInvalidError('to only applies to a sync schedule', { to });
     }
     if ((every === undefined) === (pattern === undefined)) {
@@ -566,17 +873,24 @@ class MigrationQueue {
     if (to !== undefined && !isBareFilename(to)) {
       throw new ConfigInvalidError('to must be a migration filename', { to });
     }
-    if (typeof this.#queue.upsertJobScheduler !== 'function') {
+    const queue = verify ? this.#backgroundQueue : this.#queue;
+    if (typeof queue.upsertJobScheduler !== 'function') {
       throw new ConfigInvalidError(
         'schedule() needs job schedulers (queue.upsertJobScheduler) — BullMQ 5.16 or newer',
       );
     }
-    await this.#queue.upsertJobScheduler(
+    let template;
+    if (verify) {
+      template = buildBackgroundVerifyJobTemplate({ jobOptions: this.#background.jobOptions });
+    } else if (converge) {
+      template = buildConvergeJobTemplate({ jobOptions: this.#jobOptions });
+    } else {
+      template = buildSyncJobTemplate({ to, jobOptions: this.#jobOptions });
+    }
+    await queue.upsertJobScheduler(
       id,
       { ...(every !== undefined ? { every } : { pattern }), ...(tz !== undefined ? { tz } : {}) },
-      converge
-        ? buildConvergeJobTemplate({ jobOptions: this.#jobOptions })
-        : buildSyncJobTemplate({ to, jobOptions: this.#jobOptions }),
+      template,
     );
   }
 
@@ -593,7 +907,11 @@ class MigrationQueue {
         'unschedule() needs job schedulers (queue.removeJobScheduler) — BullMQ 5.16 or newer',
       );
     }
-    return Boolean(await this.#queue.removeJobScheduler(id));
+    const removed = Boolean(await this.#queue.removeJobScheduler(id));
+    // A schedule of the background queue (the drift watch) goes the same way.
+    const background = this.#backgroundQueue;
+    if (typeof background?.removeJobScheduler !== 'function') return removed;
+    return Boolean(await background.removeJobScheduler(id)) || removed;
   }
 
   /**
@@ -618,29 +936,44 @@ class MigrationQueue {
     };
     // The worker stops fetching first: a job the shutdown below puts back in
     // the queue must go to the next worker, not straight back to this one.
+    // Both workers stop fetching together, and both processors are told to
+    // stop: a lane checkpoints at its next batch and goes back to the queue.
     const worker = this.#worker;
-    const workerClosed = worker ? attempt(() => worker.close(force)) : undefined;
+    const backgroundWorker = this.#backgroundWorker;
+    const workersClosed = [
+      worker ? attempt(() => worker.close(force)) : undefined,
+      backgroundWorker ? attempt(() => backgroundWorker.close(force)) : undefined,
+    ];
     this.#processor.shutdown('Migration queue closing');
-    await workerClosed;
+    this.#backgroundProcessor?.shutdown('Migration queue closing');
+    await Promise.all(workersClosed);
     // A worker still starting is closed too, not orphaned — and a start that
     // failed is that call's failure, not this one's.
     await this.#workerStarting?.catch(() => undefined);
     if (this.#worker && this.#worker !== worker) {
       await attempt(() => this.#worker.close(force));
     }
+    await this.#backgroundStarting?.catch(() => undefined);
+    if (this.#backgroundWorker && this.#backgroundWorker !== backgroundWorker) {
+      await attempt(() => this.#backgroundWorker.close(force));
+    }
+    const processors = [this.#processor];
+    if (this.#backgroundProcessor) processors.push(this.#backgroundProcessor);
+    if (!force) {
+      for (const processor of processors) await attempt(() => processor.close());
+    }
     if (this.#queueEvents && this.#ownsQueueEvents) await attempt(() => this.#queueEvents.close());
     if (this.#ownsQueue) await attempt(() => this.#queue.close());
+    if (this.#ownsBackgroundQueue) await attempt(() => this.#backgroundQueue.close());
     if (force) {
-      // The migration in flight is not waited for — but it keeps its
-      // connection until it ends: a kit this object created is disconnected
-      // only once the processor has settled.
-      this.#processor
-        .close()
+      // The work in flight is not waited for — but it keeps its connection
+      // until it ends: a kit this object created is disconnected only once
+      // the processors have settled.
+      Promise.allSettled(processors.map((processor) => processor.close()))
         .then(() => (this.#ownsKit ? this.#kit.disconnect() : undefined))
         .catch(() => undefined);
-    } else {
-      await attempt(() => this.#processor.close());
-      if (this.#ownsKit) await attempt(() => this.#kit.disconnect());
+    } else if (this.#ownsKit) {
+      await attempt(() => this.#kit.disconnect());
     }
     if (failures.length > 0) throw failures[0];
   }

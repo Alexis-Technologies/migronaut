@@ -1,7 +1,9 @@
 const assert = require('node:assert/strict');
 const { describe, it, mock } = require('node:test');
 const {
+  assertBackgroundJobOptions,
   assertJobOptions,
+  enqueueBackground,
   enqueueConverge,
   enqueueDown,
   enqueueUp,
@@ -10,6 +12,7 @@ const {
 } = require('../../src/bullmq/producer.js');
 const { waitForGroup } = require('../../src/bullmq/wait.js');
 const {
+  BackgroundPendingError,
   ConfigInvalidError,
   MigrationBlockedError,
   MigrationInvalidNameError,
@@ -868,5 +871,121 @@ describe('converge jobs from the producer', () => {
       ordered: false,
     });
     assert.deepStrictEqual([blind.jobId, blind.deduplicated], ['7', false]);
+  });
+});
+
+describe('background on the producer side', () => {
+  const NAME = '0001-orders.js';
+  const queue = () => new FakeQueue('jobs-background', { connection: createFakeConnection() });
+
+  it('should cut an up plan before a migration that waits for a background one', async () => {
+    const kit = stubKit({
+      dryRun: mock.fn(async () => [
+        { ...pendingRow(NAME), kind: 'background', background: true },
+        { ...pendingRow('0002-next.js'), kind: 'background', requires: [NAME], waitsFor: [NAME] },
+        { ...pendingRow('0003-contract.js'), requires: [NAME], waitsFor: [NAME] },
+        pendingRow('0004-later.js'),
+      ]),
+      convergesAfterUp: mock.fn(async () => true),
+    });
+    const plan = await planUpJobs(kit);
+    assert.deepStrictEqual(
+      plan.migrations,
+      [NAME, '0002-next.js'],
+      'a background file is not held',
+    );
+    assert.deepStrictEqual(plan.waiting, { migration: '0003-contract.js', waitsFor: [NAME] });
+    assert.strictEqual(plan.converge, undefined, 'a group cut short never converges');
+    await assert.rejects(planUpJobs(kit, { filename: '0003-contract.js' }), (error) => {
+      assert.ok(error instanceof BackgroundPendingError);
+      assert.deepStrictEqual(error.context.waitsFor, [{ migration: NAME }]);
+      return true;
+    });
+    const group = await enqueueUp(queue(), kit);
+    assert.strictEqual(group.upToDate, false);
+    assert.deepStrictEqual(group.waiting, plan.waiting);
+  });
+
+  it('should report a group held at its very first file as not up to date', async () => {
+    const kit = stubKit({
+      dryRun: mock.fn(async () => [{ ...pendingRow('0003-contract.js'), waitsFor: [NAME] }]),
+    });
+    const group = await enqueueUp(queue(), kit);
+    assert.strictEqual(group.jobs.length, 0);
+    assert.strictEqual(group.upToDate, false);
+    assert.strictEqual(group.waiting.migration, '0003-contract.js');
+  });
+
+  it('should refuse background job options a coordinator or a lane owns', () => {
+    assertBackgroundJobOptions(undefined);
+    assertBackgroundJobOptions({ keepLogs: 5 });
+    assert.throws(() => assertBackgroundJobOptions('x'), /must be an object/);
+    for (const key of ['attempts', 'parent', 'failParentOnFailure', 'removeDependencyOnFailure']) {
+      assert.throws(() => assertBackgroundJobOptions({ [key]: 1 }), new RegExp(key));
+    }
+  });
+
+  it('should add a takeover for a running background migration nothing has moved for stallMs', async () => {
+    const old = new Date(Date.now() - 60_000);
+    const statuses = {
+      '0001-a.js': {
+        migration: '0001-a.js',
+        status: 'running',
+        liveLeases: 0,
+        registeredAt: old,
+        lastProgressAt: old,
+        coordinator: { kind: 'bullmq', round: 3, at: old },
+      },
+      '0002-b.js': {
+        migration: '0002-b.js',
+        status: 'running',
+        liveLeases: 1,
+        registeredAt: old,
+      },
+      '0003-c.js': {
+        migration: '0003-c.js',
+        status: 'running',
+        liveLeases: 0,
+        registeredAt: new Date(),
+      },
+    };
+    const kit = stubKit({
+      runnableBackground: mock.fn(async () => [
+        ...Object.keys(statuses).map((migration) => ({ migration, status: 'running' })),
+        { migration: '0004-d.js', status: 'pending', maxParallel: 1 },
+        { migration: '0005-gone.js', status: 'running', maxParallel: 1 },
+      ]),
+      backgroundStatus: mock.fn(async (name) => statuses[name] ?? null),
+    });
+    const target = queue();
+    const { jobs } = await enqueueBackground(target, kit, { stallMs: 30_000, reason: 'heal' });
+    assert.deepStrictEqual(
+      jobs.map((job) => [job.migration, job.takeover ?? false]),
+      [
+        ['0001-a.js', false],
+        ['0001-a.js', true],
+        ['0002-b.js', false],
+        ['0003-c.js', false],
+        ['0004-d.js', false],
+        ['0005-gone.js', false],
+      ],
+    );
+    const takeover = await target.getJob(jobs[1].id);
+    assert.deepStrictEqual(takeover.opts.deduplication, { id: 'bg-0001-a.js-t3' });
+    assert.strictEqual(takeover.data.reason, 'heal');
+  });
+
+  it('should refuse a bad call, and add nothing when nothing is runnable', async () => {
+    const kit = stubKit({
+      runnableBackground: mock.fn(async () => []),
+      backgroundStatus: mock.fn(async () => null),
+    });
+    await assert.rejects(enqueueBackground(queue(), kit, 1), /must be an object/);
+    await assert.rejects(enqueueBackground({}, kit), /addBulk/);
+    await assert.rejects(enqueueBackground(queue(), kit, { stallMs: 5 }), /stallMs/);
+    await assert.rejects(enqueueBackground(queue(), kit, { migration: '../x.js' }), /./);
+    await assert.rejects(enqueueBackground(queue(), kit, { migration: NAME }), /not registered/);
+    await assert.rejects(enqueueBackground(queue(), kit, { requestedBy: 5 }), ConfigInvalidError);
+    assert.deepStrictEqual(await enqueueBackground(queue(), kit), { jobs: [] });
   });
 });

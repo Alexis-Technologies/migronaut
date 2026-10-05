@@ -2053,6 +2053,8 @@ export interface BackgroundStatus {
   status: BackgroundState;
   phase: 'partition' | 'process' | 'replan';
   direction: 'forward' | 'revert';
+  /** Minted at every (re-)registration — `up --force`, `redo` and `down` get a new one */
+  registration: string;
   mode: 'declarative' | 'step';
   collection?: string;
   from?: number;
@@ -2079,6 +2081,11 @@ export interface BackgroundStatus {
   };
   /** Leases renewed within their TTL — lanes working right now */
   liveLeases: number;
+  /**
+   * The driver of the latest coordinator step that said who it was — a queue's
+   * coordinator chain carries its `round`, and an older round bows out
+   */
+  coordinator?: { kind: string; round?: number; at: Date };
   plan?: { method: string; estimate: number; partitions: number; degraded?: string };
   registeredAt: Date;
   startedAt?: Date;
