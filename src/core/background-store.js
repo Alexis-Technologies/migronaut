@@ -225,7 +225,10 @@ class BackgroundStore {
    * plan is not the state's — and removes them. Returns the state after, or
    * `null` when the race was lost.
    */
-  async commitPlan(name, { generation, previousToken, plan, partitions, fields = {} }) {
+  async commitPlan(
+    name,
+    { generation, previousToken, plan, partitions, fields = {}, filter = {} },
+  ) {
     const token = randomId();
     const nextGeneration = generation + 1;
     if (partitions.length > 0) {
@@ -249,7 +252,7 @@ class BackgroundStore {
     }
     const state = await this.cas(
       name,
-      { generation, 'plan.token': previousToken ?? { $exists: false } },
+      { ...filter, generation, 'plan.token': previousToken ?? { $exists: false } },
       {
         $set: {
           generation: nextGeneration,
