@@ -127,7 +127,11 @@ function applyVersioningPlugin(schema, versioning) {
  * @throws {ConfigInvalidError} on a non-schema, invalid versioning, or a
  *   version field the schema already gives a default
  */
-function versioningPlugin(schema, definition) {
+function versioningPlugin(schema, definitionOrModule) {
+  // An ES-module definition file, as `require` returns it, too — as defineShapes takes it.
+  const definition = isPlainObject(definitionOrModule?.default)
+    ? definitionOrModule.default
+    : definitionOrModule;
   if (!isPlainObject(definition)) {
     throw new ConfigInvalidError(
       'versioningPlugin needs the collection definition: schema.plugin(versioningPlugin, definition)',

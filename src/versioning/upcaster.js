@@ -180,7 +180,11 @@ function createUpcaster(versioning, steps, { newer = 'throw', collection } = {})
  * @throws {ConfigInvalidError} when a step is missing between `min` and
  *   `current`, goes past `current`, is async, or is not a function
  */
-function upcaster(definition, steps, options = {}) {
+function upcaster(definitionOrModule, steps, options = {}) {
+  // An ES-module definition file, as `require` returns it, too — as defineShapes takes it.
+  const definition = isPlainObject(definitionOrModule?.default)
+    ? definitionOrModule.default
+    : definitionOrModule;
   if (!isPlainObject(definition)) {
     throw new ConfigInvalidError('upcaster takes a collection definition or its versioning');
   }

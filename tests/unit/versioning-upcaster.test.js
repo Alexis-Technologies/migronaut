@@ -18,6 +18,11 @@ const shapeError = (reason) => (error) => {
 };
 
 describe('upcaster', () => {
+  it('should take an ES-module definition file as require returns it', () => {
+    const lifted = upcaster({ default: orders, __esModule: true }, steps).upcast({ __v: 2 });
+    assert.strictEqual(lifted.__v, 3);
+  });
+
   it('should lift a document step by step, stamping each version', () => {
     const seen = [];
     const traced = upcaster(orders, {

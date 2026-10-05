@@ -58,6 +58,12 @@ function fakeDoc(fields, { isNew = true, where } = {}) {
 const orders = { versioning: { current: 2 } };
 
 describe('versioningPlugin', () => {
+  it('should take an ES-module definition file as require returns it', () => {
+    const schema = fakeSchema();
+    versioningPlugin(schema, { default: orders, __esModule: true });
+    assert.strictEqual(schema.options.versionKey, '__rev');
+  });
+
   it('should make the revision the version key, with optimistic concurrency', () => {
     const schema = fakeSchema();
     versioningPlugin(schema, orders);
