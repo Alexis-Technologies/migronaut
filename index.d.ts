@@ -1933,7 +1933,9 @@ export class MigratorKit extends EventEmitter {
   /** The partitions of a background migration's latest generation. @experimental */
   backgroundPartitions(name: string): Promise<BackgroundPartitionInfo[]>;
   /** The background migrations with work to do (blocked ones unblocked on the way). @experimental */
-  runnableBackground(): Promise<{ migration: string; status: BackgroundState }[]>;
+  runnableBackground(): Promise<
+    { migration: string; status: BackgroundState; maxParallel: number }[]
+  >;
   /** Pause; its lanes stop at the next batch (`wait` until they have). @experimental */
   pauseBackground(name: string, options?: BackgroundControlOptions): Promise<BackgroundControlResult>;
   /** Resume a paused one. @experimental */
@@ -2356,6 +2358,45 @@ export const EXIT_CODES: Readonly<
     number
   >
 >;
+
+// ─── Background runner ────────────────────────────────────────────────────────
+
+/** Options of {@link startBackgroundRunner} */
+export interface BackgroundRunnerOptions {
+  /** The kit to drive — or `config` (and `kitOptions`) for one the runner makes and closes */
+  kit?: MigratorKit;
+  config?: Partial<MigronautConfig>;
+  kitOptions?: MigratorKitOptions;
+  /** Lane loops in this process, shared by every background migration (default 1, ≤ 64) */
+  concurrency?: number;
+  /** How often the runnable list is read again (default 5000 ms) */
+  pollIntervalMs?: number;
+  /** A slice's length (default: each background migration's `sliceMs`) */
+  sliceMs?: number;
+  /** The drift watch's period (default 600 000 ms — 10 minutes); `false`: off */
+  verifyIntervalMs?: number | false;
+  /** Stops the runner, as `stop()` does */
+  signal?: AbortSignal;
+  /** Hears every failed slice (the runner itself never throws) */
+  onError?: (error: unknown, migration?: string) => void;
+}
+
+/** A running {@link startBackgroundRunner} */
+export interface BackgroundRunner {
+  readonly kit: MigratorKit;
+  readonly running: boolean;
+  /** Stop at the next batch, release every lease, and close the kit the runner made */
+  stop(): Promise<void>;
+}
+
+/**
+ * Drive background migrations from inside the application — no queue:
+ * `concurrency` lane loops shared by every runnable background migration,
+ * round-robin, plus the drift watch every `verifyIntervalMs`. Several
+ * application instances share the work through the leases.
+ * @experimental New in 2.3
+ */
+export function startBackgroundRunner(options?: BackgroundRunnerOptions): BackgroundRunner;
 
 // ─── Logger factory ───────────────────────────────────────────────────────────
 

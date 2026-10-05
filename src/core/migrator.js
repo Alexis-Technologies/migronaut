@@ -2712,7 +2712,11 @@ class MigratorKit extends EventEmitter {
       let current = state;
       if (state.status === 'blocked') current = (await tryUnblock(deps, state)) ?? state;
       if (current.status !== 'blocked') {
-        runnable.push({ migration: current._id, status: current.status });
+        runnable.push({
+          migration: current._id,
+          status: current.status,
+          maxParallel: current.spec?.maxParallel ?? 1,
+        });
       }
     }
     return runnable;

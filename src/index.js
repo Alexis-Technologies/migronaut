@@ -1,4 +1,5 @@
 const { EXIT_CODES } = require('./cli/exit-codes.js');
+const { startBackgroundRunner } = require('./core/background-runner.js');
 const { MigratorKit } = require('./core/migrator.js');
 const { pendingMigrations, runMigrations } = require('./core/run.js');
 const { createLogger } = require('./utils/logger.js');
@@ -51,6 +52,9 @@ module.exports = {
 
   // The CLI's exit-code map, for wrappers that mirror its semantics
   EXIT_CODES,
+
+  // Background migrations driven from inside the application (experimental)
+  startBackgroundRunner,
 
   // Error classes
   BackgroundConflictError,

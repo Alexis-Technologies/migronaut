@@ -64,6 +64,8 @@ import {
   createLogger,
   pendingMigrations,
   runMigrations,
+  startBackgroundRunner,
+  type BackgroundRunner,
 } from '../../index.js';
 
 // MigratorKit is constructible with a partial config and returns typed results
@@ -575,3 +577,18 @@ expectAssignable<MigrationModule>({
 });
 expectType<Promise<RunResult[]>>(kit.up(undefined, { onBackgroundPending: 'stop' }));
 expectError(kit.up(undefined, { onBackgroundPending: 'wait' }));
+
+// ─── Background runner ────────────────────────────────────────────────────────
+const runner = startBackgroundRunner({
+  config: { uri: 'mongodb://x', dbName: 'db' },
+  concurrency: 2,
+});
+expectType<BackgroundRunner>(runner);
+expectType<Promise<void>>(runner.stop());
+expectType<boolean>(runner.running);
+startBackgroundRunner({
+  kit: new MigratorKit(),
+  verifyIntervalMs: false,
+  onError: () => undefined,
+});
+expectError(startBackgroundRunner({ verifyIntervalMs: true }));
