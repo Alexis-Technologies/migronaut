@@ -4,6 +4,7 @@ import type {
   BackgroundSliceResult,
   BackgroundStatus,
   BackgroundVerifyResult,
+  BackgroundWatcher,
   CollectionConvergeResult,
   ConvergeSearchSummary,
   ConvergeUnstable,
@@ -14,6 +15,7 @@ import type {
   MigronautErrorCode,
   OnLockHeld,
   StatusRow,
+  WatchBackgroundOptions,
 } from './index.js';
 
 // ─── Structural BullMQ surface ─────────────────────────────────────────────────
@@ -1095,6 +1097,12 @@ export interface BackgroundQueueOptions {
    * ≥ 1000). Default 600000 (10 minutes); `false` registers none.
    */
   verifyIntervalMs?: number | false;
+  /**
+   * Host the live drift watcher in the background worker's process — `true`,
+   * or its options. Default: when the kit's `backgroundDrift` is `'stream'`
+   * or `'both'`. Closed first by `close()`.
+   */
+  watch?: boolean | Omit<WatchBackgroundOptions, 'signal' | 'onError'>;
 }
 
 /**
@@ -1126,6 +1134,8 @@ export class MigrationQueue<
   readonly backgroundWorker: W | undefined;
   /** The background processor, for a Worker you construct yourself */
   readonly backgroundProcessor: BackgroundProcessor | undefined;
+  /** The live drift watcher `startBackgroundWorker()` started, if any */
+  readonly backgroundWatcher: BackgroundWatcher | undefined;
 
   /**
    * Enqueue pending migrations — all, up to `options.to`, or the one

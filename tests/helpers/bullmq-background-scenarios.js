@@ -374,6 +374,36 @@ function defineBullMQBackgroundScenarios(harness) {
     assert.strictEqual((await mq.backgroundQueue.getJobCounts())['waiting-children'] ?? 0, 0);
   });
 
+  it('[background] should host one drift-watcher leader across two workers, and hand it over on close', async () => {
+    await seed(50);
+    project.write(NAME, spec());
+    const watch = { refreshMs: 200, leaderRetryMs: 100, checkpointMs: 50 };
+    const first = createQueue({ background: { watch } });
+    const second = createQueue({ background: { watch } });
+    await first.startWorker();
+    await first.startBackgroundWorker();
+    await second.startBackgroundWorker();
+    await (await first.enqueueUp()).wait({ timeoutMs: 20_000 });
+    await reached(first, 'completed');
+    await drained(first);
+    const roles = (mq) => mq.backgroundWatcher.status()[0]?.state;
+    await until('one leader and one follower', () => {
+      const states = [roles(first), roles(second)].sort();
+      return states[0] === 'following' && states[1] === 'streaming';
+    });
+    const [leader, follower] = roles(first) === 'streaming' ? [first, second] : [second, first];
+    await leader.close();
+    await until('the handover', () => roles(follower) === 'streaming');
+    const { insertedId } = await harness
+      .mongo()
+      .db.collection('orders')
+      .insertOne({ __v: 1, __rev: 0, late: true });
+    await until('the upgrade', () =>
+      harness.mongo().db.collection('orders').findOne({ _id: insertedId, __v: 2 }),
+    );
+    await drained(follower);
+  });
+
   if (!harness.fake) return;
 
   // ─── What only the fake can stage ──────────────────────────────────────────

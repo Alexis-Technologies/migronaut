@@ -65,6 +65,9 @@ const { runConverge } = require('./converge.js');
 const { readServer } = require('./server-info.js');
 const { readChunks, readShardKey } = require('./shard-info.js');
 
+/** How recent a streaming watcher's record must be for the poll to leave its collection alone */
+const STREAMING_FRESH_MS = 60_000;
+
 /** A drift watcher's stored document as its status row */
 function watchRow(row) {
   return {
@@ -1699,6 +1702,10 @@ class MigratorKit extends EventEmitter {
               .collection(this.#config.migrationsCollection)
               .find({ kind: 'background', status: 'applied' }, { projection: { name: 1 } })
               .toArray(),
+          // Only where drift is streamed: a watcher's record is not a finding otherwise.
+          ...(this.#config.backgroundDrift !== 'poll'
+            ? { watchRows: () => this.#watchStore().status() }
+            : {}),
         });
       },
     });
@@ -2402,10 +2409,34 @@ class MigratorKit extends EventEmitter {
     if (onDrift !== 'reopen' && onDrift !== 'report') {
       throw new ConfigInvalidError("onDrift must be 'reopen' or 'report'", { onDrift });
     }
+    // With `backgroundDrift: 'stream'` the poll is the safety net: it leaves
+    // alone a collection whose watcher is streaming and alive.
+    const streaming =
+      this.#config.backgroundDrift === 'stream' ? await this.#streamingCollections() : undefined;
     return verifyDrift(this.#backgroundDeps(), {
       onDrift,
       ...(options.collections !== undefined ? { collections: options.collections } : {}),
+      ...(streaming !== undefined ? { streaming } : {}),
     });
+  }
+
+  /** Collections a live watcher leads right now — streaming, its record fresh */
+  async #streamingCollections() {
+    const fresh = Date.now() - STREAMING_FRESH_MS;
+    const names = [];
+    for (const row of await this.#watchStore().status()) {
+      if (row.state === 'streaming' && row.updatedAt?.getTime() > fresh) names.push(row._id);
+    }
+    return names;
+  }
+
+  /**
+   * How drift is watched (`backgroundDrift`): `'poll'`, `'stream'` or
+   * `'both'` — what a runner or a queue worker hosting this kit follows.
+   * Resolves the config; does not connect.
+   */
+  async driftMode() {
+    return (await this.#ensureConfig()).backgroundDrift;
   }
 
   /** A background migration file, loaded and resolved: `{ spec, fns, checksum }` */

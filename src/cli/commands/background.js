@@ -21,6 +21,7 @@ const ACTIONS = new Set([
   'dry-run',
   'unlock',
   'verify',
+  'watch',
 ]);
 
 /** Which flags each action takes (besides the global ones) */
@@ -44,6 +45,7 @@ const FLAGS = {
   ],
   unlock: ['yes'],
   verify: ['report'],
+  watch: ['report'],
 };
 const ALL_FLAGS = new Set(Object.values(FLAGS).flat());
 
@@ -119,6 +121,57 @@ async function confirmed(action, state, { opts, json, logger }) {
   }
   const what = action === 'retry' ? 'retry from the start' : action;
   return confirm(`${what[0].toUpperCase()}${what.slice(1)} ${state?.migration ?? 'it'}? [y/N] `);
+}
+
+/**
+ * `watch`: the live drift watcher in the foreground — every collection with a
+ * completed background migration, or the one named — until SIGINT or
+ * SIGTERM, which end it cleanly (exit 0): streams closed, positions saved,
+ * locks released. What it does is printed as it happens.
+ */
+async function watchAction(migrator, opts, collection, { logger, json }) {
+  const controller = new AbortController();
+  const onWatch = (event) => logger.info(`… ${event.collection}: ${event.state}`);
+  const onDrift = (event) => {
+    if (event.source !== 'stream') return;
+    const line = `${event.collection}: ${event.action} (${event.migration})`;
+    if (event.action === 'upgraded') logger.info(`✔ ${line}`);
+    else logger.warn(`⚠ ${line}`);
+  };
+  if (!json) {
+    migrator.on('background:watch', onWatch);
+    migrator.on('background:drift', onDrift);
+  }
+  let stop;
+  const stopped = new Promise((resolve) => {
+    stop = resolve;
+  });
+  const handlers = ['SIGINT', 'SIGTERM'].map((signal) => [
+    signal,
+    () => {
+      controller.abort();
+      stop();
+    },
+  ]);
+  for (const [signal, handler] of handlers) process.on(signal, handler);
+  try {
+    const watcher = await migrator.watchBackground({
+      ...(collection !== undefined ? { collections: [collection] } : {}),
+      ...(opts.report ? { upgrade: false } : {}),
+      signal: controller.signal,
+      onError: (error, where) =>
+        logger.warn(`⚠ Drift watcher${where ? ` (${where})` : ''}: ${error?.message ?? error}`),
+    });
+    if (!json) logger.info('Watching for old-shape writes — Ctrl-C to stop');
+    await stopped;
+    const rows = watcher.status();
+    await watcher.stop();
+    return { watch: rows };
+  } finally {
+    for (const [signal, handler] of handlers) process.off(signal, handler);
+    migrator.off('background:watch', onWatch);
+    migrator.off('background:drift', onDrift);
+  }
 }
 
 /** `run`: drive one background migration (or every runnable one, in order) from here */
@@ -254,13 +307,14 @@ function registerBackground(program) {
   defineCommand(program, {
     name: 'background',
     description:
-      'Background migrations: status, run, pause, resume, cancel, retry, repin, dry-run, unlock, verify',
+      'Background migrations: status, run, pause, resume, cancel, retry, repin, dry-run, unlock, ' +
+      'verify, watch',
     args: [
       [
         '<action>',
-        'status | run | pause | resume | cancel | retry | repin | dry-run | unlock | verify',
+        'status | run | pause | resume | cancel | retry | repin | dry-run | unlock | verify | watch',
       ],
-      ['[name]', 'The background migration (its file name)'],
+      ['[name]', 'The background migration (its file name) — watch: a collection'],
     ],
     options: [
       ['--partitions', 'status: list the partitions of the latest generation'],
@@ -281,7 +335,7 @@ function registerBackground(program) {
       ['--revert', 'dry-run: the way back'],
       ['--max-docs <n>', 'dry-run: document images to keep (default 20)'],
       ['--deadline-ms <ms>', 'dry-run: stop the sandbox after this long (default 50000)'],
-      ['--report', 'verify: only report drift, never reopen'],
+      ['--report', 'verify: only report drift, never reopen; watch: never upgrade'],
       ['--reason <text>', 'controls: why — recorded in its history'],
       ['-y, --yes', 'cancel, retry --from-start, repin, unlock: do not ask (required with --json)'],
     ],
@@ -346,6 +400,8 @@ function registerBackground(program) {
               ...(opts.deadlineMs !== undefined ? { deadlineMs: Number(opts.deadlineMs) } : {}),
             }),
           };
+        case 'watch':
+          return watchAction(migrator, opts, name, cli);
         default:
           return {
             verify: await migrator.verifyBackground(opts.report ? { onDrift: 'report' } : {}),
@@ -370,6 +426,10 @@ function registerBackground(program) {
             `⚠ ${entry.collection}: old-shape documents after ${entry.migration} — ${entry.action}`,
           );
         }
+      } else if (data.watch) {
+        let upgraded = 0;
+        for (const row of data.watch) upgraded += row.counters.upgraded;
+        logger.info(`✔ Stopped watching — ${upgraded} document(s) upgraded`);
       } else if (data.applied !== undefined) {
         logger.info(`✔ ${data.applied === 'changed' ? 'Done' : 'Nothing to do'} — ${data.status}`);
       } else if (data.leases !== undefined) {

@@ -993,13 +993,16 @@ async function probeOldShape(deps, state, hint) {
  * version index is missing. With `onDrift: 'reopen'` a finding reopens it —
  * a new pass over what is left, not a reset — and with `'report'` it is only
  * said. Chains (v1→v2→v3) converge on their own. No document id is reported.
+ * `streaming`: collections a live watcher leads right now — skipped too.
  */
-async function verify(deps, { onDrift = 'reopen', collections } = {}) {
+async function verify(deps, { onDrift = 'reopen', collections, streaming } = {}) {
   const states = await deps.store.list();
   const active = new Set();
   for (const state of states) {
     if (ACTIVE.has(state.status) && state.spec?.collection) active.add(state.spec.collection);
   }
+  // In `backgroundDrift: 'stream'` mode a live watcher's collection is its, not the poll's.
+  for (const collection of streaming ?? []) active.add(collection);
   const wanted = collections === undefined ? undefined : new Set(collections);
   const result = { checked: 0, skipped: 0, drift: [] };
   for (const state of states) {
@@ -1144,6 +1147,18 @@ async function auditFindings(deps, { now = Date.now() } = {}) {
     if (!byName.has(record.name)) {
       warnings.push(`${record.name} is applied but its background migration is not registered`);
     }
+  }
+  // Live drift watchers, when drift is streamed: one left to the poll for
+  // long, or one nobody has led for long, is worth a look.
+  for (const row of (await deps.watchRows?.()) ?? []) {
+    const quietMs = now - new Date(row.updatedAt).getTime();
+    if (!(quietMs > STALL_MS)) continue;
+    const minutes = Math.round(quietMs / 60_000);
+    warnings.push(
+      row.state === 'fallback'
+        ? `the drift watcher of ${row._id} has fallen back to polling for ${minutes} min`
+        : `the drift watcher of ${row._id} has had no live leader for ${minutes} min`,
+    );
   }
   const summary = Object.entries(counts)
     .map(([status, n]) => `${n} ${status}`)

@@ -1,6 +1,7 @@
 const { ConfigInvalidError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { sleep } = require('./background-throttle.js');
+const { watchOptions } = require('./background-watch.js');
 const { MigratorKit } = require('./migrator.js');
 
 /**
@@ -12,7 +13,9 @@ const { MigratorKit } = require('./migrator.js');
  * the work through the same leases.
  *
  * A lane loop never throws: a failed slice goes to `onError` and that
- * migration backs off. The drift watch runs every `verifyIntervalMs`.
+ * migration backs off. The drift watch runs every `verifyIntervalMs`; the
+ * live drift watcher (change streams) runs alongside when `watch` says so —
+ * by default when `backgroundDrift` is `'stream'` or `'both'`.
  */
 
 const DEFAULTS = Object.freeze({
@@ -52,6 +55,13 @@ function readOptions(options) {
   }
   if (options.kit !== undefined && !(options.kit instanceof MigratorKit)) {
     throw new ConfigInvalidError('kit must be a MigratorKit');
+  }
+  const { watch } = options;
+  if (watch !== undefined && typeof watch !== 'boolean') {
+    if (watch === null || typeof watch !== 'object') {
+      throw new ConfigInvalidError('watch must be a boolean or the watcher options');
+    }
+    watchOptions(watch);
   }
   return { concurrency, pollIntervalMs, verifyIntervalMs };
 }
@@ -208,16 +218,43 @@ function startBackgroundRunner(options = {}) {
     }
   }
 
+  /** The live drift watcher, when this runner hosts one — it never throws either */
+  async function watcher() {
+    let wanted = options.watch;
+    try {
+      wanted ??= (await kit.driftMode()) !== 'poll';
+      if (wanted === false || signal.aborted) return undefined;
+      return await kit.watchBackground({
+        ...(typeof wanted === 'object' ? wanted : {}),
+        signal,
+        onError: (error, collection) => report(error, collection),
+      });
+    } catch (error) {
+      if (!signal.aborted) report(error);
+      return undefined;
+    }
+  }
+
+  const watching = watcher();
   const work = Promise.all([...Array.from({ length: concurrency }, () => lane()), verifier()]);
   let stopping;
+  let hosted;
+  watching.then((started) => {
+    hosted = started;
+  });
   return {
     kit,
     get running() {
       return !signal.aborted;
     },
+    /** The live drift watcher this runner hosts, once started — or undefined */
+    get watcher() {
+      return hosted;
+    },
     stop() {
       stopping ??= (async () => {
         if (!signal.aborted) controller.abort(new Error('Background runner stopped'));
+        await (await watching)?.stop();
         await work;
         options.signal?.removeEventListener('abort', onOuterAbort);
         if (ownsKit) await kit.disconnect().catch(() => undefined);

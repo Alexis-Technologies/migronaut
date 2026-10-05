@@ -314,8 +314,13 @@ const withBackground = createMigrationQueue<Queue, Worker, QueueEvents>({
     children: 'auto',
     stallMs: 600_000,
     verifyIntervalMs: false,
+    watch: { refreshMs: 10_000, maxCollections: 4 },
   },
 });
+expectType<boolean | undefined>(withBackground.backgroundWatcher?.running);
+expectError(
+  createMigrationQueue({ bullmq: { Queue }, connection, background: { watch: { signal: 1 } } }),
+);
 createMigrationQueue({ bullmq: { Queue, Worker }, connection, config, background: true });
 expectError(
   createMigrationQueue({

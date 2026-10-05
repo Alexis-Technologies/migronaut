@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
 const { MongoMemoryServer } = require('mongodb-memory-server');
+const { startBackgroundRunner } = require('../../index.js');
 const { ConfigInvalidError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
@@ -229,6 +230,75 @@ describe('live drift watcher (integration)', () => {
       return states.includes('overloaded');
     });
     assert.strictEqual((await kit.backgroundStatus(NAME)).status, 'running', 'reopened');
+  });
+
+  it('should leave a streaming collection to its watcher when drift is streamed', async () => {
+    const { kit } = await watched({ backgroundDrift: 'stream' });
+    await until('a fresh record', () =>
+      mongo.db.collection(WATCH).findOne({ state: 'streaming', resumeToken: { $exists: true } }),
+    );
+    const verified = await kit.verifyBackground();
+    assert.deepStrictEqual(verified, { checked: 0, skipped: 1, drift: [] });
+    const polled = kitWith();
+    assert.strictEqual((await polled.verifyBackground()).checked, 1, "'poll' mode probes it");
+    assert.strictEqual(await kit.driftMode(), 'stream');
+  });
+
+  it('should warn in audit about a watcher left to the poll, or without a leader, for long', async () => {
+    const kit = kitWith({ backgroundDrift: 'both' });
+    await orders().insertOne({ __v: 1, __rev: 0 });
+    project.write(NAME, spec());
+    await kit.up();
+    await kit.runBackground(NAME);
+    const long = new Date(Date.now() - 20 * 60_000);
+    await mongo.db.collection(WATCH).insertMany([
+      { _id: 'orders', state: 'fallback', updatedAt: long },
+      { _id: 'users', state: 'streaming', updatedAt: long },
+      { _id: 'fresh', state: 'streaming', updatedAt: new Date() },
+    ]);
+    const check = (await kit.audit()).checks.find((entry) => entry.name === 'background');
+    assert.strictEqual(check.status, 'warn');
+    assert.match(check.detail, /drift watcher of orders has fallen back to polling for 20 min/);
+    assert.match(check.detail, /drift watcher of users has had no live leader/);
+    assert.ok(!check.detail.includes('fresh'));
+    const polled = kitWith();
+    const quiet = (await polled.audit()).checks.find((entry) => entry.name === 'background');
+    assert.strictEqual(quiet.status, 'pass', "'poll' mode does not look at watchers");
+  });
+
+  it('should be hosted by the in-process runner when drift is streamed', async () => {
+    await orders().insertOne({ __v: 1, __rev: 0 });
+    const kit = kitWith({ backgroundDrift: 'both' });
+    project.write(NAME, spec());
+    await kit.up();
+    await kit.runBackground(NAME);
+    const states = [];
+    kit.on('background:watch', (event) => states.push(event.state));
+    const runner = startBackgroundRunner({
+      kit,
+      pollIntervalMs: 50,
+      verifyIntervalMs: false,
+      watch: FAST,
+    });
+    try {
+      await until('the stream', () => states.includes('streaming'));
+      assert.ok(runner.watcher);
+      const { insertedId } = await orders().insertOne({ __v: 1, __rev: 0 });
+      await until('the upgrade', () => orders().findOne({ _id: insertedId, __v: 2 }));
+    } finally {
+      await runner.stop();
+    }
+    assert.strictEqual(runner.watcher.running, false, 'stopped with the runner');
+    const quiet = startBackgroundRunner({
+      kit: kitWith(),
+      pollIntervalMs: 50,
+      verifyIntervalMs: false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.strictEqual(quiet.watcher, undefined, "'poll' mode hosts none");
+    await quiet.stop();
+    assert.throws(() => startBackgroundRunner({ kit, watch: 'yes' }), ConfigInvalidError);
+    assert.throws(() => startBackgroundRunner({ kit, watch: { maxLagMs: 0 } }), ConfigInvalidError);
   });
 
   it('should refuse bad options before connecting', async () => {

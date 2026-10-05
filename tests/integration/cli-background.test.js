@@ -210,6 +210,34 @@ describe('migronaut background (CLI)', () => {
     );
   });
 
+  it('should watch for drift in the foreground and stop cleanly on SIGINT (exit 0)', async () => {
+    project.write(NAME, spec());
+    await runCli(args('up'));
+    assert.strictEqual((await runCli(args('background', 'run', NAME))).code, 0);
+    let inserted = false;
+    let sent = false;
+    let output = '';
+    const run = await runCli(args('background', 'watch', 'orders'), {
+      onLine: (text, child) => {
+        output += text;
+        if (!inserted && /orders: streaming/.test(output)) {
+          inserted = true;
+          mongo.db.collection('orders').insertOne({ __v: 1, __rev: 0, late: true });
+        }
+        if (!sent && /orders: upgraded/.test(output)) {
+          sent = true;
+          child.kill('SIGINT');
+        }
+      },
+    });
+    assert.strictEqual(run.code, 0, run.stderr);
+    assert.match(run.stdout + run.stderr, /Stopped watching — 1 document\(s\) upgraded/);
+    assert.strictEqual(
+      await mongo.db.collection('orders').countDocuments({ late: true, __v: 2 }),
+      1,
+    );
+  });
+
   it('should refuse a wrong action, a missing name and a flag of another action before connecting', async () => {
     for (const bad of [
       ['background', 'explode'],
@@ -217,6 +245,7 @@ describe('migronaut background (CLI)', () => {
       ['background', 'run'],
       ['background', 'verify', NAME],
       ['background', 'status', '--validate'],
+      ['background', 'watch', '--concurrency', '2'],
       ['background', 'run', NAME, '--concurrency', '0'],
     ]) {
       assert.strictEqual(

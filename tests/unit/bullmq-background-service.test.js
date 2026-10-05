@@ -9,6 +9,12 @@ const NAME = '0001-orders.js';
 
 function backgroundKit(overrides = {}) {
   return stubKit({
+    driftMode: mock.fn(async () => 'poll'),
+    watchBackground: mock.fn(async () => ({
+      running: true,
+      status: () => [],
+      stop: mock.fn(async () => {}),
+    })),
     backgroundStatus: mock.fn(async () => null),
     coordinateBackground: mock.fn(async () => ({ next: 'done', status: 'completed' })),
     runBackgroundSlice: mock.fn(async () => ({ outcome: 'exhausted', counters: {} })),
@@ -189,6 +195,63 @@ describe('createMigrationQueue background option', () => {
     await mq.verifyBackground();
     assert.strictEqual(mq.backgroundQueue._state().wait.length, 1);
     assert.deepStrictEqual(await mq.backgroundStatus(NAME), { migration: NAME, status: 'pending' });
+    await mq.close();
+  });
+});
+
+describe('createMigrationQueue background watcher', () => {
+  it('should refuse a watch option that is neither a boolean nor options', () => {
+    assert.throws(
+      () =>
+        createMigrationQueue({
+          bullmq: fakeBullmq(),
+          connection: createFakeConnection(),
+          kit: backgroundKit(),
+          background: { watch: 'yes' },
+        }),
+      /background\.watch must be a boolean or the watcher options/,
+    );
+  });
+
+  it('should host a watcher when told to — or when drift is streamed — and stop it first on close', async () => {
+    const told = make({ background: { watch: { refreshMs: 1000 }, verifyIntervalMs: false } });
+    await told.mq.startBackgroundWorker({ autorun: false });
+    const [options] = told.kit.watchBackground.mock.calls[0].arguments;
+    assert.strictEqual(options.refreshMs, 1000);
+    assert.strictEqual(typeof options.onError, 'function');
+    const watcher = told.mq.backgroundWatcher;
+    assert.ok(watcher);
+    await told.mq.close();
+    assert.strictEqual(watcher.stop.mock.callCount(), 1);
+
+    const streamed = make({
+      kit: backgroundKit({ driftMode: mock.fn(async () => 'both') }),
+      background: { verifyIntervalMs: false },
+    });
+    await streamed.mq.startBackgroundWorker({ autorun: false });
+    assert.strictEqual(streamed.kit.watchBackground.mock.callCount(), 1);
+    await streamed.mq.close();
+
+    const polled = make({ background: { verifyIntervalMs: false } });
+    await polled.mq.startBackgroundWorker({ autorun: false });
+    assert.strictEqual(polled.kit.watchBackground.mock.callCount(), 0);
+    assert.strictEqual(polled.mq.backgroundWatcher, undefined);
+    await polled.mq.close();
+  });
+
+  it('should start the worker anyway when the watcher cannot start, and say so', async () => {
+    const kit = backgroundKit({
+      watchBackground: mock.fn(async () => {
+        throw new Error('no change streams here');
+      }),
+    });
+    const warnings = [];
+    kit.logger = { ...kit.logger, warn: (message) => warnings.push(message) };
+    const { mq } = make({ kit, background: { watch: true, verifyIntervalMs: false } });
+    const worker = await mq.startBackgroundWorker({ autorun: false });
+    assert.ok(worker);
+    assert.strictEqual(mq.backgroundWatcher, undefined);
+    assert.match(warnings[0], /live drift watcher did not start: no change streams here/);
     await mq.close();
   });
 });

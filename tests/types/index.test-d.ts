@@ -621,3 +621,4 @@ kit.on('background:watch', (event) => {
     event.state as 'streaming' | 'following' | 'history-lost',
   );
 });
+expectType<Promise<'poll' | 'stream' | 'both'>>(kit.driftMode());

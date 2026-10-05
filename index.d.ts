@@ -1904,6 +1904,12 @@ export class MigratorKit extends EventEmitter {
    */
   convergesAfterUp(): Promise<boolean>;
   /**
+   * How drift is watched — the `backgroundDrift` setting — which a runner or
+   * a queue worker hosting this kit follows. Resolves the config; does not
+   * connect. @experimental
+   */
+  driftMode(): Promise<'poll' | 'stream' | 'both'>;
+  /**
    * The converge history, newest first (`limit` 1–1000, default 20): one entry
    * per converge that changed something or failed. Read-only.
    */
@@ -2487,6 +2493,11 @@ export interface BackgroundRunnerOptions {
   sliceMs?: number;
   /** The drift watch's period (default 600 000 ms — 10 minutes); `false`: off */
   verifyIntervalMs?: number | false;
+  /**
+   * Host the live drift watcher in this process — `true`, or its options.
+   * Default: when `backgroundDrift` is `'stream'` or `'both'`
+   */
+  watch?: boolean | Omit<WatchBackgroundOptions, 'signal' | 'onError'>;
   /** Stops the runner, as `stop()` does */
   signal?: AbortSignal;
   /** Hears every failed slice (the runner itself never throws) */
@@ -2497,6 +2508,8 @@ export interface BackgroundRunnerOptions {
 export interface BackgroundRunner {
   readonly kit: MigratorKit;
   readonly running: boolean;
+  /** The live drift watcher this runner hosts, once started — or undefined */
+  readonly watcher: BackgroundWatcher | undefined;
   /** Stop at the next batch, release every lease, and close the kit the runner made */
   stop(): Promise<void>;
 }

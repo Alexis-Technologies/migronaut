@@ -56,6 +56,7 @@ const BACKGROUND_KEYS = new Set([
   'pollIntervalMs',
   'stallMs',
   'verifyIntervalMs',
+  'watch',
 ]);
 
 /**
@@ -108,6 +109,10 @@ function resolveBackground(background, { queueName, QueueSource }) {
       `background.verifyIntervalMs must be false or an integer ≥ ${MIN_SCHEDULE_EVERY_MS}`,
       { verifyIntervalMs },
     );
+  }
+  const { watch } = options;
+  if (watch !== undefined && typeof watch !== 'boolean' && !isPlainObject(watch)) {
+    throw new ConfigInvalidError('background.watch must be a boolean or the watcher options');
   }
   return { ...options, name, queueIsInstance, verifyIntervalMs };
 }
@@ -188,6 +193,7 @@ class MigrationQueue {
   #backgroundProcessor;
   #backgroundWorker;
   #backgroundStarting;
+  #backgroundWatcher;
 
   constructor(options) {
     if (!isPlainObject(options)) {
@@ -482,6 +488,11 @@ class MigrationQueue {
     return this.#backgroundProcessor;
   }
 
+  /** The live drift watcher `startBackgroundWorker()` started, if any */
+  get backgroundWatcher() {
+    return this.#backgroundWatcher;
+  }
+
   #ensureQueueEvents() {
     if (this.#queueEvents) return this.#queueEvents;
     // A connection opened after close() would have nobody to close it.
@@ -770,7 +781,40 @@ class MigrationQueue {
     );
     await worker.waitUntilReady?.();
     await this.#backgroundProcessor.heal();
+    await this.#startWatcher();
     return worker;
+  }
+
+  /**
+   * The live drift watcher, in this process — when `background.watch` says
+   * so, or, unsaid, when `backgroundDrift` is `'stream'` or `'both'`. A
+   * watcher that cannot start (a standalone server) leaves the polling watch
+   * to it, with a warning: the worker itself is fine.
+   */
+  async #startWatcher() {
+    let wanted = this.#background.watch;
+    wanted ??= (await this.#kit.driftMode()) !== 'poll';
+    if (wanted === false) return;
+    const logger = this.#kit.logger;
+    try {
+      this.#backgroundWatcher = await this.#kit.watchBackground({
+        ...(typeof wanted === 'object' ? wanted : {}),
+        onError: (error, collection) =>
+          logger.warn(
+            `⚠ Drift watcher${collection ? ` (${collection})` : ''}: ${errorText(error)}`,
+            {
+              queue: this.#background.name,
+              ...(collection ? { collection } : {}),
+              error: errorText(error),
+            },
+          ),
+      });
+    } catch (error) {
+      logger.warn(`⚠ The live drift watcher did not start: ${errorText(error)}`, {
+        queue: this.#background.name,
+        error: errorText(error),
+      });
+    }
   }
 
   /** Stop workers from picking up new jobs. The job in flight finishes */
@@ -936,6 +980,10 @@ class MigrationQueue {
     };
     // The worker stops fetching first: a job the shutdown below puts back in
     // the queue must go to the next worker, not straight back to this one.
+    // The watcher first: its streams close, its last positions are saved,
+    // its locks go to the next pod's watcher.
+    await this.#backgroundStarting?.catch(() => undefined);
+    if (this.#backgroundWatcher) await attempt(() => this.#backgroundWatcher.stop());
     // Both workers stop fetching together, and both processors are told to
     // stop: a lane checkpoints at its next batch and goes back to the queue.
     const worker = this.#worker;
