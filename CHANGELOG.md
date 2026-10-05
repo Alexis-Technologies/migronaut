@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
-## v2.3.0 — unreleased
+## v2.3.0 — 2026-10-05
 
 Document versioning and background migrations. Additive: nothing changes for a project that
 declares no `versioning` and writes no `background` file. Everything new is experimental — its
