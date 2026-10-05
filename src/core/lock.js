@@ -8,8 +8,14 @@ const { errorText } = require('../utils/error.js');
 const { randomId } = require('../utils/id.js');
 const { safeUsername } = require('../utils/user.js');
 
-/** Fixed `_id` of the singleton lock document */
+/** Fixed `_id` of the singleton migration lock document */
 const LOCK_ID = 'migronaut_lock';
+
+/** What the migration lock is called in messages — another lock passes its own `label` */
+const LOCK_LABEL = 'migration lock';
+
+/** `migration lock` → `Migration lock`, for the start of a sentence */
+const sentence = (label) => label.charAt(0).toUpperCase() + label.slice(1);
 
 /** Returns true when an error is a MongoDB duplicate-key error (code 11000) */
 function isDuplicateKeyError(error) {
@@ -40,11 +46,19 @@ function toLockInfo(doc) {
  * MongoDB-native distributed lock backed by a single document, using an atomic
  * upsert as a test-and-set. A lock older than `ttlSeconds` is considered stale
  * and may be reclaimed.
+ *
+ * `options.id` is the lock document's `_id` (default: the migration lock's)
+ * and `options.label` what messages call it — so other locks (a background
+ * migration's coordinator, `background:<name>`) live next to the migration
+ * lock in the same collection without ever touching it: `unlock`, the audit
+ * and `forceRelease` of the migration lock only see its own document.
  */
 class MigrationLock {
   #db;
   #collectionName;
   #ttlSeconds;
+  #id;
+  #label;
   /** Token naming this instance as the current holder; set on acquire, cleared on release */
   #owner;
   /**
@@ -55,10 +69,22 @@ class MigrationLock {
    */
   #nonce;
 
-  constructor(db, collectionName, ttlSeconds) {
+  constructor(db, collectionName, ttlSeconds, { id = LOCK_ID, label = LOCK_LABEL } = {}) {
     this.#db = db;
     this.#collectionName = collectionName;
     this.#ttlSeconds = ttlSeconds;
+    this.#id = id;
+    this.#label = label;
+  }
+
+  /** The lock document's `_id` */
+  get id() {
+    return this.#id;
+  }
+
+  /** What messages call this lock */
+  get label() {
+    return this.#label;
   }
 
   /** The token identifying this holder, or undefined when the lock is not held */
@@ -91,7 +117,7 @@ class MigrationLock {
     // strings: a pipeline expression would otherwise interpret a leading `$`
     // in a value as a field path.
     const lockDoc = {
-      _id: LOCK_ID,
+      _id: this.#id,
       lockedAt: '$$NOW',
       pid: { $literal: process.pid },
       host: { $literal: os.hostname() },
@@ -109,7 +135,7 @@ class MigrationLock {
       // or the holder is stale; otherwise keep the current document untouched.
       // The read-back below tells those outcomes apart.
       result = await collection.updateOne(
-        { _id: LOCK_ID },
+        { _id: this.#id },
         [
           {
             $replaceWith: {
@@ -131,8 +157,8 @@ class MigrationLock {
     } catch (error) {
       if (isDuplicateKeyError(error)) {
         // Two processes raced the very first insert; the loser lands here.
-        const holder = await collection.findOne({ _id: LOCK_ID });
-        throw new LockAlreadyHeldError('Migration lock is already held', {
+        const holder = await collection.findOne({ _id: this.#id });
+        throw new LockAlreadyHeldError(`${sentence(this.#label)} is already held`, {
           holder: toLockInfo(holder) ?? undefined,
           ttlMs: this.ttlMs,
         });
@@ -155,9 +181,9 @@ class MigrationLock {
     // writer's document wins; either way the loser reads a different one here
     // and backs off instead of running concurrently. The nonce is what makes
     // that hold when both carry the same owner token.
-    const current = await collection.findOne({ _id: LOCK_ID });
+    const current = await collection.findOne({ _id: this.#id });
     if (!current || current.owner !== owner || current.nonce !== nonce) {
-      throw new LockAlreadyHeldError('Migration lock is already held', {
+      throw new LockAlreadyHeldError(`${sentence(this.#label)} is already held`, {
         holder: toLockInfo(current) ?? undefined,
         ttlMs: this.ttlMs,
       });
@@ -178,7 +204,7 @@ class MigrationLock {
     }
     const result = await this.#db
       .collection(this.#collectionName)
-      .updateOne({ _id: LOCK_ID, owner: this.#owner, nonce: this.#nonce }, [
+      .updateOne({ _id: this.#id, owner: this.#owner, nonce: this.#nonce }, [
         { $set: { lockedAt: '$$NOW' } },
       ]);
     return result.matchedCount === 1;
@@ -186,7 +212,7 @@ class MigrationLock {
 
   /** Read the current lock document, or null when no lock is held */
   async inspect() {
-    return this.#db.collection(this.#collectionName).findOne({ _id: LOCK_ID });
+    return this.#db.collection(this.#collectionName).findOne({ _id: this.#id });
   }
 
   /**
@@ -196,8 +222,8 @@ class MigrationLock {
    */
   async forceRelease() {
     const collection = this.#db.collection(this.#collectionName);
-    const existing = await collection.findOne({ _id: LOCK_ID });
-    await collection.deleteOne({ _id: LOCK_ID });
+    const existing = await collection.findOne({ _id: this.#id });
+    await collection.deleteOne({ _id: this.#id });
     return existing;
   }
 
@@ -213,14 +239,14 @@ class MigrationLock {
    */
   async release() {
     if (!this.#owner) return;
-    const filter = { _id: LOCK_ID, owner: this.#owner, nonce: this.#nonce };
+    const filter = { _id: this.#id, owner: this.#owner, nonce: this.#nonce };
     try {
       await this.#db.collection(this.#collectionName).deleteOne(filter);
       this.#owner = undefined;
       this.#nonce = undefined;
     } catch (error) {
       throw new LockReleaseFailedError(
-        'Failed to release migration lock',
+        `Failed to release ${this.#label}`,
         { error: errorText(error) },
         { cause: error },
       );
@@ -253,6 +279,9 @@ class MigrationLock {
  */
 async function runWithLock(lock, options, fn) {
   const controller = new AbortController();
+  // Any object with acquire/renew/release/ttlMs is a lock here — a partition
+  // lease included; `label` names it in the messages.
+  const label = typeof lock?.label === 'string' ? lock.label : LOCK_LABEL;
 
   if (options.noLock) {
     options.logger.warn('⚠ Running without a lock (--no-lock) — concurrent runs are unsafe', {
@@ -278,15 +307,13 @@ async function runWithLock(lock, options, fn) {
   const loseLock = (reason) => {
     // The most alert-worthy line this module emits — structured fields so a
     // JSON sink can trigger on it without parsing the human string.
-    options.logger.warn(`⚠ Lost the migration lock mid-run (${reason})`, {
+    options.logger.warn(`⚠ Lost the ${label} mid-run (${reason})`, {
       event: 'lock:lost',
       reason,
     });
     options.onLockLostEvent?.(reason);
     if (abortOnLoss && !controller.signal.aborted) {
-      controller.abort(
-        new LockLostError('Lost the migration lock mid-run', { reason, aborted: true }),
-      );
+      controller.abort(new LockLostError(`Lost the ${label} mid-run`, { reason, aborted: true }));
     }
   };
 
@@ -381,7 +408,7 @@ async function runWithLock(lock, options, fn) {
         } catch (releaseError) {
           const message = errorText(releaseError);
           options.logger.warn(
-            `⚠ Failed to release the migration lock early: ${message} — it frees itself once ` +
+            `⚠ Failed to release the ${label} early: ${message} — it frees itself once ` +
               'its TTL runs out',
             { event: 'lock:release-failed', error: message, early: true },
           );
@@ -424,7 +451,7 @@ async function runWithLock(lock, options, fn) {
       throw releaseError;
     }
     const message = errorText(releaseError);
-    options.logger.warn(`⚠ Failed to release the migration lock: ${message}`, {
+    options.logger.warn(`⚠ Failed to release the ${label}: ${message}`, {
       event: 'lock:release-failed',
       error: message,
     });
@@ -434,4 +461,4 @@ async function runWithLock(lock, options, fn) {
   return result;
 }
 
-module.exports = { LOCK_ID, MigrationLock, runWithLock, toLockInfo };
+module.exports = { LOCK_ID, LOCK_LABEL, MigrationLock, runWithLock, toLockInfo };

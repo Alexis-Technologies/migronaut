@@ -566,3 +566,76 @@ describe('runWithLock', () => {
     assert.strictEqual(callsWhileStuck, 1);
   });
 });
+
+describe('MigrationLock — id and label', () => {
+  it("should keep the migration lock's id and messages by default", async () => {
+    const lock = new MigrationLock(makeDb().db, '_migronaut_locks', 60);
+    assert.strictEqual(lock.id, LOCK_ID);
+    assert.strictEqual(lock.label, 'migration lock');
+    const { db, collection } = makeDb();
+    // eslint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
+    collection.updateOne.mock.mockImplementationOnce(() => Promise.reject({ code: 11000 }));
+    await assert.rejects(
+      new MigrationLock(db, '_migronaut_locks', 60).acquire(),
+      (error) => error.message === 'Migration lock is already held',
+    );
+  });
+
+  it('should use its own document id and name itself in messages', async () => {
+    const { db, collection } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60, {
+      id: 'background:0001-orders.js',
+      label: 'background coordinator lock',
+    });
+    await lock.acquire();
+    assert.strictEqual(
+      collection.updateOne.mock.calls[0].arguments[0]._id,
+      'background:0001-orders.js',
+    );
+    await lock.inspect();
+    assert.deepStrictEqual(collection.findOne.mock.calls.at(-1).arguments[0], {
+      _id: 'background:0001-orders.js',
+    });
+    collection.deleteOne.mock.mockImplementationOnce(() => Promise.reject(new Error('down')));
+    await assert.rejects(lock.release(), /Failed to release background coordinator lock/);
+    // eslint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
+    collection.updateOne.mock.mockImplementationOnce(() => Promise.reject({ code: 11000 }));
+    await assert.rejects(
+      new MigrationLock(db, '_migronaut_locks', 60, { label: 'watch lock' }).acquire(),
+      /Watch lock is already held/,
+    );
+  });
+});
+
+describe('runWithLock — any lock-shaped object', () => {
+  it('should run, renew and release a duck-typed lock, naming it in its messages', async () => {
+    const calls = [];
+    let held = true;
+    const lease = {
+      label: 'partition lease',
+      ttlMs: 40,
+      acquire: async () => calls.push('acquire'),
+      renew: async () => {
+        calls.push('renew');
+        return held;
+      },
+      release: async () => calls.push('release'),
+    };
+    const warnings = [];
+    const logger = { ...silentLogger, warn: (message) => warnings.push(message) };
+    const result = await runWithLock(lease, { logger }, async (signal) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      held = false;
+      await new Promise((resolve) => {
+        if (signal.aborted) resolve();
+        signal.addEventListener('abort', resolve, { once: true });
+      });
+      return signal.reason;
+    });
+    assert.strictEqual(result.code, 'LOCK_LOST');
+    assert.strictEqual(result.message, 'Lost the partition lease mid-run');
+    assert.ok(warnings.some((line) => line.includes('Lost the partition lease mid-run')));
+    assert.deepStrictEqual([calls[0], calls.at(-1)], ['acquire', 'release']);
+    assert.ok(calls.includes('renew'));
+  });
+});
