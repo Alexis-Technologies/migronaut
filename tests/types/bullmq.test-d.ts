@@ -231,7 +231,8 @@ expectType<boolean>(isRetryableError(new Error('x')));
 expectType<string>(dedupId('up', '0001-a.js'));
 expectType<ParsedJobData>(parseJobData(realJob));
 declare const progress: MigrationJobProgress;
-expectType<'lock-wait' | 'running' | 'completed' | 'failed'>(progress.phase);
+expectType<'lock-wait' | 'running' | 'search-wait' | 'completed' | 'failed'>(progress.phase);
+expectType<number | undefined>(progress.searchIndexes);
 expectType<MigronautErrorCode | 'UNKNOWN' | undefined>(progress.code);
 expectType<string | undefined>(progress.runId);
 
@@ -258,6 +259,8 @@ expectType<ConvergeJobSpec | undefined>(convergePlan.converge);
 declare const convergeResult: ConvergeJobResult;
 expectType<boolean>(convergeResult.inSync);
 expectType<number>(convergeResult.lockWaitMs);
+expectType<boolean | undefined>(convergeResult.search?.available);
+expectAssignable<string | undefined>(convergeResult.search?.notReady[0]?.status);
 declare const syncResult: SyncJobResult;
 expectType<{ jobId: string; deduplicated: boolean } | undefined>(syncResult.converge);
 // A payload carries no prune — the worker's own definitions decide.

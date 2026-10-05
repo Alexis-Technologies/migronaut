@@ -643,3 +643,63 @@ describe('converge (integration) — the run', () => {
     assert.strictEqual(await mongo.db.collection('_migronaut_locks').countDocuments(), 0);
   });
 });
+
+describe('converge (integration) — search indexes on a server without Atlas Search', () => {
+  // mongodb-memory-server runs a plain mongod: no mongot, so no Search. What
+  // the server really answers decides; the opt-in search-atlas suite covers
+  // a server that has it.
+  const movies = (fields = {}) => [
+    {
+      name: 'movies',
+      indexes: [{ key: { title: 1 } }],
+      searchIndexes: [{ definition: { mappings: { dynamic: true } } }],
+      ...fields,
+    },
+  ];
+
+  it('should refuse the run before writing anything', async () => {
+    await mongo.db.collection('movies').insertOne({ title: 'Alien' });
+    await assert.rejects(kitWith({ collections: movies() }).converge(), (error) => {
+      assert.ok(error instanceof ConvergeFailedError);
+      assert.strictEqual(error.context.phase, 'plan');
+      assert.strictEqual(error.context.conflicts[0].target, 'searchIndex');
+      assert.match(error.context.hint, /onSearchUnavailable: 'skip'/);
+      assert.strictEqual(error.context.converge.search.available, false);
+      return true;
+    });
+    assert.deepStrictEqual(await indexNames('movies'), [], 'title_1 was not built');
+  });
+
+  it('should refuse it for a collection that does not exist yet, too', async () => {
+    await assert.rejects(kitWith({ collections: movies() }).converge(), ConvergeFailedError);
+    assert.strictEqual(await optionsOf('movies'), undefined, 'movies was not created');
+  });
+
+  it('should show the refusal in a dry run', async () => {
+    const plan = await kitWith({ collections: movies() }).converge({ dryRun: true });
+    assert.deepStrictEqual(rows(plan), [
+      'movies/collection:movies:create',
+      'movies/index:title_1:create',
+      'movies/searchIndex:default:conflict',
+    ]);
+    assert.strictEqual(plan.inSync, false);
+  });
+
+  it("should converge everything else with onSearchUnavailable: 'skip'", async () => {
+    await mongo.db.collection('movies').insertOne({ title: 'Alien' });
+    const result = await kitWith({ collections: movies(), onSearchUnavailable: 'skip' }).converge();
+    assert.deepStrictEqual(rows(result), [
+      'movies/index:title_1:create',
+      'movies/searchIndex:default:skip',
+    ]);
+    assert.strictEqual(result.inSync, true);
+    assert.deepStrictEqual(result.search, { available: false, evidence: 'error', notReady: [] });
+    assert.deepStrictEqual(await indexNames('movies'), ['title_1']);
+  });
+
+  it('should make no search call for definitions without search indexes', async () => {
+    // A plain mongod refuses every search call: getting through proves none was made.
+    const result = await convergeToFixedPoint([{ name: 'movies', indexes: [{ key: { a: 1 } }] }]);
+    assert.ok(!('search' in result));
+  });
+});

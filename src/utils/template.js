@@ -358,6 +358,13 @@ function configBody(values, createExtension) {
   // collectionsDir: './collections',
   // Converge at the end of every bulk \`migronaut up\`.
   // convergeAfterUp: false,
+  // Search indexes declared for a server without Atlas Search: refuse the
+  // converge ('fail'), or converge everything else and skip them ('skip').
+  // onSearchUnavailable: 'fail',
+  // Hold converge until every declared search index is queryable — for at
+  // most searchIndexWaitTimeoutMs (10 minutes by default).
+  // waitForSearchIndexes: false,
+  // searchIndexWaitTimeoutMs: 600000,
 
   // ── Lifecycle hooks (code only — not available in JSON config) ──
   // hooks: {

@@ -1,7 +1,7 @@
 # migronaut converge
 
-Bring the [declared collections](/guide/collections) — their indexes and validators — to their
-declared state.
+Bring the [declared collections](/guide/collections) — their indexes,
+[search indexes](/guide/collections#search-indexes) and validators — to their declared state.
 
 ```bash
 migronaut converge [options]
@@ -9,7 +9,7 @@ migronaut converge [options]
 
 ## Why it exists
 
-An index or a validator has a current value, not a history. Rather than a migration file per
+An index, a search index or a validator has a current value, not a history. Rather than a migration file per
 change, declare the end state in `collections` (or one file per collection in `collectionsDir`)
 and let converge compare it with the live database and make the difference. It is stateless:
 every run reads the database afresh, and the [history](/guide/collections#history) it keeps is for
@@ -21,7 +21,8 @@ you — no run reads it back.
 migronaut converge --dry-run   # show what would change, change nothing
 migronaut converge --check     # exit 28 if anything would change — a CI gate
 migronaut converge             # plan, ask before any drop or rebuild, then apply
-migronaut converge --prune     # also drop indexes a definition does not declare
+migronaut converge --prune     # also drop indexes (and search indexes) a definition does not declare
+migronaut converge --wait-search  # wait until every declared search index is queryable
 migronaut converge --ordered   # refuse while a migration is still pending
 migronaut converge --reason "TICKET-123"  # why — recorded in the converge history
 migronaut converge --history   # what converge has changed, newest first (read-only)
@@ -30,8 +31,8 @@ migronaut converge --rebuild-unique  # allow rebuilding a unique index (see belo
 ```
 
 Without `--yes`, converge plans first. A plan that only creates indexes or modifies them in place is
-applied straight away; one that would **drop or rebuild an index**, or **change the validator of a
-collection that already exists** (tightening one can start rejecting your application's writes),
+applied straight away; one that would **drop or rebuild an index**, **drop a search index**, or
+**change the validator of a collection that already exists** (tightening one can start rejecting your application's writes),
 is shown, then confirmed. A plan with a conflict is refused without asking:
 
 ```
@@ -56,8 +57,10 @@ Rows that need nothing are folded into the summary; `--verbose` lists them too.
 | Option | Description |
 |---|---|
 | `--dry-run` | Plan and print, change nothing. Takes no lock. |
-| `--check` | Like `--dry-run`, then exit `28` (`COLLECTIONS_DRIFT`) if anything would change or conflict. An undeclared index kept with prune off is not drift. |
-| `--prune` | Drop indexes a definition does not declare — in collections whose definition does not set `prune` itself. With `indexes: []` that is every index but `_id`, and converge warns. |
+| `--check` | Like `--dry-run`, then exit `28` (`COLLECTIONS_DRIFT`) if anything would change or conflict — or a declared search index failed to build. An undeclared index kept with prune off is not drift, nor is a search index build under way. |
+| `--prune` | Drop indexes a definition does not declare — in collections whose definition does not set `prune` itself. With `indexes: []` that is every index but `_id`, and converge warns. Search indexes too, where the definition declares `searchIndexes`. |
+| `--wait-search` | Hold the run until every declared search index is queryable with its declared definition — `CONVERGE_FAILED` with `phase: 'wait'` on a FAILED build of an index the run created or changed, or after `searchIndexWaitTimeoutMs`. The migration lock is released when the wait starts — it only reads. Overrides `waitForSearchIndexes`. Not with `--dry-run`, `--check` or `--history`. |
+| `--no-wait-search` | Do not wait, whatever `waitForSearchIndexes` says. |
 | `--ordered` | Refuse (`MIGRATION_BLOCKED`, exit `24`) while any migration is still pending — checked under the lock. |
 | `--reason <text>` | Why — recorded in the [converge history](/guide/collections#history) with the run. |
 | `--history` | Show the converge history instead of converging: when, triggered how, who asked and why, how many changes. `--json` prints the full entries, with every row's `from` / `to`. |
@@ -121,10 +124,13 @@ is refused the same way.
 | `dryRun` | `true` for `--dry-run` / `--check` |
 | `changed` | Changes applied — or, in a dry run, changes that would be |
 | `inSync` | Nothing left to do and no conflict |
-| `collections[].actions[].action` | `create`, `modify`, `recreate`, `drop`, `keep`, `unchanged`, `conflict` |
+| `collections[].actions[].target` | `collection`, `validator`, `index`, `searchIndex` |
+| `collections[].actions[].action` | `create`, `modify`, `recreate`, `drop`, `keep`, `unchanged`, `conflict` — and `skip`, a search index left alone on a server without Search (`onSearchUnavailable: 'skip'`) |
 | `collections[].actions[].status` | `planned` (dry run), `applied`, `failed`, `skipped` (nothing to do, or not reached) |
-| `collections[].actions[].from` / `.to` | What is there now, and what the row puts there — the index (`{ key, name, …options }`) or the validator (`{ validator, validationLevel, validationAction }`) |
+| `collections[].actions[].from` / `.to` | What is there now, and what the row puts there — the index (`{ key, name, …options }`), the search index (`{ name, type, definition }`) or the validator (`{ validator, validationLevel, validationAction }`) |
+| `collections[].actions[].build` | A search index row's build on the server: `{ status, queryable, message?, updating? }` |
 | `unstable` | Present when something applied still compares as changed afterwards |
+| `search` | Present when search indexes are declared: `{ available, notReady }` — whether the server has Atlas Search, and the declared search indexes still building, updating or failed |
 
 ## Exit codes
 
@@ -134,8 +140,8 @@ is refused the same way.
 | `3` | `LOCK_ALREADY_HELD` — another run holds the lock (a dry run still works) |
 | `6` | `CONFIG_INVALID` — a bad definition, or a destructive plan without `--yes` in `--json` mode |
 | `11` | `RUN_ABORTED` — stopped by a signal, between steps or at the prompt |
-| `27` | `CONVERGE_FAILED` — a conflict refused the plan, or a step failed |
-| `28` | `COLLECTIONS_DRIFT` — `--check` found work to do |
+| `27` | `CONVERGE_FAILED` — a conflict refused the plan, a step failed, or `--wait-search` gave up |
+| `28` | `COLLECTIONS_DRIFT` — `--check` found work to do, or a search index that failed to build |
 
 On `27`, `--json` prints the usual error document; `error.context.converge` holds the result so
 far, and `error.context.hint` what usually fixes the server error behind it.
@@ -144,7 +150,8 @@ far, and `error.context.hint` what usually fixes the server error behind it.
 
 A real run holds the migration lock, like `up`. A plan with a [conflict](/guide/collections#conflicts)
 — an undeclared index covering a declared one's key under another name, a view, a time-series
-collection — is refused before anything is written.
+collection, a search index change no update can make, or search indexes on a server without Atlas
+Search — is refused before anything is written.
 
 ## After `up`
 
@@ -158,6 +165,7 @@ lock. `migronaut up --converge` / `--no-converge` override it for one run. See
 const result = await kit.converge();                 // under the lock
 const plan = await kit.converge({ dryRun: true });   // no lock, no writes
 await kit.converge({ prune: true });
+await kit.converge({ waitForSearchIndexes: true });  // until search indexes are queryable
 ```
 
 See [Declared Collections](/guide/collections) for the definition format and the rules.

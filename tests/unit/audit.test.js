@@ -214,3 +214,140 @@ describe('runAudit (mocked deps)', () => {
     assert.ok(report.warnings >= 1);
   });
 });
+
+describe('runAudit — Atlas Search', () => {
+  const serverError = (code, message) => Object.assign(new Error(message), { code });
+  const declared = (...names) =>
+    names.map((name) => ({
+      name,
+      searchIndexes: [{ name: 'default', type: 'search', definition: { mappings: {} } }],
+    }));
+
+  /** Healthy deps whose database also answers the search probe */
+  function searchDeps({ definitions, listed = {}, listError, config = {}, version = [8, 0, 4] }) {
+    const deps = makeDeps({ config });
+    const base = deps.getDb();
+    const db = {
+      ...base,
+      admin: () => ({
+        command: async (command) => {
+          if (command.buildInfo) return { versionArray: [...version, 0] };
+          return { setName: 'rs0' };
+        },
+      }),
+      collection: (name) => ({
+        ...base.collection(name),
+        aggregate: () => ({
+          toArray: async () => {
+            if (listError) throw listError;
+            return listed[name] ?? [];
+          },
+        }),
+      }),
+    };
+    return { ...deps, getDb: () => db, definitions };
+  }
+
+  it('should record nothing when no definition declares search indexes', async () => {
+    for (const definitions of [
+      undefined,
+      async () => [{ name: 'users', indexes: [] }],
+      async () => {
+        throw new Error('broken definition file');
+      },
+    ]) {
+      const report = await runAudit(searchDeps({ definitions }));
+      assert.strictEqual(check(report, 'search'), undefined);
+      assert.strictEqual(report.ok, true);
+    }
+  });
+
+  it('should pass where Search is available', async () => {
+    const report = await runAudit(
+      searchDeps({ definitions: async () => declared('movies', 'shows') }),
+    );
+    assert.deepStrictEqual(check(report, 'search'), {
+      name: 'search',
+      status: 'pass',
+      detail: 'Available — 2 search index(es) declared in 2 collection(s)',
+    });
+  });
+
+  it('should warn about a declared search index that failed to build', async () => {
+    const report = await runAudit(
+      searchDeps({
+        definitions: async () => declared('movies'),
+        listed: {
+          movies: [
+            { name: 'default', status: 'FAILED', queryable: false, message: 'too many fields' },
+            { name: 'other', status: 'FAILED', queryable: false },
+          ],
+        },
+      }),
+    );
+    assert.strictEqual(check(report, 'search').status, 'warn');
+    assert.strictEqual(
+      check(report, 'search').detail,
+      'Available — failed to build: movies.default (too many fields)',
+    );
+  });
+
+  it('should warn about a declared search index that went stale', async () => {
+    const report = await runAudit(
+      searchDeps({
+        definitions: async () => declared('movies'),
+        listed: { movies: [{ name: 'default', status: 'STALE', queryable: true }] },
+      }),
+    );
+    assert.strictEqual(check(report, 'search').status, 'warn');
+    assert.strictEqual(
+      check(report, 'search').detail,
+      'Available — stale (not replicating): movies.default',
+    );
+  });
+
+  it('should fail where Search is missing and converge would refuse', async () => {
+    const report = await runAudit(
+      searchDeps({
+        definitions: async () => declared('movies'),
+        listError: serverError(31082, 'requires additional configuration'),
+      }),
+    );
+    assert.strictEqual(report.ok, false);
+    assert.strictEqual(check(report, 'search').status, 'fail');
+    assert.match(
+      check(report, 'search').detail,
+      /Not available on this server .*converge refuses them: use Atlas/,
+    );
+  });
+
+  it("should only warn where Search is missing and onSearchUnavailable is 'skip'", async () => {
+    const report = await runAudit(
+      searchDeps({
+        definitions: async () => declared('movies'),
+        listError: serverError(31082, 'requires additional configuration'),
+        config: { onSearchUnavailable: 'skip' },
+      }),
+    );
+    assert.strictEqual(report.ok, true);
+    assert.strictEqual(check(report, 'search').status, 'warn');
+    assert.match(check(report, 'search').detail, /converge skips them/);
+  });
+
+  it('should warn when the check itself cannot run', async () => {
+    const report = await runAudit(
+      searchDeps({
+        definitions: async () => declared('movies'),
+        listError: serverError(13, 'not authorized'),
+      }),
+    );
+    assert.strictEqual(check(report, 'search').status, 'warn');
+    assert.match(check(report, 'search').detail, /Could not check Atlas Search: not authorized/);
+  });
+
+  it('should run before the runtime check', async () => {
+    const report = await runAudit(searchDeps({ definitions: async () => declared('movies') }));
+    const names = report.checks.map((entry) => entry.name);
+    assert.ok(names.indexOf('search') < names.indexOf('runtime'));
+  });
+});

@@ -347,6 +347,94 @@ describe('renderConvergeTable', () => {
     );
   });
 
+  it('should list search indexes by name, with their type and build', () => {
+    const search = (fields) => ({ target: 'searchIndex', status: 'planned', ...fields });
+    const vector = { name: 'plot', type: 'vectorSearch', definition: { fields: [] } };
+    const output = renderConvergeTable(
+      plan(
+        [
+          search({ name: 'plot', action: 'create', to: vector }),
+          search({
+            name: 'default',
+            action: 'modify',
+            reason: 'mappings',
+            build: { status: 'READY', queryable: true },
+            to: { name: 'default', type: 'search', definition: {} },
+          }),
+          search({
+            name: 'titles',
+            action: 'unchanged',
+            build: { status: 'BUILDING', queryable: false },
+          }),
+          search({
+            name: 'broken',
+            action: 'unchanged',
+            build: { status: 'FAILED', queryable: false, message: 'too many fields' },
+          }),
+          search({
+            name: 'busy',
+            action: 'unchanged',
+            build: { status: 'READY', queryable: true, updating: true },
+          }),
+          search({
+            name: 'lagging',
+            action: 'unchanged',
+            build: { status: 'STALE', queryable: true },
+          }),
+          search({ name: 'ok', action: 'unchanged', build: { status: 'READY', queryable: true } }),
+          search({ name: 'legacy', action: 'drop', reason: 'not declared' }),
+          search({ name: 'stray', action: 'keep', reason: 'not declared' }),
+        ],
+        {
+          search: {
+            available: true,
+            notReady: [
+              { collection: 'users', name: 'titles', status: 'BUILDING', queryable: false },
+              { collection: 'users', name: 'broken', status: 'FAILED', queryable: false },
+              { collection: 'users', name: 'lagging', status: 'STALE', queryable: true },
+            ],
+          },
+        },
+      ),
+    );
+    const plain = stripAnsi(output);
+    assert.match(plain, /│ users +│ search index │ plot +│ create +│ vectorSearch +│/);
+    assert.match(plain, /│ search index │ default +│ modify +│ mappings +│/);
+    // Unchanged, but not serving yet: shown without --verbose.
+    assert.match(plain, /│ titles +│ unchanged │ BUILDING/);
+    assert.match(plain, /│ broken +│ unchanged │ FAILED: too many fields/);
+    assert.match(plain, /│ busy +│ unchanged │ updating/);
+    assert.match(plain, /│ lagging +│ unchanged │ STALE — not replicating/);
+    assert.ok(!/│ ok +│/.test(plain), 'a READY unchanged index stays folded');
+    assert.strictEqual(
+      plain.split('\n').pop(),
+      'Would make 3 change(s) in 1 of 2 collection(s) · 1 drop/rebuild · ' +
+        '1 undeclared search index(es) kept · 1 search index(es) building · ' +
+        '1 search index(es) stale · 1 search index(es) failed · 5 unchanged',
+    );
+  });
+
+  it('should not count a skipped search index as a change', () => {
+    const plain = stripAnsi(
+      renderConvergeTable(
+        plan([
+          {
+            target: 'searchIndex',
+            name: 'default',
+            action: 'skip',
+            status: 'planned',
+            reason: 'Atlas Search is not available on this server',
+          },
+        ]),
+      ),
+    );
+    assert.match(plain, /│ search index │ default │ skip +│ Atlas Search is not available/);
+    assert.match(
+      plain,
+      /✔ 2 collection\(s\) match their declarations · 1 search index\(es\) skipped — Search unavailable$/,
+    );
+  });
+
   it('should sanitize names that come from the database', () => {
     const escape = String.fromCharCode(27);
     const plain = renderConvergeTable(

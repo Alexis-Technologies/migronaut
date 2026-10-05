@@ -1,12 +1,13 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { ConfigInvalidError } = require('../errors/index.js');
-const { isPlainObject, regExpIssue, toWire } = require('../utils/canonical.js');
+const { isPlainObject, toWire, unsendable } = require('../utils/canonical.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { importUserFile, tsLoadMessageOrNull } = require('../utils/loader.js');
 const { indexIssues, normalizeDeclaredIndex, sameDeclaredSignature } = require('./index-spec.js');
+const { normalizeDeclaredSearchIndex, searchIndexIssues } = require('./search-index-spec.js');
 
 /**
  * Declared collections: validating a definition, normalizing it for the
@@ -23,6 +24,7 @@ const { indexIssues, normalizeDeclaredIndex, sameDeclaredSignature } = require('
 const DEFINITION_KEYS = [
   'name',
   'indexes',
+  'searchIndexes',
   'validator',
   'validationLevel',
   'validationAction',
@@ -38,27 +40,6 @@ const FS_CONCURRENCY = 16;
 /** `collections[2]` + `indexes` → `collections[2].indexes`; `users.ts:` + `indexes` → `users.ts: indexes` */
 function join(base, key) {
   return base.endsWith(':') ? `${base} ${key}` : `${base}.${key}`;
-}
-
-/** What makes a validator unsendable — a function, a symbol, a cycle — or null */
-function unsendable(value, seen = new Set()) {
-  if (seen.size === 0) {
-    const issue = regExpIssue(value);
-    if (issue) return issue;
-  }
-  const type = typeof value;
-  if (type === 'function') return 'must not contain functions';
-  if (type === 'symbol') return 'must not contain symbols';
-  if (value === null || type !== 'object') return null;
-  if (seen.has(value)) return 'must not contain circular references';
-  seen.add(value);
-  const items = Array.isArray(value) ? value : isPlainObject(value) ? Object.values(value) : [];
-  for (const item of items) {
-    const reason = unsendable(item, seen);
-    if (reason) return reason;
-  }
-  seen.delete(value);
-  return null;
 }
 
 const isEmptyObject = (value) => isPlainObject(value) && Object.keys(value).length === 0;
@@ -95,6 +76,34 @@ function indexListIssues(indexes, base, issues) {
         issues.push({ path: later.path, message });
         break;
       }
+    }
+  }
+}
+
+function searchIndexListIssues(searchIndexes, base, issues) {
+  const listPath = join(base, 'searchIndexes');
+  if (!Array.isArray(searchIndexes)) {
+    issues.push({ path: listPath, message: 'must be an array of search index definitions' });
+    return;
+  }
+  const names = new Map();
+  for (const [position, index] of searchIndexes.entries()) {
+    const indexPath = `${listPath}[${position}]`;
+    const found = searchIndexIssues(index, indexPath);
+    issues.push(...found);
+    if (found.length > 0) continue;
+    const { name } = normalizeDeclaredSearchIndex(index);
+    if (names.has(name)) {
+      issues.push({
+        path: indexPath,
+        message:
+          `has the same name as searchIndexes[${names.get(name)}] ("${name}")` +
+          (index.name === undefined
+            ? ' — a search index declared without a name is "default"'
+            : ''),
+      });
+    } else {
+      names.set(name, position);
     }
   }
 }
@@ -137,13 +146,20 @@ function definitionIssues(definition, { path: base, reserved = [], fallbackName 
     report('name', `"${name}" is one of migronaut's own collections`);
   }
 
-  if (definition.indexes === undefined && definition.validator === undefined) {
+  if (
+    definition.indexes === undefined &&
+    definition.searchIndexes === undefined &&
+    definition.validator === undefined
+  ) {
     issues.push({
       path: self,
-      message: 'declares neither indexes nor a validator — nothing to manage',
+      message: 'declares no indexes, searchIndexes or validator — nothing to manage',
     });
   }
   if (definition.indexes !== undefined) indexListIssues(definition.indexes, base, issues);
+  if (definition.searchIndexes !== undefined) {
+    searchIndexListIssues(definition.searchIndexes, base, issues);
+  }
 
   const { validator } = definition;
   if (validator !== undefined && validator !== null) {
@@ -203,8 +219,9 @@ function collectionsIssues(list, { reserved = [] } = {}) {
 
 /**
  * A valid definition in the planner's shape: indexes normalized (effective
- * names, server-form keys, the spec to send), the validator cleaned for the
- * wire. `indexes`/`validator` stay `undefined` when not managed.
+ * names, server-form keys, the spec to send), search indexes with their
+ * default name and type, the validator cleaned for the wire.
+ * `indexes`/`searchIndexes`/`validator` stay `undefined` when not managed.
  */
 function normalizeDefinition(definition, { name, source } = {}) {
   const { validator } = definition;
@@ -212,6 +229,13 @@ function normalizeDefinition(definition, { name, source } = {}) {
     name: definition.name ?? name,
     source,
     indexes: definition.indexes?.map((index) => normalizeDeclaredIndex(index)),
+    ...(definition.searchIndexes !== undefined
+      ? {
+          searchIndexes: definition.searchIndexes.map((index) =>
+            normalizeDeclaredSearchIndex(index),
+          ),
+        }
+      : {}),
     validator: validator === undefined || validator === null ? validator : toWire(validator),
     ...(definition.validationLevel !== undefined
       ? { validationLevel: definition.validationLevel }

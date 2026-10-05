@@ -1,5 +1,9 @@
+const { mapLimit } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
+const { SEARCH_UNAVAILABLE_HINT, listSearchIndexes, probeSearch } = require('./converge-search.js');
 const { toLockInfo } = require('./lock.js');
+const { normalizeLiveSearchIndex, searchBuildState } = require('./search-index-spec.js');
+const { READ_OPTIONS, readServer } = require('./server-info.js');
 
 /** Changelog indexes ensureIndexes() creates — audit warns when any is absent */
 const EXPECTED_INDEXES = [
@@ -12,14 +16,16 @@ const EXPECTED_INDEXES = [
 
 /**
  * Read-only health check of the setup: configuration, connectivity,
- * transaction support, indexes, lock state and checksum drift.
+ * transaction support, indexes, lock state, checksum drift — and Atlas Search,
+ * when declared collections hold search indexes.
  *
  * Fixes nothing — it reports, so an operator can see in one command why a
  * migration would fail before running one. Every check is independent: a
  * failure in one is recorded and the rest still run.
  *
  * Pure orchestration over capabilities the MigratorKit injects (`deps`), so it
- * needs none of the kit's private state.
+ * needs none of the kit's private state. `deps.definitions()` (optional) gives
+ * the declared collections, for the search check.
  */
 async function runAudit(deps) {
   const checks = [];
@@ -133,7 +139,10 @@ async function runAudit(deps) {
     record('checksums', 'warn', `Could not read status: ${errorText(error)}`);
   }
 
-  // 7. Runtime. TypeScript migrations need a runtime that can strip types.
+  // 7. Search — only where declared collections hold search indexes.
+  await auditSearch(deps, db, config, record);
+
+  // 8. Runtime. TypeScript migrations need a runtime that can strip types.
   // Feature detection instead of version parsing: it also catches a run
   // under `--no-experimental-strip-types` on an otherwise capable Node.
   const nodeVersion = process.versions.node;
@@ -150,6 +159,82 @@ async function runAudit(deps) {
   }
 
   return auditReport(checks);
+}
+
+/** Search index lists the audit reads at once */
+const AUDIT_READ_CONCURRENCY = 8;
+
+/**
+ * Whether the server has the Atlas Search that declared search indexes need,
+ * and whether any of them failed to build. Records nothing when none is
+ * declared — or when the definitions do not load: converge reports that
+ * itself, with every issue.
+ */
+async function auditSearch(deps, db, config, record) {
+  if (typeof deps.definitions !== 'function') return;
+  let definitions;
+  try {
+    definitions = await deps.definitions();
+  } catch {
+    return;
+  }
+  // One pass: the collections that declare search indexes, the names each
+  // declares, and how many there are in all.
+  const declaring = [];
+  let declared = 0;
+  for (const definition of definitions) {
+    if (definition.searchIndexes === undefined) continue;
+    const names = new Set();
+    for (const index of definition.searchIndexes) names.add(index.name);
+    declaring.push({ definition, names });
+    declared += definition.searchIndexes.length;
+  }
+  if (declaring.length === 0) return;
+  const counted = `${declared} search index(es) declared in ${declaring.length} collection(s)`;
+  try {
+    const probe = await probeSearch(db, await readServer(db), {
+      collection: declaring[0].definition.name,
+      readOptions: READ_OPTIONS,
+    });
+    if (!probe.available) {
+      const skip = config.onSearchUnavailable === 'skip';
+      record(
+        'search',
+        skip ? 'warn' : 'fail',
+        `Not available on this server (${probe.reason}) — ${counted}; ` +
+          (skip
+            ? "converge skips them (onSearchUnavailable: 'skip')"
+            : `converge refuses them: ${SEARCH_UNAVAILABLE_HINT}`),
+      );
+      return;
+    }
+    const failed = [];
+    const stale = [];
+    // One list per collection, a few at a time; reported in declaration order.
+    const lists = await mapLimit(declaring, AUDIT_READ_CONCURRENCY, ({ definition }) =>
+      listSearchIndexes(db, definition.name, READ_OPTIONS),
+    );
+    for (const [position, { definition, names }] of declaring.entries()) {
+      for (const raw of lists[position]) {
+        const index = normalizeLiveSearchIndex(raw);
+        if (!names.has(index.name)) continue;
+        const state = searchBuildState(index);
+        const label = `${definition.name}.${index.name}${index.message ? ` (${index.message})` : ''}`;
+        if (state === 'failed') failed.push(label);
+        else if (state === 'stale') stale.push(label);
+      }
+    }
+    if (failed.length > 0 || stale.length > 0) {
+      const parts = [];
+      if (failed.length > 0) parts.push(`failed to build: ${failed.join(', ')}`);
+      if (stale.length > 0) parts.push(`stale (not replicating): ${stale.join(', ')}`);
+      record('search', 'warn', `Available — ${parts.join('; ')}`);
+    } else {
+      record('search', 'pass', `Available — ${counted}`);
+    }
+  } catch (error) {
+    record('search', 'warn', `Could not check Atlas Search: ${errorText(error)}`);
+  }
 }
 
 /** Roll individual checks up into the report shape (one pass, both counters) */

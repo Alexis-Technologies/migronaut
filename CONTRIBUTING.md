@@ -77,11 +77,31 @@ on 22; see [tests/helpers/event-loop.js](tests/helpers/event-loop.js).
 
 Use `before`/`after`, not `beforeAll`/`afterAll` (those are Jest/Vitest names).
 Silence the logger with `logger: null`. No committed `.only` or `.skip` — the
-one sanctioned exception is `bullmq-redis.test.js` skipping itself, with a
-reason, when there is no Redis to run against. The coverage gate must pass
-without it.
+two sanctioned exceptions are `bullmq-redis.test.js` and `search-atlas.test.js`
+skipping themselves, with a reason, when there is no Redis or no Atlas Search
+to run against. The coverage gate must pass without either.
 
-Four environment variables control the test run:
+`search-atlas.test.js` is manual: CI does not run it. Run it locally after a
+change to how search indexes are compared, planned or applied
+(`src/core/search-index-spec.js`, `src/core/converge-search.js`,
+`src/core/converge-search-run.js`, the search part of `src/core/converge-plan.js`)
+— the unit tests carry the coverage, but only a real `mongot` shows what the
+server reports back. Run it on `mongodb/mongodb-atlas-local:8.0` and `:latest`:
+
+```bash
+docker run --rm -d --name migronaut-atlas -p 27018:27017 -e DO_NOT_TRACK=1 mongodb/mongodb-atlas-local:8.0
+MIGRONAUT_TEST_ATLAS_URI="mongodb://127.0.0.1:27018/?directConnection=true" node --test tests/integration/search-atlas.test.js
+```
+
+After a change to the availability probe (`probeSearch`), also run the converge
+integration file once against a plain `mongod` newer than CI's 7.0 — the probe
+treats servers from 7.2.1 differently, and CI never boots one:
+
+```bash
+MONGOMS_VERSION=8.0.32 node --test tests/integration/converge.test.js
+```
+
+Five environment variables control the test run:
 
 | Env var | Effect |
 |---|---|
@@ -89,6 +109,7 @@ Four environment variables control the test run:
 | `MONGOMS_VERSION` | `mongodb-memory-server`'s own variable — which server version to download. CI pins `7.0.14`; an explicit value always wins. |
 | `MONGOMS_DOWNLOAD_DIR` | `mongodb-memory-server`'s binary cache directory. CI points it at a cached path. |
 | `MIGRONAUT_TEST_REDIS_URL` | Opt-in: run the queue adapter's scenarios against the real `bullmq` on this Redis (`docker run --rm -d -p 6379:6379 redis:7-alpine`, then `redis://127.0.0.1:6379`). Unset → that one file is skipped. |
+| `MIGRONAUT_TEST_ATLAS_URI` | Opt-in, manual (never set in CI): run `search-atlas.test.js` — declared search indexes against a server with Atlas Search, such as `mongodb/mongodb-atlas-local` (above). Unset → that one file is skipped. |
 
 The two `MONGOMS_*` names belong to `mongodb-memory-server`, so they keep their
 prefix. Everything migronaut itself reads is `MIGRONAUT_*` — including

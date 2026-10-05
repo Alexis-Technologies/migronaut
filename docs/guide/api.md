@@ -67,7 +67,7 @@ up, even from a different project's env file.
 | `init(options?)` | `Promise<string>` | Generate a config file; returns its path. |
 | `import(options?)` | `Promise<ImportResult>` | Adopt a migrate-mongo changelog. |
 | `baseline(options?)` | `Promise<BaselineSummary>` | Mark files applied without executing them — the [`migronaut baseline`](/commands/baseline) command's engine. |
-| `converge(options?)` | `Promise<ConvergeResult>` | Bring the [declared collections](/guide/collections) to their declared indexes and validators — the [`migronaut converge`](/commands/converge) command's engine. |
+| `converge(options?)` | `Promise<ConvergeResult>` | Bring the [declared collections](/guide/collections) to their declared indexes, search indexes and validators — the [`migronaut converge`](/commands/converge) command's engine. |
 | `convergesAfterUp()` | `Promise<boolean>` | Whether a bulk `up` on this kit ends by converging (`convergeAfterUp` on, something declared). Does not connect. |
 | `convergeHistory(options?)` | `Promise<ConvergeHistoryEntry[]>` | The [converge history](/guide/collections#history), newest first (`{ limit }`, default 20). Read-only. |
 | `nextBatch()` | `Promise<number>` | The batch number the next `up` would use — a peek, not a reservation. |
@@ -130,6 +130,8 @@ await migrator.converge({ prune: true });               // drop undeclared index
 | `prune` | Drop undeclared indexes in collections whose definition does not set `prune` |
 | `noLock` | Skip the lock (dev only) |
 | `ordered` | Refuse (`MigrationBlockedError`) while a migration is pending — checked under the lock |
+| `rebuildUnique` | Allow a rebuild that drops a unique index and builds a unique one back (a `conflict` otherwise) |
+| `waitForSearchIndexes` | Hold the run until every declared [search index](/guide/collections#search-indexes) is queryable (overrides the config key; not with `dryRun`) |
 
 ```ts
 interface ConvergeResult {
@@ -139,20 +141,34 @@ interface ConvergeResult {
   collections: {
     name: string;
     actions: {
-      target: 'collection' | 'validator' | 'index';
+      target: 'collection' | 'validator' | 'index' | 'searchIndex';
       name: string;
-      action: 'create' | 'modify' | 'recreate' | 'drop' | 'keep' | 'unchanged' | 'conflict';
+      action:
+        | 'create' | 'modify' | 'recreate' | 'drop' | 'keep' | 'unchanged' | 'conflict'
+        | 'skip'; // a search index on a server without Search (onSearchUnavailable: 'skip')
       status: 'planned' | 'applied' | 'failed' | 'skipped';
       reason?: string; // what differs, or why
       liveName?: string; // the live index, when its name differs
       durationMs?: number;
+      from?: object; // what is there now
+      to?: object; // what the row puts there
+      build?: { status: string; queryable: boolean; message?: string; updating?: true }; // search
     }[];
   }[];
   unstable?: { collection: string; target: string; name: string; action: string; reason?: string }[];
+  // Present when search indexes are declared:
+  search?: {
+    available: boolean; // the server has Atlas Search
+    notReady: { collection: string; name: string; status: string; queryable: boolean }[];
+  };
 }
 ```
 
-A conflicting plan, or a step that fails, rejects with `ConvergeFailedError` (`CONVERGE_FAILED`),
+A search index builds in the background: `result.search.notReady` lists the declared ones still
+building, updating or failed — which does not count against `inSync`.
+
+A conflicting plan, a step that fails, or a `waitForSearchIndexes` that gives up rejects with
+`ConvergeFailedError` (`CONVERGE_FAILED`, `context.phase`: `plan`, `replan`, `apply` or `wait`),
 whose `context.converge` is the result so far. `up(undefined, { converge: true })` converges after
 the migrations under the same lock — what `convergeAfterUp` does for every bulk `up`; `up` still
 returns its migration rows, and the converge outcome arrives as the `converge:end` event.
@@ -160,7 +176,7 @@ returns its migration rows, and the converge outcome arrives as the `converge:en
 ::: tip `MigratorKit` is an `EventEmitter`
 Subscribe to `run:start`, `run:end`, `migration:start`, `migration:success`, `migration:skipped`,
 `migration:error`, `lock:acquired`, `lock:released`, `lock:lost` and — for a real converge run —
-`converge:start`, `converge:action` and `converge:end` to feed metrics or alerting without
+`converge:start`, `converge:action`, `converge:wait` and `converge:end` to feed metrics or alerting without
 parsing log lines. See [Lifecycle Hooks → Events](/guide/hooks#events) for the payloads. For traces — spans that the
 MongoDB driver's own spans nest under — and ready-made OpenTelemetry metrics, pass
 [`telemetry`](/guide/opentelemetry) in the config instead.

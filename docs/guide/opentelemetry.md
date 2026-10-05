@@ -99,6 +99,7 @@ attribute.
 | `migronaut.lock.wait.duration` | histogram, `s` | Every wait for a held lock (`runMigrations` with `onLockHeld: 'wait'`, a queue job) — one point per wait, however many polls | `migronaut.lock.wait.outcome`: `acquired`, `timeout` or `aborted` |
 | `migronaut.lock.refused` | counter, `{refusal}` | A run refused because the lock was held — one per poll of a waiting caller | — |
 | `migronaut.lock.lost` | counter, `{loss}` | A lock lost mid-run | — |
+| `migronaut.converge.search.wait.duration` | histogram, `s` | Every wait for search index builds (`waitForSearchIndexes`, `--wait-search`) — one point per wait, however many polls | `migronaut.converge.search.wait.outcome`: `ready`, `failed`, `timeout`, `unreadable` or `aborted` |
 
 Every point also carries `db.namespace` and your `telemetry.attributes`.
 
@@ -106,6 +107,11 @@ Durations are in seconds, with bucket boundaries from 10 ms to an hour (an SDK's
 for milliseconds and would put every migration in one bucket). `error.type` is present only on
 failures — a point without it is a success. The migration's file name is deliberately not a metric
 attribute — it would add a series per file; it is on the span.
+
+`migronaut.converge.search.wait.duration` shows how long new or changed search indexes take to
+become queryable — a trend that grows with the collections, and the figure to set
+`searchIndexWaitTimeoutMs` from. The migration lock is released while converge waits, so the wait is
+not part of anyone's `migronaut.lock.wait.duration`.
 
 ::: info Names may still change
 The span, attribute and metric names above are new in 2.1 and follow OpenTelemetry's conventions as

@@ -4,6 +4,9 @@ const { pathToFileURL } = require('node:url');
 const { ConfigInvalidError } = require('../errors/index.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
+
+/** The keys a `telemetry` object may hold — a Set, read once per key */
+const TELEMETRY_KEY_SET = new Set(TELEMETRY_KEYS);
 const { applyEnvFile } = require('../utils/env.js');
 const { errorText } = require('../utils/error.js');
 const { resolveLogger } = require('../utils/logger.js');
@@ -32,6 +35,9 @@ const DEFAULT_CONFIG = {
   onOutOfOrder: 'warn',
   reloadMigrations: false,
   convergeAfterUp: false,
+  onSearchUnavailable: 'fail',
+  waitForSearchIndexes: false,
+  searchIndexWaitTimeoutMs: 600_000,
 };
 
 /** Candidate config file names, checked in priority order within the cwd */
@@ -150,6 +156,19 @@ const CONFIG_KEYS = [
     optional: true,
   },
   { path: 'convergeAfterUp', check: isBoolean, message: 'must be a boolean', optional: true },
+  {
+    path: 'onSearchUnavailable',
+    check: (value) => value === 'fail' || value === 'skip',
+    message: "must be 'fail' or 'skip'",
+    optional: true,
+  },
+  { path: 'waitForSearchIndexes', check: isBoolean, message: 'must be a boolean', optional: true },
+  {
+    path: 'searchIndexWaitTimeoutMs',
+    check: isPositiveInteger,
+    message: 'must be a positive integer',
+    optional: true,
+  },
 ];
 
 /**
@@ -331,6 +350,17 @@ const ENV_KEYS = [
   { env: 'MIGRONAUT_RELOAD_MIGRATIONS', path: 'reloadMigrations', parse: parseBoolean },
   { env: 'MIGRONAUT_COLLECTIONS_DIR', path: 'collectionsDir', parse: parseString },
   { env: 'MIGRONAUT_CONVERGE_AFTER_UP', path: 'convergeAfterUp', parse: parseBoolean },
+  {
+    env: 'MIGRONAUT_ON_SEARCH_UNAVAILABLE',
+    path: 'onSearchUnavailable',
+    parse: parseEnum(['fail', 'skip']),
+  },
+  { env: 'MIGRONAUT_WAIT_FOR_SEARCH_INDEXES', path: 'waitForSearchIndexes', parse: parseBoolean },
+  {
+    env: 'MIGRONAUT_SEARCH_INDEX_WAIT_TIMEOUT_MS',
+    path: 'searchIndexWaitTimeoutMs',
+    parse: parsePositiveInteger,
+  },
 ];
 
 /** Build a partial config from the MIGRONAUT_* environment variables */
@@ -523,7 +553,7 @@ async function loadConfig(options = {}) {
   // (`trace`, `metrics`) instead of a tracer and a meter turns it off silently.
   if (config.telemetry) {
     for (const key in config.telemetry) {
-      if (!TELEMETRY_KEYS.includes(key)) (unknown ??= []).push(`telemetry.${key}`);
+      if (!TELEMETRY_KEY_SET.has(key)) (unknown ??= []).push(`telemetry.${key}`);
     }
   }
   if (unknown) {

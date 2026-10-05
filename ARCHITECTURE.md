@@ -92,7 +92,11 @@ src/
 │   ├── baseline.js          # runBaseline() — mark existing files applied without running them
 │   ├── collections.js       # Declared collections: validate, normalize, load collectionsDir
 │   ├── index-spec.js        # PURE: one declared index vs one live index (names, keys, options)
+│   ├── search-index-spec.js # PURE: one declared search index vs one live one (defaults, type, build)
 │   ├── converge-plan.js     # PURE: plan one collection — result rows + executable steps
+│   ├── converge-search.js   # Atlas Search: raw commands, the availability probe, error hints, the wait
+│   ├── converge-search-run.js # The search half of a converge run: read, report, wait for builds
+│   ├── server-info.js       # Read options, read pace, server version/topology, not-found codes
 │   ├── converge.js          # runConverge() — read live state, plan, carry the plan out
 │   ├── converge-log.js      # ConvergeLog — the append-only converge history (_migronaut_converge)
 │   ├── import.js            # PURE migrate-mongo → MigrationRecord mapping
@@ -443,11 +447,57 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **The invariant:** what the server stores for a declaration must compare as unchanged against
   that declaration — see [§6.7](#67-declared-collections-converge).
 
+### `src/core/search-index-spec.js` — declared search index vs live search index (pure)
+- **Responsibility:** `searchIndexIssues` (light validation: unknown keys, the shape that tells
+  `search` from `vectorSearch`, vector/`autoEmbed` mixing, repeated fields),
+  `normalizeDeclaredSearchIndex` (default name `default`, type `search`),
+  `normalizeLiveSearchIndex` (a `$listSearchIndexes` document — type inferred where a self-managed
+  `mongot` reports none, `updating` from a staged index or an older served version),
+  `effectiveDefinition` (`SEARCH_DEFAULTS` & co. filled in), `tolerateServerOptions`,
+  `compareSearchIndex` (`{ diffs, paths, more, typeChange, immutable, ignored }`),
+  `searchBuildState` (`serving`/`updating`/`building`/`stale`/`failed`/`removing` — the one word
+  every reporter uses), `isSearchIndexReady`, `searchBuild`, `searchIndexSpec`.
+- **The invariant** is index-spec.js's: what the server reports for a declaration must compare as
+  unchanged against it — hence defaults filled on *both* sides, from one table. What the tables do
+  not know, `tolerateServerOptions` drops: after the fill, an option the live side has and the
+  declared side lacks can only be one whose default migronaut does not know, so it is left out
+  (and named in `ignored`) rather than turned into an update — and a rebuild — on every run. Only
+  option objects are trimmed (definition, `mappings`, field mappings with their `fields`/`multi`,
+  vector fields and `hnswOptions`); a field, a mapping type or a vector field only the server has
+  stays a difference. Keys are written with `canonical.js`'s `assign`, so a field named
+  `__proto__` stays a field.
+
+### `src/core/converge-search.js` — Atlas Search, the mechanism
+- **Responsibility:** the raw search commands (`runSearchStep`: create, update — retried once with
+  its type for a self-managed `mongot` — and drop, tolerating "already gone"),
+  `listSearchIndexes`, `probeSearch` (does the server have Search at all — see
+  [§6.7](#67-declared-collections-converge)), `isSearchUnavailable` / `searchHint` (what the
+  server's errors mean), `isTransientError` (a read worth trying again), and
+  `awaitSearchIndexes` / `nextPollDelay` (the optional wait). Returns outcomes; converge.js
+  decides what they do to a run.
+
+### `src/core/converge-search-run.js` — the search half of a converge run
+- **Responsibility:** what converge.js calls in at each phase when definitions declare search
+  indexes — `readSearch` (the probe, then every declaring collection's list), `readSearchIndexes`
+  (a failed read reported in the phase that read it), `warnIgnored` / `warnSkipping`,
+  `searchSummary` (`result.search`), `refreshBuilds` (the verify phase), `waitPhase` (release the
+  lock, poll, emit `converge:wait`, record the metric point, fail on a build the run started),
+  and `reportNotReady` (the closing lines). Orchestration over the same `deps` as converge.js;
+  split out so the main flow reads as one. `pause` (an abortable sleep) and
+  `SEARCH_SETTLE_DELAYS_MS` live here too.
+
+### `src/core/server-info.js` — what is read about the server, and how
+- **Responsibility:** `READ_OPTIONS` (primary, plain-JavaScript BSON — forced onto every converge
+  and audit read), `READ_CONCURRENCY`, `readServer` (mongos or not, version with patch) and the
+  `NAMESPACE_NOT_FOUND` / `INDEX_NOT_FOUND` codes — shared by converge, its search half and the
+  audit, so none of them reaches into another for it.
+
 ### `src/core/converge-plan.js` — the converge planner (pure)
-- **Responsibility:** `planCollection(definition, live, { prune })` → `{ name, actions, steps }`:
-  result rows (`create`/`modify`/`recreate`/`drop`/`keep`/`unchanged`/`conflict`) and the steps
-  that carry them out, in execution order, each pointing at the rows it settles. Plus
-  `summarize`, `isDestructive`, the validator helpers.
+- **Responsibility:** `planCollection(definition, live, { prune, search })` → `{ name, actions,
+  steps }`: result rows (`create`/`modify`/`recreate`/`drop`/`keep`/`unchanged`/`conflict`/`skip`)
+  and the steps that carry them out, in execution order, each pointing at the rows it settles.
+  `planSearchIndexes` plans the `searchIndex` rows. Plus `isDestructive`, `needsConfirmation`,
+  `SERVED_ACTIONS`, `TARGET_LABELS`, the validator helpers.
 
 ### `src/core/converge.js` — the converge flow
 - **Responsibility:** `runConverge(deps, options, signal)`, in phases that are functions of their
@@ -456,8 +506,11 @@ Each entry: **responsibility · key exports · nuances you must know.**
   (`refuseConflicts`), then per collection *re-plan* (`replan`), *apply* (`applyCollection` — the
   steps one by one, an abort check between them) and *verify* (`verifyFixedPoint`), and finally
   *report* (`reportSuccess` / `reportFailure` — closing lines, the history entry, `converge:end`).
-- **Key exports:** `runConverge`, `readLiveState`, `readLiveStates`, `READ_OPTIONS`. Same
-  `runX(deps)` injection pattern as audit, import and baseline.
+  Everything the report needs — `changed`/`inSync`, collections touched, undeclared indexes kept,
+  the per-action `counts`, the history rows, the search indexes not serving — comes from one pass
+  over the rows (`tally`, behind `finalize`), which also settles the rows never reached.
+- **Key exports:** `runConverge`, `readLiveState`, `readLiveStates` (`READ_OPTIONS` lives in
+  `server-info.js`). Same `runX(deps)` injection pattern as audit, import and baseline.
 
 ### `src/core/converge-log.js` — the converge history
 - **Responsibility:** `ConvergeLog` — `append(db, entry)` (creates the `startedAt` index on first
@@ -688,6 +741,15 @@ and the next has not started. Set `onLockLost: 'warn'` to keep the old warn-and-
 **Release** — `deleteOne({_id, owner, nonce})`, scoped so we never delete a lock since reclaimed by
 someone else. `forceRelease()` (for `migronaut unlock`) deletes unconditionally by `_id`.
 
+**Early release** — the work function gets a second argument, `control`, whose `release()` gives
+the lock up before the work returns: it stops the heartbeat and the deadline, awaits the renewal in
+flight, deletes the document, fires `onLockReleased({ early: true })` (`lock:released` with
+`early: true`) and resolves to whether it worked. It is for a tail that only reads — converge
+waiting for search index builds — so the next deploy or a queue's next job need not wait out a
+build. The run goes on (its id, span and `run:end` are unchanged); a stop still aborts it, a lost
+lock no longer can. Idempotent; a failed early release is warned about and retried at the end;
+under `noLock` it resolves `false`.
+
 > **Why TTL + heartbeat instead of just TTL?** TTL alone means a migration longer than `lockTTLSeconds`
 > would let its own lock go stale and be stolen mid-run. The heartbeat refreshes it; the TTL is only
 > the *crash-recovery* window (a dead holder's lock becomes reclaimable after TTL).
@@ -858,17 +920,19 @@ processor down, so a job put back is not fetched again by the same worker.
 Files: [collections.js](src/core/collections.js), [index-spec.js](src/core/index-spec.js),
 [converge-plan.js](src/core/converge-plan.js), [converge.js](src/core/converge.js).
 
-**What it is.** Indexes and validators declared as an end state (`collections`, `collectionsDir`)
-and brought there by `kit.converge()` — stateless: every run reads `listCollections` +
-`listIndexes` and plans afresh, and the history it appends is never read back to decide anything. Migrations keep everything with an order and a
+**What it is.** Indexes, search indexes and validators declared as an end state (`collections`,
+`collectionsDir`) and brought there by `kit.converge()` — stateless: every run reads
+`listCollections` + `listIndexes` (+ `$listSearchIndexes` where search indexes are declared) and
+plans afresh, and the history it appends is never read back to decide anything. Migrations keep everything with an order and a
 history; this is for what only has a current value.
 
 **Pure planner, thin executor.** All decisions live in `converge-plan.js` / `index-spec.js`
 (table-tested, no database); `converge.js` reads, executes the steps in order and reports. Steps
-per collection: create collection (with its validator) → validator `collMod` → index creates →
-in-place `collMod` (TTL when both sides have one, `hidden`) → rebuilds (drop + create, back to
-back, no abort check between) → pruned drops, last — an index is only removed once everything
-declared exists.
+per collection: create collection (with its validator) → validator `collMod` → search index
+creates, then updates (accepted at once, built in the background — so before the regular builds)
+→ index creates → in-place `collMod` (TTL when both sides have one, `hidden`) → rebuilds (drop +
+create, back to back, no abort check between) → pruned index drops → pruned search index drops,
+last — an index is only removed once everything declared exists.
 
 **The comparison invariant.** Whatever the server stores for a declaration must compare as
 unchanged against that declaration, or the index is rebuilt on every run. Hence: `false` booleans
@@ -907,6 +971,49 @@ refused drop is kept, not failed).
 
 **Re-plan, then act.** Each collection after the first is re-read and re-planned right before its
 steps; a conflict or a destructive row the initial plan lacked stops the run (`phase: 'replan'`).
+
+**Search indexes.** A `searchIndex` row is planned by `planSearchIndexes` against the live
+`$listSearchIndexes` documents, which are read only for collections that declare `searchIndexes`
+— a run without any makes no search call, and no probe. Things that differ from regular indexes:
+- *Never a rebuild.* `$search` against a missing index returns nothing rather than fail, so a
+  drop-and-create would be a silent outage for the whole build. `updateSearchIndex` changes a
+  definition in place (the old one serves meanwhile) and is **not** destructive; what it cannot
+  change — the type, an `autoEmbed` field's path/model/size/quantization/modality — is a
+  `conflict` with the new-name recipe. Only a pruned `drop` is destructive (and confirmed).
+- *Is Search there?* `probeSearch` asks once per run, listing the first existing declaring
+  collection: an "unavailable" refusal (31082 / 115 / 6047401 / 59 / 40324 — by version) is the
+  answer; a non-empty list, or an empty one from 7.2.1+, means yes; an empty list from an older
+  server proves nothing (a plain `mongod` of that age answered some lists with `[]`), so
+  `getParameter searchIndexManagementHostAndPort` decides — empty or unknown → no, refused → assume
+  yes. Without Search, declared search indexes are `conflict` rows (`onSearchUnavailable: 'fail'`,
+  refused before any write, with a hint) or `skip` rows (`'skip'`). A refusal at apply time in skip
+  mode turns the step's rows to `skip` and Search off for the rest of the run.
+- *What the server reports.* `latestDefinition` comes back with defaults written in — top-level,
+  per field mapping by type (`FIELD_DEFAULTS`: `string` gains `indexOptions`/`store`/`norms`,
+  `number` its representation, `document` `dynamic`, …, recursively through `fields` and `multi`)
+  and per vector field — and a field indexed as several types in the server's own order. Both
+  sides are filled from the same tables and those lists sorted; the opt-in Atlas suite is what
+  proves the tables (atlas-local 8.0 and 8.3). A default the tables lack is tolerated (see
+  `tolerateServerOptions`) and warned about once per run; a *value* the server changes for a
+  known default still shows as `unstable`, with the paths and a warning that every update builds
+  the index again. A self-managed `mongot` reports `latestVersion`
+  instead of `latestDefinitionVersion.version`, and an Atlas CLI local deployment refuses every
+  `updateSearchIndex` of a vector index (with or without `type`): the step fails with the
+  new-name recipe as its hint.
+- *Builds are asynchronous.* The server accepts a create or update at once. The verify phase
+  re-reads a lagging list a bounded number of times (250/500/1000 ms) before calling anything
+  unstable, and refreshes each row's `build`. `result.search.notReady` lists declared indexes not
+  serving their declaration; **builds never count against `inSync`** (the queue's sync tick would
+  otherwise enqueue a converge per tick while an index builds), but `converge --check` fails on a
+  FAILED one. `waitForSearchIndexes` adds a wait phase after the last collection: polls back off
+  1 s → 10 s, never past `searchIndexWaitTimeoutMs`; an updated index must also report a definition
+  version past the one the update started from. The wait only reads, so it starts by giving the
+  migration lock up (`deps.releaseLock` → `runWithLock`'s early release); `converge:end` and the
+  history entry still come after it. FAILED (of an index the run created or changed)
+  or timeout → `phase: 'wait'`; a FAILED or STALE index the run did not touch does not hold the
+  wait (it is returned as `preexisting` and warned about). A read that fails with a blip (network,
+  failover — `isTransientError`) is retried at the next poll, up to three in a row; the pause
+  between polls is cut short by an abort.
 
 **After `up`.** The hook lives in `up()`, not `#runUp` (which `redo` reuses): bulk only, no `to`,
 definitions resolved before the lock, converge inside the same `#withLock` callback even with zero
@@ -1069,6 +1176,21 @@ The high-impact ones for code changes:
 - **No third telemetry wrap site.** A converge run is an ordinary `migronaut.run` span with
   `command: 'converge'`; there are no per-step spans (the driver's index commands nest under the
   run span).
+- **A search index is never `recreate`d.** Changing its type, or an `autoEmbed` field's immutable
+  attributes, is a `conflict` — even with `prune`. Dropping it to build it again would leave every
+  `$search` silently returning nothing until the build ends.
+- **A FAILED search index with the declared definition is `unchanged`.** Resubmitting the same
+  definition changes nothing; it is reported (`notReady`, a warning, `--check` exit 28), never
+  retried — and it does not hold `waitForSearchIndexes`, which only fails on a build the run
+  started. Builds in progress or failed do not count against `inSync` — the sync tick would loop.
+- **`type` goes to `createSearchIndexes` only for a vector index**, and `updateSearchIndex` is sent
+  without one — retried with it only on a self-managed `mongot`'s "mappings is required". Atlas
+  documents no `type` on update; an older server refuses a field it does not know.
+- **The probe trusts an empty list only from 7.2.1+.** Older plain `mongod`s answered some
+  `$listSearchIndexes` with `[]`; the `getParameter` tiebreaker decides, and a server that will not
+  say (Atlas restricts it) is assumed to have Search — a refusal at apply time is still reported.
+- **Search indexes are not read at all without `searchIndexes`.** No probe, no list, even with
+  `prune: true` — "leave a part out to leave it alone" holds for Search too.
 
 ---
 
@@ -1100,11 +1222,19 @@ The high-impact ones for code changes:
   adapter's coverage) and by `tests/integration/bullmq-redis.test.js` against the real `bullmq`
   package on a real Redis. The second run is what keeps the first honest: when they disagree, the
   fake is wrong. Add adapter behaviour to the scenario module, not to either file.
+- **Search indexes:** the unit tier's fake (`tests/unit/converge.test.js`) answers
+  `$listSearchIndexes` and the three search commands, with lag, server-side normalization and
+  build progress on demand — that carries the coverage. The memory-server suite proves the
+  *unavailable* path against a real `mongod`, which has no Search. A server that has it is the
+  opt-in, manual `tests/integration/search-atlas.test.js` (`mongodb/mongodb-atlas-local`): every
+  scenario ends at a fixed point, which is the only proof that the comparison rules match what a
+  real `mongot` reports.
 - **Rules:** every feature ships with tests in the same PR. Silence the logger (`logger:null`). No
-  `.only`/`.skip` committed — the single sanctioned exception is `bullmq-redis.test.js`, which
-  skips itself *with a reason* when `MIGRONAUT_TEST_REDIS_URL` is unset: an environment-capability
-  skip (CI sets the variable via a Redis service), not a disabled test. The coverage gate must pass
-  without it. Test file names mirror source names. Coverage gate: **90% lines / 90%
+  `.only`/`.skip` committed — the two sanctioned exceptions are `bullmq-redis.test.js` and
+  `search-atlas.test.js`, which skip themselves *with a reason* when `MIGRONAUT_TEST_REDIS_URL` /
+  `MIGRONAUT_TEST_ATLAS_URI` is unset: environment-capability skips (CI sets the Redis variable via
+  a Redis service and never the Atlas one), not disabled tests. The coverage gate must pass
+  without them. Test file names mirror source names. Coverage gate: **90% lines / 90%
   funcs / 90% branches**, enforced via `c8` (`pnpm run test:coverage`).
 - **Gotcha:** Node caches dynamic `import()` by path. A test that rewrites the *same* migration
   filename mid-run will re-load the *cached* module. Use a new filename, or assert via a read-only
@@ -1143,6 +1273,9 @@ pnpm run check:dts                         # tsc --noEmit --strict over both .d.
 # opt-in: the adapter scenarios against the real bullmq + Redis (CI runs this)
 docker run --rm -d -p 6379:6379 redis:7-alpine
 MIGRONAUT_TEST_REDIS_URL=redis://127.0.0.1:6379 node --test tests/integration/bullmq-redis.test.js
+# opt-in, manual: declared search indexes against Atlas Search (CI does not run this)
+docker run --rm -d -p 27018:27017 -e DO_NOT_TRACK=1 mongodb/mongodb-atlas-local:8.0
+MIGRONAUT_TEST_ATLAS_URI="mongodb://127.0.0.1:27018/?directConnection=true" node --test tests/integration/search-atlas.test.js
 ```
 
 ## 10. No build, lint, release

@@ -503,10 +503,11 @@ describe('failureText', () => {
 });
 
 describe('metrics', () => {
-  it('should create four duration histograms in seconds and two counters', () => {
+  it('should create five duration histograms in seconds and two counters', () => {
     const meter = fakeMeter();
     createTelemetry({ meter });
     assert.deepStrictEqual(Object.keys(meter.instruments).sort(), [
+      'migronaut.converge.search.wait.duration',
       'migronaut.lock.acquire.duration',
       'migronaut.lock.lost',
       'migronaut.lock.refused',
@@ -519,6 +520,7 @@ describe('metrics', () => {
       METRICS.MIGRATION_DURATION,
       METRICS.LOCK_ACQUIRE_DURATION,
       METRICS.LOCK_WAIT_DURATION,
+      METRICS.SEARCH_WAIT_DURATION,
     ]) {
       const instrument = meter.instruments[name];
       assert.strictEqual(instrument.kind, 'histogram');
@@ -549,6 +551,26 @@ describe('metrics', () => {
       {
         value: 90,
         attributes: { 'db.namespace': 'app', 'migronaut.lock.wait.outcome': 'timeout' },
+      },
+    ]);
+  });
+
+  it('should record how a wait for search index builds ended, in seconds', () => {
+    const meter = fakeMeter();
+    const telemetry = createTelemetry({ meter }, { dbName: 'app' });
+    telemetry.searchWaited({ waitedMs: 42_000, outcome: 'ready' });
+    telemetry.searchWaited({ waitedMs: 600_000, outcome: 'timeout' });
+    assert.deepStrictEqual(meter.instruments[METRICS.SEARCH_WAIT_DURATION].points, [
+      {
+        value: 42,
+        attributes: { 'db.namespace': 'app', 'migronaut.converge.search.wait.outcome': 'ready' },
+      },
+      {
+        value: 600,
+        attributes: {
+          'db.namespace': 'app',
+          'migronaut.converge.search.wait.outcome': 'timeout',
+        },
       },
     ]);
   });

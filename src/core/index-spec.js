@@ -53,6 +53,9 @@ const INDEX_KEYS = new Set([
   ...IGNORED_OPTIONS,
 ]);
 
+/** Every option an index is normalized with — built once, read per index */
+const NORMALIZED_OPTIONS = Object.freeze([...SEMANTIC_OPTIONS, ...DECLARED_ONLY_OPTIONS]);
+
 const BOOLEAN_OPTIONS = new Set(['unique', 'sparse', 'hidden', 'background']);
 const OBJECT_OPTIONS = new Set([
   'partialFilterExpression',
@@ -98,16 +101,20 @@ function keyIssues(key, report) {
     return null;
   }
   let usable = true;
+  let integerLike = false;
   for (const [field, direction] of entries) {
     if (typeof field !== 'string' || field.length === 0) {
       report('field names must be non-empty strings');
       usable = false;
-    } else if (!DIRECTIONS.has(direction)) {
+      continue;
+    }
+    if (!integerLike && INTEGER_LIKE.test(field)) integerLike = true;
+    if (!DIRECTIONS.has(direction)) {
       report(`direction of "${field}" must be 1, -1, 'text', 'hashed', '2d' or '2dsphere'`);
       usable = false;
     }
   }
-  if (usable && entries.length > 1 && entries.some(([field]) => INTEGER_LIKE.test(field))) {
+  if (usable && entries.length > 1 && integerLike) {
     if (!(key instanceof Map)) {
       report(
         'has an integer-like field name — JavaScript reorders such keys, so declare this key ' +
@@ -145,10 +152,14 @@ function indexIssues(index, path) {
     if (!INDEX_KEYS.has(key)) report(key)('is not a supported index option');
   }
   const entries = keyIssues(index.key, report('key'));
-  const isText = entries?.some(([, direction]) => direction === TEXT) ?? false;
+  let isText = false;
   // `wildcardProjection` belongs to an all-fields wildcard (`$**`, compound or
   // not) — the server refuses it on a path wildcard such as `a.$**`.
-  const isAllFieldsWildcard = entries?.some(([field]) => field === '$**') ?? false;
+  let isAllFieldsWildcard = false;
+  for (const [field, direction] of entries ?? []) {
+    if (direction === TEXT) isText = true;
+    if (field === '$**') isAllFieldsWildcard = true;
+  }
 
   if (index.name !== undefined) {
     if (typeof index.name !== 'string' || index.name.length === 0) {
@@ -209,23 +220,23 @@ function indexIssues(index, path) {
 }
 
 /**
- * The key as the server stores it. A text index is not stored under its
- * fields: they collapse into `_fts: 'text', _ftsx: 1` at the position of the
- * first text field, and move into `weights`.
+ * The key as the server stores it, and whether it is a text index — in one
+ * pass. A text index is not stored under its fields: they collapse into
+ * `_fts: 'text', _ftsx: 1` at the position of the first text field, and move
+ * into `weights`.
  */
 function serverKeyOf(entries) {
-  if (!entries.some(([, direction]) => direction === TEXT)) return entries;
   const out = [];
-  let placed = false;
+  let isText = false;
   for (const entry of entries) {
     if (entry[1] !== TEXT) {
       out.push(entry);
-    } else if (!placed) {
+    } else if (!isText) {
       out.push(['_fts', TEXT], ['_ftsx', 1]);
-      placed = true;
+      isText = true;
     }
   }
-  return out;
+  return { serverKey: isText ? out : entries, isText };
 }
 
 /** Text fields at weight 1, then whatever the declaration weighs differently */
@@ -243,10 +254,10 @@ function textWeights(entries, declared) {
  */
 function normalizeDeclaredIndex(index) {
   const entries = keyEntries(index.key);
-  const isText = entries.some(([, direction]) => direction === TEXT);
+  const { serverKey, isText } = serverKeyOf(entries);
   const name = index.name ?? defaultIndexName(entries);
   const options = {};
-  for (const option of [...SEMANTIC_OPTIONS, ...DECLARED_ONLY_OPTIONS]) {
+  for (const option of NORMALIZED_OPTIONS) {
     const value = index[option];
     if (value === undefined) continue;
     // `false` is the server default; sending it would only make the stored
@@ -258,7 +269,7 @@ function normalizeDeclaredIndex(index) {
   return {
     name,
     entries,
-    serverKey: serverKeyOf(entries),
+    serverKey,
     isText,
     options,
     // The key travels as a Map: the field order is the index, and the driver
@@ -271,7 +282,7 @@ function normalizeDeclaredIndex(index) {
 function normalizeLiveIndex(raw) {
   const entries = Object.entries(raw.key ?? {});
   const options = {};
-  for (const option of [...SEMANTIC_OPTIONS, ...DECLARED_ONLY_OPTIONS]) {
+  for (const option of NORMALIZED_OPTIONS) {
     const value = raw[option];
     if (value === undefined) continue;
     if (BOOLEAN_OPTIONS.has(option)) {

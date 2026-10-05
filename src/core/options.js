@@ -198,10 +198,25 @@ function assertDryRunOptions(filename, options) {
 
 /** `converge(options)` */
 function assertConvergeOptions(options) {
-  for (const key of ['dryRun', 'prune', 'noLock', 'ordered', 'rebuildUnique']) {
+  for (const key of [
+    'dryRun',
+    'prune',
+    'noLock',
+    'ordered',
+    'rebuildUnique',
+    'waitForSearchIndexes',
+  ]) {
     if (options[key] !== undefined && typeof options[key] !== 'boolean') {
       throw new ConfigInvalidError(`${key} must be a boolean`, { [key]: options[key] });
     }
+  }
+  // A dry run builds nothing, so there is nothing to wait for — asking for
+  // both is a mistake worth saying, not a wait that silently never happens.
+  if (options.dryRun && options.waitForSearchIndexes) {
+    throw new ConfigInvalidError('waitForSearchIndexes cannot be combined with dryRun', {
+      dryRun: true,
+      waitForSearchIndexes: true,
+    });
   }
   assertActorValid(options);
 }

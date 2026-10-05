@@ -16,9 +16,10 @@ Key facts:
   per job). BullMQ is injected by the caller (`bullmq: { Queue, Worker }`) — never a dependency
 - Optional OpenTelemetry: `telemetry: { tracer, meter }` from the caller's own
   `@opentelemetry/api` — injected, never a dependency or a peer
-- Declared collections (experimental): indexes and validators declared as an end state in
-  `collections` / `collectionsDir`, applied statelessly by `migronaut converge` (or
-  `convergeAfterUp` after every bulk `up`) — no migration file per change
+- Declared collections (experimental): indexes, Atlas Search / Vector Search indexes and
+  validators declared as an end state in `collections` / `collectionsDir`, applied statelessly by
+  `migronaut converge` (or `convergeAfterUp` after every bulk `up`) — no migration file per change;
+  a search index is updated in place, never rebuilt
 - License: MIT
 - Repository: https://github.com/Alexis-Technologies/migronaut
 
@@ -33,7 +34,7 @@ Key facts:
 - [Writing Migrations](https://migronaut.vercel.app/guide/writing-migrations): The up/down contract in TypeScript, ESM, and CommonJS
 - [Transactions](https://migronaut.vercel.app/guide/transactions): Opt-in MongoDB transactions per file or globally
 - [Lifecycle Hooks](https://migronaut.vercel.app/guide/hooks): beforeAll, afterAll, beforeEach, afterEach, onError
-- [Declared Collections](https://migronaut.vercel.app/guide/collections): Declare indexes and validators as an end state; converge compares with the live database and applies the difference
+- [Declared Collections](https://migronaut.vercel.app/guide/collections): Declare indexes, Atlas Search / Vector Search indexes and validators as an end state; converge compares with the live database and applies the difference
 - [Programmatic API](https://migronaut.vercel.app/guide/api): The MigratorKit class, methods, and result types
 - [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq): Run migrations as BullMQ jobs — a migration service with ordering, batches, scheduling, and enqueue-and-wait
 - [OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry): Traces and metrics through an injected tracer and meter — a span per run and per migration, with the MongoDB driver's spans nested under it

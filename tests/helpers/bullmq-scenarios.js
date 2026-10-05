@@ -63,6 +63,10 @@ function defineBullMQScenarios(harness) {
     prefix = harness.prefix();
   });
 
+  // A forced close does not wait for a migration in flight — it runs on, and
+  // would write into the next scenario's freshly dropped database. So every
+  // scenario waits for whatever it enqueued (`settled`, `untilRecord`, a
+  // group's `wait()`) before it ends.
   afterEach(async () => {
     for (const mq of opened.splice(0)) {
       await harness.obliterate(mq.queue).catch(() => undefined);
@@ -105,6 +109,20 @@ function defineBullMQScenarios(harness) {
       (doc) => doc.marker,
     );
   const records = () => harness.mongo().db.collection(CHANGELOG).find().sort({ name: 1 }).toArray();
+
+  /**
+   * Poll the changelog until `name` has `status` — for a migration job a sync
+   * tick enqueued, which runs after the tick has already completed.
+   */
+  async function untilRecord(name, status, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const record = await harness.mongo().db.collection(CHANGELOG).findOne({ name, status });
+      if (record) return record;
+      if (Date.now() > deadline) throw new Error(`${name} did not become ${status}`);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+  }
 
   /** Poll until every job has finished, then return their views */
   async function settled(mq, ids, timeoutMs = 10_000) {
@@ -611,18 +629,7 @@ function defineBullMQScenarios(harness) {
 
     const first = await tick();
     assert.strictEqual(first.enqueued, 1);
-    await assert.rejects(
-      (async () => {
-        const deadline = Date.now() + 10_000;
-        for (;;) {
-          const [record] = await records();
-          if (record?.status === 'failed') throw new Error('failed as expected');
-          if (Date.now() > deadline) return;
-          await new Promise((resolve) => setTimeout(resolve, 15));
-        }
-      })(),
-      /failed as expected/,
-    );
+    await untilRecord('0001-a.js', 'failed');
 
     // Same file, same failure waiting to happen: the tick holds the line.
     const second = await tick();
@@ -634,6 +641,10 @@ function defineBullMQScenarios(harness) {
     const third = await tick();
     assert.strictEqual(third.enqueued, 1);
     assert.ok(!('held' in third));
+    // The job the tick enqueued runs after it: see it through, or it would
+    // still be applying the migration when the next scenario starts.
+    await untilRecord('0001-a.js', 'applied');
+    assert.deepStrictEqual(await markers(), ['a']);
   });
 
   it('should carry who asked, and why, into the changelog', async () => {

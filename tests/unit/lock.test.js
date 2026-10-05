@@ -374,6 +374,96 @@ describe('runWithLock', () => {
     ]);
   });
 
+  it('should give the lock up early, once, and not again at the end', async () => {
+    const { db, collection } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    const events = [];
+    const result = await runWithLock(
+      lock,
+      {
+        logger: silentLogger,
+        onLockAcquired: () => events.push(['acquired']),
+        onLockReleased: (extra) => events.push(['released', extra]),
+      },
+      async (_signal, control) => {
+        const released = await Promise.all([control.release(), control.release()]);
+        assert.deepStrictEqual(released, [true, true]);
+        assert.strictEqual(collection.deleteOne.mock.callCount(), 1, 'gone before fn returns');
+        assert.strictEqual(await control.release(), true);
+        return 'waited';
+      },
+    );
+    assert.strictEqual(result, 'waited');
+    assert.strictEqual(collection.deleteOne.mock.callCount(), 1);
+    assert.deepStrictEqual(events, [['acquired'], ['released', { early: true }]]);
+  });
+
+  it('should stop renewing once released early, so a lost lock no longer aborts', async () => {
+    const { db, collection } = makeDb();
+    // 40ms TTL → a renewal every 20ms, a deadline at 30ms — none must fire.
+    const lock = new MigrationLock(db, '_migronaut_locks', 0.04);
+    const keepAlive = keepEventLoopAlive();
+    try {
+      await runWithLock(lock, { logger: silentLogger }, async (signal, control) => {
+        await control.release();
+        const renewals = collection.updateOne.mock.callCount();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.strictEqual(collection.updateOne.mock.callCount(), renewals, 'no renewal');
+        assert.strictEqual(signal.aborted, false);
+      });
+    } finally {
+      keepAlive();
+    }
+  });
+
+  it('should warn when an early release fails, go on, and release at the end', async () => {
+    const { db, collection } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    let deletes = 0;
+    collection.deleteOne.mock.mockImplementation(() => {
+      deletes += 1;
+      return deletes === 1 ? Promise.reject(new Error('network blip')) : Promise.resolve({});
+    });
+    const warn = mock.fn();
+    const events = [];
+    const result = await runWithLock(
+      lock,
+      {
+        logger: { ...silentLogger, warn },
+        onLockReleased: (extra) => events.push(extra),
+      },
+      async (_signal, control) => {
+        assert.strictEqual(await control.release(), false);
+        return 'ok';
+      },
+    );
+    assert.strictEqual(result, 'ok');
+    assert.strictEqual(deletes, 2);
+    assert.match(warn.mock.calls[0].arguments[0], /Failed to release the migration lock early/);
+    assert.deepStrictEqual(events, [undefined], 'released once — at the end');
+  });
+
+  it('should have nothing to release early when noLock is true', async () => {
+    const { db } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await runWithLock(lock, { noLock: true, logger: silentLogger }, async (_signal, control) => {
+      assert.strictEqual(await control.release(), false);
+    });
+  });
+
+  it('should still throw what the function threw after an early release', async () => {
+    const { db, collection } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await assert.rejects(
+      runWithLock(lock, { logger: silentLogger }, async (_signal, control) => {
+        await control.release();
+        throw new Error('wait failed');
+      }),
+      /wait failed/,
+    );
+    assert.strictEqual(collection.deleteOne.mock.callCount(), 1);
+  });
+
   it('should abort via the TTL deadline when renewals keep failing', async () => {
     const { db, collection } = makeDb();
     // 200ms TTL → renew every 100ms, hard deadline at 150ms. Every renewal

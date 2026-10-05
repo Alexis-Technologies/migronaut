@@ -14,8 +14,10 @@ import {
   type BaselineSummary,
   type CollectionDefinition,
   type CollectionDefinitionFile,
+  type ConvergeActionKind,
   ConvergeFailedError,
   type ConvergeResult,
+  type ConvergeSearchSummary,
   ChecksumMismatchError,
   EXIT_CODES,
   HookFailedError,
@@ -45,6 +47,10 @@ import {
   type RunEndEvent,
   type RunResult,
   type RunStartEvent,
+  type SearchIndexBuild,
+  type SearchIndexDefinition,
+  type SearchIndexStatus,
+  type SearchIndexType,
   type StatusRow,
   TransactionsUnsupportedError,
   createLogger,
@@ -188,6 +194,9 @@ kit.once('lock:lost', (event) => {
 kit.once('lock:acquired', (event) => {
   expectType<number | undefined>(event.ttlMs);
   expectType<number | undefined>(event.acquireMs);
+});
+kit.on('lock:released', (event) => {
+  expectType<true | undefined>(event.early);
 });
 // The event-name union is enforced — a typo'd event does not degrade to the
 // untyped EventEmitter overload.
@@ -412,6 +421,43 @@ expectError<CollectionDefinition>({ name: 'x', indexes: [{ key: { a: 'asc' } }] 
 expectError<CollectionDefinition>({ name: 'x', indexes: [{ key: { a: 1 }, uniqe: true }] });
 expectError<CollectionDefinition>({ name: 'x', validationLevel: 'loose' });
 
+// Search indexes: a search definition has mappings, a vector one a list of fields.
+const movies: CollectionDefinition = {
+  name: 'movies',
+  searchIndexes: [
+    { definition: { mappings: { dynamic: true } } },
+    {
+      name: 'titles',
+      type: 'search',
+      definition: {
+        analyzer: 'lucene.english',
+        mappings: { dynamic: false, fields: { title: { type: 'string' } } },
+        storedSource: { include: ['title'] },
+      },
+    },
+    {
+      name: 'plot_vectors',
+      type: 'vectorSearch',
+      definition: {
+        fields: [
+          { type: 'vector', path: 'embedding', numDimensions: 1536, similarity: 'cosine' },
+          { type: 'filter', path: 'year' },
+        ],
+      },
+    },
+  ],
+  prune: true,
+};
+expectAssignable<CollectionDefinitionFile>({
+  searchIndexes: [{ type: 'vectorSearch', definition: { fields: [] } }],
+});
+expectAssignable<SearchIndexDefinition>(movies.searchIndexes![0]);
+expectType<SearchIndexType | undefined>(movies.searchIndexes![0].type);
+expectError<SearchIndexDefinition>({ type: 'vectorSearch', definition: { mappings: {} } });
+expectError<SearchIndexDefinition>({ definition: { fields: [] } });
+expectError<SearchIndexDefinition>({ type: 'atlas', definition: { mappings: {} } });
+expectError<SearchIndexDefinition>({ name: 'x' });
+
 expectType<Promise<ConvergeResult>>(kit.converge());
 expectType<Promise<ConvergeResult>>(kit.converge({ dryRun: true, prune: true }));
 expectType<Promise<ConvergeResult>>(kit.converge({ noLock: true, ordered: true }));
@@ -423,9 +469,30 @@ declare const converged: ConvergeResult;
 expectType<boolean>(converged.inSync);
 expectType<number>(converged.changed);
 const firstAction = converged.collections[0].actions[0];
-expectType<'collection' | 'validator' | 'index'>(firstAction.target);
+expectType<'collection' | 'validator' | 'index' | 'searchIndex'>(firstAction.target);
 expectType<'planned' | 'applied' | 'failed' | 'skipped'>(firstAction.status);
 expectType<string | undefined>(firstAction.liveName);
+expectAssignable<ConvergeActionKind>('skip');
+expectType<SearchIndexBuild | undefined>(firstAction.build);
+expectType<string[] | undefined>(firstAction.ignored);
+expectType<SearchIndexStatus>(firstAction.build!.status);
+expectType<ConvergeSearchSummary | undefined>(converged.search);
+expectType<boolean>(converged.search!.available);
+expectType<string>(converged.search!.notReady[0].collection);
+expectType<'listed' | 'parameter' | 'error' | 'version' | 'assumed' | undefined>(
+  converged.search!.evidence,
+);
+expectType<'ready' | 'failed' | 'timeout' | 'unreadable' | 'aborted' | undefined>(
+  converged.search!.wait?.outcome,
+);
+expectAssignable<Partial<MigronautConfig>>({ onSearchUnavailable: 'skip' });
+expectAssignable<Partial<MigronautConfig>>({
+  waitForSearchIndexes: true,
+  searchIndexWaitTimeoutMs: 120_000,
+});
+expectType<Promise<ConvergeResult>>(kit.converge({ waitForSearchIndexes: true }));
+expectError(kit.converge({ waitForSearchIndexes: 'yes' }));
+expectError<Partial<MigronautConfig>>({ onSearchUnavailable: 'ignore' });
 
 kit.on('converge:start', (event) => {
   expectType<'converge' | 'up'>(event.trigger);
@@ -437,6 +504,14 @@ kit.on('converge:action', (event) => {
 kit.on('converge:end', (event) => {
   expectType<ConvergeResult>(event.result);
   expectType<boolean>(event.success);
+});
+kit.on('converge:wait', (event) => {
+  expectType<'started' | 'progress' | 'ready' | 'failed' | 'timeout' | 'unreadable' | 'aborted'>(
+    event.status,
+  );
+  expectType<number>(event.searchIndexes);
+  expectType<boolean | undefined>(event.lockReleased);
+  expectType<number | undefined>(event.waitedMs);
 });
 
 expectAssignable<MigronautErrorCode>('CONVERGE_FAILED');

@@ -229,10 +229,18 @@ class MigrationLock {
 }
 
 /**
- * Run `fn(signal)` while holding the migration lock. The lock is always
- * released in a `finally` block. While `fn` runs, a heartbeat renews the lock
- * every `ttlMs/2` so a migration that takes longer than the TTL never lets its
- * lock go stale and get reclaimed by another process.
+ * Run `fn(signal, control)` while holding the migration lock. The lock is
+ * always released in a `finally` block. While `fn` runs, a heartbeat renews the
+ * lock every `ttlMs/2` so a migration that takes longer than the TTL never lets
+ * its lock go stale and get reclaimed by another process.
+ *
+ * `control.release()` gives the lock up before `fn` returns — once, for a
+ * tail of work that only reads (converge waiting for search index builds):
+ * the heartbeat stops, the lock document goes, `onLockReleased({ early: true })`
+ * fires, and the signal no longer aborts on a lost lock. It resolves to
+ * whether the lock was released: one that fails is only warned about (the
+ * lock frees itself once its TTL runs out) and tried again at the end. With
+ * `noLock` there is nothing to release (`false`).
  *
  * If the lock is nonetheless lost — another process reclaimed it, or the
  * heartbeat cannot reach the database — the `signal` is aborted with a
@@ -254,7 +262,7 @@ async function runWithLock(lock, options, fn) {
     // `skipped: true` tells them apart from a real lock.
     options.onLockAcquired?.({ skipped: true });
     try {
-      return await fn(controller.signal);
+      return await fn(controller.signal, { release: async () => false });
     } finally {
       options.onLockReleased?.({ skipped: true });
     }
@@ -352,23 +360,53 @@ async function runWithLock(lock, options, fn) {
   }, intervalMs);
   heartbeat.unref?.();
 
-  let result;
-  let runError;
-  let failed = false;
-  try {
-    result = await fn(controller.signal);
-  } catch (error) {
-    failed = true;
-    runError = error;
-  } finally {
+  const stopHeartbeat = async () => {
     stopped = true;
     clearInterval(heartbeat);
     clearTimeout(deadline);
     // Let any renewal already in flight settle, so no stray query outlives this
     // call and lands after the caller has closed the client.
     await inFlight;
+  };
+  let released = false;
+  let releasing;
+  const control = {
+    release: () =>
+      (releasing ??= (async () => {
+        await stopHeartbeat();
+        try {
+          await lock.release();
+          released = true;
+          options.onLockReleased?.({ early: true });
+        } catch (releaseError) {
+          const message = errorText(releaseError);
+          options.logger.warn(
+            `⚠ Failed to release the migration lock early: ${message} — it frees itself once ` +
+              'its TTL runs out',
+            { event: 'lock:release-failed', error: message, early: true },
+          );
+        }
+        return released;
+      })()),
+  };
+
+  let result;
+  let runError;
+  let failed = false;
+  try {
+    result = await fn(controller.signal, control);
+  } catch (error) {
+    failed = true;
+    runError = error;
+  } finally {
+    await releasing;
+    await stopHeartbeat();
   }
 
+  if (released) {
+    if (failed) throw runError;
+    return result;
+  }
   try {
     await lock.release();
     options.onLockReleased?.();

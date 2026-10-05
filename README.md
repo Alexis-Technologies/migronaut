@@ -59,8 +59,9 @@ change before it touches your database.
   (warn by default, `onOutOfOrder: 'error'` to refuse) instead of silently applying.
 - **Lifecycle hooks** — `beforeAll`, `afterAll`, `beforeEach`, `afterEach`, `onError`.
 - **Opt-in transactions** — wrap a migration so it fully commits or fully aborts.
-- **Indexes and validators as an end state** — declare them, and `migronaut converge` brings the
-  database to match; no migration file per index change ([details](#declared-collections)).
+- **Indexes, search indexes and validators as an end state** — declare them (Atlas Search and
+  Vector Search indexes included), and `migronaut converge` brings the database to match; no
+  migration file per index change ([details](#declared-collections)).
 - **TypeScript, ESM & CommonJS** — all run with no `ts-node` plumbing.
 - **Zero config files required** — drive everything from env vars if you prefer.
 - **Pino-friendly logging** — the `logger` option is pino-compatible; pass a pino instance directly
@@ -90,6 +91,7 @@ change before it touches your database.
 | First-class TypeScript (built-in)               |        ❌        |          ✅          |
 | History preserved on rollback (never deleted)   |        ❌        |          ✅          |
 | Declared indexes & validators (`converge`)      |        ❌        |          ✅          |
+| Declared Atlas Search / Vector Search indexes   |        ❌        |          ✅          |
 | Adopt an existing `migrate-mongo` changelog     |        —        | ✅ `migronaut import` |
 
 <sub>Reflects `migrate-mongo`'s documented CLI as of mid-2026 (v14: optional
@@ -117,6 +119,7 @@ via a `client` argument; `migronaut` exposes the same plus a declarative per-fil
 | Pino-compatible logger                          |        ❌        |          ✅          |
 | BullMQ queue adapter (`/bullmq` entry point)    |        ❌        |          ✅          |
 | Declared indexes & validators (`converge`)      |        ❌        |          ✅          |
+| Declared Atlas Search / Vector Search indexes   |        ❌        |          ✅          |
 | Node floor                                      |      ≥ 18       |      ≥ 22.18        |
 
 <sub>Compared against `mongo-migrate-kit` 1.2.2 — the version this project forked from. The Node
@@ -196,7 +199,7 @@ Every command accepts the global flags `--uri`, `--db`, `--dir`, `--config`, `--
 | `migronaut up [file]` | Run all pending migrations, one named file, or up to `--to <file>` |
 | `migronaut down [file]` | Roll back the last batch, a chosen batch, the last N steps, one file, or to `--to <file>` |
 | `migronaut redo [file]` | Roll back then re-apply (the last migration, or one file) |
-| `migronaut converge` | Bring declared collections — indexes and validators — to their declared state |
+| `migronaut converge` | Bring declared collections — indexes, search indexes and validators — to their declared state |
 | `migronaut status` | Print the full migration status table (`--check` to fail CI on pending) |
 | `migronaut list` | List migrations, filtered by status |
 | `migronaut dry-run <up\|down> [file]` | Preview a run without touching the database |
@@ -272,11 +275,12 @@ migronaut redo <file>              # a specific file
 migronaut redo --no-lock           # skip the lock (dev only)
 migronaut redo --json              # machine-readable output (array of run results)
 
-# converge — declared indexes and validators → the database
+# converge — declared indexes, search indexes and validators → the database
 migronaut converge                 # plan, ask before any drop/rebuild, then apply
 migronaut converge --dry-run       # show the plan, change nothing
 migronaut converge --check         # exit 28 if anything would change (CI gate)
 migronaut converge --prune         # also drop indexes a definition does not declare
+migronaut converge --wait-search   # wait until every declared search index is queryable
 migronaut converge --yes           # no confirmation (required for drops/rebuilds with --json)
 migronaut converge --no-lock       # skip the concurrency lock (local dev only)
 migronaut converge --json          # machine-readable output (the converge result)
@@ -630,12 +634,13 @@ All errors extend `MigronautError` and carry a typed `code` (`LOCK_ALREADY_HELD`
 </details>
 
 <details id="declared-collections">
-<summary><b>Declared collections</b> — indexes and validators as an end state, with no migration file per change</summary>
+<summary><b>Declared collections</b> — indexes, search indexes and validators as an end state, with no migration file per change</summary>
 
 <br>
 
-When what matters is *the final shape* of a collection's indexes and validator — not the history
-of how it got there — declare it and let `migronaut converge` make the difference:
+When what matters is *the final shape* of a collection's indexes, Atlas Search indexes and
+validator — not the history of how it got there — declare it and let `migronaut converge` make the
+difference:
 
 ```js
 // migronaut.config.js
@@ -650,6 +655,19 @@ export default {
         { key: { createdAt: 1 }, expireAfterSeconds: 60 * 60 * 24 * 30 },
       ],
       validator: { $jsonSchema: { bsonType: 'object', required: ['email'] } },
+    },
+    {
+      name: 'movies',
+      searchIndexes: [
+        { definition: { mappings: { dynamic: true } } }, // Atlas Search, named "default"
+        {
+          name: 'plot_vectors',
+          type: 'vectorSearch',
+          definition: {
+            fields: [{ type: 'vector', path: 'embedding', numDimensions: 1536, similarity: 'cosine' }],
+          },
+        },
+      ],
     },
   ],
   collectionsDir: './collections', // …and/or one file per collection
@@ -668,11 +686,15 @@ migronaut converge --check     # exit 28 on drift: a CI gate
   a changed index is rebuilt (and put back if the rebuild fails). An index you did not declare is
   **kept and reported** — dropped only with `prune`. An identical index under another name is
   accepted as is, never silently rebuilt.
+- **Search indexes, too** — on Atlas, an Atlas CLI local deployment or MongoDB 8.3+ with `mongot`.
+  A changed definition is updated in place (on Atlas the old one serves until the new one is
+  built), never dropped and rebuilt; `--wait-search` waits until the builds are queryable. On a server without
+  Search, converge refuses — or skips them with `onSearchUnavailable: 'skip'`.
 - **Locked like a migration**, and refused before the first write when the plan has a conflict.
 - **After every deploy** with `convergeAfterUp: true` — a bulk `up` then ends by converging,
   under the same lock — or as a [queue job](https://migronaut.vercel.app/guide/bullmq#converge-jobs).
 
-Experimental in 2.1. → **[Declared Collections](https://migronaut.vercel.app/guide/collections)**
+Experimental since 2.1 (search indexes: 2.2). → **[Declared Collections](https://migronaut.vercel.app/guide/collections)**
 
 </details>
 
@@ -761,6 +783,8 @@ export default {
   // collections: [{ name: 'users', indexes: [{ key: { email: 1 }, unique: true }] }],
   // collectionsDir: './collections', // one definition file per collection
   // convergeAfterUp: false,          // true → every bulk `up` ends by converging
+  // onSearchUnavailable: 'fail',     // 'skip' → converge without search indexes where Search is absent
+  // waitForSearchIndexes: false,     // true → converge waits until search indexes are queryable
 
   // ── Code-only options (omit in migronaut.config.json) ─────────────────────────
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
@@ -896,6 +920,9 @@ optional rather than merely discouraged:
 | `MIGRONAUT_RELOAD_MIGRATIONS` | `reloadMigrations` | `false` |
 | `MIGRONAUT_COLLECTIONS_DIR` | `collectionsDir` | — *(none read)* |
 | `MIGRONAUT_CONVERGE_AFTER_UP` | `convergeAfterUp` | `false` |
+| `MIGRONAUT_ON_SEARCH_UNAVAILABLE` | `onSearchUnavailable` | `fail` |
+| `MIGRONAUT_WAIT_FOR_SEARCH_INDEXES` | `waitForSearchIndexes` | `false` |
+| `MIGRONAUT_SEARCH_INDEX_WAIT_TIMEOUT_MS` | `searchIndexWaitTimeoutMs` | `600000` |
 | `MIGRONAUT_ENV_FILE` | `envFile` | `.env` |
 
 `fileExtensions`, `clientOptions`, `collections`, `client`, `mongoose`, `hooks`, `logger`,

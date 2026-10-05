@@ -28,6 +28,7 @@ const ATTRIBUTES = {
   LOCK_SKIPPED: 'migronaut.lock.skipped',
   LOCK_LOST_REASON: 'migronaut.lock.lost_reason',
   LOCK_WAIT_OUTCOME: 'migronaut.lock.wait.outcome',
+  SEARCH_WAIT_OUTCOME: 'migronaut.converge.search.wait.outcome',
   MIGRATION_NAME: 'migronaut.migration.name',
   MIGRATION_DIRECTION: 'migronaut.migration.direction',
   MIGRATION_BATCH: 'migronaut.migration.batch',
@@ -46,6 +47,7 @@ const METRICS = {
   LOCK_WAIT_DURATION: 'migronaut.lock.wait.duration',
   LOCK_REFUSED: 'migronaut.lock.refused',
   LOCK_LOST: 'migronaut.lock.lost',
+  SEARCH_WAIT_DURATION: 'migronaut.converge.search.wait.duration',
 };
 
 /**
@@ -130,6 +132,9 @@ function failureText(error) {
 
 /** The parts of `telemetry` — anything else in it is a typo, mentioned at debug level */
 const TELEMETRY_KEYS = Object.freeze(['tracer', 'meter', 'attributes']);
+
+/** The types a static attribute's value may have */
+const ATTRIBUTE_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
 /** Static attributes are dimensions: a handful at most */
 const MAX_STATIC_ATTRIBUTES = 20;
 
@@ -184,7 +189,7 @@ function telemetryIssues(telemetry) {
       }
       for (const key of keys) {
         const value = attributes[key];
-        if (!['string', 'number', 'boolean'].includes(typeof value)) {
+        if (!ATTRIBUTE_VALUE_TYPES.has(typeof value)) {
           issues.push({
             path: `telemetry.attributes.${key}`,
             message: 'must be a string, a number or a boolean',
@@ -329,6 +334,10 @@ function createTelemetry(telemetry, { dbName } = {}) {
     '{refusal}',
   );
   const lockLost = counter(METRICS.LOCK_LOST, 'Migration locks lost mid-run', '{loss}');
+  const searchWaitDuration = histogram(
+    METRICS.SEARCH_WAIT_DURATION,
+    'Time a converge waited for its search index builds, by how the wait ended',
+  );
 
   // Durations are measured in milliseconds everywhere in migronaut and
   // reported in seconds, the unit OpenTelemetry's conventions settle on.
@@ -373,6 +382,14 @@ function createTelemetry(telemetry, { dbName } = {}) {
     },
     lockLost() {
       increment(lockLost);
+    },
+    /**
+     * A converge's wait for search index builds ended — `outcome` is
+     * `'ready'`, `'failed'`, `'timeout'`, `'unreadable'` or `'aborted'`. One
+     * point per wait, however many polls.
+     */
+    searchWaited({ waitedMs, outcome }) {
+      record(searchWaitDuration, waitedMs, { [ATTRIBUTES.SEARCH_WAIT_OUTCOME]: outcome });
     },
   };
 }

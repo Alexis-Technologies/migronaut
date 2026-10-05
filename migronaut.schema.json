@@ -163,6 +163,25 @@
       "type": "boolean",
       "default": false,
       "description": "End every bulk `up` (no file, no --to) by converging the declared collections under the same lock"
+    },
+    "onSearchUnavailable": {
+      "enum": [
+        "fail",
+        "skip"
+      ],
+      "default": "fail",
+      "description": "What converge does with declared search indexes on a server without Atlas Search: refuse the run (fail), or converge everything else and skip them (skip)"
+    },
+    "waitForSearchIndexes": {
+      "type": "boolean",
+      "default": false,
+      "description": "Hold converge until every declared search index is queryable (search indexes build in the background)"
+    },
+    "searchIndexWaitTimeoutMs": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 600000,
+      "description": "How long waitForSearchIndexes waits, in milliseconds, before the converge fails (the build goes on)"
     }
   },
   "definitions": {
@@ -182,6 +201,11 @@
           "required": [
             "validator"
           ]
+        },
+        {
+          "required": [
+            "searchIndexes"
+          ]
         }
       ],
       "properties": {
@@ -197,6 +221,13 @@
             "$ref": "#/definitions/index"
           },
           "description": "Every index besides _id. Omit to leave the collection's indexes unmanaged"
+        },
+        "searchIndexes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/searchIndex"
+          },
+          "description": "Atlas Search and Vector Search indexes. Omit to leave the collection's search indexes unmanaged (Atlas, an Atlas CLI local deployment, or MongoDB 8.3+ with mongot)"
         },
         "validator": {
           "oneOf": [
@@ -227,7 +258,7 @@
         },
         "prune": {
           "type": "boolean",
-          "description": "Drop indexes this definition does not declare (otherwise they are kept and reported)"
+          "description": "Drop indexes (and search indexes, when declared) this definition does not declare — otherwise they are kept and reported"
         }
       }
     },
@@ -318,6 +349,31 @@
         "background": {
           "type": "boolean",
           "description": "Accepted and ignored — a no-op since MongoDB 4.2"
+        }
+      }
+    },
+    "searchIndex": {
+      "type": "object",
+      "required": [
+        "definition"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Index name. Defaults to \"default\", as on the server"
+        },
+        "type": {
+          "enum": [
+            "search",
+            "vectorSearch"
+          ],
+          "description": "Defaults to 'search'. Cannot change in place — declare a new index under a new name instead"
+        },
+        "definition": {
+          "type": "object",
+          "description": "The index definition, as Atlas defines it: { mappings, analyzer, … } for search, { fields: [...] } for vectorSearch"
         }
       }
     }

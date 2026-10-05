@@ -146,6 +146,64 @@ drops an undeclared index unless asked to.
 **Fix:** declare the index under the name it already has (`name: 'by_email'`), or run
 `migronaut converge --prune` to replace it. Nothing was written.
 
+## "Atlas Search is not available on this server"
+
+```
+✖ CONVERGE_FAILED: Converge refused: 1 conflict(s) — movies search index "default": Atlas Search is not available on this server — use Atlas, …
+```
+
+**Why:** a definition declares `searchIndexes`, and the server has no Atlas Search — a plain
+`mongod`, or an older Atlas CLI deployment. Nothing was written, in any collection.
+
+**Fix:** converge against Atlas, an Atlas CLI local deployment (the `mongodb/mongodb-atlas-local`
+Docker image), or MongoDB 8.3+ with `mongot`. Where Search is expected to be missing — a plain
+`mongo` container in development — set `onSearchUnavailable: 'skip'` (or
+`MIGRONAUT_ON_SEARCH_UNAVAILABLE=skip`): everything else converges, and the search indexes are
+reported as `skip`.
+
+## A search index stays `PENDING` / `BUILDING`, or `FAILED`
+
+**Why:** search indexes build in the background, after converge has returned — a large collection
+takes a while. A `FAILED` build carries the server's reason in the plan's Detail column and in
+`result.search.notReady[].message` (too many fields for the tier, an invalid mapping, …).
+converge does not resubmit a definition that has not changed, so a failed build stays failed.
+
+**Fix:** for a slow build, wait — `migronaut converge --wait-search` blocks until it is queryable,
+and `converge --dry-run` shows where it is. For a failed one, change the definition (or the data
+behind the failure) and converge again; `converge --check` exits `28` until it builds.
+
+`--wait-search` fails on a `FAILED` build only for an index the same run created or changed. One
+that failed before — its definition unchanged, so converge cannot fix it — is named in a line and
+a warning, and the wait goes on without it: a deploy is not held up by a build it did not start.
+
+## A search index is `STALE`
+
+**Why:** the index still answers queries, but it has stopped replicating from the collection — its
+results may be out of date. It is not a build in progress, so waiting longer does not help:
+`--wait-search` keeps polling for an index the run created or changed until the budget runs out,
+and does not wait at all for one it did not touch. converge and `migronaut audit` warn about it.
+
+**Fix:** see the Atlas Search documentation on index statuses for your cluster. Once the index is
+`READY` again, nothing is left for converge to do.
+
+## "Could not modify search index … "mappings" is required"
+
+**Why:** an Atlas CLI local deployment (the `mongodb/mongodb-atlas-local` image) cannot update a
+**vector** search index in place — it refuses the update with or without the index type. Atlas
+can.
+
+**Fix:** declare the changed vector index under a **new name**, converge, then remove the old
+declaration and converge with `--prune`. Against Atlas, the same definition updates in place.
+
+## "the type cannot change in place" / "autoEmbed … cannot change in place"
+
+**Why:** no update can turn a search index into a vector one (or back), or give an automated-
+embedding field another path, model, size, quantization or modality — and dropping the index to
+build it again would leave every `$search` returning nothing until the build ends.
+
+**Fix:** declare the new index under a **new name**, converge with `--wait-search`, move your
+queries to it, then remove the old declaration and converge with `--prune`.
+
 ## "Could not create index … E11000 duplicate key error"
 
 **Why:** a unique index cannot be built over documents that already share a value. When the index

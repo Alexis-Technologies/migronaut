@@ -16,12 +16,12 @@ POST /migrations/up ──► BullMQ queue "migrations" ──► worker ──�
 | [`server.js`](server.js)      | The HTTP routes, the worker, error → status mapping, graceful shutdown           |
 | [`tracing.js`](tracing.js)    | Optional OpenTelemetry: one trace from the HTTP request to the MongoDB commands  |
 | [`migrations/`](migrations)   | Two idempotent migrations (safe to re-run after a crash)                         |
-| [`collections/`](collections) | A declared collection: indexes and a validator, applied by `converge`            |
+| [`collections/`](collections) | Declared indexes, a search index and a validator, applied by `converge`          |
 
 ## Run it
 
 ```bash
-docker compose up -d                 # MongoDB + Redis
+docker compose up -d                 # MongoDB (Atlas local, with Search) + Redis
 cp .env.example .env
 pnpm install --ignore-workspace      # or: npm install
 node server.js                       # ROLE=all: API and worker in one process
@@ -52,8 +52,8 @@ curl -s localhost:3000/migrations/status
 # Roll back the last batch — i.e. everything the last enqueue applied
 curl -s -X POST localhost:3000/migrations/down -H 'content-type: application/json' -d '{"wait":true}'
 
-# Declared indexes and validators: every enqueue above already ends with a converge job
-# (convergeAfterUp), and this runs one on its own — "wait" returns its result
+# Declared indexes, search index and validator: every enqueue above already ends with a converge
+# job (convergeAfterUp), and this runs one on its own — "wait" returns its result
 curl -s -X POST localhost:3000/migrations/converge -H 'content-type: application/json' -d '{"wait":true}'
 
 # Keep the database migrated every 5 minutes

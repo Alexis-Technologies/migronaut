@@ -200,7 +200,7 @@ describe('MigratorKit converge guards', () => {
       ...config,
     });
 
-  for (const key of ['dryRun', 'prune', 'noLock', 'ordered']) {
+  for (const key of ['dryRun', 'prune', 'noLock', 'ordered', 'waitForSearchIndexes']) {
     it(`should reject a non-boolean ${key} before anything connects`, async () => {
       await assert.rejects(kitWith({}).converge({ [key]: 'yes' }), (error) => {
         assert.ok(error instanceof ConfigInvalidError);
@@ -209,6 +209,15 @@ describe('MigratorKit converge guards', () => {
       });
     });
   }
+
+  it('should refuse to wait for search indexes in a dry run, which builds none', async () => {
+    await assert.rejects(
+      kitWith({}).converge({ dryRun: true, waitForSearchIndexes: true }),
+      (error) =>
+        error instanceof ConfigInvalidError &&
+        /waitForSearchIndexes cannot be combined with dryRun/.test(error.message),
+    );
+  });
 
   it('should return an empty, in-sync result without connecting when nothing is declared', async () => {
     // The host is unreachable: a connection attempt would reject.

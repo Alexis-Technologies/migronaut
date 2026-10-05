@@ -139,7 +139,8 @@ src/
 ├── errors/index.js          # MigronautError base + one subclass per error code
 ├── core/                     # The engine (config, lock, lock-wait, changelog, runner, context, import, migrator, run,
 │                             #   options, sequence, run-recorder, and declared collections: collections,
-│                             #   index-spec, converge-plan, converge, converge-log)
+│                             #   index-spec, search-index-spec, converge-plan, converge, converge-search,
+│                             #   converge-search-run, converge-log, server-info)
 ├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id, telemetry,
 │                             #   canonical, collection-name, actor, error, redact — pure-ish helpers
 ├── cli/                        # own arg parser (args.js) + spinner + table + one file per command
@@ -158,7 +159,7 @@ migrations/             # Example/dev migration files used while developing this
 **Layering rule:** Presentation (`cli/`, `bin/`) never touches the DB or contains migration
 logic. Orchestration (`core/migrator.js` with its `run-recorder.js`, `core/run.js`) sequences
 steps and owns the connection lifecycle. Mechanism modules
-(`core/{lock,changelog,runner,context,import,config,options,sequence}.js`, `utils/`) do one job each and know nothing about the CLI — no `console.*`, no spinner or table
+(`core/{lock,changelog,runner,context,import,config,options,sequence,server-info}.js`, `utils/`) do one job each and know nothing about the CLI — no `console.*`, no spinner or table
 imports. The CLI injects a `ProgressReporter` callback into core instead. The queue adapter
 (`bullmq/`) is a second orchestration layer *above* the kit: it may require `core/migrator.js`,
 `core/lock-wait.js`, `utils/` and `errors/`, but never a mechanism module (`lock`, `changelog`,
@@ -198,6 +199,10 @@ pnpm run size                            # esbuild bundle-size report (library, 
 # The real-BullMQ suite is opt-in (CI runs it; everything else needs no Redis):
 #   docker run --rm -d -p 6379:6379 redis:7-alpine
 #   MIGRONAUT_TEST_REDIS_URL=redis://127.0.0.1:6379 node --test tests/integration/bullmq-redis.test.js
+# The Atlas Search suite is opt-in and manual (CI never runs it) — after search index changes:
+#   docker run --rm -d -p 27018:27017 -e DO_NOT_TRACK=1 mongodb/mongodb-atlas-local:8.0
+#   MIGRONAUT_TEST_ATLAS_URI="mongodb://127.0.0.1:27018/?directConnection=true" \
+#     node --test tests/integration/search-atlas.test.js
 pnpm run bench                           # ops/sec micro-benchmarks (bench/bench.js), manual only, not in CI
 pnpm run docs:dev                        # vitepress dev docs
 ```
@@ -234,13 +239,20 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
   transactions work).
 - `node:test` uses `before`/`after`, not `beforeAll`/`afterAll` (those are Vitest/Jest names —
   don't reintroduce them).
-- Silence the logger (`logger: null`) in tests. No committed `.only`/`.skip` — with one
-  sanctioned exception: `tests/integration/bullmq-redis.test.js` skips itself, with a reason,
-  when `MIGRONAUT_TEST_REDIS_URL` is unset (an environment-capability skip, not a disabled test).
+- Silence the logger (`logger: null`) in tests. No committed `.only`/`.skip` — with two
+  sanctioned exceptions, both environment-capability skips with a reason, not disabled tests:
+  `tests/integration/bullmq-redis.test.js` when `MIGRONAUT_TEST_REDIS_URL` is unset (CI sets it),
+  and `tests/integration/search-atlas.test.js` when `MIGRONAUT_TEST_ATLAS_URI` is unset (CI never
+  does — run it by hand after changing `search-index-spec.js`, `converge-search.js` or the search
+  planner; the unit fake carries the coverage, but only a real `mongot` proves the fixed point).
 - The queue adapter is tested against `tests/helpers/fake-bullmq.js`, an in-memory double — that
   is where its coverage comes from, so the gate passes with no Redis. The scenarios live once, in
   `tests/helpers/bullmq-scenarios.js`, and run against both the fake and (in the opt-in file) the
   real `bullmq`: add adapter behaviour there. If the two disagree, the fake is what is wrong.
+  Every scenario must wait for everything it enqueued — `settled`, `untilRecord`, a group's
+  `wait()` — before it ends: `afterEach` force-closes, which does not wait for a migration in
+  flight, and a straggler writes into the next scenario's database (a sync tick's migration job
+  runs *after* the tick completes).
 - Coverage gate: 90% lines / 90% functions / 90% branches (`pnpm run test:coverage`, via `c8`).
 - The lock-heartbeat integration tests use real timers; running the *full* integration suite in
   parallel (13 concurrent `mongodb-memory-server` replica sets) can make timing-sensitive tests
@@ -289,7 +301,28 @@ converge result travels as `converge:end`, `summary.converge` and `converge --js
 never previews a converge; `ConvergeFailedError` keeps its progress in `context.converge`, never
 `context.results` (the kit and the CLI read `results` as migration rows); the CLI confirms *after*
 planning, inside `run`, like `unlock`; a converge job carries no `prune` and is ordered by default;
-and a converge run adds no third telemetry wrap site. Names already taken, so not to reuse for
-anything else: `sync` (the queue job), `ensureIndexes` and the audit check `indexes` (the
-changelog's own indexes), `schema` (`migronaut.schema.json`).
+and a converge run adds no third telemetry wrap site. For search indexes (§6.7 too): a search
+index is never `recreate`d (a `$search` on a missing index returns nothing — a type or immutable
+`autoEmbed` change is a `conflict`); a FAILED build with the declared definition stays `unchanged`,
+and builds never count against `inSync`; `type` is sent to `createSearchIndexes` only for a vector
+index, and `updateSearchIndex` is retried with it only on a self-managed `mongot`'s "mappings is
+required"; the availability probe trusts an empty list only from 7.2.1+ (older servers go through
+`getParameter`); defaults are filled per field mapping too (`FIELD_DEFAULTS` — mongot writes them
+into what it reports) and a field's list of types compares as a set; an Atlas CLI local deployment
+cannot update a vector index at all (the step fails with the new-name hint — not a migronaut bug);
+and nothing reads search indexes for a definition without `searchIndexes`. An option only the
+server reports, with no default in those tables, is **ignored** in the comparison (`ignored` on the
+row, one warning) — otherwise a new mongot default would update and rebuild the index on every
+run; the opt-in Atlas suite still fails on one, since that means a table is missing a default. The
+wait for builds (`waitForSearchIndexes`) runs **without the migration lock** — released via
+`runWithLock`'s `control.release()` once every step is applied — so `lock:released` (`early: true`)
+can precede `run:end`, and a newer converge may change the index under it; it fails only on a
+FAILED build of an index the run created or changed (an untouched FAILED/STALE one is warned about,
+and `--check` still fails on FAILED); STALE never ends a wait early; up to three network or
+failover blips in a row are ridden out; and `migronaut.converge.search.wait.duration` is a metric
+point, not a third wrap site. A search index list that cannot be read reports the phase that read
+it (`plan` only before the first write). Names
+already taken, so not to reuse for anything else: `sync` (the queue job), `ensureIndexes` and the
+audit check `indexes` (the changelog's own indexes), the audit check `search`, `schema`
+(`migronaut.schema.json`).
 Don't "fix" these without checking the doc first.

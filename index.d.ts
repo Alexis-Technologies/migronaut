@@ -292,6 +292,30 @@ export interface MigronautConfig {
    * Default: false
    */
   convergeAfterUp?: boolean;
+  /**
+   * What converge does with declared search indexes on a server without
+   * Atlas Search: `'fail'` refuses the run before anything is written,
+   * `'skip'` converges everything else and reports them as `skip` rows.
+   * Default: 'fail'
+   * @experimental New in 2.2
+   */
+  onSearchUnavailable?: 'fail' | 'skip';
+  /**
+   * Hold every converge — the after-up one included — until each declared
+   * search index is queryable with its declared definition. Search indexes
+   * build in the background, so without it a new one is not queryable yet when
+   * converge returns. An index that FAILED or went STALE before the run, its
+   * definition unchanged, does not hold it — it is warned about instead. The
+   * migration lock is released while it waits. Default: false
+   * @experimental New in 2.2
+   */
+  waitForSearchIndexes?: boolean;
+  /**
+   * How long `waitForSearchIndexes` waits before the converge fails with
+   * `phase: 'wait'` (the server goes on building). Default: 600000 (10 minutes)
+   * @experimental New in 2.2
+   */
+  searchIndexWaitTimeoutMs?: number;
   /** Mongoose instance — required only if your migrations use Mongoose models */
   mongoose?: MongooseLike;
   hooks?: MigrationHooks;
@@ -393,9 +417,77 @@ export interface IndexDefinition {
 export type ValidationLevel = 'off' | 'strict' | 'moderate';
 export type ValidationAction = 'error' | 'warn' | 'errorAndLog';
 
+/** The two kinds of Atlas search index */
+export type SearchIndexType = 'search' | 'vectorSearch';
+
+/** `mappings` of an Atlas Search definition */
+export interface SearchIndexMappings {
+  /** Default: false */
+  dynamic?: boolean | { typeSet: string };
+  fields?: Record<string, unknown>;
+}
+
+/**
+ * An Atlas Search index definition, as Atlas defines it. Compared whole, with
+ * the documented defaults filled in; anything Atlas adds can be declared too.
+ */
+export interface SearchDefinition {
+  mappings: SearchIndexMappings;
+  /** Default: 'lucene.standard' */
+  analyzer?: string;
+  /** Default: the analyzer */
+  searchAnalyzer?: string;
+  analyzers?: Array<Record<string, unknown>>;
+  synonyms?: Array<Record<string, unknown>>;
+  /** Default: false */
+  storedSource?: boolean | { include?: string[]; exclude?: string[] };
+  /** Default: 1 */
+  numPartitions?: number;
+  [option: string]: unknown;
+}
+
+/** One field of a Vector Search definition */
+export interface VectorSearchField {
+  /** `'autoEmbed'` is Atlas's automated embedding (in preview); one index holds vector or autoEmbed fields, not both */
+  type: 'vector' | 'filter' | 'autoEmbed' | (string & {});
+  path: string;
+  numDimensions?: number;
+  similarity?: 'euclidean' | 'cosine' | 'dotProduct';
+  /** Default: 'none' ('scalar' for autoEmbed) */
+  quantization?: string;
+  /** Default: 'hnsw' */
+  indexingMethod?: 'hnsw' | 'flat';
+  /** Default: { maxEdges: 16, numEdgeCandidates: 100 } */
+  hnswOptions?: { maxEdges?: number; numEdgeCandidates?: number };
+  /** autoEmbed: the embedding model */
+  model?: string;
+  /** autoEmbed: 'text' */
+  modality?: string;
+  [option: string]: unknown;
+}
+
+/** A Vector Search index definition */
+export interface VectorSearchDefinition {
+  fields: VectorSearchField[];
+  [option: string]: unknown;
+}
+
+/**
+ * One declared Atlas Search or Vector Search index. The name defaults to
+ * `'default'` and the type to `'search'`, as on the server. A change of type
+ * — or of an autoEmbed field's path, model, size, quantization or modality —
+ * cannot be made in place: converge refuses it, and the way is a new index
+ * under a new name (converge, then remove the old declaration and converge
+ * with prune).
+ * @experimental New in 2.2 — the shape may still change in a minor release (named in the CHANGELOG).
+ */
+export type SearchIndexDefinition =
+  | { name?: string; type?: 'search'; definition: SearchDefinition }
+  | { name?: string; type: 'vectorSearch'; definition: VectorSearchDefinition };
+
 /**
  * A declared collection: the end state `converge()` keeps it in. Leave
- * `indexes` or `validator` out to leave that part unmanaged.
+ * `indexes`, `searchIndexes` or `validator` out to leave that part unmanaged.
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
 export interface CollectionDefinition {
@@ -405,13 +497,23 @@ export interface CollectionDefinition {
    * unless `prune` is on.
    */
   indexes?: IndexDefinition[];
+  /**
+   * Atlas Search and Vector Search indexes (Atlas, an Atlas CLI local
+   * deployment, or MongoDB 8.3+ with mongot). Undeclared live ones are kept
+   * unless `prune` is on; leave the key out and they are not managed at all.
+   * @experimental New in 2.2
+   */
+  searchIndexes?: SearchIndexDefinition[];
   /** A query or `{ $jsonSchema }` document; `null` (or `{}`) for no validator */
   validator?: Record<string, unknown> | null;
   /** Default: 'strict'. Only with a validator */
   validationLevel?: ValidationLevel;
   /** Default: 'error'. Only with a validator */
   validationAction?: ValidationAction;
-  /** Drop live indexes this definition does not declare. Default: the call's `prune`, else false */
+  /**
+   * Drop live indexes (and search indexes, when `searchIndexes` is declared)
+   * this definition does not declare. Default: the call's `prune`, else false
+   */
   prune?: boolean;
 }
 
@@ -443,20 +545,33 @@ export interface ConvergeOptions {
    * CLI: `--rebuild-unique`.
    */
   rebuildUnique?: boolean;
+  /**
+   * Hold the run until every declared search index serves its
+   * declaration — failing on a FAILED build of an index this run created or
+   * changed, or after `searchIndexWaitTimeoutMs`. The migration lock is released
+   * when the wait starts — it only reads. Overrides the config's `waitForSearchIndexes`;
+   * not with `dryRun`. CLI: `--wait-search` / `--no-wait-search`.
+   * @experimental New in 2.2
+   */
+  waitForSearchIndexes?: boolean;
   /** Who asked for this converge — recorded in the converge history */
   requestedBy?: string;
   /** Why — recorded in the converge history */
   reason?: string;
 }
 
-export type ConvergeTarget = 'collection' | 'validator' | 'index';
+export type ConvergeTarget = 'collection' | 'validator' | 'index' | 'searchIndex';
 
 /**
  * What converge does to one target. `keep` is an undeclared index left alone
  * (prune off); `conflict` refuses the run — an undeclared index covers the
  * declared one's key under another name, a unique index would be rebuilt
- * without {@link ConvergeOptions.rebuildUnique}, or the collection is a view
- * or a time-series collection.
+ * without {@link ConvergeOptions.rebuildUnique}, the collection is a view or a
+ * time-series collection, a search index would need a change no update can
+ * make (its type, an autoEmbed field's model or size), or the server has no
+ * Atlas Search; `skip` is a declared search index left alone on a server
+ * without Search (`onSearchUnavailable: 'skip'`). A search index is never
+ * `recreate`d: `modify` updates it in place.
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
 export type ConvergeActionKind =
@@ -466,7 +581,37 @@ export type ConvergeActionKind =
   | 'drop'
   | 'keep'
   | 'unchanged'
-  | 'conflict';
+  | 'conflict'
+  | 'skip';
+
+/**
+ * The status `$listSearchIndexes` reports for a search index — `'UNKNOWN'`
+ * when the server reports none
+ */
+export type SearchIndexStatus =
+  | 'PENDING'
+  | 'BUILDING'
+  | 'READY'
+  | 'FAILED'
+  | 'STALE'
+  | 'DELETING'
+  | 'DOES_NOT_EXIST'
+  | 'UNKNOWN'
+  | (string & {});
+
+/**
+ * Where the server is with a search index: it builds in the background, so a
+ * created or updated one is not queryable (with its new definition) at once
+ * @experimental New in 2.2
+ */
+export interface SearchIndexBuild {
+  status: SearchIndexStatus;
+  queryable: boolean;
+  /** The server's message — why a build FAILED, typically */
+  message?: string;
+  /** A newer definition is being built next to the one served */
+  updating?: true;
+}
 
 /**
  * `planned` in a dry run; otherwise `applied`, `failed`, or `skipped` — no
@@ -497,6 +642,21 @@ export interface ConvergeAction {
   from?: Record<string, unknown>;
   /** What the row puts there — the declared index or validator — on rows that create or change it */
   to?: Record<string, unknown>;
+  /**
+   * A search index row's build state on the server — as read before the run,
+   * and after it for a row the run applied
+   * @experimental New in 2.2
+   */
+  build?: SearchIndexBuild;
+  /**
+   * On a search index row: the options the server reports that the
+   * declaration does not set and migronaut knows no default for
+   * (`mappings.fields.title.similarity`) — left out of the comparison, so a
+   * new server default does not make every converge update the index.
+   * Declare one to manage it.
+   * @experimental New in 2.2
+   */
+  ignored?: string[];
 }
 
 /**
@@ -532,6 +692,12 @@ export interface ConvergeHistoryEntry {
   /** The rows that changed, failed or refused the run — each with its collection and `from` / `to` */
   actions: Array<ConvergeAction & { collection: string }>;
   unstable?: ConvergeUnstable[];
+  /**
+   * What the run saw of Atlas Search, and how a wait for its builds ended —
+   * when a definition declares `searchIndexes`
+   * @experimental New in 2.2
+   */
+  search?: ConvergeSearchSummary;
 }
 
 /**
@@ -547,6 +713,42 @@ export interface ConvergeUnstable {
 }
 
 /**
+ * A declared search index that exists but does not serve its declaration yet
+ * @experimental New in 2.2
+ */
+export interface SearchIndexNotReady extends SearchIndexBuild {
+  collection: string;
+  name: string;
+}
+
+/**
+ * What a converge saw of Atlas Search — present when a definition declares
+ * `searchIndexes`
+ * @experimental New in 2.2
+ */
+export interface ConvergeSearchSummary {
+  /** Whether the server has Atlas Search */
+  available: boolean;
+  /**
+   * How that was told: `'listed'` (the server listed search indexes),
+   * `'parameter'` (its search index manager setting), `'error'` (it refused
+   * a search command), `'version'` (older than 6.0, not asked) or
+   * `'assumed'` (it would not say — a refusal at apply time reports it)
+   */
+  evidence?: 'listed' | 'parameter' | 'error' | 'version' | 'assumed';
+  /**
+   * Declared search indexes still building, updating, stale or failed. Does
+   * not count against `inSync`: a build is the server's work, not a difference.
+   */
+  notReady: SearchIndexNotReady[];
+  /** How a wait for the builds (`waitForSearchIndexes`) ended, when there was one */
+  wait?: { outcome: ConvergeWaitOutcome; waitedMs: number };
+}
+
+/** How a wait for search index builds ended */
+export type ConvergeWaitOutcome = 'ready' | 'failed' | 'timeout' | 'unreadable' | 'aborted';
+
+/**
  * Outcome of {@link MigratorKit.converge}
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
@@ -556,11 +758,15 @@ export interface ConvergeResult {
   changed: number;
   /**
    * True when the database matches the declarations: nothing left to do and
-   * no conflict. Undeclared indexes kept with prune off do not count against it.
+   * no conflict. Undeclared indexes kept with prune off, search indexes
+   * skipped on a server without Search, and search index builds still under
+   * way do not count against it.
    */
   inSync: boolean;
   collections: CollectionConvergeResult[];
   unstable?: ConvergeUnstable[];
+  /** @experimental New in 2.2 */
+  search?: ConvergeSearchSummary;
 }
 
 // ─── Logger ───────────────────────────────────────────────────────────────────
@@ -1014,6 +1220,12 @@ export interface LockEvent extends MigronautEventBase {
   ttlMs?: number;
   /** How long acquisition took in ms (on `lock:acquired`) */
   acquireMs?: number;
+  /**
+   * True on a `lock:released` that came before the run ended: a converge gave
+   * the lock up to wait for search index builds, which only reads.
+   * @experimental New in 2.2
+   */
+  early?: true;
 }
 
 /** Who started a converge: the `converge` call itself, or a bulk `up` (`convergeAfterUp`) */
@@ -1053,6 +1265,26 @@ export interface ConvergeActionEvent extends MigronautEventBase {
 /**
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
+/**
+ * A converge's wait for search index builds (`waitForSearchIndexes`):
+ * `started` once, `progress` every 30 seconds, then how it ended — one of
+ * {@link ConvergeWaitOutcome}.
+ * @experimental New in 2.2
+ */
+export interface ConvergeWaitEvent extends MigronautEventBase {
+  status: 'started' | 'progress' | ConvergeWaitOutcome;
+  /** How many search indexes the wait is for */
+  searchIndexes: number;
+  /** `started` only — whether the migration lock was released for the wait */
+  lockReleased?: boolean;
+  /** `started` only — the budget (`searchIndexWaitTimeoutMs`) */
+  timeoutMs?: number;
+  /** Every status but `started` */
+  waitedMs?: number;
+  /** `failed` and `timeout` — the indexes that did not get there */
+  notReady?: SearchIndexNotReady[];
+}
+
 export interface ConvergeEndEvent extends MigronautEventBase {
   trigger: ConvergeTrigger;
   success: boolean;
@@ -1085,12 +1317,17 @@ export interface MigronautEvents {
   'lock:lost': (event: LockEvent) => void;
   'converge:start': (event: ConvergeStartEvent) => void;
   'converge:action': (event: ConvergeActionEvent) => void;
+  'converge:wait': (event: ConvergeWaitEvent) => void;
   'converge:end': (event: ConvergeEndEvent) => void;
 }
 
 /** One check performed by {@link MigratorKit.audit} */
 export interface AuditCheck {
-  /** e.g. 'config', 'connection', 'transactions', 'indexes', 'lock', 'checksums' */
+  /**
+   * e.g. 'config', 'connection', 'transactions', 'indexes', 'lock', 'checksums',
+   * 'pending', 'ordering', 'runtime' — and 'search' when declared collections
+   * hold search indexes
+   */
   name: string;
   status: 'pass' | 'warn' | 'fail';
   detail: string;
@@ -1620,11 +1857,27 @@ export class QueueJobFailedError extends MigronautError {
 
 /**
  * Thrown by {@link MigratorKit.converge} when the database cannot be brought
- * to the declared state. `context.phase` is `'plan'` for a refused plan
- * (`context.conflicts` lists why; nothing was written) or `'apply'` for a
- * failed step (`collection`, `target`, `name`, `action`, `cause`, and
- * `mongoCode`, `hint` and — after a failed rebuild — `restored` when they
- * apply). `context.converge` is the {@link ConvergeResult} so far.
+ * to the declared state. `context.phase` is:
+ * - `'plan'` for a refused plan (`context.conflicts` lists why, with a `hint`
+ *   when Atlas Search is missing; nothing was written) — or a search index
+ *   list that could not be read before the first write (`collection`,
+ *   `target: 'searchIndex'`, `cause`, `mongoCode`, `hint`);
+ * - `'replan'` when a collection changed while the run was under way
+ *   (`collection`, `introduced`: the new conflicts or drops; nothing of that
+ *   collection was written) — or its search index list could not be read
+ *   again (as for `'plan'`);
+ * - `'apply'` for a failed step (`collection`, `target`, `name`, `action`,
+ *   `cause`, and `mongoCode`, `hint` and — after a failed rebuild — `restored`
+ *   when they apply) — or a search index list that could not be read to check
+ *   the steps just applied (as for `'plan'`);
+ * - `'wait'` when `waitForSearchIndexes` gave up: `reason` is `'failed'` (the
+ *   build of a search index this run created or changed FAILED) or `'timeout'`,
+ *   with `notReady` the indexes not serving their declaration, `waitedMs`,
+ *   `timeoutMs` — or `'unreadable'`: a search index list that could not be
+ *   read (as for `'plan'`), after up to three network or failover blips in a
+ *   row. Everything was applied — only the builds were not finished.
+ *
+ * `context.converge` is the {@link ConvergeResult} so far.
  */
 export class ConvergeFailedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);

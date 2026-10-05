@@ -1,11 +1,13 @@
 const { needsConfirmation } = require('../../core/converge-plan.js');
+const { searchBuildState } = require('../../core/search-index-spec.js');
 const { ConfigInvalidError, RunAbortedError } = require('../../errors/index.js');
 const { confirm, defineCommand, EXIT_CODES } = require('../shared.js');
 const { renderConvergeHistory, renderConvergeTable } = require('../table.js');
 
 /**
  * Every row the operator must confirm, across all collections: a dropped or
- * rebuilt index, or a validator change on a collection that holds data.
+ * rebuilt index, a dropped search index, or a validator change on a
+ * collection that holds data.
  */
 function actionsToConfirm(plan) {
   const found = [];
@@ -36,14 +38,18 @@ function assertNotStopped(stopRequested) {
 function registerConverge(program) {
   defineCommand(program, {
     name: 'converge',
-    description: 'Bring declared collections (indexes, validators) to their declared state',
+    description:
+      'Bring declared collections (indexes, search indexes, validators) to their declared state',
     options: [
       ['--dry-run', 'Show what would change without changing anything'],
       [
         '--check',
         `Exit with code ${EXIT_CODES.COLLECTIONS_DRIFT} if anything would change (CI gate; implies --dry-run)`,
       ],
-      ['--prune', 'Drop undeclared indexes (in collections whose definition does not decide)'],
+      [
+        '--prune',
+        'Drop undeclared indexes and search indexes (in collections whose definition does not decide)',
+      ],
       ['--ordered', 'Refuse while any migration is still pending'],
       ['--reason <text>', 'Why — recorded in the converge history (who: the OS user)'],
       ['--history', 'Show the converge history instead of converging (read-only)'],
@@ -52,6 +58,11 @@ function registerConverge(program) {
         '--rebuild-unique',
         'Allow rebuilding a unique index (drops the constraint until the new one is built)',
       ],
+      [
+        '--wait-search',
+        'Wait until every declared search index is queryable (overrides waitForSearchIndexes)',
+      ],
+      ['--no-wait-search', 'Do not wait for search indexes, whatever waitForSearchIndexes says'],
       [
         '-y, --yes',
         'Drop and rebuild indexes, and change validators, without asking (required with --json)',
@@ -64,6 +75,13 @@ function registerConverge(program) {
     // ask only when the plan drops or rebuilds an index, then apply — the way
     // `unlock` reads the lock before asking.
     run: async (migrator, opts, _positionals, { logger, json, spinner, stopRequested }) => {
+      const waitSearch = typeof opts.waitSearch === 'boolean' ? opts.waitSearch : undefined;
+      if (waitSearch !== undefined && (opts.history || opts.dryRun || opts.check)) {
+        throw new ConfigInvalidError(
+          `--${waitSearch ? '' : 'no-'}wait-search applies to a real converge — not to ` +
+            `${opts.history ? '--history' : opts.check ? '--check' : '--dry-run'}`,
+        );
+      }
       if (opts.history) {
         return migrator.convergeHistory(
           opts.limit !== undefined ? { limit: Number(opts.limit) } : {},
@@ -98,16 +116,13 @@ function registerConverge(program) {
           // applies without one.
           if (json) {
             throw new ConfigInvalidError(
-              `converge would drop or rebuild an index, or change a validator ` +
+              `converge would drop or rebuild an index, drop a search index, or change a validator ` +
                 `(${destructive.length} change(s)) — pass --yes to confirm in --json mode`,
               { destructive },
             );
           }
           logger.info(renderConvergeTable(plan));
-          const uniqueRebuilds = destructive.filter(
-            (action) => action.action === 'recreate' && opts.rebuildUnique,
-          );
-          if (uniqueRebuilds.length > 0) {
+          if (opts.rebuildUnique && destructive.some((action) => action.action === 'recreate')) {
             logger.warn(
               '⚠ --rebuild-unique: a rebuilt unique index enforces nothing until it is built ' +
                 'again — a duplicate written in between makes it unbuildable',
@@ -127,6 +142,7 @@ function registerConverge(program) {
           noLock: opts.noLock,
           ...prune,
           ...ordered,
+          ...(waitSearch !== undefined ? { waitForSearchIndexes: waitSearch } : {}),
           ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
         });
       } finally {
@@ -147,9 +163,21 @@ function registerConverge(program) {
       logger.info(renderConvergeTable(result, { all: Boolean(opts.verbose) }));
     },
     after: (result, { logger, opts }) => {
-      if (!opts.check || result === undefined || result.inSync) return;
+      if (!opts.check || result === undefined) return;
+      // A search index that failed to build serves nothing, whatever its
+      // definition says — the gate fails on it too, though converge cannot fix it.
       // .error writes to stderr, so JSON stdout stays a single clean document.
-      logger.error('✖ The database differs from the declared collections');
+      let failed = 0;
+      for (const index of result.search?.notReady ?? []) {
+        if (searchBuildState(index) !== 'failed') continue;
+        failed += 1;
+        logger.error(
+          `✖ Search index ${index.collection} "${index.name}" failed to build` +
+            `${index.message ? `: ${index.message}` : ''}`,
+        );
+      }
+      if (result.inSync && failed === 0) return;
+      if (!result.inSync) logger.error('✖ The database differs from the declared collections');
       // A dedicated code: a CI gate must tell "out of step" (act: converge)
       // from "the check itself crashed" (act: page).
       process.exitCode = EXIT_CODES.COLLECTIONS_DRIFT;

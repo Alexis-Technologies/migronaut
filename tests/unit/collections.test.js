@@ -37,7 +37,71 @@ describe('definitionIssues', () => {
   it('should refuse a definition that manages nothing', () => {
     const [issue] = issuesOf({ name: 'users' });
     assert.strictEqual(issue.path, 'collections[0]');
-    assert.match(issue.message, /nothing to manage/);
+    assert.match(issue.message, /no indexes, searchIndexes or validator — nothing to manage/);
+  });
+
+  it('should accept a definition that only declares search indexes', () => {
+    assert.deepStrictEqual(issuesOf({ name: 'movies', searchIndexes: [] }), []);
+    assert.deepStrictEqual(
+      issuesOf({
+        name: 'movies',
+        searchIndexes: [
+          { definition: { mappings: { dynamic: true } } },
+          {
+            name: 'plot_vectors',
+            type: 'vectorSearch',
+            definition: { fields: [{ type: 'vector', path: 'e', numDimensions: 3 }] },
+          },
+        ],
+        prune: true,
+      }),
+      [],
+    );
+  });
+
+  it('should report search index issues with their position', () => {
+    assert.deepStrictEqual(pathsOf({ name: 'c', searchIndexes: {} }), [
+      'collections[0].searchIndexes',
+    ]);
+    assert.deepStrictEqual(
+      pathsOf({
+        name: 'c',
+        searchIndexes: [
+          { definition: { mappings: {} } },
+          { type: 'vectorSearch', definition: { fields: [{}, { type: 'filter', path: 'a' }] } },
+        ],
+      }),
+      ['collections[0].searchIndexes[1].definition.fields[0]'],
+    );
+    assert.deepStrictEqual(
+      issuesOf(
+        { searchIndexes: [{ type: 'text', definition: { mappings: {} } }] },
+        { path: 'movies.js:', fallbackName: 'movies' },
+      ).map((issue) => issue.path),
+      ['movies.js: searchIndexes[0].type'],
+    );
+  });
+
+  it('should refuse two search indexes under one name — an unnamed one is "default"', () => {
+    const issues = issuesOf({
+      name: 'c',
+      searchIndexes: [
+        { name: 'default', definition: { mappings: {} } },
+        { definition: { mappings: { dynamic: true } } },
+        {
+          name: 'v',
+          type: 'vectorSearch',
+          definition: { fields: [{ type: 'filter', path: 'a' }] },
+        },
+        { name: 'v', definition: { mappings: {} } },
+      ],
+    });
+    assert.deepStrictEqual(
+      issues.map((issue) => issue.path),
+      ['collections[0].searchIndexes[1]', 'collections[0].searchIndexes[3]'],
+    );
+    assert.match(issues[0].message, /searchIndexes\[0\] \("default"\).*declared without a name/);
+    assert.doesNotMatch(issues[1].message, /without a name/);
   });
 
   it('should refuse unknown keys — a typo must not read as "unmanaged"', () => {
@@ -196,6 +260,17 @@ describe('normalizeDefinition', () => {
     assert.strictEqual(definition.validator, undefined);
     assert.strictEqual(definition.prune, true);
     assert.ok(!('validationLevel' in definition));
+    assert.strictEqual(definition.searchIndexes, undefined);
+  });
+
+  it('should give search indexes their default name and type', () => {
+    const definition = normalizeDefinition({
+      name: 'movies',
+      searchIndexes: [{ definition: { mappings: { dynamic: true } } }],
+    });
+    assert.deepStrictEqual(definition.searchIndexes, [
+      { name: 'default', type: 'search', definition: { mappings: { dynamic: true } } },
+    ]);
   });
 
   it('should clean the validator for the wire and keep null as "none"', () => {

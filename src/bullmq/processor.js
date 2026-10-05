@@ -253,11 +253,34 @@ function createMigrationProcessor(options = {}) {
     },
     'converge:action': (event) => {
       if (!current) return;
-      const target = event.target === 'index' ? `index ${event.name}` : event.target;
+      const target =
+        event.target === 'index'
+          ? `index ${event.name}`
+          : event.target === 'searchIndex'
+            ? `search index ${event.name}`
+            : event.target;
       const what = `${event.action} ${target} on ${event.collection}`;
       if (event.status === 'started') log(current, `… ${what}`);
       else if (event.status === 'applied') log(current, `✔ ${what} [${event.durationMs ?? 0}ms]`);
       else log(current, `✖ ${what}: ${event.error ?? 'failed'}`);
+    },
+    'converge:wait': (event) => {
+      if (!current) return;
+      if (event.status === 'started' || event.status === 'progress') {
+        const waited = event.status === 'started' ? 0 : event.waitedMs;
+        log(
+          current,
+          event.status === 'started'
+            ? `… Waiting for ${event.searchIndexes} search index(es) to become queryable` +
+                (event.lockReleased ? ' — the migration lock is released meanwhile' : '')
+            : `… Still waiting for search indexes [${Math.round(waited / 1000)}s]`,
+        );
+        progress(current, 'search-wait', { searchIndexes: event.searchIndexes, waitedMs: waited });
+      } else if (event.status === 'ready') {
+        log(current, `✔ Search index(es) queryable [${event.waitedMs}ms]`);
+      } else {
+        log(current, `✖ Wait for search indexes ended: ${event.status} [${event.waitedMs}ms]`);
+      }
     },
     'converge:end': (event) => {
       if (current && event.success) log(current, `✔ Converged ${event.changed} change(s)`);
@@ -362,6 +385,7 @@ function createMigrationProcessor(options = {}) {
       inSync: result.inSync,
       collections: result.collections,
       ...(result.unstable ? { unstable: result.unstable } : {}),
+      ...(result.search ? { search: result.search } : {}),
       ...(ctx.runId ? { runId: ctx.runId } : {}),
       lockWaitMs: waitedMs,
     });
