@@ -623,15 +623,23 @@ describe('runWithLock — any lock-shaped object', () => {
     };
     const warnings = [];
     const logger = { ...silentLogger, warn: (message) => warnings.push(message) };
-    const result = await runWithLock(lease, { logger }, async (signal) => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      held = false;
-      await new Promise((resolve) => {
-        if (signal.aborted) resolve();
-        signal.addEventListener('abort', resolve, { once: true });
+    // Once the 50ms timer fires, the unref'ed heartbeat is the only pending
+    // handle — see tests/helpers/event-loop.js.
+    const release = keepEventLoopAlive();
+    let result;
+    try {
+      result = await runWithLock(lease, { logger }, async (signal) => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        held = false;
+        await new Promise((resolve) => {
+          if (signal.aborted) resolve();
+          signal.addEventListener('abort', resolve, { once: true });
+        });
+        return signal.reason;
       });
-      return signal.reason;
-    });
+    } finally {
+      release();
+    }
     assert.strictEqual(result.code, 'LOCK_LOST');
     assert.strictEqual(result.message, 'Lost the partition lease mid-run');
     assert.ok(warnings.some((line) => line.includes('Lost the partition lease mid-run')));
