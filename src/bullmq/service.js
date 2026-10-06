@@ -15,7 +15,7 @@ const {
   permissionsNeeded,
   resolveAllow,
   buildSyncJobTemplate,
-  isPlainObject,
+  isObjectLike,
 } = require('./jobs.js');
 const {
   createBackgroundProcessor,
@@ -67,7 +67,7 @@ const BACKGROUND_KEYS = new Set([
 function resolveBackground(background, { queueName, QueueSource }) {
   if (background === undefined || background === false) return undefined;
   const options = background === true ? {} : background;
-  if (!isPlainObject(options)) {
+  if (!isObjectLike(options)) {
     throw new ConfigInvalidError('background must be true or an object');
   }
   for (const key of Object.keys(options)) {
@@ -77,7 +77,7 @@ function resolveBackground(background, { queueName, QueueSource }) {
   }
   const queueIsInstance =
     options.queue !== undefined &&
-    isPlainObject(options.queue) &&
+    isObjectLike(options.queue) &&
     typeof options.queue.addBulk === 'function';
   if (options.queue !== undefined && !queueIsInstance) {
     throw new ConfigInvalidError('background.queue must be a Queue instance');
@@ -97,7 +97,7 @@ function resolveBackground(background, { queueName, QueueSource }) {
       queueName: name,
     });
   }
-  if (options.workerOptions !== undefined && !isPlainObject(options.workerOptions)) {
+  if (options.workerOptions !== undefined && !isObjectLike(options.workerOptions)) {
     throw new ConfigInvalidError('background.workerOptions must be an object');
   }
   assertBackgroundConcurrency(options.workerOptions?.concurrency);
@@ -112,7 +112,7 @@ function resolveBackground(background, { queueName, QueueSource }) {
     );
   }
   const { watch } = options;
-  if (watch !== undefined && typeof watch !== 'boolean' && !isPlainObject(watch)) {
+  if (watch !== undefined && typeof watch !== 'boolean' && !isObjectLike(watch)) {
     throw new ConfigInvalidError('background.watch must be a boolean or the watcher options');
   }
   // Said explicitly, the interval is re-registered at every start; left to its
@@ -205,7 +205,7 @@ class MigrationQueue {
   #backgroundWatcher;
 
   constructor(options) {
-    if (!isPlainObject(options)) {
+    if (!isObjectLike(options)) {
       throw new ConfigInvalidError('createMigrationQueue options must be an object');
     }
     const {
@@ -224,7 +224,7 @@ class MigrationQueue {
       background,
     } = options;
 
-    if (!isPlainObject(bullmq)) {
+    if (!isObjectLike(bullmq)) {
       throw new ConfigInvalidError(
         'bullmq is required — pass { Queue, Worker, QueueEvents } from your own bullmq install',
       );
@@ -239,14 +239,14 @@ class MigrationQueue {
         { telemetry: typeof telemetry },
       );
     }
-    const queueIsInstance = isPlainObject(Queue) && typeof Queue.addBulk === 'function';
+    const queueIsInstance = isObjectLike(Queue) && typeof Queue.addBulk === 'function';
     if (!isClass(Queue) && !queueIsInstance) {
       throw new ConfigInvalidError('bullmq.Queue must be the Queue class or a Queue instance');
     }
     if (Worker !== undefined && !isClass(Worker)) {
       throw new ConfigInvalidError('bullmq.Worker must be the Worker class');
     }
-    const eventsIsInstance = isPlainObject(QueueEvents) && typeof QueueEvents.on === 'function';
+    const eventsIsInstance = isObjectLike(QueueEvents) && typeof QueueEvents.on === 'function';
     if (QueueEvents !== undefined && !isClass(QueueEvents) && !eventsIsInstance) {
       throw new ConfigInvalidError(
         'bullmq.QueueEvents must be the QueueEvents class or a QueueEvents instance',
@@ -280,7 +280,7 @@ class MigrationQueue {
       );
     }
     assertJobOptions(jobOptions);
-    if (!isPlainObject(workerOptions)) {
+    if (!isObjectLike(workerOptions)) {
       throw new ConfigInvalidError('workerOptions must be an object');
     }
     MigrationQueue.#assertConcurrency(workerOptions.concurrency);
@@ -621,7 +621,7 @@ class MigrationQueue {
   async enqueueBackground(name, options = {}) {
     this.#assertOpen();
     this.#assertBackground('enqueueBackground()');
-    if (!isPlainObject(options)) {
+    if (!isObjectLike(options)) {
       throw new ConfigInvalidError('enqueueBackground options must be an object');
     }
     return enqueueBackground(this.#backgroundQueue, this.#kit, {
@@ -688,7 +688,7 @@ class MigrationQueue {
    */
   async startWorker(overrides = {}) {
     this.#assertOpen();
-    if (!isPlainObject(overrides)) {
+    if (!isObjectLike(overrides)) {
       throw new ConfigInvalidError('startWorker options must be an object');
     }
     MigrationQueue.#assertConcurrency(overrides.concurrency);
@@ -766,7 +766,7 @@ class MigrationQueue {
   async startBackgroundWorker(overrides = {}) {
     this.#assertOpen();
     this.#assertBackground('startBackgroundWorker()');
-    if (!isPlainObject(overrides)) {
+    if (!isObjectLike(overrides)) {
       throw new ConfigInvalidError('startBackgroundWorker options must be an object');
     }
     assertBackgroundConcurrency(overrides.concurrency);
@@ -917,7 +917,7 @@ class MigrationQueue {
    */
   async schedule(options = {}) {
     this.#assertOpen();
-    if (!isPlainObject(options)) {
+    if (!isObjectLike(options)) {
       throw new ConfigInvalidError('schedule options must be an object');
     }
     const { job = JOB_NAMES.SYNC, every, pattern, tz, to } = options;

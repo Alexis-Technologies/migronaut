@@ -159,8 +159,8 @@ src/
 │                             #   index-spec, search-index-spec, converge-plan, converge, converge-search,
 │                             #   converge-search-run, converge-log, server-info, versioning-spec,
 │                             #   shard-info; background migrations: background-spec, -partition, -shard,
-│                             #   -store, -engine, -throttle, background, -sandbox, -dry-run, -runner,
-│                             #   -watch, -watch-plan, -watch-store; bson-peer)
+│                             #   -store, -engine, -throttle, background, -drift, -audit, -kit, -sandbox,
+│                             #   -dry-run, -runner, -watch, -watch-plan, -watch-store; bson-peer)
 ├── versioning/                # The ./versioning runtime: internal, config, document (the shared contract),
 │                             #   occ, registry, upcaster, mongoose
 ├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id, telemetry,
@@ -190,10 +190,10 @@ imports. The CLI injects a `ProgressReporter` callback into core instead. The qu
 `core/lock-wait.js`, `utils/` and `errors/`, but never a mechanism module (`lock`, `changelog`,
 `runner`, any `background-*`) and never the database — if it needs something the kit does not
 offer, the kit gains a small public option (that is where `up({ batch, ordered })`, `nextBatch()`,
-`coordinateBackground()` and `driftMode()` came from). `core/background.js` and
-`core/background-watch.js` are flows like `converge.js`: they get what they need as `deps`, built
-only by `migrator.js`. The core may require `src/versioning/`; `src/versioning/` never requires
-the core.
+`coordinateBackground()` and `driftMode()` came from). `core/background.js` (with
+`background-drift.js`, `background-audit.js` and `background-kit.js`) and `core/background-watch.js`
+are flows like `converge.js`: they get what they need as `deps`, built only by `migrator.js`.
+The core may require `src/versioning/`; `src/versioning/` never requires the core.
 
 ## Naming conventions (post-rename)
 

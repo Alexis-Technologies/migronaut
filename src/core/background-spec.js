@@ -566,19 +566,6 @@ for (const bracket of ID_BRACKETS) {
 /** The bracket of a `$type` name — `exotic` for anything this table does not list */
 const bracketOfType = (type) => BRACKET_OF_TYPE.get(type) ?? 'exotic';
 
-/** Why a partition scope is not one the engine can run, or `null` */
-function scopeIssue(scope) {
-  if (!isPlainObject(scope)) return 'must be an object';
-  if (scope.kind === 'step') return null;
-  if (scope.kind !== 'id-range') return `has an unknown kind "${scope.kind}"`;
-  const bracket = BRACKETS_BY_NAME.get(scope.bracket);
-  if (bracket === undefined) return `has an unknown bracket "${scope.bracket}"`;
-  if ((scope.gte !== undefined || scope.lt !== undefined) && !bracket.splittable) {
-    return `bounds a bracket that is never split ("${scope.bracket}")`;
-  }
-  return null;
-}
-
 /** The filter that keeps a scan inside a partition's scope */
 function scopeFilter(scope) {
   if (scope.kind !== 'id-range') return {};
@@ -606,6 +593,5 @@ module.exports = {
   matchHash,
   resolveBackgroundSpec,
   scopeFilter,
-  scopeIssue,
   transition,
 };

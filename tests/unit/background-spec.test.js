@@ -15,7 +15,6 @@ const {
   matchHash,
   resolveBackgroundSpec,
   scopeFilter,
-  scopeIssue,
   transition,
 } = require('../../src/core/background-spec.js');
 const { assertUpOptions } = require('../../src/core/options.js');
@@ -406,15 +405,6 @@ describe('_id brackets and scopes', () => {
     assert.deepStrictEqual(scopeFilter({ kind: 'step' }), {});
     assert.deepStrictEqual(keysetFilter(id), { _id: { $gt: id } });
     assert.deepStrictEqual(keysetFilter(undefined), {});
-  });
-
-  it('should refuse a scope it cannot run', () => {
-    assert.strictEqual(scopeIssue({ kind: 'id-range', bracket: 'string', gte: 'a' }), null);
-    assert.strictEqual(scopeIssue({ kind: 'step' }), null);
-    assert.match(scopeIssue(null), /object/);
-    assert.match(scopeIssue({ kind: 'hash' }), /unknown kind/);
-    assert.match(scopeIssue({ kind: 'id-range', bracket: 'array' }), /unknown bracket/);
-    assert.match(scopeIssue({ kind: 'id-range', bracket: 'object', gte: {} }), /never split/);
   });
 });
 

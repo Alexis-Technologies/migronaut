@@ -15,7 +15,7 @@ const {
   buildBackgroundJob,
   buildConvergeJob,
   buildMigrationJob,
-  isPlainObject,
+  isObjectLike,
   migrationJobOptions,
 } = require('./jobs.js');
 const { waitForGroup } = require('./wait.js');
@@ -31,7 +31,7 @@ const LOOKUP_CONCURRENCY = 16;
  */
 function assertJobOptions(jobOptions) {
   if (jobOptions === undefined) return;
-  if (!isPlainObject(jobOptions)) {
+  if (!isObjectLike(jobOptions)) {
     throw new ConfigInvalidError('jobOptions must be an object', { jobOptions: typeof jobOptions });
   }
   for (const key of FORBIDDEN_JOB_OPTIONS) {
@@ -51,7 +51,7 @@ function assertJobOptions(jobOptions) {
  */
 function assertBackgroundJobOptions(jobOptions) {
   if (jobOptions === undefined) return;
-  if (!isPlainObject(jobOptions)) {
+  if (!isObjectLike(jobOptions)) {
     throw new ConfigInvalidError('background jobOptions must be an object', {
       jobOptions: typeof jobOptions,
     });
@@ -419,7 +419,7 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
  * pending — the declared state describes the newest schema.
  */
 async function enqueueConverge(queue, kit, options = {}, internals = {}) {
-  if (!isPlainObject(options)) {
+  if (!isObjectLike(options)) {
     throw new ConfigInvalidError('enqueueConverge options must be an object');
   }
   const { ordered, jobOptions, queueEvents } = options;
@@ -505,7 +505,7 @@ const ENQUEUE_BACKGROUND_KEYS = new Set([
 ]);
 
 async function enqueueBackground(queue, kit, options = {}) {
-  if (!isPlainObject(options)) {
+  if (!isObjectLike(options)) {
     throw new ConfigInvalidError('enqueueBackground options must be an object');
   }
   for (const key of Object.keys(options)) {

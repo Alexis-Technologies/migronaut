@@ -310,6 +310,7 @@ module.exports = {
   isVersion,
   nextRevision,
   occFilter,
+  refuseTouch,
   resolveFieldNames,
   resolveRevisionField,
   revisionFilter,

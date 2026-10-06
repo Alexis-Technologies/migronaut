@@ -2,7 +2,7 @@ const { MigratorKit } = require('../core/migrator.js');
 const { ConfigInvalidError, MigronautError, RunAbortedError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { redactOutbound } = require('../utils/redact.js');
-const { JOB_NAMES, buildLaneJob, isPlainObject, parseBackgroundJobData } = require('./jobs.js');
+const { JOB_NAMES, buildLaneJob, isObjectLike, parseBackgroundJobData } = require('./jobs.js');
 const {
   UNRECOVERABLE_ERROR_NAME,
   isRetryableError,
@@ -78,7 +78,7 @@ const PROCESSOR_KEYS = new Set([
 ]);
 
 function resolveBackgroundProcessorOptions(options) {
-  if (!isPlainObject(options)) {
+  if (!isObjectLike(options)) {
     throw new ConfigInvalidError('createBackgroundProcessor options must be an object');
   }
   for (const key of Object.keys(options)) {

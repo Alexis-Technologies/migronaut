@@ -96,7 +96,6 @@ function valueAt(doc, path) {
   return value === undefined ? null : value;
 }
 
-/** The hashed field of a shard key, if it has one */
 /**
  * The shard-key fields of a document as a write filter — next to the
  * optimistic filter, they send the write to the one shard that owns the
@@ -171,6 +170,7 @@ function withShardKey(partitioner, key) {
   });
 }
 
+/** The hashed field of a shard key, if it has one */
 function hashedFieldOf(key) {
   for (const [field, value] of Object.entries(key)) if (value === 'hashed') return field;
   return undefined;

@@ -1,4 +1,5 @@
 const { errorText } = require('../utils/error.js');
+const { isUnauthorized } = require('./shard-info.js');
 
 /**
  * Pacing a background migration: it rewrites a production collection while
@@ -12,7 +13,7 @@ const { errorText } = require('../utils/error.js');
  *   be read (standalone, mongos) or with one warning where it may not be
  *   (no `clusterMonitor`).
  *
- * The latency-driven batch sizing (AIMD) lives here too, from phase 15.
+ * The latency-driven batch sizing (AIMD) lives here too.
  * Clock and sleep are injected, so every rule is tested without waiting.
  */
 
@@ -25,14 +26,15 @@ const CONFIG_CHECK_INTERVAL_MS = 60_000;
 /** How long to wait between two looks at a lag that is too high */
 const LAG_WAIT_MS = 1_000;
 
-const UNAUTHORIZED = 13;
-
 /** Errors that mean "no replication status here" — not a replica set member */
 const NO_REPLICATION = new Set([
   59, // CommandNotFound (mongos)
   76, // NoReplicationEnabled (standalone)
   115, // CommandNotSupported
 ]);
+
+/** `ms`, jittered down to half of it — so processes that start together drift apart */
+const jitter = (ms) => Math.round(ms * (0.5 + Math.random() / 2));
 
 /** Sleep `ms`, cut short (rejecting with the reason) when `signal` aborts */
 function sleep(ms, signal) {
@@ -129,7 +131,7 @@ function createThrottle({ spec, db, logger, name, now = Date.now, wait = sleep, 
         lag = await currentLag();
       } catch (error) {
         lagEnabled = false;
-        if (error?.code === UNAUTHORIZED && !warnings.has('lag')) {
+        if (isUnauthorized(error) && !warnings.has('lag')) {
           warnings.add('lag');
           logger.warn(
             '⚠ Background migrations cannot read the replication lag (replSetGetStatus needs ' +
@@ -261,6 +263,7 @@ module.exports = {
   createAdaptive,
   createThrottle,
   excludedMembers,
+  jitter,
   replicationLagMs,
   sleep,
 };

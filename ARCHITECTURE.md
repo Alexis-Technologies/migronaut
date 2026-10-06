@@ -129,7 +129,10 @@ src/
 │   ├── background-store.js  # BackgroundStore — state, partitions, leases (= slots), fenced checkpoints
 │   ├── background-engine.js # One batch / one partition: read, transform, stampedDiff, OCC write
 │   ├── background-throttle.js # pauseMs, the throttle hook, replication lag, the AIMD controller
-│   ├── background.js        # The flow: coordinate, runSlice, control, verify (drift), audit findings
+│   ├── background.js        # The flow: coordinate, runSlice, control, repin, requires
+│   ├── background-drift.js  # The drift probes: the requires guard's, the poll's (verifyBackground)
+│   ├── background-audit.js  # What audit says about background migrations
+│   ├── background-kit.js    # The kit's background side: lanes in-process, down, requires, views
 │   ├── background-sandbox.js # The always-aborted transaction + allow-list proxies of a dry run
 │   ├── background-dry-run.js # previewSample / previewSteps
 │   ├── background-runner.js # startBackgroundRunner() — lanes in the application's own process
@@ -198,9 +201,10 @@ There are three layers. Keep logic in the lowest layer it belongs to.
 
 The background modules split the same way: `background-spec.js`, `background-watch-plan.js` and
 the planning halves of the partitioners are pure; `background-store.js`,
-`background-watch-store.js`, the engine and the throttle are mechanism; `background.js` and
-`background-watch.js` are flows that receive what they need as `deps` from the kit (like
-`converge.js`), and only `migrator.js` builds those deps. The core may require `src/versioning/`;
+`background-watch-store.js`, the engine and the throttle are mechanism; `background.js` (with
+`background-drift.js`, `background-audit.js` and `background-kit.js`) and `background-watch.js` are
+flows that receive what they need as `deps` from the kit (like `converge.js`), and only
+`migrator.js` builds those deps. The core may require `src/versioning/`;
 `src/versioning/` never requires the core.
 
 **Why this matters for you:** the CLI's spinner lives *entirely* in the CLI layer

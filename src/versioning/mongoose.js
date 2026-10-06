@@ -1,6 +1,6 @@
 const { ConfigInvalidError } = require('../errors/index.js');
 const { resolveVersioning } = require('./config.js');
-const { isPlainObject, topField } = require('./internal.js');
+const { isPlainObject, topField, unwrapDefinition } = require('./internal.js');
 
 /**
  * A Mongoose schema plugin for a versioned collection — it never requires
@@ -138,10 +138,7 @@ function applyVersioningPlugin(schema, versioning) {
  *   version field the schema already gives a default
  */
 function versioningPlugin(schema, definitionOrModule) {
-  // An ES-module definition file, as `require` returns it, too — as defineShapes takes it.
-  const definition = isPlainObject(definitionOrModule?.default)
-    ? definitionOrModule.default
-    : definitionOrModule;
+  const definition = unwrapDefinition(definitionOrModule);
   if (!isPlainObject(definition)) {
     throw new ConfigInvalidError(
       'versioningPlugin needs the collection definition: schema.plugin(versioningPlugin, definition)',

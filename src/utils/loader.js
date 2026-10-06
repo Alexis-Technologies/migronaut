@@ -193,8 +193,8 @@ function resolveMigrationExports(resolved, filepath) {
  * - TypeScript / JavaScript ESM named exports (`export async function up/down`)
  * - CommonJS default export (`module.exports = { up, down }`)
  *
- * A background migration is returned only with `allowBackground` — every
- * other caller wants something it can run with up() and down().
+ * A background migration (`kind: 'background'`) is returned like any other:
+ * the caller tells it apart by its kind.
  *
  * @throws {MigrationFileNotFoundError} when the file does not exist
  * @throws {MigrationInvalidExportError} when up/down are not both functions
@@ -204,12 +204,6 @@ async function loadMigrationFile(filepath, options = {}) {
     await importMigrationModule(filepath, options),
     filepath,
   );
-  if (migration.kind === 'background' && options.allowBackground !== true) {
-    throw new MigrationInvalidExportError(
-      'This is a background migration — it cannot run as a regular one here',
-      { filepath },
-    );
-  }
   return migration;
 }
 

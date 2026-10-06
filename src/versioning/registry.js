@@ -1,7 +1,7 @@
 const { ConfigInvalidError, ShapeVersionError } = require('../errors/index.js');
 const { resolveVersioning } = require('./config.js');
-const { stampDocument, versionOf } = require('./document.js');
-const { isPlainObject, touchedFields } = require('./internal.js');
+const { refuseTouch, stampDocument, versionOf } = require('./document.js');
+const { isPlainObject, touchedFields, unwrapDefinition } = require('./internal.js');
 const { applyVersioningPlugin } = require('./mongoose.js');
 const {
   bumpRevision,
@@ -26,7 +26,8 @@ const { createUpcaster } = require('./upcaster.js');
 function entriesOf(definitions) {
   if (Array.isArray(definitions)) {
     const entries = [];
-    for (const [position, definition] of definitions.entries()) {
+    for (const [position, item] of definitions.entries()) {
+      const definition = unwrapDefinition(item);
       if (!isPlainObject(definition) || typeof definition.name !== 'string') {
         throw new ConfigInvalidError(
           `defineShapes: definitions[${position}] needs a name — or pass { name: definition }`,
@@ -44,8 +45,7 @@ function entriesOf(definitions) {
   }
   const entries = [];
   for (const [name, definition] of Object.entries(definitions)) {
-    // An ES module namespace (`import * as orders`) carries the definition as its default.
-    const resolved = isPlainObject(definition?.default) ? definition.default : definition;
+    const resolved = unwrapDefinition(definition);
     if (!isPlainObject(resolved) || resolved.versioning === undefined) {
       throw new ConfigInvalidError(`defineShapes: "${name}" declares no versioning`);
     }
@@ -173,11 +173,7 @@ function defineShapes(definitions) {
         throw new ConfigInvalidError('stampUpsert takes an operator update, not a replacement');
       }
       const { field, revisionField } = versioning;
-      if (revisionField !== null && fields.has(revisionField)) {
-        throw new ConfigInvalidError(
-          `The update must not write the revision field "${revisionField}" — migronaut sets it`,
-        );
-      }
+      refuseTouch(fields, revisionField, 'revision');
       const out = { ...update };
       if (!fields.has(field)) {
         out.$setOnInsert = { ...update.$setOnInsert, [field]: versioning.current };

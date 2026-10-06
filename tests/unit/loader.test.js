@@ -132,10 +132,9 @@ describe('tsLoadMessageOrNull', () => {
 });
 
 describe('loadMigrationFile — background migrations and requires', () => {
-  it('should refuse a background file unless the caller allows one', async () => {
+  it('should load a background file, told apart by its kind', async () => {
     const file = path.join(fixtures, '0100-background-orders.cjs');
-    await assert.rejects(loadMigrationFile(file), /background migration/);
-    const loaded = await loadMigrationFile(file, { allowBackground: true });
+    const loaded = await loadMigrationFile(file);
     assert.strictEqual(loaded.kind, 'background');
     assert.strictEqual(loaded.background.collection, 'orders');
     assert.strictEqual(loaded.description, 'Move address into shipping');
@@ -144,9 +143,7 @@ describe('loadMigrationFile — background migrations and requires', () => {
 
   it('should refuse a background file that also exports up or down', async () => {
     await assert.rejects(
-      loadMigrationFile(path.join(fixtures, '0101-background-with-up.cjs'), {
-        allowBackground: true,
-      }),
+      loadMigrationFile(path.join(fixtures, '0101-background-with-up.cjs'), {}),
       /exports no up\(\) or down\(\)/,
     );
   });

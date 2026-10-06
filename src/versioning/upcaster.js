@@ -1,7 +1,7 @@
 const { ConfigInvalidError, ShapeVersionError } = require('../errors/index.js');
 const { resolveVersioning } = require('./config.js');
 const { cloneDocument, versionOf } = require('./document.js');
-const { isPlainObject } = require('./internal.js');
+const { isPlainObject, unwrapDefinition } = require('./internal.js');
 
 /**
  * An upcaster: the shape changes of one collection as plain functions, one
@@ -200,10 +200,7 @@ function createUpcaster(versioning, steps, { newer = 'throw', collection } = {})
  *   `current`, goes past `current`, is async, or is not a function
  */
 function upcaster(definitionOrModule, steps, options = {}) {
-  // An ES-module definition file, as `require` returns it, too — as defineShapes takes it.
-  const definition = isPlainObject(definitionOrModule?.default)
-    ? definitionOrModule.default
-    : definitionOrModule;
+  const definition = unwrapDefinition(definitionOrModule);
   if (!isPlainObject(definition)) {
     throw new ConfigInvalidError('upcaster takes a collection definition or its versioning');
   }

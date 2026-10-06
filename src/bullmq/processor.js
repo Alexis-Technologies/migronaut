@@ -11,13 +11,7 @@ const {
 const { pickActor } = require('../utils/actor.js');
 const { errorText } = require('../utils/error.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
-const {
-  JOB_NAMES,
-  assertAllowed,
-  isPlainObject,
-  parseJobData,
-  resolveAllow,
-} = require('./jobs.js');
+const { JOB_NAMES, assertAllowed, isObjectLike, parseJobData, resolveAllow } = require('./jobs.js');
 const {
   assertBackgroundJobOptions,
   assertJobOptions,
@@ -142,7 +136,7 @@ function prepareErrorForQueue(error) {
  * opens any connection of its own.
  */
 function resolveProcessorOptions(options) {
-  if (!isPlainObject(options)) {
+  if (!isObjectLike(options)) {
     throw new ConfigInvalidError('createMigrationProcessor options must be an object');
   }
   const { kit, config, lockWait = {}, jobOptions, ordered = true, allow, background } = options;
@@ -155,7 +149,7 @@ function resolveProcessorOptions(options) {
   if (typeof ordered !== 'boolean') {
     throw new ConfigInvalidError('ordered must be a boolean', { ordered });
   }
-  if (!isPlainObject(lockWait)) {
+  if (!isObjectLike(lockWait)) {
     throw new ConfigInvalidError('lockWait must be an object', { lockWait: typeof lockWait });
   }
   // Unlike runMigrations, waiting is the default: nothing is blocked on this
@@ -172,7 +166,7 @@ function resolveProcessorOptions(options) {
  * `{ queue, jobOptions?, stallMs? }`.
  */
 function assertBackgroundLink(background) {
-  if (!isPlainObject(background) || typeof background.queue?.addBulk !== 'function') {
+  if (!isObjectLike(background) || typeof background.queue?.addBulk !== 'function') {
     throw new ConfigInvalidError('background must be { queue } — the background queue');
   }
   for (const key of Object.keys(background)) {

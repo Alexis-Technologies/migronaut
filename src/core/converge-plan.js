@@ -186,12 +186,6 @@ function joinReasons(first, second) {
   return first ? `${first}; ${second}` : second;
 }
 
-/**
- * Plan the declared indexes of one collection against its live ones. With
- * `partial` (only the version index of `versioning` is declared, not the
- * collection's own list) the other live indexes are not managed at all: never
- * listed, never dropped — prune does not reach them.
- */
 /** Why the ordinary version index stays on a sharded collection whose version index replaced it */
 const DISPLACED_REASON =
   'replaced by the shard-key-prefixed version index — drop it once nothing hints it ' +
@@ -222,6 +216,12 @@ function indexesFor(definition, live) {
   return { indexes: result, displaced };
 }
 
+/**
+ * Plan the declared indexes of one collection against its live ones. With
+ * `partial` (only the version index of `versioning` is declared, not the
+ * collection's own list) the other live indexes are not managed at all: never
+ * listed, never dropped — prune does not reach them.
+ */
 function planIndexes(
   declaredIndexes,
   live,

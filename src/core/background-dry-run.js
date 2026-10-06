@@ -68,10 +68,6 @@ function dryJob(name, loaded, direction, logger) {
 }
 
 /**
- * Preview a declarative background migration on a sample. `deps`:
- * `{ db, client, topology, forbidden, logger }`; `loaded`: `{ spec, fns }`.
- */
-/**
  * Whether a collection is sharded, for the sandbox — asked only behind a
  * mongos; a key that cannot be read is left to the server to judge.
  */
@@ -80,6 +76,10 @@ function shardedCheck(deps) {
     (await deps.topology()) === 'sharded' && Boolean(await deps.shardKeyOf?.(name));
 }
 
+/**
+ * Preview a declarative background migration on a sample. `deps`:
+ * `{ db, client, topology, forbidden, logger, shardKeyOf? }`; `loaded`: `{ spec, fns }`.
+ */
 async function previewSample(deps, name, loaded, options = {}) {
   const { spec } = loaded;
   if (spec.mode !== 'declarative') {

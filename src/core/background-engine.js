@@ -15,6 +15,7 @@ const {
 } = require('../versioning/document.js');
 const { MAX_CHECKPOINT_BYTES } = require('./background-spec.js');
 const { bsonSize } = require('./bson-peer.js');
+const { sleep } = require('./background-throttle.js');
 const { READ_OPTIONS } = require('./server-info.js');
 
 /**
@@ -62,6 +63,11 @@ function directionOf(spec, fns, direction) {
 function matchOf(spec, direction) {
   const source = direction === 'revert' ? spec.to : spec.from;
   return { ...spec.filter, ...versionFilter(spec, source) };
+}
+
+/** `match` without the documents that failed — left out of later passes and of the final count */
+function excludeBadIds(match, badIds = []) {
+  return badIds.length > 0 ? { $and: [match, { _id: { $nin: badIds } }] } : match;
 }
 
 /** What a transformation sees besides the document */
@@ -441,7 +447,7 @@ async function runStep(job, ctx, cursor) {
     } catch (error) {
       await session.abortTransaction().catch(() => undefined);
       if (!isTransientTransaction(error) || attempt >= job.spec.transaction.maxRetries) throw error;
-      await sleepFor(Math.random() * Math.min(2000, 50 * 2 ** (attempt + 1)), signal);
+      await sleep(backoffMs(attempt + 1), signal);
     } finally {
       await session.endSession().catch(() => undefined);
     }
@@ -523,6 +529,16 @@ async function plainBatch(job, ctx, cursor, batchSize) {
   });
   return { result, next, counts };
 }
+
+/** A transaction's retry backoff: full jitter, up to 50 ms · 2ⁿ, never past 2 s */
+const TXN_BACKOFF_BASE_MS = 50;
+const TXN_BACKOFF_MAX_MS = 2_000;
+const backoffMs = (attempt) =>
+  Math.random() * Math.min(TXN_BACKOFF_MAX_MS, TXN_BACKOFF_BASE_MS * 2 ** attempt);
+
+/** A transactional batch halved on trouble grows back ×1.5 after this many clean ones */
+const CLEAN_BATCHES_TO_GROW = 5;
+const BATCH_GROWTH = 1.5;
 
 /** The server's ceiling on what one batch reads into a transaction — well under 16 MiB */
 const MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
@@ -637,8 +653,8 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
       await commit(session);
       lease.touch();
       ctx.txn.clean += 1;
-      if (ctx.txn.clean >= 5 && size < batchSize) {
-        ctx.txn.size = Math.min(batchSize, Math.ceil(size * 1.5));
+      if (ctx.txn.clean >= CLEAN_BATCHES_TO_GROW && size < batchSize) {
+        ctx.txn.size = Math.min(batchSize, Math.ceil(size * BATCH_GROWTH));
         ctx.txn.clean = 0;
       } else {
         ctx.txn.size = size;
@@ -687,30 +703,11 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
       attempts += 1;
       if (attempts > maxRetries) throw error;
       if (attempts > maxRetries / 2) size = Math.max(1, Math.floor(size / 2));
-      await sleepFor(Math.random() * Math.min(2000, 50 * 2 ** attempts), signal);
+      await sleep(backoffMs(attempts), signal);
     } finally {
       await session.endSession().catch(() => undefined);
     }
   }
-}
-
-/** Sleep, cut short by the signal */
-function sleepFor(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 /**
@@ -809,7 +806,9 @@ module.exports = {
   isOverload,
   buildStepContext,
   controlOutcome,
+  addCounters,
   directionOf,
+  excludeBadIds,
   idKey,
   matchOf,
   processPartition,

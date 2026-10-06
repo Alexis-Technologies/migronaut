@@ -1,6 +1,6 @@
 const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
-const { sleep } = require('./background-throttle.js');
+const { jitter, sleep } = require('./background-throttle.js');
 const { assertSliceMs } = require('./background-spec.js');
 const { watchOptions } = require('./background-watch.js');
 const { MigratorKit } = require('./migrator.js');
@@ -27,8 +27,6 @@ const DEFAULTS = Object.freeze({
 
 /** The longest a failing migration backs off for */
 const MAX_BACKOFF_MS = 60_000;
-
-const jitter = (ms) => Math.round(ms * (0.5 + Math.random() / 2));
 
 function readOptions(options) {
   const concurrency = options.concurrency ?? DEFAULTS.concurrency;

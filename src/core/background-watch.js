@@ -2,7 +2,7 @@ const { ConfigInvalidError, LockAlreadyHeldError, RunAbortedError } = require('.
 const { errorText } = require('../utils/error.js');
 const { belowVersionFilter, versionOf } = require('../versioning/document.js');
 const { applyBatch, transactionOptions } = require('./background-engine.js');
-const { sleep } = require('./background-throttle.js');
+const { jitter, sleep } = require('./background-throttle.js');
 const {
   classifyStreamError,
   isEnding,
@@ -11,7 +11,8 @@ const {
   watchPipeline,
   watchView,
 } = require('./background-watch-plan.js');
-const { STATE_SUMMARY, control, jobFor, verify } = require('./background.js');
+const { STATE_SUMMARY, control, jobFor } = require('./background.js');
+const { verify } = require('./background-drift.js');
 const { runWithLock } = require('./lock.js');
 const { READ_OPTIONS } = require('./server-info.js');
 
@@ -75,8 +76,6 @@ const OPTION_KEYS = new Set([
 const MAX_HOPS = 16;
 /** The longest a failing stream backs off before it reopens */
 const MAX_BACKOFF_MS = 30_000;
-
-const jitter = (ms) => Math.round(ms * (0.5 + Math.random() / 2));
 
 /** Validate the watcher's options and fill in the defaults */
 function watchOptions(options) {

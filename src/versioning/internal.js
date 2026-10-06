@@ -172,6 +172,15 @@ function setOwn(target, key, value) {
   }
 }
 
+/**
+ * A collection definition as a module may hand it over: an ES-module
+ * namespace (`import * as orders`, or `require` of an ES module) carries it
+ * as its `default`.
+ */
+function unwrapDefinition(value) {
+  return isPlainObject(value?.default) ? value.default : value;
+}
+
 /** `a.b.c` → `a`; `$[]`-style paths keep their first segment too */
 const topField = (path) => {
   const dot = path.indexOf('.');
@@ -266,4 +275,5 @@ module.exports = {
   toCount,
   topField,
   touchedFields,
+  unwrapDefinition,
 };

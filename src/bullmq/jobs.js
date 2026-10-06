@@ -131,7 +131,11 @@ const JOB_FIELDS = Object.freeze({
 /** The limit every migronaut id is minted under — a producer's own check and this one agree */
 const MAX_GROUP_ID_LENGTH = MAX_ID_LENGTH;
 
-const isPlainObject = (value) =>
+/**
+ * An object that is not an array — class instances included: a Queue the
+ * caller hands over is one (not a "plain object" in versioning/'s sense).
+ */
+const isObjectLike = (value) =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 const isPositiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
 const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
@@ -192,7 +196,7 @@ const DEFAULT_ALLOW = Object.freeze({ down: true, force: false, unordered: false
 /** Validate an `allow` option and fill in the defaults */
 function resolveAllow(allow) {
   if (allow === undefined) return DEFAULT_ALLOW;
-  if (!isPlainObject(allow)) {
+  if (!isObjectLike(allow)) {
     throw new ConfigInvalidError('allow must be an object', { allow: typeof allow });
   }
   for (const key of Object.keys(allow)) {
@@ -250,7 +254,7 @@ function invalid(job, issue) {
  * above all the migration name, which becomes a filesystem path.
  */
 function parseJobData(job) {
-  if (!isPlainObject(job)) throw invalid(job, 'job is not an object');
+  if (!isObjectLike(job)) throw invalid(job, 'job is not an object');
   const { name, data } = job;
   if (
     name !== JOB_NAMES.UP &&
@@ -260,7 +264,7 @@ function parseJobData(job) {
   ) {
     throw invalid(job, 'unknown job name');
   }
-  if (!isPlainObject(data)) throw invalid(job, 'data is not an object');
+  if (!isObjectLike(data)) throw invalid(job, 'data is not an object');
   if (!Number.isSafeInteger(data.v) || data.v < MIN_JOB_DATA_VERSION) {
     throw invalid(job, 'unsupported job data version');
   }
@@ -363,7 +367,7 @@ function parseJobData(job) {
 /** The version and field checks every job shares — then the fields of `kind` */
 function assertEnvelope(job, kind) {
   const { data } = job;
-  if (!isPlainObject(data)) throw invalid(job, 'data is not an object');
+  if (!isObjectLike(data)) throw invalid(job, 'data is not an object');
   if (!Number.isSafeInteger(data.v) || data.v < MIN_JOB_DATA_VERSION) {
     throw invalid(job, 'unsupported job data version');
   }
@@ -385,7 +389,7 @@ function assertEnvelope(job, kind) {
  * copy — as untrusted as any other: the migration name becomes a path.
  */
 function parseBackgroundJobData(job) {
-  if (!isPlainObject(job)) throw invalid(job, 'job is not an object');
+  if (!isObjectLike(job)) throw invalid(job, 'job is not an object');
   const { name } = job;
   if (
     name !== JOB_NAMES.BACKGROUND &&
@@ -688,7 +692,7 @@ module.exports = {
   convergeDedupId,
   dedupId,
   idFragment,
-  isPlainObject,
+  isObjectLike,
   migrationJobOptions,
   parseBackgroundJobData,
   parseJobData,
