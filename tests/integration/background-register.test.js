@@ -210,6 +210,52 @@ export const background = { collection: 'orders', from: 1, to: 2, migrate: (doc)
     assert.strictEqual(record.status, 'applied', 'the refused down left it applied');
   });
 
+  it('should refuse down of a one-way step migration that ran, though it never counted documents', async () => {
+    await mongo.db.collection('orders').insertMany([{ __v: 1 }, { __v: 1 }]);
+    const kit = kitWith();
+    project.write(
+      '0001-orders.js',
+      `export const background = {
+  collection: 'orders',
+  pauseMs: 0,
+  step: async ({ db }) => {
+    await db.collection('orders').updateMany({}, { $set: { done: true } });
+    return { checkpoint: null, done: true };
+  },
+};
+`,
+    );
+    await kit.up();
+    assert.strictEqual((await kit.runBackground('0001-orders.js')).status, 'completed');
+    await assert.rejects(kit.dryRun('down'), IrreversibleMigrationError);
+    await assert.rejects(kit.down(), (error) => {
+      assert.ok(
+        error instanceof IrreversibleMigrationError ||
+          error.cause instanceof IrreversibleMigrationError,
+      );
+      return true;
+    });
+    assert.notStrictEqual(await store().get('0001-orders.js'), null);
+  });
+
+  it('should pause a planned one-way migration before it withdraws it — nothing rewritten yet', async () => {
+    await mongo.db.collection('orders').insertMany([{ __v: 1 }, { __v: 1 }]);
+    const kit = kitWith();
+    project.write('0001-orders.js', ONE_WAY);
+    await kit.up();
+    // Planned — lanes could claim now — but none has written a batch.
+    assert.strictEqual((await kit.coordinateBackground('0001-orders.js')).next, 'process');
+    const controls = [];
+    kit.on('background:control', (event) => controls.push(`${event.action}:${event.to}`));
+    await kit.down();
+    assert.strictEqual(await store().get('0001-orders.js'), null, 'withdrawn');
+    assert.deepStrictEqual(controls, ['pause:paused']);
+    assert.strictEqual(
+      await mongo.db.collection('_migronaut_background_partitions').countDocuments(),
+      0,
+    );
+  });
+
   it('should refuse a file with both background and up/down', async () => {
     const kit = kitWith();
     project.write(

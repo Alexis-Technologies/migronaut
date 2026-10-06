@@ -1,5 +1,9 @@
 const crypto = require('node:crypto');
-const { BackgroundConflictError, MigrationInvalidExportError } = require('../errors/index.js');
+const {
+  BackgroundConflictError,
+  ConfigInvalidError,
+  MigrationInvalidExportError,
+} = require('../errors/index.js');
 const { canonical, isPlainObject, toWire, unsendable } = require('../utils/canonical.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { fieldNameIssue } = require('../versioning/config.js');
@@ -50,6 +54,24 @@ const INTEGER_SETTINGS = [
   ['maxParallel', 1, 64],
   ['shardConcurrency', 1, 64],
 ];
+
+/** The longest slice — for a caller that overrides the spec's (a runner, the CLI, a test) too */
+const [, , MAX_SLICE_MS] = INTEGER_SETTINGS.find(([key]) => key === 'sliceMs');
+
+/**
+ * A caller's `sliceMs`: a positive integer up to the spec's maximum. A slice
+ * always works one batch before it looks at its deadline, so a short one
+ * still makes progress; 0, a negative number or NaN would not.
+ *
+ * @throws {ConfigInvalidError} when it is not an integer in range
+ */
+function assertSliceMs(sliceMs) {
+  if (!Number.isSafeInteger(sliceMs) || sliceMs < 1 || sliceMs > MAX_SLICE_MS) {
+    throw new ConfigInvalidError(`sliceMs must be an integer from 1 to ${MAX_SLICE_MS}`, {
+      sliceMs,
+    });
+  }
+}
 
 const PARTITION_SETTINGS = [
   ['overPartition', 1, 64],
@@ -540,6 +562,7 @@ module.exports = {
   STATUSES,
   TERMINAL,
   TRANSITIONS,
+  assertSliceMs,
   backgroundIssues,
   bracketOfType,
   keysetFilter,

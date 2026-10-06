@@ -417,6 +417,64 @@ describe('background coordinator (integration)', () => {
     assert.strictEqual(matchHash(job.spec).length, 32);
   });
 
+  it('should not count a lane stopped by its caller as a failed slice', async () => {
+    await seed(20);
+    const deps = makeDeps({
+      [NAME]: {
+        background: {
+          collection: 'orders',
+          from: 1,
+          to: 2,
+          migrate: moveAddress,
+          batchSize: 5,
+          // The first batch never waits; the second waits here — and is stopped.
+          pauseMs: 60_000,
+          maxSliceFailures: 1,
+        },
+      },
+    });
+    await register(deps, NAME);
+    assert.strictEqual((await coordinate(deps, NAME)).next, 'process');
+    for (let round = 1; round <= 3; round++) {
+      const controller = new AbortController();
+      const batches = deps.events.length;
+      const slice = runSlice(deps, NAME, { signal: controller.signal, sliceMs: 600_000 });
+      while (!deps.events.slice(batches).some(([event]) => event === 'background:batch')) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      controller.abort(new Error('deploy'));
+      assert.strictEqual((await slice).outcome, 'stopped', `round ${round}`);
+      const [partition] = await deps.store.partitions(NAME);
+      assert.strictEqual(partition.status, 'running');
+      assert.strictEqual(partition.failures ?? 0, 0);
+      assert.strictEqual(partition.lease, undefined, 'the lease is released');
+    }
+    assert.strictEqual(await mongo.db.collection('orders').countDocuments({ __v: 2 }), 15);
+  });
+
+  it('should still count a slice that fails on its own', async () => {
+    await seed(10);
+    const deps = makeDeps({
+      [NAME]: {
+        background: {
+          collection: 'orders',
+          from: 1,
+          to: 2,
+          migrateBatch: () => {
+            throw new Error('broken transform');
+          },
+          pauseMs: 0,
+          maxSliceFailures: 1,
+        },
+      },
+    });
+    await register(deps, NAME);
+    assert.strictEqual((await coordinate(deps, NAME)).next, 'process');
+    await assert.rejects(runSlice(deps, NAME, { signal: new AbortController().signal }), /broken/);
+    const [partition] = await deps.store.partitions(NAME);
+    assert.strictEqual(partition.status, 'failed');
+  });
+
   it('should keep a blocked one blocked until what it requires completes', async () => {
     await seed(10);
     const deps = makeDeps({

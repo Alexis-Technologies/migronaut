@@ -691,9 +691,11 @@ async function processPartition(job, ctx) {
   const spec = job.spec;
   const counters = {};
   let cursor = partition.cursor ?? {};
+  let batches = 0;
   for (;;) {
     if (signal?.aborted) return { outcome: 'stopped', counters };
-    if (now() >= ctx.deadline) return { outcome: 'yielded', counters, cursor };
+    // At least one batch per partition claimed, however short the slice.
+    if (batches > 0 && now() >= ctx.deadline) return { outcome: 'yielded', counters, cursor };
     const control = await readControl();
     const stop = controlOutcome(control, job, partition);
     if (stop) return { outcome: stop, counters };
@@ -739,6 +741,7 @@ async function processPartition(job, ctx) {
       }
     }
     addCounters(counters, batchCounts);
+    batches += 1;
     ctx.onBatch?.({ counters: batchCounts, latencyMs: since(now, started), batchSize });
     if (next === null) return { outcome: 'exhausted', counters };
     cursor = next;

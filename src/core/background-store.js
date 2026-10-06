@@ -207,11 +207,16 @@ class BackgroundStore {
     return result.matchedCount === 1;
   }
 
-  /** Delete a state document and its partitions */
-  async remove(name, { session } = {}) {
+  /**
+   * Delete a state document and its partitions — with `filter`, only while
+   * the state still matches it (`{ generation: 0 }`: no plan was ever
+   * committed, so no lane can have written). Returns whether it was deleted.
+   */
+  async remove(name, { session, filter } = {}) {
     const options = session ? { session } : {};
+    const result = await this.#states.deleteOne({ _id: name, ...filter }, options);
+    if (filter !== undefined && result.deletedCount !== 1) return false;
     await this.#partitions.deleteMany({ background: name }, options);
-    const result = await this.#states.deleteOne({ _id: name }, options);
     return result.deletedCount === 1;
   }
 
@@ -391,23 +396,34 @@ class BackgroundStore {
   }
 
   /**
-   * How many documents a background migration has rewritten so far: the
-   * rolled-up totals plus the partitions not rolled up yet. 0 for one that
-   * is not registered.
+   * What a background migration has done so far: documents rewritten
+   * (`migrated`) and batches — or steps — checkpointed (`batches`), the
+   * rolled-up totals plus the partitions not rolled up yet. Zeros for one
+   * that is not registered. A step migration says how many documents it
+   * rewrote only when it wants to; every checkpointed step counts as a batch.
    */
-  async migratedSoFar(name) {
+  async progress(name) {
     const state = await this.get(name);
-    if (state === null) return 0;
+    if (state === null) return { migrated: 0, batches: 0 };
     const [row] = await this.#partitions
       .aggregate(
         [
           { $match: { background: name, generation: { $gt: state.rolledGeneration ?? 0 } } },
-          { $group: { _id: null, migrated: { $sum: { $ifNull: ['$counters.migrated', 0] } } } },
+          {
+            $group: {
+              _id: null,
+              migrated: { $sum: { $ifNull: ['$counters.migrated', 0] } },
+              batches: { $sum: { $ifNull: ['$counters.batches', 0] } },
+            },
+          },
         ],
         READ_OPTIONS,
       )
       .toArray();
-    return (state.totals?.migrated ?? 0) + (row?.migrated ?? 0);
+    return {
+      migrated: (state.totals?.migrated ?? 0) + (row?.migrated ?? 0),
+      batches: (state.totals?.batches ?? 0) + (row?.batches ?? 0),
+    };
   }
 
   /** Delete the partitions of generations up to `generation` — `keep` spares one */
@@ -671,7 +687,9 @@ class BackgroundStore {
    */
   async checkpoint(lease, update, { session } = {}) {
     const { cursor, counters = {}, badIds = [], docErrors = [], done = false, throttle } = update;
-    const set = { 'lease.renewedAt': '$$NOW', updatedAt: '$$NOW' };
+    // A checkpoint is progress: `maxSliceFailures` counts failed slices in a
+    // row, so a transient error now and then never adds up to a failure.
+    const set = { 'lease.renewedAt': '$$NOW', updatedAt: '$$NOW', failures: literal(0) };
     if (cursor !== undefined) set.cursor = literal(cursor);
     for (const [key, value] of Object.entries(counters)) {
       if (value) set[`counters.${key}`] = plus(`counters.${key}`, value);

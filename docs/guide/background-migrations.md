@@ -115,7 +115,7 @@ Every setting sits next to `collection` in the same object.
 | `maxDocumentErrors` | `0` | Documents that may fail before the background migration does (see [Document errors](#document-errors)) |
 | `maxPasses` | `10` | Passes over what is left before it fails |
 | `maxConflictRetries` | `3` | Rounds of re-reading documents a concurrent write moved under a batch |
-| `maxSliceFailures` | `3` | Failed slices of one partition before that partition fails |
+| `maxSliceFailures` | `3` | Failed slices of one partition in a row before that partition fails |
 | `maxReplicationLagMs` | `10000` | Wait while a secondary lags more than this; `false`: never wait |
 | `throttle(ctx)` | — | Called before every batch; a number it returns is an extra pause in ms |
 | `maxParallel` | `1` | Partitions worked at once, across every process (1–64) |
@@ -225,7 +225,11 @@ pausing a completed one. A control whose result is already in place is not an er
   aside on a collection while a revert works on it.
 - **Without `revert`**, the background migration is withdrawn (its state removed), but only while
   no document has been rewritten. After that, `down` and `dry-run down` refuse with
-  `IrreversibleMigrationError` (exit 13). Write a background migration back instead.
+  `IrreversibleMigrationError` (exit 13). Write a background migration back instead. Once a plan
+  exists, `down` first pauses it and waits for its lanes (each stops at its next batch boundary),
+  so the check sees every batch they wrote; a refused `down` resumes it. A `step` migration counts
+  as having rewritten documents as soon as one step was checkpointed, whether or not it returned
+  `migrated`.
 
 **`up --force` and `redo`** register it again. It gets a new `registration` id, the old plan's
 partitions are deleted, and the pass count goes back to 0. Documents already at `to` no longer
@@ -287,7 +291,9 @@ lanes as child jobs. See [Background migrations on the queue](/guide/bullmq#back
 For small collections and tests, `backgroundInline: true` (or `MIGRONAUT_BACKGROUND_INLINE=true`)
 makes `up` run each background migration to the end right after registering it. It runs under the
 migration lock, with `maxParallel` lanes, and runs anything it requires first. A failure fails the
-`up` with `BACKGROUND_FAILED` (exit 32), and a stop fails it with `RUN_ABORTED` (exit 11).
+`up` with `BACKGROUND_FAILED` (exit 32), and a stop fails it with `RUN_ABORTED` (exit 11). A file
+changed since it was registered fails it with `CHECKSUM_MISMATCH` instead of waiting for a deploy
+to finish (this run *is* the deploy): pin the new version with `migronaut background repin`.
 
 Inline mode holds the line for as long as the rewrite takes, which is the very thing background
 migrations exist to avoid. Keep it for data you know is small.
@@ -298,7 +304,7 @@ The runtimes are built on public kit methods, which you can drive yourself:
 
 | Method | |
 |---|---|
-| `runBackground(name, { signal?, sliceMs?, untilDone?, concurrency? })` | Run the coordinator and up to `concurrency` lanes in this process until it is done (or one round with `untilDone: false`). Throws `BackgroundFailedError` if it fails, `RunAbortedError` if stopped |
+| `runBackground(name, { signal?, sliceMs?, untilDone?, concurrency? })` | Run the coordinator and up to `concurrency` lanes in this process until it is done (or one round with `untilDone: false`). Throws `BackgroundFailedError` if it fails, `RunAbortedError` if stopped. A failed slice is retried with a backoff; an error no retry fixes (the file changed or is gone, the deployment cannot run it), or 10 failed slices in a row, ends it with that error. `sliceMs` (1 to 3 600 000) overrides the spec's; a slice always works one batch first |
 | `coordinateBackground(name, { signal?, driver? })` | One coordinator step: `{ next: 'process' \| 'wait' \| 'done' \| 'busy' \| 'superseded', lanes?, … }` |
 | `runBackgroundSlice(name, { signal?, sliceMs? })` | One slice of one lane: `{ outcome, counters }`, where `outcome` is `yielded`, `exhausted`, `busy`, `stale`, `paused`, `cancelled`, `failed`, `stopped` or `lost` |
 | `runnableBackground()` | The background migrations with work to do. Blocked ones whose requirements are met are unblocked on the way |
@@ -365,8 +371,10 @@ every partition and pass:
 Migronaut never logs a failed document's `_id` or contents: they are your application's data.
 
 A slice that fails as a whole (a lost connection, a `writeConcernError`, a throwing `migrateBatch`)
-is counted on its partition. The partition fails after `maxSliceFailures` failed slices, and a
-failed partition fails the background migration when its pass closes.
+is counted on its partition. The partition fails after `maxSliceFailures` failed slices in a row (a
+checkpoint in between starts the count again), and a failed partition fails the background
+migration when its pass closes. A lane stopped by its process (a shutdown, a deploy) is not a
+failed slice: it releases its lease and the next lane resumes from the last checkpoint.
 
 ## `requires`: waiting for a background migration
 

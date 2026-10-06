@@ -6,6 +6,7 @@ const path = require('node:path');
 // and pulls in ~150 modules, which `--help`, `--version`, `init` and `create`
 // have no use for.
 const {
+  BackgroundConflictError,
   BackgroundPendingError,
   ChecksumMismatchError,
   ConfigInvalidError,
@@ -44,13 +45,13 @@ const {
   failedError,
   repin: repinBackgroundState,
   runSlice,
+  stillDirty,
   tryUnblock,
   verify: verifyDrift,
   waitForLanes,
 } = require('./background.js');
-const { resolveBackgroundSpec } = require('./background-spec.js');
+const { assertSliceMs, resolveBackgroundSpec } = require('./background-spec.js');
 const { previewSample, previewSteps } = require('./background-dry-run.js');
-const { matchOf } = require('./background-engine.js');
 const { BackgroundStore } = require('./background-store.js');
 const { sleep } = require('./background-throttle.js');
 const { startWatch, watchOptions } = require('./background-watch.js');
@@ -64,6 +65,33 @@ const { buildContext } = require('./context.js');
 const { runConverge } = require('./converge.js');
 const { readServer } = require('./server-info.js');
 const { readChunks, readShardKey } = require('./shard-info.js');
+
+/**
+ * Slice errors no retry fixes: the file changed or is gone or invalid, the
+ * configuration or the deployment cannot run it. A lane ends on them.
+ */
+const FATAL_SLICE_CODES = new Set([
+  'CHECKSUM_MISMATCH',
+  'MIGRATION_FILE_NOT_FOUND',
+  'MIGRATION_INVALID_EXPORT',
+  'MIGRATION_INVALID_NAME',
+  'CONFIG_INVALID',
+  'TRANSACTIONS_UNSUPPORTED',
+]);
+
+/** Failed slices in a row after which a lane of runBackground gives up */
+const MAX_LANE_FAILURES = 10;
+
+/** Statuses a `down` without a revert pauses before it judges whether anything was rewritten */
+const PAUSABLE = new Set(['blocked', 'pending', 'running']);
+
+/** A background migration that has rewritten documents and declares no way back */
+const irreversibleBackground = (name) =>
+  new IrreversibleMigrationError(
+    `Background migration ${name} has already rewritten documents and declares no revert — ` +
+      'write a background migration back instead',
+    { names: [name] },
+  );
 
 /** How recent a streaming watcher's record must be for the poll to leave its collection alone */
 const STREAMING_FRESH_MS = 60_000;
@@ -434,6 +462,12 @@ class MigratorKit extends EventEmitter {
     this.#client = undefined;
     this.#db = undefined;
     this.#changelog = undefined;
+    // The background stores bind the Db they were made with, and the topology
+    // and definitions were read through it: a later connect() reads them anew.
+    this.#backgroundStoreInstance = undefined;
+    this.#watchStoreInstance = undefined;
+    this.#topology = undefined;
+    this.#backgroundDefinitions = undefined;
     this.#ownsClient = true;
     if (owned) await client.close();
   }
@@ -2229,26 +2263,33 @@ class MigratorKit extends EventEmitter {
     return { status, direction: 'forward', ...(waitsFor.length > 0 ? { waitsFor } : {}) };
   }
 
+  /**
+   * Whether a background migration has written anything a `down` without a
+   * revert could not put back: documents rewritten — or, for a step
+   * migration (which says how many it rewrote only when it wants to), any
+   * step checkpointed at all.
+   */
+  async #hasRewritten(name, spec) {
+    const { migrated, batches } = await this.#backgroundStore().progress(name);
+    return spec.mode === 'step' ? batches > 0 : migrated > 0;
+  }
+
   /** What a `down` of a background migration would refuse — for a preview to refuse it too */
   async #assertBackgroundRevertible(name) {
     const loaded = await this.#peek(name);
     if (loaded === null || loaded.kind !== 'background') return;
     const { spec } = await this.#backgroundSpec(name, loaded);
     if (spec.reversible) return;
-    if ((await this.#backgroundStore().migratedSoFar(name)) > 0) {
-      throw new IrreversibleMigrationError(
-        `Background migration ${name} has already rewritten documents and declares no revert — ` +
-          'write a background migration back instead',
-        { names: [name] },
-      );
-    }
+    if (await this.#hasRewritten(name, spec)) throw irreversibleBackground(name);
   }
 
   /**
    * `down` of a background migration: with a `revert`, the forward one is
    * replaced by the way back (registered to run like any other); without one,
-   * it is withdrawn — but only while no document has been rewritten, since
-   * nothing could put them back.
+   * it is withdrawn — but only while nothing has been rewritten, since
+   * nothing could put it back. A plan never committed means no lane ever
+   * claimed anything: one conditional delete. Otherwise the lanes are paused
+   * and waited for first, so the check sees every batch they wrote.
    */
   async #revertBackground(name, spec, session) {
     const store = this.#backgroundStore();
@@ -2269,10 +2310,40 @@ class MigratorKit extends EventEmitter {
       );
       return { status: 'pending', direction: 'revert' };
     }
-    await this.#assertBackgroundRevertible(name);
+    const withdrawn = { status: 'withdrawn', direction: 'forward' };
+    const state = await store.get(name);
+    if (state === null) return withdrawn;
+    if (await this.#hasRewritten(name, spec)) throw irreversibleBackground(name);
+    if (
+      (state.generation ?? 0) === 0 &&
+      (await store.remove(name, { session, filter: { generation: 0 } }))
+    ) {
+      return withdrawn;
+    }
+    const deps = this.#backgroundDeps();
+    const paused = PAUSABLE.has(state.status)
+      ? (
+          await controlBackground(deps, name, 'pause', {
+            reason: 'down withdraws it',
+          })
+        ).applied === 'changed'
+      : false;
+    const stopped = await waitForLanes(deps, name);
+    if (!stopped || (await this.#hasRewritten(name, spec))) {
+      if (paused) await controlBackground(deps, name, 'resume', { reason: 'down refused' });
+      if (!stopped) {
+        throw new BackgroundConflictError(
+          `Background migration ${name} still has lanes at work — down cannot tell whether ` +
+            'they rewrote documents; try again once they stop',
+          { migration: name, action: 'withdraw' },
+        );
+      }
+      throw irreversibleBackground(name);
+    }
     await store.remove(name, { session });
-    return { status: 'withdrawn', direction: 'forward' };
+    return withdrawn;
   }
+
   /** What background.js runs with — `owner` names a lane: its lease's owner, its events' runId */
   #backgroundDeps(owner) {
     const config = this.#config;
@@ -2486,25 +2557,6 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * Whether a completed background migration's collection is still clean:
-   * one indexed `findOne` for a document in the old shape. A step migration
-   * cannot be probed — its state is all there is.
-   */
-  async #stillDirty(state) {
-    const spec = state.spec;
-    if (!spec || spec.mode !== 'declarative' || state.direction === 'revert') return false;
-    const badIds = state.badIds ?? [];
-    const match = matchOf(spec, 'forward');
-    const found = await this.#requireDb()
-      .collection(spec.collection)
-      .findOne(badIds.length > 0 ? { $and: [match, { _id: { $nin: badIds } }] } : match, {
-        projection: { _id: 1 },
-        readPreference: 'primary',
-      });
-    return found !== null;
-  }
-
-  /**
    * The background migrations of `requires` not done yet:
    * `[{ migration, status }]`. A `baseline` or imported record counts as
    * done (that history predates migronaut). A completed one is checked
@@ -2531,7 +2583,7 @@ class MigratorKit extends EventEmitter {
         waiting.push({ migration: required, status: 'reverted' });
       } else if (state.status !== 'completed') {
         waiting.push({ migration: required, status: state.status });
-      } else if (await this.#stillDirty(state)) {
+      } else if (await stillDirty(this.#backgroundDeps(), state)) {
         if (reopen) {
           await controlBackground(this.#backgroundDeps(), required, 'retry', {
             reason: 'old-shape documents reappeared',
@@ -2585,9 +2637,11 @@ class MigratorKit extends EventEmitter {
       `⧗ Running   ${name} inline`,
       this.#fields({ background: name, inline: true }),
     );
-    const status = await this.runBackground(name, {
+    await this.#backgroundReady(name);
+    const status = await this.#drive(name, {
       signal,
       concurrency: state.spec?.maxParallel ?? 1,
+      inline: true,
     });
     if (status.status === 'blocked') {
       throw new BackgroundPendingError(
@@ -2635,6 +2689,7 @@ class MigratorKit extends EventEmitter {
    * @experimental
    */
   async runBackgroundSlice(name, { signal, sliceMs } = {}) {
+    if (sliceMs !== undefined) assertSliceMs(sliceMs);
     await this.#backgroundReady(name);
     const owner = this.#newId();
     return runSlice(this.#backgroundDeps(owner), name, { signal, sliceMs, owner });
@@ -2653,6 +2708,17 @@ class MigratorKit extends EventEmitter {
     if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
       throw new ConfigInvalidError('concurrency must be a positive integer', { concurrency });
     }
+    if (sliceMs !== undefined) assertSliceMs(sliceMs);
+    return this.#drive(name, { signal, sliceMs, untilDone, concurrency });
+  }
+
+  /**
+   * runBackground's loop. `inline` (a run waiting for it under the migration
+   * lock) cannot wait out a file that changed on disk since it was
+   * registered — that wait is for a deploy in progress, and this run is the
+   * deploy — so it fails instead.
+   */
+  async #drive(name, { signal, sliceMs, untilDone = true, concurrency = 1, inline = false }) {
     const deps = this.#backgroundDeps(this.#newId());
     const stopped = () =>
       new RunAbortedError(`Stopped driving background migration ${name} — it goes on from here`, {
@@ -2665,10 +2731,15 @@ class MigratorKit extends EventEmitter {
       if (answer.next === 'process') {
         const state = await this.#registered(name);
         const lanes = Math.max(1, Math.min(concurrency, state.spec?.maxParallel ?? 1));
-        await Promise.all(
-          Array.from({ length: lanes }, () => this.#lane(name, { signal, sliceMs, untilDone })),
-        );
+        await this.#lanes(name, lanes, { signal, sliceMs, untilDone });
       } else {
+        if (inline && answer.reason === 'checksum') {
+          throw new ChecksumMismatchError(
+            `Background migration ${name} changed on disk since it was registered — it cannot ` +
+              'run inline until it is pinned again (migronaut background repin)',
+            { migration: name, background: true },
+          );
+        }
         if (!untilDone) break;
         try {
           await sleep(answer.retryAfterMs ?? 1000, signal);
@@ -2684,7 +2755,30 @@ class MigratorKit extends EventEmitter {
     return this.backgroundStatus(name);
   }
 
-  /** One lane of runBackground: slices until nothing is left to claim (or one, without untilDone) */
+  /** `count` lanes at once: the first that fails for good stops the others, and its error is thrown */
+  async #lanes(name, count, { signal, sliceMs, untilDone }) {
+    const stop = new AbortController();
+    const laneSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
+    const lanes = [];
+    for (let i = 0; i < count; i++) {
+      lanes.push(
+        this.#lane(name, { signal: laneSignal, sliceMs, untilDone }).catch((error) => {
+          if (!stop.signal.aborted) stop.abort(error);
+          throw error;
+        }),
+      );
+    }
+    const settled = await Promise.allSettled(lanes);
+    for (const result of settled) if (result.status === 'rejected') throw result.reason;
+  }
+
+  /**
+   * One lane of runBackground: slices until nothing is left to claim (or one,
+   * without untilDone). A failed slice is counted on its partition (which
+   * fails after `maxSliceFailures` in a row) and retried after a backoff; an
+   * error no retry can fix — the file changed or is gone, the deployment
+   * cannot run it — ends the lane, and so do `MAX_LANE_FAILURES` in a row.
+   */
   async #lane(name, { signal, sliceMs, untilDone }) {
     let failures = 0;
     for (;;) {
@@ -2695,11 +2789,14 @@ class MigratorKit extends EventEmitter {
         slice = await runSlice(this.#backgroundDeps(owner), name, { signal, sliceMs, owner });
         failures = 0;
       } catch (error) {
+        if (signal?.aborted) return;
         failures += 1;
+        if (FATAL_SLICE_CODES.has(error?.code) || failures >= MAX_LANE_FAILURES) throw error;
         this.#logger.warn(
           `⚠ Background migration ${name}: a slice failed (${errorText(error)}) — retrying`,
           { background: name, runId: owner, error: errorText(error) },
         );
+        if (!untilDone) return;
         try {
           await sleep(Math.min(30_000, 250 * 2 ** failures), signal);
         } catch {

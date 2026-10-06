@@ -161,7 +161,7 @@ export interface BackgroundMigrationSettings {
   maxPasses?: number;
   /** Re-read rounds for documents a concurrent write changed under a batch: 3 */
   maxConflictRetries?: number;
-  /** Failed slices of one partition before it fails: 3 */
+  /** Failed slices of one partition in a row (no checkpoint between) before it fails: 3 */
   maxSliceFailures?: number;
   /** Wait while a secondary lags more than this: 10 000 ms (`false`: never) */
   maxReplicationLagMs?: number | false;

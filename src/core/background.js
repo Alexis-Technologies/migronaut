@@ -14,7 +14,7 @@ const { idRangePartitioner } = require('./background-partition.js');
 const { createShardPartitioner, withShardKey } = require('./background-shard.js');
 const { TERMINAL, matchHash, transition } = require('./background-spec.js');
 const { MAX_BAD_IDS, STATE_SCHEMA } = require('./background-store.js');
-const { createAdaptive, createThrottle } = require('./background-throttle.js');
+const { createAdaptive, createThrottle, sleep } = require('./background-throttle.js');
 const { runWithLock } = require('./lock.js');
 const { READ_OPTIONS } = require('./server-info.js');
 const { shardedVersionIndexKey } = require('./versioning-spec.js');
@@ -640,11 +640,20 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
   if (state.status !== 'running' || state.phase !== 'process' || state.plan === undefined) {
     return { outcome: state.status === 'completed' ? 'exhausted' : 'stale', counters: {} };
   }
-  const job = await jobFor(deps, name, state);
+  let job;
+  try {
+    job = await jobFor(deps, name, state);
+    // A plan made before a reshard: the coordinator must re-split first.
+    if (job.partitioner.stale?.(state.plan.epoch)) return { outcome: 'stale', counters: {} };
+    await assertTransactions(deps, name, job.spec);
+  } catch (error) {
+    // Before any claim (the file changed or is gone, the deployment cannot
+    // run it): no partition to count it on and no slice:start to pair an
+    // event with — but measured like any failed slice; the drivers log it.
+    deps.telemetry?.backgroundSliceEnded({ name, durationMs: 0, outcome: 'error', error });
+    throw error;
+  }
   job.generation = state.generation;
-  // A plan made before a reshard: the coordinator must re-split first.
-  if (job.partitioner.stale?.(state.plan.epoch)) return { outcome: 'stale', counters: {} };
-  await assertTransactions(deps, name, job.spec);
   const now = deps.now ?? Date.now;
   const deadline = now() + (sliceMs ?? job.spec.sliceMs);
   const counters = {};
@@ -658,7 +667,8 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
   let worked = false;
   for (;;) {
     if (signal?.aborted) return { outcome: 'stopped', counters };
-    if (now() >= deadline) return { outcome: 'yielded', counters };
+    // The first claim is always made: a slice shorter than its setup still works a batch.
+    if (worked && now() >= deadline) return { outcome: 'yielded', counters };
     const claimed = await store.claim(name, {
       generation: state.generation,
       plan: state.plan.token,
@@ -741,15 +751,28 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
       // One span per lease held — it exists only once the claim succeeded.
       result = await withSpan(deps, 'slice', name, runLease);
     } catch (error) {
+      const lost = error instanceof LockLostError;
+      // The caller stopped the lane (a shutdown, a deploy): whatever a wait
+      // rejected with is the stop, not a fault of the partition — counting it
+      // would fail a partition after a few rolling deploys.
+      const stopped = !lost && signal?.aborted === true;
       deps.telemetry?.backgroundSliceEnded({
         name,
         durationMs: now() - sliceStarted,
-        outcome: error instanceof LockLostError ? 'lost' : 'error',
-        error,
+        outcome: lost ? 'lost' : stopped ? 'stopped' : 'error',
+        ...(stopped ? {} : { error }),
       });
-      if (error instanceof LockLostError) {
+      if (lost) {
         deps.emit('background:lease:lost', { migration: name, partition: String(partition._id) });
         return { outcome: 'lost', counters };
+      }
+      if (stopped) {
+        deps.emit('background:slice:end', {
+          migration: name,
+          partition: String(partition._id),
+          outcome: 'stopped',
+        });
+        return { outcome: 'stopped', counters };
       }
       const partitionFailed = await store
         .failSlice(lease, { error: errorText(error), maxSliceFailures: job.spec.maxSliceFailures })
@@ -948,17 +971,8 @@ async function waitForLanes(deps, name, { signal, timeoutMs = 120_000, pollMs = 
     const { live } = await deps.store.leases(name);
     if (live === 0) return true;
     if (now() >= until) return false;
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(resolve, pollMs);
-      signal?.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          reject(signal.reason);
-        },
-        { once: true },
-      );
-    });
+    // One listener per wait, removed with it — and an aborted signal ends it at once.
+    await sleep(pollMs, signal);
   }
 }
 
@@ -983,6 +997,29 @@ async function probeOldShape(deps, state, hint) {
       maxTimeMS: DRIFT_PROBE_MS,
       ...READ_OPTIONS,
     });
+}
+
+/**
+ * Whether a completed forward migration's collection holds an old-shape
+ * document again — for the `requires` guard, which runs under the migration
+ * lock: one hinted probe, time-boxed. Where that is not possible (a step
+ * migration, no version index, a probe that ran out of time) the status is
+ * trusted — a scan of the whole collection on every `up` is not an option.
+ */
+async function stillDirty(deps, state) {
+  const spec = state.spec;
+  if (!spec || spec.mode !== 'declarative' || state.direction === 'revert') return false;
+  const hint = await probeHint(deps, spec);
+  if (hint === undefined) return false;
+  try {
+    return (await probeOldShape(deps, state, hint)) !== null;
+  } catch (error) {
+    deps.logger.warn(
+      `⚠ Could not check ${state._id} for old-shape documents: ${errorText(error)} — trusting its status`,
+      deps.fields({ background: state._id }),
+    );
+    return false;
+  }
 }
 
 /**
@@ -1188,6 +1225,7 @@ module.exports = {
   probeHint,
   repin,
   runSlice,
+  stillDirty,
   tryUnblock,
   verify,
   versionHint,

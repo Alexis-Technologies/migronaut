@@ -287,6 +287,65 @@ describe('background migrations through the kit (integration)', () => {
     assert.strictEqual((await mongo.db.collection('orders').findOne()).b, 2);
   });
 
+  it('should work again after disconnect and connect', async () => {
+    await seed(10);
+    const kit = kitWith();
+    project.write(NAME, spec('migrate: (doc) => ({ ...doc, done: true }),'));
+    await kit.up();
+    assert.strictEqual((await kit.backgroundStatus(NAME)).status, 'pending');
+    await kit.disconnect();
+    await kit.connect();
+    assert.strictEqual((await kit.runBackground(NAME)).status, 'completed');
+    assert.strictEqual(await mongo.db.collection('orders').countDocuments({ done: true }), 10);
+  });
+
+  it('should return after one round even when its slice fails', async () => {
+    await seed(10);
+    const kit = kitWith();
+    project.write(
+      NAME,
+      spec(`maxSliceFailures: 5,
+  migrateBatch: () => {
+    throw new Error('broken transform');
+  },`),
+    );
+    await kit.up();
+    const status = await kit.runBackground(NAME, { untilDone: false });
+    assert.strictEqual(status.status, 'running');
+    assert.strictEqual((await partitions().findOne({})).failures, 1);
+  });
+
+  it('should refuse to run inline a file changed since it was registered', async () => {
+    await seed(10);
+    // Registered by one deploy, not run yet…
+    const first = kitWith();
+    project.write(NAME, spec('migrate: (doc) => ({ ...doc, done: true }),'));
+    await first.up();
+    // …and edited before the next one, which runs it inline.
+    const kit = kitWith({ backgroundInline: true });
+    project.write(NAME, spec('migrate: (doc) => ({ ...doc, done: 2 }),'));
+    project.write(
+      '0002-contract.js',
+      `export const requires = ['${NAME}'];
+export async function up() {}
+export async function down() {}
+`,
+    );
+    await assert.rejects(kit.up(), (error) => {
+      const cause = error instanceof ChecksumMismatchError ? error : error.cause;
+      assert.ok(cause instanceof ChecksumMismatchError, String(error));
+      return true;
+    });
+  });
+
+  it('should refuse a slice length that would never make progress', async () => {
+    const kit = kitWith();
+    for (const sliceMs of [0, -1, Number.NaN, '1000', 3_600_001]) {
+      await assert.rejects(kit.runBackground(NAME, { sliceMs }), /sliceMs/);
+      await assert.rejects(kit.runBackgroundSlice(NAME, { sliceMs }), /sliceMs/);
+    }
+  });
+
   it('should stop driving on a signal, and refuse control of what is not registered', async () => {
     await seed(500);
     const kit = kitWith();

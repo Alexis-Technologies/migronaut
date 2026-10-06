@@ -45,7 +45,19 @@ const MAX_LANE_BACKOFF_MS = 5 * 60_000;
  */
 const MAX_INLINE_STEPS = 5;
 
-const moved = (name) => Object.assign(new Error(name), { name });
+/** The longest slice a caller may ask for — the kit's limit, mirrored (a unit test pins it) */
+const MAX_SLICE_MS = 3_600_000;
+
+/**
+ * The error that tells BullMQ a job was moved (delayed, waiting for its
+ * children) — a typed one, renamed: BullMQ matches the name, and the adapter
+ * cannot import its classes.
+ */
+const moved = (name) => {
+  const error = new RunAbortedError(`Moved: ${name}`, { reason: name, moved: true });
+  error.name = name;
+  return error;
+};
 
 /**
  * Validate the background processor's options. Pure, like the migration
@@ -77,8 +89,14 @@ function resolveBackgroundProcessorOptions(options) {
       'queue is required — the background queue the coordinators add their lanes to',
     );
   }
-  if (sliceMs !== undefined && (!Number.isSafeInteger(sliceMs) || sliceMs < 1)) {
-    throw new ConfigInvalidError('sliceMs must be a positive integer', { sliceMs });
+  // The kit's own range for a caller's slice (background-spec's assertSliceMs).
+  if (
+    sliceMs !== undefined &&
+    (!Number.isSafeInteger(sliceMs) || sliceMs < 1 || sliceMs > MAX_SLICE_MS)
+  ) {
+    throw new ConfigInvalidError(`sliceMs must be an integer from 1 to ${MAX_SLICE_MS}`, {
+      sliceMs,
+    });
   }
   if (children !== 'auto' && children !== false) {
     throw new ConfigInvalidError("children must be 'auto' or false", { children });
@@ -376,6 +394,7 @@ function createBackgroundProcessor(options = {}) {
 
 module.exports = {
   BACKGROUND_PROCESSOR_DEFAULTS: DEFAULTS,
+  MAX_SLICE_MS,
   createBackgroundProcessor,
   resolveBackgroundProcessorOptions,
 };

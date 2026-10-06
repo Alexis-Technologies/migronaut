@@ -1,4 +1,4 @@
-const { ConfigInvalidError, LockAlreadyHeldError } = require('../errors/index.js');
+const { ConfigInvalidError, LockAlreadyHeldError, RunAbortedError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { belowVersionFilter, versionOf } = require('../versioning/document.js');
 const { applyBatch } = require('./background-engine.js');
@@ -15,6 +15,9 @@ const {
 const { control, jobFor, verify } = require('./background.js');
 const { runWithLock } = require('./lock.js');
 const { READ_OPTIONS } = require('./server-info.js');
+
+/** Why a follower or the watcher stopped — a typed abort reason, never a bare Error */
+const stopReason = (reason) => new RunAbortedError(reason, { reason });
 
 /**
  * The live drift watcher: after a background migration completed, an
@@ -174,7 +177,7 @@ function startWatch(deps, options = {}) {
           if (!followers.has(collection)) startFollower(collection);
         }
         for (const [collection, follower] of followers) {
-          if (!wanted.has(collection)) follower.controller.abort(new Error('no longer watched'));
+          if (!wanted.has(collection)) follower.controller.abort(stopReason('no longer watched'));
         }
       } catch (error) {
         if (signal.aborted) break;
@@ -224,7 +227,7 @@ function startWatch(deps, options = {}) {
       if (outcome === 'fallback' || outcome === 'gone') return;
       if (outcome === 'unsupported') {
         unsupported = outcome;
-        controller.abort(new Error('change streams are not supported here'));
+        controller.abort(stopReason('change streams are not supported here'));
         return;
       }
       await sleep(jitter(settings.leaderRetryMs), followSignal).catch(() => undefined);
@@ -505,7 +508,7 @@ function startWatch(deps, options = {}) {
     },
     stop() {
       stopping ??= (async () => {
-        if (!signal.aborted) controller.abort(new Error('Drift watcher stopped'));
+        if (!signal.aborted) controller.abort(stopReason('Drift watcher stopped'));
         await work;
         const done = [];
         for (const follower of followers.values()) done.push(follower.done);

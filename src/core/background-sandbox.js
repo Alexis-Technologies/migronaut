@@ -1,4 +1,9 @@
-const { SandboxRefusedError, TransactionsUnsupportedError } = require('../errors/index.js');
+const {
+  BackgroundFailedError,
+  RunAbortedError,
+  SandboxRefusedError,
+  TransactionsUnsupportedError,
+} = require('../errors/index.js');
 const { isPlainObject } = require('../utils/canonical.js');
 const { errorText } = require('../utils/error.js');
 const { toRelaxedEjson } = require('./bson-peer.js');
@@ -220,9 +225,13 @@ function refuse(state, method, reason, collection) {
 /** Run `work` after every earlier operation — one at a time in one transaction */
 function serialized(state, work) {
   const run = state.queue.then(() => {
-    if (Date.now() > state.deadline) throw new Error('the dry run reached its deadline');
+    if (Date.now() > state.deadline) {
+      throw new RunAbortedError('the dry run reached its deadline', { reason: 'deadline' });
+    }
     if (state.failed !== undefined) {
-      throw new Error(`the transaction was aborted by ${errorText(state.failed)}`);
+      throw new BackgroundFailedError(`the transaction was aborted by ${errorText(state.failed)}`, {
+        reason: 'aborted',
+      });
     }
     return work();
   });

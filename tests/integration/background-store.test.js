@@ -357,6 +357,49 @@ describe('BackgroundStore — checkpoints, failures and roll-up (integration)', 
     assert.strictEqual((await store.partitions(NAME))[0].status, 'failed');
   });
 
+  it('should count failed slices in a row only: a checkpoint starts the count again', async () => {
+    const state = await planned(1);
+    for (let i = 1; i <= 5; i++) {
+      const { lease } = await store.claim(NAME, claimArgs(state));
+      // From the second slice on, each gets a batch through before it fails.
+      if (i > 1) await store.checkpoint(lease, { cursor: { at: i }, counters: { batches: 1 } });
+      const failed = await store.failSlice(lease, { error: `slice ${i}`, maxSliceFailures: 2 });
+      assert.strictEqual(failed, false, `slice ${i}`);
+    }
+    const [partition] = await store.partitions(NAME);
+    assert.strictEqual(partition.status, 'running');
+    assert.strictEqual(partition.failures, 1);
+    // Two in a row, though, fail it.
+    const { lease } = await store.claim(NAME, claimArgs(state));
+    assert.strictEqual(await store.failSlice(lease, { error: 'again', maxSliceFailures: 2 }), true);
+  });
+
+  it('should report progress — documents and batches, rolled up or not', async () => {
+    assert.deepStrictEqual(await store.progress(NAME), { migrated: 0, batches: 0 });
+    const state = await planned(1);
+    const { lease } = await store.claim(NAME, claimArgs(state));
+    await store.checkpoint(lease, { cursor: { at: 1 }, counters: { batches: 2, processed: 7 } });
+    assert.deepStrictEqual(await store.progress(NAME), { migrated: 0, batches: 2 });
+    await store.set(NAME, {
+      rolledGeneration: state.generation,
+      totals: { migrated: 4, batches: 3 },
+    });
+    assert.deepStrictEqual(await store.progress(NAME), { migrated: 4, batches: 3 });
+  });
+
+  it('should remove a state only while it still matches the filter', async () => {
+    const state = await planned(2);
+    assert.strictEqual(await store.remove(NAME, { filter: { generation: 0 } }), false);
+    assert.ok((await store.get(NAME)) !== null, 'a committed plan keeps it');
+    assert.strictEqual((await store.partitions(NAME)).length, 2);
+    assert.strictEqual(
+      await store.remove(NAME, { filter: { generation: state.generation } }),
+      true,
+    );
+    assert.strictEqual(await store.get(NAME), null);
+    assert.strictEqual((await store.partitions(NAME)).length, 0);
+  });
+
   it('should supersede open partitions and drop old generations and foreign plans', async () => {
     const state = await planned(3);
     const { lease } = await store.claim(NAME, claimArgs(state));

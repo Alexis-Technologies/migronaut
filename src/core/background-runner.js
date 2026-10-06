@@ -1,6 +1,7 @@
-const { ConfigInvalidError } = require('../errors/index.js');
+const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { sleep } = require('./background-throttle.js');
+const { assertSliceMs } = require('./background-spec.js');
 const { watchOptions } = require('./background-watch.js');
 const { MigratorKit } = require('./migrator.js');
 
@@ -47,6 +48,7 @@ function readOptions(options) {
       verifyIntervalMs,
     });
   }
+  if (options.sliceMs !== undefined) assertSliceMs(options.sliceMs);
   if (options.onError !== undefined && typeof options.onError !== 'function') {
     throw new ConfigInvalidError('onError must be a function');
   }
@@ -253,7 +255,13 @@ function startBackgroundRunner(options = {}) {
     },
     stop() {
       stopping ??= (async () => {
-        if (!signal.aborted) controller.abort(new Error('Background runner stopped'));
+        if (!signal.aborted) {
+          controller.abort(
+            new RunAbortedError('Background runner stopped', {
+              reason: 'Background runner stopped',
+            }),
+          );
+        }
         await (await watching)?.stop();
         await work;
         options.signal?.removeEventListener('abort', onOuterAbort);
