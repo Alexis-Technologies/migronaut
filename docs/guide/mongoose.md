@@ -183,7 +183,7 @@ The second argument is the collection definition — the same file converge read
 
 | | What the plugin does |
 |---|---|
-| **The revision** | Becomes the schema's `versionKey` (`__rev`), with `optimisticConcurrency: true`: every `save()` of a loaded document filters on the revision it was loaded at and bumps it, and a stale one throws Mongoose's `VersionError`. A document loaded without `__rev` is revision 0, guarded the same way |
+| **The revision** | Becomes the schema's `versionKey` (`__rev`), with `optimisticConcurrency: true`: every `save()` of a loaded document filters on the revision it was loaded at and bumps it, and a stale one throws Mongoose's `VersionError`. A document stored without `__rev` is revision 0, guarded the same way. One *loaded* without it — a projection that leaves `__rev` out — is refused on `save()` (`ConfigInvalidError`): Mongoose could neither guard nor bump it; select `__rev` too |
 | **New documents** | Stamped with `current` before validation, and again before save (validation can be skipped) — `create`, `save` and `insertMany` |
 | **The version path** | A `Number` with **no default**: Mongoose applies defaults to the documents it *loads*, which would mark a legacy document as current without upgrading it. A schema that gives the field a default is refused |
 | **Query updates** | `updateOne`, `updateMany` and `findOneAndUpdate` (and so `findByIdAndUpdate`) get `$inc: { __rev: 1 }` unless they write `__rev` themselves. With `upsert`, the version goes on `$setOnInsert` unless the update sets it, and an inserted document starts at revision 1 |

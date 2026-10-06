@@ -91,3 +91,20 @@ schema.plugin(versioningPlugin, { versioning: { current: 2 } });
 expectType<void>(versioningPlugin(schema, { current: 1, revision: false }));
 schema.plugin(shapes.plugin('orders'));
 expectError(versioningPlugin({}, { current: 1 }));
+
+// ─── Guards bound to one collection; revisions as the driver reads them ──────
+declare const longRevision: { toNumber(): number };
+expectType<Promise<RevisionWriteResult>>(
+  updateWithRevision(orders, { _id: 1 }, longRevision, { $set: { status: 'paid' } }),
+);
+expectType<Promise<RevisionWriteResult>>(
+  updateWithRevision(orders, { _id: 1 }, 3n, { $set: { status: 'paid' } }),
+);
+const boundShapes = defineShapes({ orders: { versioning: { current: 2, revisionField: 'rev' } } });
+const bound = boundShapes.occ('orders');
+expectType<Promise<RevisionWriteResult>>(
+  bound.updateWithRevision(orders, { _id: 1 }, 0, { $set: { status: 'paid' } }, { version: 2 }),
+);
+expectType<{ $set: { status: string } }>(bound.bumpRevision({ $set: { status: 'x' } }));
+expectError(bound.updateWithRevision(orders, { _id: 1 }, 0, {}, { revisionField: 'other' }));
+expectError(boundShapes.occ('customers'));

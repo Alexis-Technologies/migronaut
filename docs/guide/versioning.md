@@ -150,8 +150,14 @@ await updateWithRevision(orders, { _id }, order.__rev ?? 0, { $set: { status: 'p
 ```
 
 The write matches `{ _id, __rev: <the revision you read> }` and adds `$inc: { __rev: 1 }`. The
-expected revision must be a number — pass `order.__rev ?? 0` for a document without one: expected
-revision 0 also matches a missing or `null` `__rev`. If the write matches nothing, someone wrote in
+expected revision is a non-negative integer — a number, or the `Int32`, `Long` or bigint the driver
+hands back with `promoteValues: false` or `useBigInt64`. Pass `order.__rev ?? 0` for a document
+without one: expected revision 0 also matches a missing or `null` `__rev`.
+
+**The filter must name one document.** A revision guards one write to one document: `_id` given as
+an operator (`{ $ne: null }` from a request body, say) is refused — a plain `$eq` aside — and a
+filter on other fields must be unique (`{ tenantId, slug }` with its unique index). Every legacy
+document is at revision 0, so a filter that matches several would update whichever comes first. If the write matches nothing, someone wrote in
 between or the document is gone, and it throws `RevisionConflictError` (`REVISION_CONFLICT`). To
 say which, it reads the document once more and sets `context.reason`:
 
@@ -173,16 +179,30 @@ data.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `field`, `revisionField` | `'__v'`, `'__rev'` | The field names — the helpers do not read your definition, so pass custom names here |
+| `field`, `revisionField` | `'__v'`, `'__rev'` | The field names — the helpers do not read your definition, so pass custom names here, or take them bound from it: `shapes.occ('orders')` (below). `field` matters only with `version`: naming only `revisionField: '__v'` (Mongoose's version key kept as the revision) is fine |
 | `version` | — | Also set the version field to this: an upgrade written on the way |
 | `verify` | `true` | On a miss, read the document once more to say why; `false` reports `unknown` |
 
-Everything else goes to the driver — `session` (the follow-up read uses it too), `hint`,
-`collation`, `arrayFilters`, … Refused with `ConfigInvalidError` before anything is sent:
+Everything else goes to the driver — `session`, `hint`, `collation` and `let` (the follow-up read
+takes them too, on the primary, so it matches the way the write did), `arrayFilters`, … A write
+that comes back unacknowledged (`w: 0` from the collection's or the client's defaults) is refused
+after the fact: without a match count a conflict cannot be told from a success. Refused with
+`ConfigInvalidError` before anything is sent:
 `upsert: true` (a miss would insert a second document instead of reporting the conflict), `w: 0` (a
 conflict could not be seen), a filter that already constrains `__rev`, an update that writes `__rev`
 itself — or `__v` while `version` is given — and, for the two update helpers, a replacement document
 or a pipeline that projects or replaces the root.
+
+**Bound to a collection.** `shapes.occ('orders')` returns the three helpers and `bumpRevision`
+with the collection's own field names — a custom `revisionField` cannot be forgotten in one call
+(the filter `{ __rev: … }` would then match every document, none of which has `__rev`):
+
+```js
+const orderGuards = shapes.occ('orders');
+await orderGuards.updateWithRevision(orders, { _id }, order.rev, { $set: { status: 'paid' } });
+```
+
+A call that names other field names is refused, and so is a collection with `revision: false`.
 
 ::: warning A replacement is the whole document
 `replaceWithRevision` writes exactly what you pass, plus the new revision. Carry the version field
@@ -282,8 +302,12 @@ explicit `upcast` keeps the cost where you can see it.
   - `'below-min'` — it is older than the oldest step;
   - `'invalid'` — its version field is not a non-negative integer, or a step returned something that
     is not a document.
-- **`needsUpcast(doc)`** says whether `upcast` would change the document; **`step(from, to)`** spans
-  several versions at once.
+- **`needsUpcast(doc)`** says whether `upcast` would change the document (not for `null`);
+  **`step(from, to)`** spans several versions at once. A document that is not a plain object — a
+  hydrated Mongoose document — is refused by `upcast`, `needsUpcast` and `isVersion` alike: its
+  fields are not its own properties, and a silent "no" would leave it in its old shape. Read it with
+  `.lean()`, or call `.toObject()`.
+- A step may return a frozen object: the helper stamps a copy.
 
 ## Typed shapes
 

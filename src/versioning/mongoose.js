@@ -92,6 +92,16 @@ function applyVersioningPlugin(schema, versioning) {
   // migration's rewrite in between would be silently overwritten.
   schema.pre('save', function guardLegacy() {
     if (this.isNew) return;
+    // Loaded without its revision (a projection): Mongoose would neither
+    // guard the save nor bump the revision — and "not selected" is not
+    // "legacy". Refused, rather than a write an optimistic filter cannot see.
+    if (typeof this.isSelected === 'function' && !this.isSelected(revisionField)) {
+      throw new ConfigInvalidError(
+        `versioningPlugin: this document was loaded without "${revisionField}" — select it ` +
+          '(or every field) to save it',
+        { field: revisionField },
+      );
+    }
     const where = isPlainObject(this.$where) ? { ...this.$where } : {};
     if (this.get(revisionField) == null) where[revisionField] = { $in: [null, 0] };
     else delete where[revisionField];

@@ -135,7 +135,7 @@ describe('updateWithRevision', () => {
     assert.deepStrictEqual(orders.calls[1], [
       'findOne',
       { email: 'pii@example.com' },
-      { projection: { __rev: 1 }, session: 's' },
+      { projection: { __rev: 1 }, readPreference: 'primary', session: 's' },
     ]);
   });
 
@@ -445,5 +445,104 @@ describe('isVersion and the typed form of defineShapes', () => {
     assert.ok(typed.isVersion('orders', { __v: 1 }, 1));
     assert.ok(!typed.isVersion('orders', { __v: 1 }, 2));
     assert.throws(() => defineShapes(undefined), ConfigInvalidError);
+  });
+});
+
+describe('revision guards — hardening', () => {
+  it('should refuse an _id given as an operator, and take a plain $eq', async () => {
+    const orders = fakeCollection();
+    for (const _id of [{ $ne: null }, { $in: [1, 2] }, { $eq: { $gt: 1 } }]) {
+      await assert.rejects(
+        updateWithRevision(orders, { _id }, 0, { $set: { a: 1 } }),
+        (error) => error instanceof ConfigInvalidError && /operator/.test(error.message),
+      );
+    }
+    await updateWithRevision(orders, { _id: { $eq: 7 } }, 0, { $set: { a: 1 } });
+    assert.deepStrictEqual(orders.calls.at(-1)[1], { _id: { $eq: 7 }, __rev: { $in: [null, 0] } });
+  });
+
+  it('should take only a revision field — Mongoose keeping __v as its revision', async () => {
+    const orders = fakeCollection();
+    await updateWithRevision(orders, { _id: 1 }, 3, { $set: { a: 1 } }, { revisionField: '__v' });
+    assert.deepStrictEqual(orders.calls.at(-1)[1], { _id: 1, __v: 3 });
+    assert.deepStrictEqual(orders.calls.at(-1)[2], { $set: { a: 1 }, $inc: { __v: 1 } });
+    assert.deepStrictEqual(bumpRevision({ $set: { a: 1 } }, { revisionField: '__v' }), {
+      $set: { a: 1 },
+      $inc: { __v: 1 },
+    });
+    // Setting the version too needs two different fields.
+    await assert.rejects(
+      updateWithRevision(orders, { _id: 1 }, 3, {}, { revisionField: '__v', version: 2 }),
+      /must differ/,
+    );
+  });
+
+  it('should take a revision read as a Long, an Int32 or a bigint', async () => {
+    const { Int32, Long } = require('mongodb');
+    const orders = fakeCollection();
+    for (const revision of [Long.fromNumber(5), new Int32(5), 5n]) {
+      const result = await updateWithRevision(orders, { _id: 1 }, revision, { $set: { a: 1 } });
+      assert.strictEqual(result.revision, 6);
+      assert.deepStrictEqual(orders.calls.at(-1)[1], { _id: 1, __rev: 5 });
+    }
+    await assert.rejects(updateWithRevision(orders, { _id: 1 }, -1n, {}), /expectedRevision/);
+  });
+
+  it('should refuse a write the server did not acknowledge', async () => {
+    const orders = fakeCollection();
+    orders.updateOne = async () => ({ acknowledged: false });
+    await assert.rejects(
+      updateWithRevision(orders, { _id: 1 }, 0, { $set: { a: 1 } }),
+      /acknowledged/,
+    );
+  });
+
+  it('should re-read a miss the way the write matched', async () => {
+    const orders = fakeCollection({ matched: false, current: { __rev: 9 } });
+    const collation = { locale: 'en', strength: 2 };
+    await assert.rejects(
+      updateWithRevision(orders, { email: 'A@B' }, 1, { $set: { a: 1 } }, { collation, hint: 'h' }),
+      conflict('conflict', { actual: 9 }),
+    );
+    assert.deepStrictEqual(orders.calls[1][2], {
+      projection: { __rev: 1 },
+      readPreference: 'primary',
+      collation,
+      hint: 'h',
+    });
+  });
+
+  it('should name the version when it is the version that is wrong', async () => {
+    await assert.rejects(
+      replaceWithRevision(fakeCollection(), { _id: 1 }, 0, { a: 1 }, { version: -1 }),
+      /^ConfigInvalidError: version must be/,
+    );
+  });
+});
+
+describe('shapes.occ — guards bound to a collection', () => {
+  const shapes = defineShapes({
+    orders: { versioning: { current: 2, field: 'schemaVersion', revisionField: 'rev' } },
+    flat: { versioning: { current: 1, revision: false } },
+  });
+
+  it('should write with the collection field names, whatever the call forgets', async () => {
+    const orders = fakeCollection();
+    const occ = shapes.occ('orders');
+    await occ.updateWithRevision(orders, { _id: 1 }, 2, { $set: { a: 1 } }, { version: 2 });
+    const [, filter, update] = orders.calls.at(-1);
+    assert.deepStrictEqual(filter, { _id: 1, rev: 2 });
+    assert.deepStrictEqual(update, { $set: { a: 1, schemaVersion: 2 }, $inc: { rev: 1 } });
+    await occ.replaceWithRevision(orders, { _id: 1 }, 0, { a: 1 });
+    assert.deepStrictEqual(orders.calls.at(-1)[2], { a: 1, rev: 1 });
+    assert.deepStrictEqual(occ.bumpRevision({ $set: { a: 1 } }), {
+      $set: { a: 1 },
+      $inc: { rev: 1 },
+    });
+    await assert.rejects(
+      occ.updateWithRevision(orders, { _id: 1 }, 0, {}, { revisionField: '__rev' }),
+      /take no other/,
+    );
+    assert.throws(() => shapes.occ('flat'), /revision: false/);
   });
 });

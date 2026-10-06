@@ -363,6 +363,37 @@ export async function down() {}
     );
   });
 
+  it('should keep the values a duplicate key quotes out of its state, errors and logs', async () => {
+    const orders = mongo.db.collection('orders');
+    await orders.createIndex({ email: 1 }, { unique: true, sparse: true });
+    await orders.insertMany([
+      { __v: 1, __rev: 0, i: 0 },
+      { __v: 2, __rev: 0, email: 'taken@example.com' },
+    ]);
+    const lines = [];
+    const capture = (level) => (message, fields) =>
+      lines.push(`${level} ${message} ${JSON.stringify(fields ?? {})}`);
+    const kit = kitWith({
+      logger: {
+        debug: capture('debug'),
+        info: capture('info'),
+        warn: capture('warn'),
+        error: capture('error'),
+      },
+    });
+    project.write(NAME, spec(`migrate: (doc) => ({ ...doc, email: 'taken@example.com' }),`));
+    await kit.up();
+    let thrown;
+    await kit.runBackground(NAME).catch((error) => {
+      thrown = error;
+    });
+    assert.ok(thrown, 'the duplicate fails it (maxDocumentErrors: 0)');
+    const state = await mongo.db.collection('_migronaut_background').findOne({ _id: NAME });
+    const kept = JSON.stringify({ state, message: thrown.message, context: thrown.context, lines });
+    assert.match(kept, /E11000/, 'the constraint is still named');
+    assert.ok(!kept.includes('taken@example.com'), 'no document value anywhere');
+  });
+
   it('should refuse a slice length that would never make progress', async () => {
     const kit = kitWith();
     for (const sliceMs of [0, -1, Number.NaN, '1000', 3_600_001]) {

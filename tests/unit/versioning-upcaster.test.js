@@ -53,7 +53,21 @@ describe('upcaster', () => {
     assert.strictEqual(upcaster(orders, steps).upcast(doc), doc);
     assert.ok(!upcaster(orders, steps).needsUpcast(doc));
     assert.ok(upcaster(orders, steps).needsUpcast({ __v: 2 }));
-    assert.ok(!upcaster(orders, steps).needsUpcast('x'));
+    // Nothing to upcast for a missing document; a non-plain one is refused —
+    // a hydrated Mongoose document would otherwise read as current.
+    assert.ok(!upcaster(orders, steps).needsUpcast(null));
+    assert.throws(() => upcaster(orders, steps).needsUpcast('x'), shapeError('invalid'));
+    class Hydrated {
+      __v = 1;
+    }
+    assert.throws(() => upcaster(orders, steps).needsUpcast(new Hydrated()), /lean/);
+  });
+
+  it('should stamp a step that returns a frozen document', () => {
+    const frozen = upcaster(orders, { ...steps, 2: (doc) => Object.freeze({ ...doc, v3: true }) });
+    const lifted = frozen.upcast({ __v: 2 });
+    assert.strictEqual(lifted.__v, 3);
+    assert.strictEqual(lifted.v3, true);
   });
 
   it('should refuse a newer document unless told to keep it', () => {

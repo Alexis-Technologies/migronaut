@@ -37,6 +37,8 @@ function fieldNameIssue(name) {
   if (name.includes('.')) return "must be a top-level field (no '.')";
   if (name.includes('\0')) return 'must not contain NUL';
   if (name === '_id') return 'must not be _id';
+  // As a JavaScript key it names the prototype: every write of it would be lost.
+  if (name === '__proto__') return 'must not be __proto__';
   return null;
 }
 

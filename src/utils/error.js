@@ -1,5 +1,5 @@
 const { MigronautError } = require('../errors/index.js');
-const { redactUris } = require('./redact.js');
+const { redactOutbound, redactUris } = require('./redact.js');
 
 /**
  * Human-readable message from any thrown value, with URI credentials masked.
@@ -25,4 +25,13 @@ function errorWithCause(error) {
   return cause ? `${message} — ${cause}` : message;
 }
 
-module.exports = { errorText, errorWithCause };
+/**
+ * {@link errorText} for an error about the application's data — a background
+ * migration's document errors and failed slices, kept in its state and
+ * logged: the values a server error quotes (an E11000's duplicate key — an
+ * email, a phone number) are masked too. Migronaut never logs a document's
+ * contents; the index name still says which constraint was violated.
+ */
+const documentErrorText = (error) => redactOutbound(errorText(error));
+
+module.exports = { documentErrorText, errorText, errorWithCause };

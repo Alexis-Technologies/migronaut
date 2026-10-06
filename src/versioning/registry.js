@@ -3,6 +3,12 @@ const { resolveVersioning } = require('./config.js');
 const { stampDocument, versionOf } = require('./document.js');
 const { isPlainObject, touchedFields } = require('./internal.js');
 const { applyVersioningPlugin } = require('./mongoose.js');
+const {
+  bumpRevision,
+  findOneAndUpdateWithRevision,
+  replaceWithRevision,
+  updateWithRevision,
+} = require('./occ.js');
 const { createUpcaster } = require('./upcaster.js');
 
 /**
@@ -109,6 +115,45 @@ function defineShapes(definitions) {
     /** An upcaster over this collection's versioning — see upcaster.js */
     upcaster: (name, steps, options) =>
       createUpcaster(get(name), steps, { ...options, collection: name }),
+    /**
+     * The revision guards bound to this collection's field names, so no call
+     * can forget them — a custom `revisionField` left out of one write would
+     * guard nothing (no document has `__rev`, so the filter matches them all).
+     */
+    occ: (name) => {
+      const { field, revisionField } = get(name);
+      if (revisionField === null) {
+        throw new ConfigInvalidError(
+          `"${name}" declares revision: false — it has no revision to guard`,
+          { collection: name },
+        );
+      }
+      const bound = (options = {}) => {
+        if (!isPlainObject(options)) throw new ConfigInvalidError('options must be an object');
+        for (const [key, value] of [
+          ['field', field],
+          ['revisionField', revisionField],
+        ]) {
+          if (options[key] !== undefined && options[key] !== value) {
+            throw new ConfigInvalidError(
+              `${name}: ${key} is "${value}" — the guards bound to it take no other`,
+              { collection: name, [key]: options[key] },
+            );
+          }
+        }
+        return { ...options, field, revisionField };
+      };
+      return Object.freeze({
+        // Async, like the helpers: a refused option rejects, it does not throw.
+        updateWithRevision: async (collection, filter, expected, update, options) =>
+          updateWithRevision(collection, filter, expected, update, bound(options)),
+        replaceWithRevision: async (collection, filter, expected, replacement, options) =>
+          replaceWithRevision(collection, filter, expected, replacement, bound(options)),
+        findOneAndUpdateWithRevision: async (collection, filter, expected, update, options) =>
+          findOneAndUpdateWithRevision(collection, filter, expected, update, bound(options)),
+        bumpRevision: (update) => bumpRevision(update, { revisionField }),
+      });
+    },
     /** `stamp` for one document or every document of an array — for `insertMany` */
     onInsert: (name, docs) =>
       Array.isArray(docs) ? docs.map((doc) => stamp(name, doc)) : stamp(name, docs),

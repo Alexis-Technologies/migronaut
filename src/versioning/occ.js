@@ -1,6 +1,12 @@
 const { ConfigInvalidError, RevisionConflictError } = require('../errors/index.js');
-const { resolveFieldNames, revisionFilter, revisionOf, stampedUpdate } = require('./document.js');
-const { filterTouches, isPlainObject } = require('./internal.js');
+const {
+  resolveFieldNames,
+  resolveRevisionField,
+  revisionFilter,
+  revisionOf,
+  stampedUpdate,
+} = require('./document.js');
+const { filterTouches, isPlainObject, toCount } = require('./internal.js');
 
 /**
  * Optimistic concurrency for a repository layer: a write that only lands if
@@ -20,6 +26,9 @@ const { filterTouches, isPlainObject } = require('./internal.js');
 
 /** Options of ours, kept away from the driver */
 const OWN_OPTIONS = new Set(['field', 'revisionField', 'version', 'verify']);
+
+/** The write's options its explaining re-read takes along, to match the same way */
+const REREAD_OPTIONS = ['session', 'collation', 'hint', 'let'];
 
 /** `{ names, version, verify, driverOptions }` from the caller's options */
 function splitOptions(options = {}) {
@@ -41,21 +50,57 @@ function splitOptions(options = {}) {
         'cannot be seen',
     );
   }
-  const names = resolveFieldNames({ field: options.field, revisionField: options.revisionField });
+  // The version field matters only to a write that sets the version.
+  const names =
+    options.version === undefined && options.field === undefined
+      ? { field: null, revisionField: resolveRevisionField(options.revisionField) }
+      : resolveFieldNames({ field: options.field, revisionField: options.revisionField });
+  if (options.version !== undefined) assertCount(options.version, 'version');
   return { names, version: options.version, verify: options.verify !== false, driverOptions };
 }
 
-function assertRevision(expected) {
-  if (!Number.isSafeInteger(expected) || expected < 0) {
-    throw new ConfigInvalidError('expectedRevision must be an integer ≥ 0', {
-      expectedRevision: expected,
-    });
+function assertCount(value, what) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new ConfigInvalidError(`${what} must be an integer ≥ 0`, { [what]: value });
   }
 }
 
-/** The caller's filter, refused if it already constrains the revision, plus ours */
+/**
+ * The revision the caller read, as a number: an Int32, a Long or a bigint
+ * (a document read with `promoteValues: false`, or `useBigInt64`) counts too.
+ */
+function expectedOf(expected) {
+  const count = toCount(expected);
+  if (count === null) {
+    throw new ConfigInvalidError('expectedRevision must be an integer ≥ 0', {
+      expectedRevision: typeof expected,
+    });
+  }
+  return count;
+}
+
+/** An `_id` given as an operator — anything but a single `$eq` of a value */
+function operatorId(id) {
+  if (!isPlainObject(id)) return false;
+  const keys = Object.keys(id);
+  if (keys.length === 1 && keys[0] === '$eq') return operatorId(id.$eq);
+  for (const key of keys) if (key.startsWith('$')) return true;
+  return false;
+}
+
+/**
+ * The caller's filter, refused if it already constrains the revision, plus
+ * ours. A revision guards one document: an `_id` given as an operator
+ * (`{ $ne: null }` from a request body, say) would let it land on whichever
+ * document is at that revision — every legacy one is at 0 — so it is refused.
+ */
 function guardedFilter(filter, names, expected) {
   if (!isPlainObject(filter)) throw new ConfigInvalidError('filter must be an object');
+  if (operatorId(filter._id)) {
+    throw new ConfigInvalidError(
+      'filter._id must be a value, not an operator — a revision guards one document',
+    );
+  }
   if (filterTouches(filter, names.revisionField)) {
     throw new ConfigInvalidError(
       `The filter must not constrain "${names.revisionField}" — pass the revision as ` +
@@ -71,15 +116,18 @@ function guardedFilter(filter, names, expected) {
  * cannot be told (`unknown` — the read was turned off, or it failed). The
  * filter itself never goes into the error: it may carry PII.
  */
-async function conflictError(collection, filter, names, expected, { verify, session }) {
+async function conflictError(collection, filter, names, expected, { verify, driverOptions }) {
   const context = { expected, reason: 'unknown' };
   if (collection?.collectionName !== undefined) context.collection = collection.collectionName;
   if (verify) {
     try {
-      const current = await collection.findOne(filter, {
-        projection: { [names.revisionField]: 1 },
-        ...(session !== undefined ? { session } : {}),
-      });
+      // Matched the way the write matched (its collation, hint, variables),
+      // on the primary: a secondary may not have seen the write that won.
+      const read = { projection: { [names.revisionField]: 1 }, readPreference: 'primary' };
+      for (const key of REREAD_OPTIONS) {
+        if (driverOptions[key] !== undefined) read[key] = driverOptions[key];
+      }
+      const current = await collection.findOne(filter, read);
       if (current === null || current === undefined) {
         context.reason = 'not-found';
       } else {
@@ -115,17 +163,29 @@ async function conflictError(collection, filter, names, expected, { verify, sess
  */
 async function updateWithRevision(collection, filter, expectedRevision, update, options) {
   const { names, version, verify, driverOptions } = splitOptions(options);
-  assertRevision(expectedRevision);
-  const guarded = guardedFilter(filter, names, expectedRevision);
+  const expected = expectedOf(expectedRevision);
+  const guarded = guardedFilter(filter, names, expected);
   const stamped = stampedUpdate(names, { to: version, update });
   const result = await collection.updateOne(guarded, stamped, driverOptions);
+  assertAcknowledged(result);
   if (result.matchedCount === 0) {
-    throw await conflictError(collection, filter, names, expectedRevision, {
-      verify,
-      session: driverOptions.session,
-    });
+    throw await conflictError(collection, filter, names, expected, { verify, driverOptions });
   }
-  return { ...result, revision: expectedRevision + 1 };
+  return { ...result, revision: expected + 1 };
+}
+
+/**
+ * An unacknowledged write (`w: 0` from the collection's or the client's
+ * defaults, which no option of the call shows) reports no match count — it
+ * cannot be told from a success, so it is refused after the fact.
+ */
+function assertAcknowledged(result) {
+  if (result?.acknowledged === false || typeof result?.matchedCount !== 'number') {
+    throw new ConfigInvalidError(
+      'A revision-guarded write needs an acknowledged write concern — this one was not ' +
+        "acknowledged (w: 0 from the collection's or the client's defaults?)",
+    );
+  }
 }
 
 /** A plain document none of whose top-level keys is an operator */
@@ -144,26 +204,21 @@ function isReplacement(value) {
  */
 async function replaceWithRevision(collection, filter, expectedRevision, replacement, options) {
   const { names, version, verify, driverOptions } = splitOptions(options);
-  assertRevision(expectedRevision);
+  const expected = expectedOf(expectedRevision);
   if (!isReplacement(replacement)) {
     throw new ConfigInvalidError(
       'The replacement must be a plain document without update operators',
     );
   }
-  const guarded = guardedFilter(filter, names, expectedRevision);
-  const document = { ...replacement, [names.revisionField]: expectedRevision + 1 };
-  if (version !== undefined) {
-    assertRevision(version);
-    document[names.field] = version;
-  }
+  const guarded = guardedFilter(filter, names, expected);
+  const document = { ...replacement, [names.revisionField]: expected + 1 };
+  if (version !== undefined) document[names.field] = version;
   const result = await collection.replaceOne(guarded, document, driverOptions);
+  assertAcknowledged(result);
   if (result.matchedCount === 0) {
-    throw await conflictError(collection, filter, names, expectedRevision, {
-      verify,
-      session: driverOptions.session,
-    });
+    throw await conflictError(collection, filter, names, expected, { verify, driverOptions });
   }
-  return { ...result, revision: expectedRevision + 1 };
+  return { ...result, revision: expected + 1 };
 }
 
 /**
@@ -176,8 +231,8 @@ async function replaceWithRevision(collection, filter, expectedRevision, replace
  */
 async function findOneAndUpdateWithRevision(collection, filter, expectedRevision, update, options) {
   const { names, version, verify, driverOptions } = splitOptions(options);
-  assertRevision(expectedRevision);
-  const guarded = guardedFilter(filter, names, expectedRevision);
+  const expected = expectedOf(expectedRevision);
+  const guarded = guardedFilter(filter, names, expected);
   const stamped = stampedUpdate(names, { to: version, update });
   const result = await collection.findOneAndUpdate(guarded, stamped, {
     returnDocument: 'after',
@@ -186,10 +241,7 @@ async function findOneAndUpdateWithRevision(collection, filter, expectedRevision
   });
   const value = result?.value ?? null;
   if (value === null) {
-    throw await conflictError(collection, filter, names, expectedRevision, {
-      verify,
-      session: driverOptions.session,
-    });
+    throw await conflictError(collection, filter, names, expected, { verify, driverOptions });
   }
   return value;
 }
@@ -251,7 +303,10 @@ async function retryOnConflict(fn, { attempts = 3, backoff, signal } = {}) {
  * filter — the application's, or a background migration's — cannot see.
  */
 function bumpRevision(update, { revisionField } = {}) {
-  return stampedUpdate(resolveFieldNames({ revisionField }), { update });
+  return stampedUpdate(
+    { field: null, revisionField: resolveRevisionField(revisionField) },
+    { update },
+  );
 }
 
 module.exports = {

@@ -4,6 +4,7 @@ const {
   cloneDocument,
   isPlainObject,
   sameValue,
+  setOwn,
   toCount,
   touchedFields,
 } = require('./internal.js');
@@ -64,9 +65,39 @@ const versionOf = (doc, field = VERSIONING_DEFAULTS.field) => countOf(doc, field
 const revisionOf = (doc, revisionField = VERSIONING_DEFAULTS.revisionField) =>
   countOf(doc, revisionField);
 
-/** Whether `doc` is at exactly `version` — a missing or `null` field is version 0 */
+/**
+ * Whether `doc` is at exactly `version` — a missing or `null` field is
+ * version 0. A document that is not a plain object (a hydrated Mongoose
+ * document) is refused: its fields are not its own properties, and a silent
+ * `false` would read as "an old shape".
+ */
 function isVersion(doc, version, { field = VERSIONING_DEFAULTS.field } = {}) {
+  if (doc === null || doc === undefined) return false;
+  assertPlainDocument(doc);
   return versionOf(doc, field) === version;
+}
+
+/** A plain document, or a ConfigInvalidError that says how to get one */
+function assertPlainDocument(doc) {
+  if (!isPlainObject(doc)) {
+    throw new ConfigInvalidError(
+      'A plain document is expected — read it with .lean(), or call .toObject() on a Mongoose ' +
+        'document',
+    );
+  }
+}
+
+/**
+ * The revision field alone, validated (`__rev` by default) — for a write
+ * that never sets the version, whose field name it then has no use for: a
+ * caller naming only its revision field (`__v`, as a Mongoose app may keep
+ * it) is not refused over a version field it never touches.
+ */
+function resolveRevisionField(revisionField) {
+  const name = revisionField ?? VERSIONING_DEFAULTS.revisionField;
+  const issue = fieldNameIssue(name);
+  if (issue) throw new ConfigInvalidError(`revisionField ${issue}`, { key: 'revisionField' });
+  return name;
 }
 
 /** The revision after one more write */
@@ -118,11 +149,13 @@ const versionIndexKey = (names) => ({ [names.field]: 1, _id: 1 });
 function occFilter(prev, names, { from } = {}) {
   const version = from ?? versionOf(prev, names.field);
   const filter = { _id: prev._id };
-  if (version === null) filter[names.field] = prev[names.field];
+  // A value that is not a count is matched as it is stored — `$eq`, so a
+  // stored object with `$`-keys is never read as an operator.
+  if (version === null) filter[names.field] = { $eq: prev[names.field] };
   else Object.assign(filter, countFilter(names.field, version));
   if (names.revisionField !== null) {
     const revision = revisionOf(prev, names.revisionField);
-    if (revision === null) filter[names.revisionField] = prev[names.revisionField];
+    if (revision === null) filter[names.revisionField] = { $eq: prev[names.revisionField] };
     else Object.assign(filter, countFilter(names.revisionField, revision));
   }
   return filter;
@@ -181,14 +214,14 @@ function stampedDiff(prev, next, names, { to }) {
     if (issue) throw invalidShape(issue, { field: key });
     const value = next[key];
     if (value === undefined) {
-      if (Object.hasOwn(prev, key)) $unset[key] = '';
+      if (Object.hasOwn(prev, key)) setOwn($unset, key, '');
     } else if (!Object.hasOwn(prev, key) || !sameValue(prev[key], value)) {
-      $set[key] = value;
+      setOwn($set, key, value);
     }
   }
   for (const key of Object.keys(prev)) {
     if (key === '_id' || key === field || key === revisionField) continue;
-    if (!Object.hasOwn(next, key)) $unset[key] = '';
+    if (!Object.hasOwn(next, key)) setOwn($unset, key, '');
   }
   if (to === 0) $unset[field] = '';
   else $set[field] = to;
@@ -270,6 +303,7 @@ function stampDocument(doc, names, version) {
 }
 
 module.exports = {
+  assertPlainDocument,
   belowVersionFilter,
   cloneDocument,
   fieldNameIssue,
@@ -277,6 +311,7 @@ module.exports = {
   nextRevision,
   occFilter,
   resolveFieldNames,
+  resolveRevisionField,
   revisionFilter,
   revisionOf,
   sameValue,

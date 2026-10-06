@@ -79,8 +79,8 @@ function runStep(step, doc, from, versioning, context) {
       version: from,
     });
   }
-  next[versioning.field] = from + 1;
-  return next;
+  // A copy, not an assignment: a step may return a frozen object.
+  return { ...next, [versioning.field]: from + 1 };
 }
 
 /**
@@ -132,7 +132,10 @@ function createUpcaster(versioning, steps, { newer = 'throw', collection } = {})
    */
   const upcast = (doc) => {
     if (!isPlainObject(doc)) {
-      throw shapeError('Only a document can be upcast', { ...base, reason: 'invalid' });
+      throw shapeError(
+        'Only a plain document can be upcast — read it with .lean(), or call .toObject()',
+        { ...base, reason: 'invalid' },
+      );
     }
     const version = versionChecked(doc);
     if (version === current) return doc;
@@ -147,8 +150,21 @@ function createUpcaster(versioning, steps, { newer = 'throw', collection } = {})
     return lift(doc, version, current);
   };
 
-  /** Whether `upcast` would change the document */
-  const needsUpcast = (doc) => isPlainObject(doc) && versionChecked(doc) < current;
+  /**
+   * Whether `upcast` would change the document. Not one for a missing
+   * document; a document that is not a plain object (a hydrated Mongoose
+   * one) is refused — a silent `false` would leave it unread in its old shape.
+   */
+  const needsUpcast = (doc) => {
+    if (doc === null || doc === undefined) return false;
+    if (!isPlainObject(doc)) {
+      throw shapeError(
+        'Only a plain document can be upcast — read it with .lean(), or call .toObject()',
+        { ...base, reason: 'invalid' },
+      );
+    }
+    return versionChecked(doc) < current;
+  };
 
   /**
    * The transformation from `from` to `to` (default `from + 1`) as a

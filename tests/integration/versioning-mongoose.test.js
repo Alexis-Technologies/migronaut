@@ -77,6 +77,20 @@ describe('versioningPlugin with mongoose (integration)', () => {
     assert.strictEqual((await raw({ _id: other })).name, 'b');
   });
 
+  it('should refuse to save a document loaded without its revision', async () => {
+    const Order = orderModel();
+    const created = await Order.create({ name: 'a' });
+    const partial = await Order.findById(created._id).select('name');
+    partial.name = 'b';
+    await assert.rejects(partial.save(), /loaded without "__rev"/);
+    assert.strictEqual((await raw({ _id: created._id })).name, 'a', 'nothing written');
+    // Selected (or everything), it saves — guarded and bumped.
+    const whole = await Order.findById(created._id).select('name __rev');
+    whole.name = 'c';
+    await whole.save();
+    assert.strictEqual((await raw({ _id: created._id })).__rev, 1);
+  });
+
   it('should bump the revision of updates and stamp upserted documents', async () => {
     const Order = orderModel();
     const created = await Order.create({ name: 'a' });

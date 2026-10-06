@@ -150,8 +150,26 @@ function cloneDocument(value) {
   if (value instanceof Date) return new Date(value.getTime());
   if (!isPlainObject(value)) return value;
   const out = {};
-  for (const key of Object.keys(value)) out[key] = cloneDocument(value[key]);
+  for (const key of Object.keys(value)) setOwn(out, key, cloneDocument(value[key]));
   return out;
+}
+
+/**
+ * `target[key] = value` as an own, enumerable property — `__proto__` too,
+ * which a plain assignment would turn into the object's prototype (a stored
+ * field of that name is data, as the BSON parser reads it).
+ */
+function setOwn(target, key, value) {
+  if (key === '__proto__') {
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  } else {
+    target[key] = value;
+  }
 }
 
 /** `a.b.c` → `a`; `$[]`-style paths keep their first segment too */
@@ -236,6 +254,7 @@ module.exports = {
   filterTouches,
   isPlainObject,
   sameValue,
+  setOwn,
   toCount,
   topField,
   touchedFields,

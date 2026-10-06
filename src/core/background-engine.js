@@ -4,7 +4,7 @@ const {
   LockLostError,
 } = require('../errors/index.js');
 const { canonical, isPlainObject } = require('../utils/canonical.js');
-const { errorText } = require('../utils/error.js');
+const { documentErrorText } = require('../utils/error.js');
 const {
   cloneDocument,
   occFilter,
@@ -81,7 +81,7 @@ function transformContext(job, extra = {}) {
 
 const docError = (doc, error, reason) => ({
   id: doc._id,
-  error: errorText(error),
+  error: documentErrorText(error),
   ...(reason !== undefined ? { reason } : {}),
 });
 
@@ -632,7 +632,7 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
       if (size === 1 && docs.length === 1) {
         const [doc] = docs;
         if (timeOrSize) {
-          excluded.set(idKey(doc._id), docError(doc, errorText(error), 'transaction'));
+          excluded.set(idKey(doc._id), docError(doc, error, 'transaction'));
           continue;
         }
         if (conflict) {

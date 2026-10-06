@@ -27,6 +27,7 @@ const {
   belowVersionFilter,
   cloneDocument,
   fieldNameIssue,
+  isVersion,
   nextRevision,
   occFilter,
   resolveFieldNames,
@@ -330,11 +331,16 @@ describe('document versions and revisions', () => {
       __rev: { $in: [null, 0] },
     });
     assert.deepStrictEqual(occFilter({ _id: id, __v: 1 }, noRevision), { _id: id, __v: 1 });
-    // A field that is not a count is matched exactly as it was read.
+    // A field that is not a count is matched exactly as it was read — as a
+    // value, never as an operator, even when it looks like one.
     assert.deepStrictEqual(occFilter({ _id: id, __v: 'x', __rev: 'y' }, names), {
       _id: id,
-      __v: 'x',
-      __rev: 'y',
+      __v: { $eq: 'x' },
+      __rev: { $eq: 'y' },
+    });
+    assert.deepStrictEqual(occFilter({ _id: id, __v: { $ne: null } }, noRevision), {
+      _id: id,
+      __v: { $eq: { $ne: null } },
     });
   });
 
@@ -469,5 +475,44 @@ describe('stampedUpdate', () => {
     assert.doesNotThrow(() => stampedUpdate(names, { update: { $set: { __v: 1 } } }));
     assert.throws(() => stampedUpdate(names, { update: 'x' }), ConfigInvalidError);
     assert.throws(() => stampedUpdate(names, { to: 1.5, update: {} }), ConfigInvalidError);
+  });
+});
+
+describe('versioning — __proto__ and plain documents', () => {
+  it('should keep a stored __proto__ field as data, in a copy and in a diff', () => {
+    const stored = JSON.parse('{ "_id": 1, "__v": 1, "__proto__": { "role": "admin" } }');
+    const copy = cloneDocument(stored);
+    assert.ok(Object.hasOwn(copy, '__proto__'));
+    assert.strictEqual(Object.getPrototypeOf(copy), Object.prototype);
+    assert.strictEqual(copy.role, undefined, 'no field inherited from stored data');
+    const next = cloneDocument(stored);
+    Object.defineProperty(next, '__proto__', {
+      value: { role: 'user' },
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    const update = stampedDiff(stored, next, names, { to: 2 });
+    assert.ok(Object.hasOwn(update.$set, '__proto__'), 'the change is written, not lost');
+    assert.deepStrictEqual(Object.getOwnPropertyDescriptor(update.$set, '__proto__').value, {
+      role: 'user',
+    });
+    assert.match(fieldNameIssue('__proto__'), /__proto__/);
+  });
+
+  it('should refuse a document that is not a plain object, instead of a silent false', () => {
+    class Hydrated {
+      __v = 2;
+    }
+    assert.strictEqual(isVersion({ __v: 2 }, 2), true);
+    assert.strictEqual(isVersion(null, 0), false);
+    assert.throws(
+      () => isVersion(new Hydrated(), 2),
+      (error) => {
+        assert.ok(error instanceof ConfigInvalidError);
+        assert.match(error.message, /lean/);
+        return true;
+      },
+    );
   });
 });

@@ -73,10 +73,13 @@ export interface RevisionedCollectionLike {
  * Options of a revision-guarded write. Everything not listed here goes to the
  * driver (`session`, `hint`, `collation`, `arrayFilters`, …). `upsert` is
  * refused: a miss would insert a second document instead of reporting the
- * conflict — and so is an unacknowledged write (`w: 0`).
+ * conflict — and so is an unacknowledged write (`w: 0`). The filter must
+ * name one document: an `_id` given as an operator is refused (`$eq` of a
+ * value aside), and a filter on other fields must be unique — every legacy
+ * document is at revision 0.
  */
 export interface RevisionWriteOptions {
-  /** The version field. Default `'__v'` */
+  /** The version field — needed only with `version`. Default `'__v'` */
   field?: string;
   /** The revision field. Default `'__rev'` */
   revisionField?: string;
@@ -92,6 +95,12 @@ export interface RevisionWriteOptions {
   [driverOption: string]: unknown;
 }
 
+/**
+ * A revision as the driver may hand it back: a number, or — read with
+ * `promoteValues: false` or `useBigInt64` — an `Int32`, a `Long` or a bigint.
+ */
+export type RevisionValue = number | bigint | { toNumber(): number } | { valueOf(): number };
+
 /** The driver's result plus the document's new revision */
 export type RevisionWriteResult<R extends RevisionWriteResultLike = RevisionWriteResultLike> =
   R & { revision: number };
@@ -106,7 +115,7 @@ export type RevisionWriteResult<R extends RevisionWriteResultLike = RevisionWrit
 export function updateWithRevision(
   collection: RevisionedCollectionLike | Pick<RevisionedCollectionLike, 'updateOne' | 'findOne'>,
   filter: FilterLike,
-  expectedRevision: number,
+  expectedRevision: RevisionValue,
   update: UpdateLike,
   options?: RevisionWriteOptions,
 ): Promise<RevisionWriteResult>;
@@ -120,7 +129,7 @@ export function updateWithRevision(
 export function replaceWithRevision(
   collection: RevisionedCollectionLike | Pick<RevisionedCollectionLike, 'replaceOne' | 'findOne'>,
   filter: FilterLike,
-  expectedRevision: number,
+  expectedRevision: RevisionValue,
   replacement: Record<string, unknown>,
   options?: RevisionWriteOptions,
 ): Promise<RevisionWriteResult>;
@@ -137,7 +146,7 @@ export function findOneAndUpdateWithRevision<TDocument = Record<string, unknown>
     | RevisionedCollectionLike
     | Pick<RevisionedCollectionLike, 'findOneAndUpdate' | 'findOne'>,
   filter: FilterLike,
-  expectedRevision: number,
+  expectedRevision: RevisionValue,
   update: UpdateLike,
   options?: RevisionWriteOptions & { returnDocument?: 'before' | 'after' },
 ): Promise<TDocument>;
@@ -313,7 +322,8 @@ export type BackgroundMigrationFor<
 
 /**
  * Whether `doc` is at version `version` (a missing field is version 0) — a
- * type guard over a union of shapes.
+ * type guard over a union of shapes. A document that is not a plain object
+ * (a hydrated Mongoose document) is refused: read it with `.lean()`.
  */
 export function isVersion<D extends object, V extends number, F extends string = '__v'>(
   doc: D,
@@ -443,6 +453,45 @@ export interface ShapeRegistry<Name extends string = string> {
    * the update sets it) and the revision bumped.
    */
   stampUpsert<U extends Record<string, unknown>>(name: Name, update: U): U;
+  /**
+   * The revision guards bound to the collection's field names — no call can
+   * forget them. Refused for a collection declared with `revision: false`.
+   */
+  occ(name: Name): BoundRevisionGuards;
+}
+
+/** A bound guard's options: the field names are the collection's, never the call's */
+export type BoundRevisionWriteOptions = Omit<RevisionWriteOptions, 'field' | 'revisionField'> & {
+  field?: never;
+  revisionField?: never;
+};
+
+/** {@link ShapeRegistry.occ}: the revision guards with one collection's field names */
+export interface BoundRevisionGuards {
+  updateWithRevision(
+    collection: RevisionedCollectionLike | Pick<RevisionedCollectionLike, 'updateOne' | 'findOne'>,
+    filter: FilterLike,
+    expectedRevision: RevisionValue,
+    update: UpdateLike,
+    options?: BoundRevisionWriteOptions,
+  ): Promise<RevisionWriteResult>;
+  replaceWithRevision(
+    collection: RevisionedCollectionLike | Pick<RevisionedCollectionLike, 'replaceOne' | 'findOne'>,
+    filter: FilterLike,
+    expectedRevision: RevisionValue,
+    replacement: Record<string, unknown>,
+    options?: BoundRevisionWriteOptions,
+  ): Promise<RevisionWriteResult>;
+  findOneAndUpdateWithRevision<TDocument = Record<string, unknown>>(
+    collection:
+      | RevisionedCollectionLike
+      | Pick<RevisionedCollectionLike, 'findOneAndUpdate' | 'findOne'>,
+    filter: FilterLike,
+    expectedRevision: RevisionValue,
+    update: UpdateLike,
+    options?: BoundRevisionWriteOptions & { returnDocument?: 'before' | 'after' },
+  ): Promise<TDocument>;
+  bumpRevision<U extends UpdateLike>(update: U): U;
 }
 
 // ─── The typed registry ───────────────────────────────────────────────────────

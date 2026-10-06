@@ -7,7 +7,7 @@ const {
   MigronautError,
   TransactionsUnsupportedError,
 } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
+const { documentErrorText, errorText } = require('../utils/error.js');
 const { versionIndexKey } = require('../versioning/document.js');
 const { idKey, matchOf, processPartition } = require('./background-engine.js');
 const { idRangePartitioner } = require('./background-partition.js');
@@ -589,7 +589,9 @@ async function finalize(deps, job, state) {
 }
 
 /** Move a state to `failed` with `message`, and say so */
-async function failState(deps, state, message) {
+async function failState(deps, state, reason) {
+  // Kept, emitted and logged: the application's data stays out of it.
+  const message = documentErrorText(reason);
   const failed = await deps.store.move(state._id, {
     from: ['running', 'pending', 'blocked'],
     to: 'failed',
@@ -826,13 +828,16 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
         return { outcome: 'stopped', counters };
       }
       const partitionFailed = await store
-        .failSlice(lease, { error: errorText(error), maxSliceFailures: job.spec.maxSliceFailures })
+        .failSlice(lease, {
+          error: documentErrorText(error),
+          maxSliceFailures: job.spec.maxSliceFailures,
+        })
         .catch(() => false);
       deps.emit('background:slice:end', {
         migration: name,
         partition: String(partition._id),
         outcome: 'error',
-        error: errorText(error),
+        error: documentErrorText(error),
       });
       if (error instanceof MigronautError) {
         error.context = { ...error.context, background: name, partitionFailed };
@@ -854,7 +859,9 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
       counters: result.counters,
     });
     if (result.outcome === 'failed' && result.error) {
-      await store.failPartition(lease, { error: errorText(result.error) }).catch(() => undefined);
+      await store
+        .failPartition(lease, { error: documentErrorText(result.error) })
+        .catch(() => undefined);
       await failState(deps, state, result.error.message);
       return { outcome: 'failed', counters, error: result.error };
     }
