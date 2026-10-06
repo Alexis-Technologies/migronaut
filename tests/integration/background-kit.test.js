@@ -394,6 +394,22 @@ export async function down() {}
     assert.ok(!kept.includes('taken@example.com'), 'no document value anywhere');
   });
 
+  it('should leave a trace of an unlock — an event, a log line, a history entry', async () => {
+    await seed(10);
+    const kit = kitWith();
+    project.write(NAME, spec('migrate: (doc) => ({ ...doc, done: true }),'));
+    await kit.up();
+    const controls = [];
+    kit.on('background:control', (event) => controls.push(event));
+    assert.deepStrictEqual(await kit.unlockBackground(NAME), { lock: false, leases: 0 });
+    assert.strictEqual(controls.length, 1);
+    assert.strictEqual(controls[0].action, 'unlock');
+    const state = await mongo.db.collection('_migronaut_background').findOne({ _id: NAME });
+    const last = state.history.at(-1);
+    assert.strictEqual(last.action, 'unlock');
+    assert.strictEqual(last.leases, 0);
+  });
+
   it('should refuse a slice length that would never make progress', async () => {
     const kit = kitWith();
     for (const sliceMs of [0, -1, Number.NaN, '1000', 3_600_001]) {

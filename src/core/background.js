@@ -310,6 +310,13 @@ async function coordinateStep(deps, name, { signal, driver }) {
   let state = await store.get(name);
   if (state === null) return { next: 'done', status: 'unregistered' };
   if (state.schema > STATE_SCHEMA) {
+    warnOnce(
+      deps,
+      `schema:${name}`,
+      `⚠ ${name} was registered by a newer release (state schema ${state.schema}, this one ` +
+        `knows ${STATE_SCHEMA}) — waiting for a process of that release to drive it`,
+      { background: name },
+    );
     return retrySoon(deps, 'newer-schema');
   }
   if (TERMINAL.has(state.status) || state.status === 'paused') {
@@ -411,7 +418,8 @@ async function coordinatePass(deps, name, initial, { signal }) {
       state =
         (await store.move(name, { from: ['pending'], to: 'running', action: 'plan' })) ?? state;
     }
-    await store.reap(name);
+    const reaped = await store.reap(name);
+    if (reaped > 0) deps.telemetry?.backgroundLeasesReclaimed({ name, count: reaped });
     const counts = await store.partitionCounts(name, {
       generation: state.generation,
       plan: state.plan.token,
@@ -471,6 +479,7 @@ async function planPass(deps, job, state, hash, { newPass = true } = {}) {
       partitioner: spec.mode === 'step' ? 'step' : job.partitioner.id,
       method: plan.method,
       estimate: plan.estimate,
+      ...(plan.atLeast ? { atLeast: true } : {}),
       match: hash,
       ...(plan.degraded ? { degraded: plan.degraded } : {}),
       ...(plan.epoch ? { epoch: plan.epoch } : {}),
@@ -492,6 +501,7 @@ async function planPass(deps, job, state, hash, { newPass = true } = {}) {
     pass,
     partitions: plan.partitions.length,
     estimate: plan.estimate,
+    ...(plan.atLeast ? { atLeast: true } : {}),
     method: plan.method,
     ...(plan.degraded ? { degraded: plan.degraded } : {}),
   });
@@ -878,7 +888,14 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
           error: documentErrorText(error),
           maxSliceFailures: job.spec.maxSliceFailures,
         })
-        .catch(() => false);
+        .catch((countError) => {
+          // The slice's own error is what is thrown; this one is only said.
+          deps.logger.debug(
+            `Could not count a failed slice of ${name}: ${errorText(countError)}`,
+            deps.fields({ background: name }),
+          );
+          return false;
+        });
       deps.emit('background:slice:end', {
         migration: name,
         partition: String(partition._id),

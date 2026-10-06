@@ -308,6 +308,30 @@ class BackgroundStore {
     return this.cas(name, { status: { $in: from }, ...filter }, [{ $set: set }]);
   }
 
+  /**
+   * Append a history entry with no status change — a control that is not a
+   * transition (an unlock). `null` when it is not registered.
+   */
+  note(name, { action, by, reason, ...details }) {
+    const entry = {
+      at: '$$NOW',
+      action: literal(action),
+      ...(by !== undefined ? { by: literal(by) } : {}),
+      ...(reason !== undefined ? { reason: literal(reason) } : {}),
+    };
+    for (const [key, value] of Object.entries(details)) entry[key] = literal(value);
+    return this.cas(name, {}, [
+      {
+        $set: {
+          updatedAt: '$$NOW',
+          history: {
+            $slice: [{ $concatArrays: [{ $ifNull: ['$history', []] }, [entry]] }, -MAX_HISTORY],
+          },
+        },
+      },
+    ]);
+  }
+
   /** Set fields of a state document (no status change) */
   async set(name, fields, { filter = {}, session } = {}) {
     const result = await this.#states.updateOne(

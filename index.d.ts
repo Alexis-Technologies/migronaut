@@ -2197,7 +2197,17 @@ export interface BackgroundStatus {
    * coordinator chain carries its `round`, and an older round bows out
    */
   coordinator?: { kind: string; round?: number; at: Date };
-  plan?: { method: string; estimate: number; partitions: number; degraded?: string };
+  /**
+   * The current plan. `estimate` is the documents it expects to rewrite —
+   * with `atLeast`, a count that stopped at its limit (there are more)
+   */
+  plan?: {
+    method: string;
+    estimate: number;
+    atLeast?: boolean;
+    partitions: number;
+    degraded?: string;
+  };
   /**
    * On a sharded collection, how the plan used the shard key: `chunks` (a
    * partition per run of chunks on one shard), `sampled` (the key space

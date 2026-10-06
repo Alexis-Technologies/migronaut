@@ -754,7 +754,7 @@ lease holder (host and pid, never its token) and throttle state.
 | cancel | `cancelBackground(name, { wait? })` | Its open partitions are cancelled. `retry` can bring it back |
 | retry | `retryBackground(name, { fromStart?, repin? })` | A failed or cancelled one goes on from where it was: its failed and cancelled partitions are pending again — or, when its pass had already closed (a failed partition found at the end of a pass, `maxPasses`), a new pass takes what is left. `fromStart` plans everything again, from pass 0, with a clean list of failed documents (the totals stay: they are what was rewritten). A completed one is reopened over what is left |
 | repin | `repinBackground(name)` | Pin the file on disk: its checksum (in the changelog too) and its spec. A change to what it matches (`from`, `to`, `filter`, field names), to `maxParallel` or to `partitions` replans the pass |
-| unlock | `unlockBackground(name)` | Clear a stuck coordinator lock and every partition lease. A lane still alive is fenced off at its next write |
+| unlock | `unlockBackground(name)` | Clear a stuck coordinator lock and every partition lease. A lane still alive is fenced off at its next write. Recorded like any control: a `background:control` event (`action: 'unlock'`, `lock`, `leases`), a warning and a history entry |
 
 Every control takes `requestedBy` and `reason`, recorded in the background migration's history
 (the CLI's `--reason`). `wait` resolves once no lane holds a lease (or after 2 minutes, with
@@ -801,13 +801,13 @@ instead), and one that comes from a lane or a coordinator step carries that lane
 | `background:registered` | `up` or `down` registered it (`status`: `blocked`, `pending`, or `withdrawn`; `direction`; `waitsFor`) |
 | `background:waiting` | An ordinary migration stopped the run with `onBackgroundPending: 'stop'` (`waitsFor`) |
 | `background:unblocked` | Everything it requires has completed |
-| `background:partitioned` | A pass was planned (`generation`, `pass`, `partitions`, `estimate`, `method`, `degraded?`) |
+| `background:partitioned` | A pass was planned (`generation`, `pass`, `partitions`, `estimate`, `atLeast?` — the count stopped at its limit, there are more —, `method`, `degraded?`: `sample-timeout` or `ungrouped`, also said in a warning) |
 | `background:pass` | A pass left documents behind; the next one starts |
 | `background:slice:start` / `background:slice:end` | A lane claimed / released a partition (`partition`, `slot`; `outcome`, `counters`) |
 | `background:batch` | A batch was written (`counters`, `latencyMs`, `batchSize`, `group` on a sharded collection) |
 | `background:lease:lost` | A lane lost its lease |
 | `background:throttle` | The adaptive throttle changed (`reason`: `slow`, `overload`, `recover`) |
-| `background:control` | A control was applied (`action`, `from`, `to`) |
+| `background:control` | A control was applied (`action`, `from`, `to`) — or an unlock (`action: 'unlock'`, `lock`, `leases`) |
 | `background:completed` / `background:failed` | It ended (`totals`, `passes` / `error`) |
 | `background:drift` | Old shapes after completion (`collection`, `source`: `poll`, `stream` or `requires`; `action`: `reopened`, `reported`, `upgraded` or `failed`) |
 | `background:watch` | A collection's live watcher changed state |

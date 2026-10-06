@@ -187,7 +187,13 @@ function startWatch(deps, options = {}) {
     follower.leading = leading;
     deps.emit('background:watch', { collection, state });
     if (leading) {
-      await deps.watchStore.save(collection, owner, { fields: { state } }).catch(() => undefined);
+      await deps.watchStore.save(collection, owner, { fields: { state } }).catch((error) => {
+        // The state is shown again with the next save; a lost one is only said.
+        deps.logger.debug(
+          `Drift watcher (${collection}): could not save its state: ${errorText(error)}`,
+          deps.fields({ collection }),
+        );
+      });
     }
   }
 

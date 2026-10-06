@@ -169,6 +169,8 @@ async function planIdRanges({ collection, match, hint, maxParallel, settings, ma
       epoch: null,
       method: brackets.length === 1 ? 'single' : 'brackets',
       estimate: count,
+      // The count stopped at its limit: there are at least that many.
+      ...(count >= cap ? { atLeast: true } : {}),
       partitions: perBracket(brackets, count),
     };
   }
@@ -199,6 +201,7 @@ async function planIdRanges({ collection, match, hint, maxParallel, settings, ma
       epoch: null,
       method: 'brackets',
       estimate: count,
+      ...(count >= cap ? { atLeast: true } : {}),
       degraded: 'sample-timeout',
       partitions: perBracket(brackets, count),
     };

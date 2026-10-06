@@ -107,6 +107,12 @@ describe('idRangePartitioner (integration)', () => {
     await seed(Array.from({ length: 300 }, () => new ObjectId()));
     const single = await plan({ maxParallel: 1 });
     assert.strictEqual(single.method, 'single');
+    // Counted up to one partition's worth (50) of 300: said to be at least that.
+    assert.strictEqual(single.estimate, 50);
+    assert.strictEqual(single.atLeast, true);
+    const all = await plan({ maxParallel: 1, settings: settings({ minPartitionDocs: 1000 }) });
+    assert.strictEqual(all.estimate, 300);
+    assert.strictEqual(all.atLeast, undefined, 'counted in full');
     assert.deepStrictEqual(
       single.partitions.map((p) => p.scope),
       [{ kind: 'id-range', bracket: 'objectId' }],

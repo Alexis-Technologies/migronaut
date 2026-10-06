@@ -417,6 +417,27 @@ describe('BackgroundStore — checkpoints, failures and roll-up (integration)', 
     assert.strictEqual((await store.partitions(NAME)).length, 0);
   });
 
+  it('should roll up the error of a failed partition, newest first, not the largest text', async () => {
+    const state = await planned(3);
+    const partitions = mongo.db.collection('_migronaut_background_partitions');
+    const [a, b, c] = await store.partitions(NAME);
+    await partitions.updateOne(
+      { _id: a._id },
+      { $set: { lastError: 'zzz transient, long gone', updatedAt: new Date(3000) } },
+    );
+    await partitions.updateOne(
+      { _id: b._id },
+      { $set: { status: 'failed', lastError: 'aaa the real one', updatedAt: new Date(2000) } },
+    );
+    await partitions.updateOne(
+      { _id: c._id },
+      { $set: { status: 'failed', lastError: 'bbb an older one', updatedAt: new Date(1000) } },
+    );
+    const rolled = await store.generationTotals(NAME, state.generation);
+    assert.strictEqual(rolled.totals.lastError, 'aaa the real one');
+    assert.strictEqual(rolled.totals.failedPartitions, 2);
+  });
+
   it('should supersede open partitions and drop old generations and foreign plans', async () => {
     const state = await planned(3);
     const { lease } = await store.claim(NAME, claimArgs(state));

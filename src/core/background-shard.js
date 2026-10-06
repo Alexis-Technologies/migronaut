@@ -365,8 +365,9 @@ function createShardPartitioner({ key, field, source, readChunks, epoch }) {
 
   async function plan({ collection, match, hint, maxParallel, settings, shardConcurrency = 1 }) {
     const aim = targetPartitions(settings, maxParallel);
+    const cap = aim * settings.minPartitionDocs;
     const count = await collection.countDocuments(match, {
-      limit: aim * settings.minPartitionDocs,
+      limit: cap,
       ...(hint ? { hint } : {}),
       ...READ_OPTIONS,
     });
@@ -436,6 +437,8 @@ function createShardPartitioner({ key, field, source, readChunks, epoch }) {
       epoch: planned,
       method: grouped ? 'chunks' : 'sampled',
       estimate: count,
+      // The count stopped at its limit: there are at least that many.
+      ...(count >= cap ? { atLeast: true } : {}),
       ...(degraded !== undefined ? { degraded } : {}),
       partitions: largestFirst(slices),
     };

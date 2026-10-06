@@ -2915,6 +2915,7 @@ class MigratorKit extends EventEmitter {
             plan: {
               method: state.plan.method,
               estimate: state.plan.estimate,
+              ...(state.plan.atLeast ? { atLeast: true } : {}),
               partitions: state.plan.partitions,
               ...(state.plan.degraded ? { degraded: state.plan.degraded } : {}),
             },
@@ -3136,9 +3137,17 @@ class MigratorKit extends EventEmitter {
   async unlockBackground(name) {
     await this.#backgroundReady(name);
     const deps = this.#backgroundDeps();
-    const lock = await deps.lockFor(name).forceRelease();
+    const lock = (await deps.lockFor(name).forceRelease()) !== null;
     const leases = await deps.store.unlockAll(name);
-    return { lock: lock !== null, leases };
+    // It fences every live lane: an operator's act, recorded like any control.
+    await deps.store.note(name, { action: 'unlock', lock, leases });
+    this.#emit('background:control', { migration: name, action: 'unlock', lock, leases });
+    this.#logger.warn(
+      `⚠ ${name}: unlocked — coordinator lock ${lock ? 'cleared' : 'not held'}, ${leases} ` +
+        'lease(s) dropped (their lanes stop at their next write)',
+      this.#fields({ background: name, lock, leases }),
+    );
+    return { lock, leases };
   }
 
   /** How converge treats search indexes: the config, and a call's own `waitForSearchIndexes` */
