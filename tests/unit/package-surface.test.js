@@ -206,13 +206,34 @@ describe('bullmq subpath', () => {
   });
 });
 
-describe('versioning subpath', () => {
-  /** Every `require('…')` target in a source file */
-  const requiresOf = (file) =>
-    [...stripComments(readRepoFile(file)).matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map(
-      (match) => match[1],
-    );
+/** Every `require('…')` target in a source file */
+const requiresOf = (file) =>
+  [...stripComments(readRepoFile(file)).matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map(
+    (match) => match[1],
+  );
 
+describe('bullmq adapter layering', () => {
+  it('should require the kit and the lock wait of the core, never a mechanism module', () => {
+    // A second orchestration layer above the kit: what it needs from the
+    // engine, the kit offers as a public method (CLAUDE.md, layering rule).
+    const files = sourceFiles('src/bullmq');
+    assert.ok(files.length >= 6, 'expected the adapter sources');
+    for (const file of files) {
+      for (const target of requiresOf(file)) {
+        assert.ok(
+          /^\.\/[\w-]+\.js$/.test(target) ||
+            /^\.\.\/utils\/[\w-]+\.js$/.test(target) ||
+            target === '../errors/index.js' ||
+            target === '../core/migrator.js' ||
+            target === '../core/lock-wait.js',
+          `${file} requires ${target}`,
+        );
+      }
+    }
+  });
+});
+
+describe('versioning subpath', () => {
   it('should expose the runtime through its own entry point', () => {
     const versioning = require(path.join(repoRoot, 'versioning.js'));
     for (const name of [

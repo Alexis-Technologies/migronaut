@@ -269,10 +269,15 @@ class MigrationQueue {
     const resolvedPrefix = prefix ?? (queueIsInstance ? Queue.opts?.prefix : undefined);
     if (resolvedPrefix !== undefined) assertName(resolvedPrefix, 'prefix');
     if (queueIsInstance) {
-      MigrationQueue.#assertSameQueue('Queue', Queue, resolvedName, resolvedPrefix);
+      MigrationQueue.#assertSameQueue('bullmq.Queue', Queue, resolvedName, resolvedPrefix);
     }
     if (eventsIsInstance) {
-      MigrationQueue.#assertSameQueue('QueueEvents', QueueEvents, resolvedName, resolvedPrefix);
+      MigrationQueue.#assertSameQueue(
+        'bullmq.QueueEvents',
+        QueueEvents,
+        resolvedName,
+        resolvedPrefix,
+      );
     }
     assertJobOptions(jobOptions);
     if (!isPlainObject(workerOptions)) {
@@ -308,6 +313,16 @@ class MigrationQueue {
       queueName: resolvedName,
       QueueSource: Queue,
     });
+    if (backgroundSettings?.queueIsInstance) {
+      // The same check as the migration queue's: a Worker built here on
+      // another name or prefix would listen to an empty queue.
+      MigrationQueue.#assertSameQueue(
+        'background.queue',
+        backgroundSettings.queue,
+        backgroundSettings.name,
+        resolvedPrefix,
+      );
+    }
     if (backgroundSettings !== undefined) {
       // Validated against a stand-in queue: the real one does not exist yet.
       resolveBackgroundProcessorOptions({
@@ -439,19 +454,15 @@ class MigrationQueue {
   /** An injected instance must be on the queue this object is configured for */
   static #assertSameQueue(label, instance, name, prefix) {
     if (typeof instance.name === 'string' && instance.name !== name) {
-      throw new ConfigInvalidError(
-        `bullmq.${label} is on queue "${instance.name}", not "${name}"`,
-        {
-          queueName: name,
-        },
-      );
+      throw new ConfigInvalidError(`${label} is on queue "${instance.name}", not "${name}"`, {
+        queueName: name,
+      });
     }
     const instancePrefix = instance.opts?.prefix;
     if (instancePrefix !== undefined && prefix !== undefined && instancePrefix !== prefix) {
-      throw new ConfigInvalidError(
-        `bullmq.${label} uses prefix "${instancePrefix}", not "${prefix}"`,
-        { prefix },
-      );
+      throw new ConfigInvalidError(`${label} uses prefix "${instancePrefix}", not "${prefix}"`, {
+        prefix,
+      });
     }
   }
 
@@ -788,9 +799,11 @@ class MigrationQueue {
     }
     this.#assertOpen();
     const Worker = this.#WorkerClass;
+    // An injected background queue says where its keys live; its worker listens there.
+    const prefix = this.#background.queue?.opts?.prefix ?? this.#prefix;
     const worker = new Worker(this.#background.name, this.#backgroundProcessor, {
       connection: this.#connection,
-      ...(this.#prefix !== undefined ? { prefix: this.#prefix } : {}),
+      ...(prefix !== undefined ? { prefix } : {}),
       lockDuration: DEFAULT_LOCK_DURATION_MS,
       maxStalledCount: DEFAULT_MAX_STALLED_COUNT,
       ...(this.#telemetry !== undefined ? { telemetry: this.#telemetry } : {}),
@@ -813,7 +826,10 @@ class MigrationQueue {
       ),
     );
     await worker.waitUntilReady?.();
+    // Closing meanwhile: close() takes it from here — nothing more to start.
+    if (this.#closing) return worker;
     await this.#backgroundProcessor.heal();
+    if (this.#closing) return worker;
     await this.#startWatcher();
     return worker;
   }
@@ -1011,14 +1027,11 @@ class MigrationQueue {
         failures.push(error);
       }
     };
-    // The worker stops fetching first: a job the shutdown below puts back in
-    // the queue must go to the next worker, not straight back to this one.
-    // The watcher first: its streams close, its last positions are saved,
-    // its locks go to the next pod's watcher.
-    await this.#backgroundStarting?.catch(() => undefined);
-    if (this.#backgroundWatcher) await attempt(() => this.#backgroundWatcher.stop());
-    // Both workers stop fetching together, and both processors are told to
-    // stop: a lane checkpoints at its next batch and goes back to the queue.
+    // The workers stop fetching first, together: a job the shutdown below
+    // puts back in the queue must go to the next worker, not straight back
+    // to this one. Both processors are told to stop: a lane checkpoints at
+    // its next batch and goes back to the queue. Nothing waits for a start
+    // in progress before that — one can hang on Redis for good.
     const worker = this.#worker;
     const backgroundWorker = this.#backgroundWorker;
     const workersClosed = [
@@ -1027,9 +1040,14 @@ class MigrationQueue {
     ];
     this.#processor.shutdown('Migration queue closing');
     this.#backgroundProcessor?.shutdown('Migration queue closing');
+    // The watcher: its streams close, its last positions are saved, its
+    // locks go to the next pod's watcher.
+    const watcher = this.#backgroundWatcher;
+    if (watcher) await attempt(() => watcher.stop());
     await Promise.all(workersClosed);
-    // A worker still starting is closed too, not orphaned — and a start that
-    // failed is that call's failure, not this one's.
+    // A worker still starting is closed too, not orphaned — the start sees
+    // the close at its next step — and a start that failed is that call's
+    // failure, not this one's.
     await this.#workerStarting?.catch(() => undefined);
     if (this.#worker && this.#worker !== worker) {
       await attempt(() => this.#worker.close(force));
@@ -1037,6 +1055,9 @@ class MigrationQueue {
     await this.#backgroundStarting?.catch(() => undefined);
     if (this.#backgroundWorker && this.#backgroundWorker !== backgroundWorker) {
       await attempt(() => this.#backgroundWorker.close(force));
+    }
+    if (this.#backgroundWatcher && this.#backgroundWatcher !== watcher) {
+      await attempt(() => this.#backgroundWatcher.stop());
     }
     const processors = [this.#processor];
     if (this.#backgroundProcessor) processors.push(this.#backgroundProcessor);

@@ -603,6 +603,28 @@ class BackgroundStore {
     return { held: row?.held ?? 0, live: row?.live ?? 0 };
   }
 
+  /** Leases renewed within their TTL, per background migration of `names` — one read */
+  async liveLeasesOf(names) {
+    const live = new Map();
+    if (names.length === 0) return live;
+    const rows = await this.#partitions
+      .aggregate(
+        [
+          { $match: { background: { $in: names }, 'lease.slot': { $exists: true } } },
+          {
+            $match: {
+              $expr: { $gte: ['$lease.renewedAt', { $subtract: ['$$NOW', '$lease.ttlMs'] }] },
+            },
+          },
+          { $group: { _id: '$background', live: { $sum: 1 } } },
+        ],
+        READ_OPTIONS,
+      )
+      .toArray();
+    for (const row of rows) live.set(row._id, row.live);
+    return live;
+  }
+
   /** Drop every lease of a background migration — their holders are fenced off at once */
   async unlockAll(name) {
     const result = await this.#partitions.updateMany(

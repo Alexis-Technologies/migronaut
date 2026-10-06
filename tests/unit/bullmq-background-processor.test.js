@@ -13,6 +13,20 @@ const { stubKit } = require('../helpers/stub-kit.js');
 
 const NAME = '0001-orders.js';
 
+/**
+ * A coordinator step's answer as the kit gives it: the round it hands a new
+ * chain (the one after the last, 4), or the chain's own; and, to process, the
+ * registration the lanes are named after.
+ */
+const answering = (answer) =>
+  mock.fn(async (_name, { driver }) => ({
+    ...answer,
+    ...(answer.next === 'process' ? { registration: 'reg-1' } : {}),
+    ...(answer.next === 'superseded' || answer.status === 'unregistered'
+      ? {}
+      : { round: driver.round ?? 5 }),
+  }));
+
 /** A kit whose background methods answer what each test scripts */
 function backgroundKit(overrides = {}) {
   return stubKit({
@@ -23,7 +37,7 @@ function backgroundKit(overrides = {}) {
       liveLeases: 0,
       coordinator: { kind: 'bullmq', round: 4, at: new Date() },
     })),
-    coordinateBackground: mock.fn(async () => ({ next: 'done', status: 'completed' })),
+    coordinateBackground: answering({ next: 'done', status: 'completed' }),
     runBackgroundSlice: mock.fn(async () => ({ outcome: 'exhausted', counters: { migrated: 3 } })),
     runnableBackground: mock.fn(async () => []),
     verifyBackground: mock.fn(async () => ({ checked: 2, skipped: 0, drift: [] })),
@@ -96,6 +110,12 @@ describe('createBackgroundProcessor options', () => {
     ['kit and config', { kit: backgroundKit(), config: {}, queue }, /either `kit` or `config`/],
     ['a kit without background methods', { kit: {}, queue }, /MigratorKit/],
     ['no queue', { kit: backgroundKit() }, /queue is required/],
+    ['an unknown option (a typo)', { kit: backgroundKit(), queue, stalMs: 5000 }, /"stalMs"/],
+    [
+      'a slice past the kit maximum',
+      { kit: backgroundKit(), queue, sliceMs: 3_600_001 },
+      /sliceMs/,
+    ],
     ['a zero sliceMs', { queue, sliceMs: 0 }, /sliceMs/],
     ['an unknown children mode', { queue, children: true }, /children/],
     ['a tiny poll interval', { queue, pollIntervalMs: 1 }, /pollIntervalMs/],
@@ -133,17 +153,20 @@ describe('createBackgroundProcessor options', () => {
 
 describe('background coordinator jobs', () => {
   it('should finish an unregistered background migration at once', async () => {
-    const kit = backgroundKit({ backgroundStatus: mock.fn(async () => null) });
+    const kit = backgroundKit({
+      coordinateBackground: answering({ next: 'done', status: 'unregistered' }),
+    });
     const processor = createBackgroundProcessor({ kit, queue: fakeQueue() });
     assert.deepStrictEqual(await processor(coordinatorJob(), 'token'), {
       kind: 'background',
       migration: NAME,
       status: 'unregistered',
     });
-    assert.strictEqual(kit.coordinateBackground.mock.callCount(), 0);
+    assert.strictEqual(kit.coordinateBackground.mock.callCount(), 1);
+    assert.strictEqual(kit.backgroundStatus.mock.callCount(), 0, 'no status read per wake');
   });
 
-  it('should take the round after the last one, drive as bullmq, and heal once completed', async () => {
+  it('should take the round the kit hands out, drive as bullmq, and heal once completed', async () => {
     const queue = fakeQueue();
     const kit = backgroundKit({
       runnableBackground: mock.fn(async () => [
@@ -158,15 +181,14 @@ describe('background coordinator jobs', () => {
       status: 'completed',
       round: 5,
     });
+    // A new chain asks without a round: only the kit, under its lock, hands one out.
     const [, options] = kit.coordinateBackground.mock.calls[0].arguments;
-    assert.deepStrictEqual(options.driver, { kind: 'bullmq', ref: '42', round: 5 });
+    assert.deepStrictEqual(options.driver, { kind: 'bullmq', ref: '42' });
     assert.strictEqual(queue.added[0].data.migration, '0002-next.js', 'the dependent is started');
   });
 
   it('should keep its own round, and finish when a newer one took over', async () => {
-    const kit = backgroundKit({
-      coordinateBackground: mock.fn(async () => ({ next: 'superseded' })),
-    });
+    const kit = backgroundKit({ coordinateBackground: answering({ next: 'superseded' }) });
     const processor = createBackgroundProcessor({ kit, queue: fakeQueue() });
     const result = await processor(coordinatorJob({ round: 2 }), 'token');
     assert.strictEqual(result.status, 'superseded');
@@ -188,7 +210,7 @@ describe('background coordinator jobs', () => {
 
   it('should come back later when it must wait — moved with a token, reported without one', async () => {
     const kit = backgroundKit({
-      coordinateBackground: mock.fn(async () => ({ next: 'wait', retryAfterMs: 700 })),
+      coordinateBackground: answering({ next: 'wait', retryAfterMs: 700 }),
     });
     const processor = createBackgroundProcessor({ kit, queue: fakeQueue() });
     const outside = await processor(coordinatorJob(), undefined);
@@ -210,7 +232,7 @@ describe('background coordinator jobs', () => {
   it('should spawn its lanes as children and wait for them', async () => {
     const queue = fakeQueue();
     const kit = backgroundKit({
-      coordinateBackground: mock.fn(async () => ({ next: 'process', lanes: 2, generation: 3 })),
+      coordinateBackground: answering({ next: 'process', lanes: 2, generation: 3 }),
     });
     const processor = createBackgroundProcessor({ kit, queue, jobOptions: { keepLogs: 5 } });
     const job = coordinatorJob({}, { waits: [true] });
@@ -229,7 +251,7 @@ describe('background coordinator jobs', () => {
   it('should look again in-process when its lanes are already done, then yield', async () => {
     const queue = fakeQueue();
     const kit = backgroundKit({
-      coordinateBackground: mock.fn(async () => ({ next: 'process', lanes: 1, generation: 1 })),
+      coordinateBackground: answering({ next: 'process', lanes: 1, generation: 1 }),
     });
     const processor = createBackgroundProcessor({ kit, queue });
     const job = coordinatorJob();
@@ -250,7 +272,7 @@ describe('background coordinator jobs', () => {
       ],
     ]) {
       const kit = backgroundKit({
-        coordinateBackground: mock.fn(async () => ({ next: 'process', lanes: 2, generation: 1 })),
+        coordinateBackground: answering({ next: 'process', lanes: 2, generation: 1 }),
       });
       const processor = createBackgroundProcessor({ kit, queue, ...options });
       const job = coordinatorJob();
@@ -389,7 +411,7 @@ describe('background lane jobs', () => {
     const kit = processor.kit;
     kit.coordinateBackground.mock.mockImplementation(async () => {
       processor.shutdown();
-      return { next: 'process', lanes: 1, generation: 1 };
+      return { next: 'process', lanes: 1, generation: 1, registration: 'reg-1', round: 5 };
     });
     const job = coordinatorJob();
     assert.strictEqual((await moved(processor, job)).name, 'DelayedError');

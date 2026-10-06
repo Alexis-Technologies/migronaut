@@ -949,13 +949,22 @@ describe('background on the producer side', () => {
         registeredAt: new Date(),
       },
     };
+    // The runnable list carries what a stall is told by — no status read per entry.
     const kit = stubKit({
       runnableBackground: mock.fn(async () => [
-        ...Object.keys(statuses).map((migration) => ({ migration, status: 'running' })),
-        { migration: '0004-d.js', status: 'pending', maxParallel: 1 },
-        { migration: '0005-gone.js', status: 'running', maxParallel: 1 },
+        ...Object.values(statuses).map((status) => ({ ...status, maxParallel: 1 })),
+        { migration: '0004-d.js', status: 'pending', maxParallel: 1, liveLeases: 0 },
+        {
+          migration: '0005-gone.js',
+          status: 'running',
+          maxParallel: 1,
+          liveLeases: 0,
+          registeredAt: new Date(),
+        },
       ]),
-      backgroundStatus: mock.fn(async (name) => statuses[name] ?? null),
+      backgroundStatus: mock.fn(async () => {
+        throw new Error('a heal reads no status');
+      }),
     });
     const target = queue();
     const { jobs } = await enqueueBackground(target, kit, { stallMs: 30_000, reason: 'heal' });
@@ -983,6 +992,7 @@ describe('background on the producer side', () => {
     await assert.rejects(enqueueBackground(queue(), kit, 1), /must be an object/);
     await assert.rejects(enqueueBackground({}, kit), /addBulk/);
     await assert.rejects(enqueueBackground(queue(), kit, { stallMs: 5 }), /stallMs/);
+    await assert.rejects(enqueueBackground(queue(), kit, { stalMs: 60_000 }), /"stalMs"/);
     await assert.rejects(enqueueBackground(queue(), kit, { migration: '../x.js' }), /./);
     await assert.rejects(enqueueBackground(queue(), kit, { migration: NAME }), /not registered/);
     await assert.rejects(enqueueBackground(queue(), kit, { requestedBy: 5 }), ConfigInvalidError);

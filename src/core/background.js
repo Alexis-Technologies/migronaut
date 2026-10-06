@@ -296,15 +296,35 @@ async function coordinateStep(deps, name, { signal, driver }) {
     state = unblocked;
   }
 
-  // The newest round wins: an older BullMQ coordinator bows out.
-  if (driver.round !== undefined) {
-    const current = state.coordinator?.round;
-    if (current !== undefined && driver.round < current) return { next: 'superseded' };
-    await store.set(name, {
-      coordinator: { kind: driver.kind, ref: driver.ref, round: driver.round, at: new Date() },
-    });
+  // Who drives it — recorded for status. A BullMQ chain of coordinator jobs
+  // also carries a round, which only this step hands out (under the
+  // coordinator lock): a new chain gets the next round; a chain whose round
+  // is not the latest bows out — a newer one took over (two chains started
+  // at once each get their own), or it was registered again since. A round
+  // the kit never handed out (forged in Redis) is never written.
+  let round;
+  if (driver.kind === 'bullmq') {
+    const current = state.round;
+    if (driver.round === undefined) round = (current ?? 0) + 1;
+    else if (driver.round !== current) return { next: 'superseded' };
+    else round = current;
   }
+  await store.set(name, {
+    coordinator: {
+      kind: driver.kind,
+      ...(driver.ref !== undefined ? { ref: driver.ref } : {}),
+      at: new Date(),
+    },
+    ...(round !== undefined ? { round } : {}),
+  });
+  const answer = await coordinatePass(deps, name, state, { signal });
+  return round !== undefined ? { ...answer, round } : answer;
+}
 
+/** The rest of a coordinator step, once its driver is recorded */
+async function coordinatePass(deps, name, initial, { signal }) {
+  const { store } = deps;
+  let state = initial;
   let job;
   try {
     job = await jobFor(deps, name, state);
@@ -378,7 +398,7 @@ async function coordinateStep(deps, name, { signal, driver }) {
         next: 'process',
         lanes: Math.max(0, Math.min(claimable, job.spec.maxParallel - counts.leased)),
         generation: state.generation,
-        round: driver.round,
+        registration: state.registration,
         counts,
         retryAfterMs: POLL_MS,
       };

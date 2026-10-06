@@ -38,7 +38,7 @@ function make(overrides = {}) {
 }
 
 describe('createMigrationQueue background option', () => {
-  for (const [what, background, pattern, bullmq] of [
+  for (const [what, background, pattern, bullmq, extra = {}] of [
     ['a string', 'yes', /true or an object/],
     ['an unknown key', { concurrency: 2 }, /background\.concurrency is not a known option/],
     ['a queue that is not one', { queue: {} }, /background\.queue must be a Queue instance/],
@@ -49,6 +49,23 @@ describe('createMigrationQueue background option', () => {
     ['a tiny verify interval', { verifyIntervalMs: 5 }, /verifyIntervalMs/],
     ['a bad processor option', { children: 'never' }, /children/],
     ['a bad job option', { jobOptions: { parent: {} } }, /jobOptions\.parent/],
+    [
+      'an injected queue on another name than queueName',
+      {
+        queueName: 'bg',
+        queue: new FakeQueue('elsewhere', { connection: createFakeConnection() }),
+      },
+      /background\.queue is on queue "elsewhere", not "bg"/,
+    ],
+    [
+      'an injected queue on another prefix',
+      {
+        queue: new FakeQueue('elsewhere', { connection: createFakeConnection(), prefix: 'other' }),
+      },
+      /background\.queue uses prefix "other", not "mine"/,
+      () => ({ ...fakeBullmq() }),
+      { prefix: 'mine' },
+    ],
     [
       'a Queue instance with no background queue',
       true,
@@ -67,6 +84,7 @@ describe('createMigrationQueue background option', () => {
             connection: createFakeConnection(),
             kit: backgroundKit(),
             background,
+            ...extra,
           }),
         (error) => {
           assert.ok(error instanceof ConfigInvalidError);

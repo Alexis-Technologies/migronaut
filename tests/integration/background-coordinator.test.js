@@ -396,14 +396,35 @@ describe('background coordinator (integration)', () => {
     await held.acquire();
     assert.strictEqual((await coordinate(deps, NAME)).next, 'busy');
     await held.release();
-    assert.strictEqual(
-      (await coordinate(deps, NAME, { driver: { kind: 'bullmq', ref: 'a', round: 3 } })).next,
-      'process',
-    );
+    // Rounds are the kit's to hand out: a chain that starts asks for one.
+    const first = await coordinate(deps, NAME, { driver: { kind: 'bullmq', ref: 'a' } });
+    assert.strictEqual(first.next, 'process');
+    assert.strictEqual(first.round, 1);
+    // Two chains started at once never share a round: the second gets the next…
+    const second = await coordinate(deps, NAME, { driver: { kind: 'bullmq', ref: 'b' } });
+    assert.strictEqual(second.round, 2);
+    // …and the first bows out at its next step; the second goes on.
     assert.deepStrictEqual(
-      await coordinate(deps, NAME, { driver: { kind: 'bullmq', ref: 'b', round: 2 } }),
+      await coordinate(deps, NAME, { driver: { kind: 'bullmq', ref: 'a', round: 1 } }),
       { next: 'superseded' },
     );
+    assert.strictEqual(
+      (await coordinate(deps, NAME, { driver: { kind: 'bullmq', ref: 'b', round: 2 } })).round,
+      2,
+    );
+    // A round never handed out (written to Redis by hand) retires only its own chain.
+    assert.deepStrictEqual(
+      await coordinate(deps, NAME, {
+        driver: { kind: 'bullmq', ref: 'x', round: Number.MAX_SAFE_INTEGER },
+      }),
+      { next: 'superseded' },
+    );
+    assert.strictEqual((await deps.store.get(NAME)).round, 2, 'never written');
+    // Another driver is recorded, and leaves the chain's round alone.
+    await coordinate(deps, NAME, { driver: { kind: 'cli' } });
+    const state = await deps.store.get(NAME);
+    assert.strictEqual(state.coordinator.kind, 'cli');
+    assert.strictEqual(state.round, 2);
   });
 
   it('should roll a generation up once, whatever crashes in between', async () => {

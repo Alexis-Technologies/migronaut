@@ -349,9 +349,13 @@ export interface SyncJobResult {
     migration: string;
     reason: string;
     failedAt?: Date;
-    /** The background migrations it waits for — the tick enqueued what comes before it */
-    waitsFor?: string[];
   };
+  /**
+   * Present when the next migration waits for background migrations that
+   * have not completed (`requires`): the tick enqueued what comes before it,
+   * and the line goes on once they complete. Not a failure — `held` is that.
+   */
+  waiting?: { migration: string; waitsFor: string[] };
   /** The heal of the background side: coordinators added, or found alive */
   background?: { enqueued: number };
 }

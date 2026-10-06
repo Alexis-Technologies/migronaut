@@ -495,9 +495,23 @@ function lastActivity(status) {
  * coordinator step) also gets a takeover coordinator — one per round, however
  * many pods ask — whose newer round retires the stuck one.
  */
+/** Every option enqueueBackground takes — a typo (`stalMs`) is refused, not a silent default */
+const ENQUEUE_BACKGROUND_KEYS = new Set([
+  'migration',
+  'jobOptions',
+  'stallMs',
+  'requestedBy',
+  'reason',
+]);
+
 async function enqueueBackground(queue, kit, options = {}) {
   if (!isPlainObject(options)) {
     throw new ConfigInvalidError('enqueueBackground options must be an object');
+  }
+  for (const key of Object.keys(options)) {
+    if (!ENQUEUE_BACKGROUND_KEYS.has(key)) {
+      throw new ConfigInvalidError(`enqueueBackground: "${key}" is not an option`, { key });
+    }
   }
   const { migration, jobOptions, stallMs = DEFAULT_STALL_MS } = options;
   assertQueue(queue);
@@ -518,13 +532,8 @@ async function enqueueBackground(queue, kit, options = {}) {
     }
     targets.push(status);
   } else {
-    for (const entry of await kit.runnableBackground()) {
-      targets.push(
-        entry.status === 'pending'
-          ? entry
-          : ((await kit.backgroundStatus(entry.migration)) ?? entry),
-      );
-    }
+    // One read for all of them: the runnable list carries what a stall is told by.
+    targets.push(...(await kit.runnableBackground()));
   }
   const specs = [];
   const now = Date.now();
@@ -535,6 +544,16 @@ async function enqueueBackground(queue, kit, options = {}) {
       status.liveLeases === 0 &&
       now - lastActivity(status) > stallMs;
     if (stalled) {
+      // An operational event: nothing has moved it for stallMs.
+      kit.logger.warn(
+        `⚠ Background migration ${status.migration} looks stalled (nothing moved it for ` +
+          `${Math.round((now - lastActivity(status)) / 1000)}s) — a takeover coordinator is queued`,
+        {
+          background: status.migration,
+          round: status.coordinator?.round ?? 0,
+          idleMs: now - lastActivity(status),
+        },
+      );
       specs.push(
         buildBackgroundJob({
           migration: status.migration,

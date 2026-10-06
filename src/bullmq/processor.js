@@ -489,6 +489,9 @@ function createMigrationProcessor(options = {}) {
     };
   }
 
+  /** What the last sync tick found the line waiting for — `{ migration, waitsFor }` */
+  let lastWaiting;
+
   async function runSyncJob(ctx) {
     if (!queue) {
       throw new ConfigInvalidError(
@@ -545,10 +548,26 @@ function createMigrationProcessor(options = {}) {
         ...backgroundField,
       };
     }
+    // Still waiting where the last tick found it waiting, for what is still
+    // not done: said again without planning — a background migration takes
+    // hours, and planning re-reads the whole directory on every tick.
+    if (lastWaiting?.migration === pending[0].file && (await stillWaiting(lastWaiting))) {
+      return {
+        kind: 'sync',
+        groupId: null,
+        batch: null,
+        enqueued: 0,
+        upToDate: false,
+        migrations: [],
+        waiting: lastWaiting,
+        ...backgroundField,
+      };
+    }
     const group = await enqueueUp(queue, kit, {
       ...(to !== undefined ? { to } : {}),
       ...(jobOptions ? { jobOptions } : {}),
     });
+    lastWaiting = group.waiting;
     const migrations = [];
     for (const job of group.jobs) migrations.push(job.migration);
     return {
@@ -561,17 +580,20 @@ function createMigrationProcessor(options = {}) {
       ...(group.converge
         ? { converge: { jobId: group.converge.id, deduplicated: group.converge.deduplicated } }
         : {}),
-      ...(group.waiting
-        ? {
-            held: {
-              migration: group.waiting.migration,
-              reason: 'waiting for background migrations',
-              waitsFor: group.waiting.waitsFor,
-            },
-          }
-        : {}),
+      // Waiting is not held: `held` stays the circuit breaker on a failure.
+      ...(group.waiting ? { waiting: group.waiting } : {}),
       ...backgroundField,
     };
+  }
+
+  /** Whether a background migration `waiting` waits for is still not done */
+  async function stillWaiting(waiting) {
+    if (typeof kit.backgroundStatus !== 'function') return false;
+    for (const name of waiting.waitsFor) {
+      const status = await kit.backgroundStatus(name);
+      if (status?.status !== 'completed' || status.direction === 'revert') return true;
+    }
+    return false;
   }
 
   /**

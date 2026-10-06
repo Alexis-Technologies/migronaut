@@ -2894,7 +2894,7 @@ class MigratorKit extends EventEmitter {
         ? {
             coordinator: {
               kind: state.coordinator.kind,
-              ...(state.coordinator.round !== undefined ? { round: state.coordinator.round } : {}),
+              ...(state.round !== undefined ? { round: state.round } : {}),
               at: state.coordinator.at,
             },
           }
@@ -2985,17 +2985,36 @@ class MigratorKit extends EventEmitter {
     await this.#backgroundReady();
     const store = this.#backgroundStore();
     const deps = this.#backgroundDeps();
-    const runnable = [];
+    const states = [];
     for (const state of await store.list({ status: { $in: ['blocked', 'pending', 'running'] } })) {
       let current = state;
       if (state.status === 'blocked') current = (await tryUnblock(deps, state)) ?? state;
-      if (current.status !== 'blocked') {
-        runnable.push({
-          migration: current._id,
-          status: current.status,
-          maxParallel: current.spec?.maxParallel ?? 1,
-        });
-      }
+      if (current.status !== 'blocked') states.push(current);
+    }
+    // What a heal needs to tell a stalled one — read for all of them at once.
+    const names = [];
+    for (const state of states) names.push(state._id);
+    const live = await store.liveLeasesOf(names);
+    const runnable = [];
+    for (const state of states) {
+      runnable.push({
+        migration: state._id,
+        status: state.status,
+        maxParallel: state.spec?.maxParallel ?? 1,
+        liveLeases: live.get(state._id) ?? 0,
+        registeredAt: state.registeredAt,
+        ...(state.startedAt ? { startedAt: state.startedAt } : {}),
+        ...(state.lastProgressAt ? { lastProgressAt: state.lastProgressAt } : {}),
+        ...(state.coordinator
+          ? {
+              coordinator: {
+                kind: state.coordinator.kind,
+                ...(state.round !== undefined ? { round: state.round } : {}),
+                at: state.coordinator.at,
+              },
+            }
+          : {}),
+      });
     }
     return runnable;
   }

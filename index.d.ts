@@ -1951,9 +1951,7 @@ export class MigratorKit extends EventEmitter {
   /** The partitions of a background migration's latest generation. @experimental */
   backgroundPartitions(name: string): Promise<BackgroundPartitionInfo[]>;
   /** The background migrations with work to do (blocked ones unblocked on the way). @experimental */
-  runnableBackground(): Promise<
-    { migration: string; status: BackgroundState; maxParallel: number }[]
-  >;
+  runnableBackground(): Promise<RunnableBackground[]>;
   /** Pause; its lanes stop at the next batch (`wait` until they have). @experimental */
   pauseBackground(name: string, options?: BackgroundControlOptions): Promise<BackgroundControlResult>;
   /** Resume a paused one. @experimental */
@@ -2092,12 +2090,33 @@ export interface BackgroundDriver {
   round?: number;
 }
 
+/** One of {@link MigratorKit.runnableBackground}: what a driver needs to pick it up, or to tell it stalled */
+export interface RunnableBackground {
+  migration: string;
+  status: BackgroundState;
+  maxParallel: number;
+  /** Leases renewed within their TTL — lanes working right now */
+  liveLeases: number;
+  registeredAt: Date;
+  startedAt?: Date;
+  lastProgressAt?: Date;
+  coordinator?: { kind: string; round?: number; at: Date };
+}
+
 /** What a coordinator step says to do next */
 export interface BackgroundCoordinatorAnswer {
   next: 'process' | 'wait' | 'done' | 'busy' | 'superseded';
   /** `process`: lanes that could start now */
   lanes?: number;
   generation?: number;
+  /** `process`: the registration the lanes work for (it names their jobs) */
+  registration?: string;
+  /** `process`: the current plan's partitions by status */
+  counts?: BackgroundStatus['partitions'];
+  /**
+   * A `bullmq` driver's round — handed out by this step to a chain that
+   * asked without one; a chain whose round is not the latest is `superseded`
+   */
   round?: number;
   /** `done`: where it stands */
   status?: BackgroundState | 'unregistered';

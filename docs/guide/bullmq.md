@@ -193,7 +193,11 @@ After a failure, the schedule **holds the line**: a tick whose next migration fa
 file is still the version that failed, enqueues nothing and reports it (`returnvalue.held`, and a
 warning) instead of re-running a migration that may have half-applied its changes on every tick.
 Deploy a fix — a changed file — and the next tick enqueues it again; `enqueueUp(name)` asks for it
-explicitly whenever you decide a retry is right.
+explicitly whenever you decide a retry is right. A line that only **waits** — the next migration
+`requires` a background migration that has not completed — is not held: the tick enqueues what
+comes before it and reports `returnvalue.waiting` (`{ migration, waitsFor }`). While it still waits
+for the same thing, later ticks say so again without planning; once it completes, the next tick
+goes on.
 
 ## Converge jobs
 
@@ -320,8 +324,11 @@ idempotent, because a chain that is alive absorbs the add. Heals happen:
 - whenever you call `mq.enqueueBackground()` without a name.
 
 A `running` background migration with no live lease, no checkpoint and no coordinator step for
-`stallMs` (15 minutes by default) also gets a **takeover** coordinator. There is one per round,
-however many pods ask. Its newer round retires the stuck chain, which bows out at its next step.
+`stallMs` (15 minutes by default) also gets a **takeover** coordinator, with a warning in the log.
+There is one per round, however many pods ask. Rounds are handed out by the kit itself, under the
+coordinator lock: a chain that starts asks for one and gets the next, so two chains started at once
+never share a round, and the older one bows out at its next step. A round the kit did not hand out
+(a payload written to Redis by hand) only retires the chain that carries it.
 
 ### Options
 
@@ -330,7 +337,7 @@ however many pods ask. Its newer round retires the stuck chain, which bows out a
 | Option | Default | |
 |---|---|---|
 | `queueName` | `<queueName>-background` | Must differ from the migration queue |
-| `queue` | — | A background `Queue` instance you own, never closed by `close()`. Otherwise one is built from `bullmq.Queue` |
+| `queue` | — | A background `Queue` instance you own, never closed by `close()`. Otherwise one is built from `bullmq.Queue`. Its name must be `queueName` (when given) and its prefix the migration queue's: a worker on another would listen to an empty queue |
 | `jobOptions` | — | Passed to every background job: retention, logs. Besides what migration jobs refuse, the four child-failure options (`failParentOnFailure`, `continueParentOnFailure`, `ignoreDependencyOnFailure`, `removeDependencyOnFailure`) are refused: the adapter owns them |
 | `workerOptions` | `{ concurrency: 2 }` | Defaults for `startBackgroundWorker()` |
 | `sliceMs` | each one's `sliceMs` | A lane's slice |
@@ -392,12 +399,14 @@ little later.
 
 `close()` shuts things down in this order:
 
-1. **The live watcher.** Its streams close, their positions are saved, and its locks go to another
-   pod's watcher.
-2. **Both workers stop fetching, and both processors are told to stop.** A lane stops at its next
+1. **Both workers stop fetching, and both processors are told to stop.** A lane stops at its next
    batch, checkpoints, releases its lease and moves itself back to delayed for the next worker. A
    coordinator in the middle of a step bows out and comes back.
-3. **QueueEvents, the queues it built, and the kit**, last.
+2. **The live watcher.** Its streams close, their positions are saved, and its locks go to another
+   pod's watcher.
+3. **A worker still starting** (waiting for Redis, healing) notices the close at its next step and
+   is closed too — `close()` never waits for it before stopping the rest.
+4. **QueueEvents, the queues it built, and the kit**, last.
 
 A pod killed without that loses nothing either: its leases expire after `lockTTLSeconds`, and
 another lane resumes from the last checkpoint.

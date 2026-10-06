@@ -63,9 +63,28 @@ const moved = (name) => {
  * Validate the background processor's options. Pure, like the migration
  * processor's: nothing is constructed.
  */
+/** Every option createBackgroundProcessor takes — a typo is refused, not ignored */
+const PROCESSOR_KEYS = new Set([
+  'kit',
+  'config',
+  'kitOptions',
+  'queue',
+  'jobOptions',
+  'sliceMs',
+  'children',
+  'pollIntervalMs',
+  'stallMs',
+  'maxLaneRetries',
+]);
+
 function resolveBackgroundProcessorOptions(options) {
   if (!isPlainObject(options)) {
     throw new ConfigInvalidError('createBackgroundProcessor options must be an object');
+  }
+  for (const key of Object.keys(options)) {
+    if (!PROCESSOR_KEYS.has(key)) {
+      throw new ConfigInvalidError(`createBackgroundProcessor: "${key}" is not an option`, { key });
+    }
   }
   const {
     kit,
@@ -127,6 +146,7 @@ function createBackgroundProcessor(options = {}) {
   const kit = injectedKit ?? new MigratorKit(config ?? {}, kitOptions);
   const shutdownController = new AbortController();
   const inFlight = new Set();
+  let warnedUnmovable = false;
 
   /** A log row on the job — never allowed to fail it */
   async function log(job, row) {
@@ -134,6 +154,15 @@ function createBackgroundProcessor(options = {}) {
       await job.log?.(redactOutbound(row));
     } catch {
       // Redis is the job's problem, not the background migration's.
+    }
+  }
+
+  /** The job's progress, for a dashboard — never allowed to fail it either */
+  async function progress(job, value) {
+    try {
+      await job.updateProgress?.(value);
+    } catch {
+      // As above.
     }
   }
 
@@ -145,6 +174,15 @@ function createBackgroundProcessor(options = {}) {
   async function later(ctx, delayMs, result, data) {
     const { job, token } = ctx;
     if (typeof job.moveToDelayed !== 'function' || typeof token !== 'string') {
+      if (!warnedUnmovable) {
+        warnedUnmovable = true;
+        kit.logger.warn(
+          '⚠ Background jobs run outside a BullMQ Worker (no token to move them with): a ' +
+            'coordinator takes one step and a lane one slice per job, and the rest waits for ' +
+            'the next heal',
+          {},
+        );
+      }
       return { ...result, retryAfterMs: delayMs };
     }
     if (data !== undefined) await job.updateData(data);
@@ -171,80 +209,101 @@ function createBackgroundProcessor(options = {}) {
   function childrenFor(ctx) {
     return (
       settings.children !== false &&
-      typeof queue.qualifiedName === 'string' &&
+      typeof parentQueueOf(ctx.job) === 'string' &&
       typeof ctx.job.moveToWaitingChildren === 'function' &&
       typeof ctx.token === 'string'
     );
   }
 
+  /**
+   * Where a coordinator job lives, for its lanes' `parent` — the job's own
+   * queue, which is the one a lane must wake, whatever `queue` this
+   * processor was handed to add the lanes to.
+   */
+  function parentQueueOf(job) {
+    return typeof job.queueQualifiedName === 'string'
+      ? job.queueQualifiedName
+      : queue.qualifiedName;
+  }
+
   async function runCoordinator(ctx, data) {
     const { job } = ctx;
     const name = data.migration;
-    const status = await kit.backgroundStatus(name);
     const base = { kind: JOB_NAMES.BACKGROUND, migration: name };
-    if (status === null) return { ...base, status: 'unregistered' };
-    // A new chain outranks every coordinator before it; the round is kept in
-    // the job's data, so the chain keeps it across its moves.
-    const round = data.round ?? (status.coordinator?.round ?? 0) + 1;
+    // The round is the kit's to hand out (under the coordinator lock): a new
+    // chain asks without one, and keeps the one it gets in its data across
+    // its moves.
+    let round = data.round;
     let spawn = data.spawn ?? 0;
     const children = childrenFor(ctx);
-    const keep = () => ({ ...job.data, round, spawn });
+    const keep = () => ({ ...job.data, ...(round !== undefined ? { round } : {}), spawn });
+    const withRound = (result) => (round !== undefined ? { ...result, round } : result);
 
     for (let step = 0; ; step++) {
-      if (shutdownController.signal.aborted) return later(ctx, 0, { ...base, round }, keep());
+      if (shutdownController.signal.aborted) return later(ctx, 0, withRound(base), keep());
       const answer = await kit.coordinateBackground(name, {
         signal: ctx.abort,
-        driver: { kind: 'bullmq', ref: String(job.id), round },
+        driver: { kind: 'bullmq', ref: String(job.id), ...(round !== undefined ? { round } : {}) },
       });
+      if (answer.round !== undefined) round = answer.round;
+      await progress(job, { status: answer.next, ...(round !== undefined ? { round } : {}) });
       if (answer.next === 'done') {
         await log(job, `✔ ${name}: ${answer.status}`);
         // Its dependents may just have been unblocked.
         if (answer.status === 'completed') await heal('completed');
-        return { ...base, status: answer.status, round };
+        return withRound({ ...base, status: answer.status });
       }
       if (answer.next === 'superseded') {
         await log(job, `↷ ${name}: superseded by a newer coordinator`);
-        return { ...base, status: 'superseded', round };
+        kit.logger.info(`↷ Background coordinator of ${name} superseded by a newer one`, {
+          background: name,
+          job: String(job.id),
+        });
+        return withRound({ ...base, status: 'superseded' });
       }
       if (answer.next !== 'process' || answer.lanes === 0) {
         return later(
           ctx,
           answer.retryAfterMs ?? settings.pollIntervalMs,
-          { ...base, status: answer.next, round },
+          withRound({ ...base, status: answer.next }),
           keep(),
         );
       }
       if (!children) {
         // No parents in this BullMQ (or turned off): lanes deduplicated per
         // slot, and the coordinator looks again after a while.
-        await addLanes(ctx, { name, status, answer, round, spawn });
-        return later(ctx, settings.pollIntervalMs, { ...base, status: 'process', round }, keep());
+        await addLanes(ctx, { name, answer, round, spawn });
+        return later(
+          ctx,
+          settings.pollIntervalMs,
+          withRound({ ...base, status: 'process' }),
+          keep(),
+        );
       }
-      if (step >= MAX_INLINE_STEPS) return later(ctx, 0, { ...base, round }, keep());
+      if (step >= MAX_INLINE_STEPS) return later(ctx, 0, withRound(base), keep());
       spawn += 1;
       // Before the lanes: their ids carry the spawn, and a new one must never
       // repeat one a finished lane already has.
       await job.updateData(keep());
       await addLanes(ctx, {
         name,
-        status,
         answer,
         round,
         spawn,
-        parent: { id: String(job.id), queue: queue.qualifiedName },
+        parent: { id: String(job.id), queue: parentQueueOf(job) },
       });
       if (await job.moveToWaitingChildren(ctx.token)) throw moved(WAITING_CHILDREN_ERROR_NAME);
       // Every lane finished before this job could wait for them: look again now.
     }
   }
 
-  async function addLanes(ctx, { name, status, answer, round, spawn, parent }) {
+  async function addLanes(ctx, { name, answer, round, spawn, parent }) {
     const specs = [];
     for (let lane = 0; lane < answer.lanes; lane++) {
       specs.push(
         buildLaneJob({
           migration: name,
-          registration: status.registration,
+          registration: answer.registration,
           generation: answer.generation,
           round,
           spawn,
@@ -293,6 +352,15 @@ function createBackgroundProcessor(options = {}) {
         };
       }
       await log(job, `⚠ slice failed (${message}) — retry ${retry}`);
+      kit.logger.warn(
+        `⚠ Background lane of ${name}: a slice failed (${message}) — retry ${retry}`,
+        {
+          background: name,
+          job: String(job.id),
+          retry,
+          error: message,
+        },
+      );
       return later(
         ctx,
         Math.min(MAX_LANE_BACKOFF_MS, 1000 * 2 ** (retry - 1)),
@@ -301,6 +369,7 @@ function createBackgroundProcessor(options = {}) {
       );
     }
     const reset = data.retry > 0 ? { ...job.data, retry: 0 } : undefined;
+    await progress(job, { outcome: slice.outcome, counters: slice.counters ?? {} });
     switch (slice.outcome) {
       case 'yielded':
       case 'stopped':

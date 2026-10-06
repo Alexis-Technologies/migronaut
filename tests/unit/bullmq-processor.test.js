@@ -1204,28 +1204,42 @@ describe('createMigrationProcessor background link', () => {
     assert.match(warnings[0], /Could not enqueue background migration .*redis down/);
   });
 
-  it('should heal on every sync tick, and report a group held by a background migration', async () => {
+  it('should heal on every sync tick, and report a line waiting for a background migration', async () => {
+    let completed = false;
     const { kit, queue, added } = linked({
       list: mock.fn(async () => [{ file: '0002-contract.js', status: 'pending' }]),
       dryRun: mock.fn(async () => [
-        { file: '0002-contract.js', status: 'pending', waitsFor: [NAME] },
+        { file: '0002-contract.js', status: 'pending', ...(completed ? {} : { waitsFor: [NAME] }) },
       ]),
+      backgroundStatus: mock.fn(async () => ({
+        migration: NAME,
+        status: completed ? 'completed' : 'running',
+        direction: 'forward',
+      })),
     });
     const processor = createMigrationProcessor({
       kit,
-      queue: { addBulk: mock.fn() },
+      queue: { addBulk: mock.fn(async (specs) => specs.map((_, i) => ({ id: `j${i}` }))) },
       background: { queue },
     });
     const result = await processor(fakeJob('sync', { kind: 'sync' }), 'token');
-    assert.deepStrictEqual(result.held, {
-      migration: '0002-contract.js',
-      reason: 'waiting for background migrations',
-      waitsFor: [NAME],
-    });
+    // Waiting is not a failure: `held` stays the circuit breaker's.
+    assert.strictEqual(result.held, undefined);
+    assert.deepStrictEqual(result.waiting, { migration: '0002-contract.js', waitsFor: [NAME] });
     assert.deepStrictEqual(result.background, { enqueued: 1 });
     assert.strictEqual(result.upToDate, false);
     assert.strictEqual(result.groupId, null);
     assert.strictEqual(added[0].data.migration, NAME);
+    const plans = kit.dryRun.mock.callCount();
+    // The next tick, still waiting: said again without planning.
+    const again = await processor(fakeJob('sync', { kind: 'sync' }), 'token');
+    assert.deepStrictEqual(again.waiting, { migration: '0002-contract.js', waitsFor: [NAME] });
+    assert.strictEqual(kit.dryRun.mock.callCount(), plans, 'no plan while still waiting');
+    // Once it completed, the tick plans — and the line goes on.
+    completed = true;
+    const resumed = await processor(fakeJob('sync', { kind: 'sync' }), 'token');
+    assert.strictEqual(resumed.waiting, undefined);
+    assert.ok(kit.dryRun.mock.callCount() > plans);
   });
 
   it('should count a heal that fails as nothing enqueued', async () => {
