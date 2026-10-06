@@ -249,8 +249,8 @@ export interface BackgroundStepResult {
 export interface StepBackgroundMigration extends BackgroundMigrationSettings {
   /** Shown in status — the collection it works on, if one */
   collection?: string;
-  step(ctx: BackgroundStepContext): Promise<BackgroundStepResult>;
-  revertStep?(ctx: BackgroundStepContext): Promise<BackgroundStepResult>;
+  step(ctx: BackgroundStepContext): BackgroundStepResult | Promise<BackgroundStepResult>;
+  revertStep?(ctx: BackgroundStepContext): BackgroundStepResult | Promise<BackgroundStepResult>;
 }
 
 /** A background migration, as a migration file exports it: `export const background = {…}` */
@@ -1233,7 +1233,11 @@ export interface StatusRow {
   origin?: MigrationOrigin;
   /** Redacted message of the last failed attempt (status `'failed'` only) */
   error?: string;
-  /** `'background'` for a background migration file (applied = registered) */
+  /**
+   * `'background'` for a background migration file (applied = registered) —
+   * in `status()` and `dryRun('up')` rows alike
+   * @experimental New in 2.3
+   */
   kind?: 'background';
   /** When the last failed attempt was recorded (status `'failed'` only) */
   failedAt?: Date;
@@ -1255,11 +1259,15 @@ export interface StatusRow {
    * (`up(file, { checksum })`).
    */
   checksum?: string;
-  /** `dryRun('up')` rows: a background migration file (applied = registered) */
-  background?: true;
-  /** `dryRun('up')` rows: the background migrations the file requires */
+  /**
+   * `dryRun('up')` rows: the background migrations the file requires
+   * @experimental New in 2.3
+   */
   requires?: string[];
-  /** `dryRun('up')` rows: those of `requires` not completed yet */
+  /**
+   * `dryRun('up')` rows: those of `requires` not completed yet
+   * @experimental New in 2.3
+   */
   waitsFor?: string[];
   /** Who asked for the apply, and why — when the run said (`requestedBy` / `reason` options) */
   requestedBy?: string;
@@ -1633,25 +1641,42 @@ export interface MigronautEvents {
   'converge:action': (event: ConvergeActionEvent) => void;
   'converge:wait': (event: ConvergeWaitEvent) => void;
   'converge:end': (event: ConvergeEndEvent) => void;
+  /** @experimental New in 2.3 */
   'background:registered': (event: BackgroundRegisteredEvent) => void;
+  /** @experimental New in 2.3 */
   'background:waiting': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:drift': (event: BackgroundEvent) => void;
-  /** A collection's live drift watcher changed state */
+  /**
+   * A collection's live drift watcher changed state
+   * @experimental New in 2.3
+   */
   'background:watch': (event: {
     runId?: string;
     collection: string;
     state: BackgroundWatchState;
   }) => void;
+  /** @experimental New in 2.3 */
   'background:unblocked': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:partitioned': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:pass': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:slice:start': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:batch': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:slice:end': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:lease:lost': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:throttle': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:control': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:completed': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
   'background:failed': (event: BackgroundEvent) => void;
 }
 
@@ -2083,14 +2108,20 @@ export type BackgroundState =
   | 'failed'
   | 'cancelled';
 
-/** Who runs a coordinator step: `{ kind, ref?, round? }` — a BullMQ round lets the newest win */
+/**
+ * Who runs a coordinator step: `{ kind, ref?, round? }` — a BullMQ round lets the newest win
+ * @experimental New in 2.3
+ */
 export interface BackgroundDriver {
   kind: 'bullmq' | 'runner' | 'cli' | 'inline' | 'local';
   ref?: string;
   round?: number;
 }
 
-/** One of {@link MigratorKit.runnableBackground}: what a driver needs to pick it up, or to tell it stalled */
+/**
+ * One of {@link MigratorKit.runnableBackground}: what a driver needs to pick it up, or to tell it stalled
+ * @experimental New in 2.3
+ */
 export interface RunnableBackground {
   migration: string;
   status: BackgroundState;
@@ -2103,7 +2134,10 @@ export interface RunnableBackground {
   coordinator?: { kind: string; round?: number; at: Date };
 }
 
-/** What a coordinator step says to do next */
+/**
+ * What a coordinator step says to do next
+ * @experimental New in 2.3
+ */
 export interface BackgroundCoordinatorAnswer {
   next: 'process' | 'wait' | 'done' | 'busy' | 'superseded';
   /** `process`: lanes that could start now */
@@ -2790,7 +2824,20 @@ export class ConvergeFailedError extends MigronautError {
  * caller held. The filter is never copied into the error. Experimental.
  */
 export class RevisionConflictError extends MigronautError {
+  readonly context?: RevisionConflictContext;
   constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/** {@link RevisionConflictError}'s `context` — what a caller decides on */
+export interface RevisionConflictContext {
+  reason: 'conflict' | 'not-found' | 'unknown';
+  /** The revision the caller held */
+  expected: number;
+  /** `conflict`: the revision the document is at */
+  actual?: number;
+  /** The collection's name, when the collection object has one */
+  collection?: string;
+  [key: string]: unknown;
 }
 
 /**

@@ -26,6 +26,7 @@ export {
   RevisionConflictError,
   ShapeVersionError,
 } from './index.js';
+export type { RevisionConflictContext } from './index.js';
 
 // ─── Documents and updates ────────────────────────────────────────────────────
 
@@ -77,6 +78,7 @@ export interface RevisionedCollectionLike {
  * name one document: an `_id` given as an operator is refused (`$eq` of a
  * value aside), and a filter on other fields must be unique — every legacy
  * document is at revision 0.
+ * @experimental New in 2.3
  */
 export interface RevisionWriteOptions {
   /** The version field — needed only with `version`. Default `'__v'` */
@@ -111,6 +113,7 @@ export type RevisionWriteResult<R extends RevisionWriteResultLike = RevisionWrit
  *
  * @throws {RevisionConflictError} when nothing matched — `context.reason` is
  *   `'conflict'` (with `actual`), `'not-found'` or `'unknown'`
+ * @experimental New in 2.3
  */
 export function updateWithRevision(
   collection: RevisionedCollectionLike | Pick<RevisionedCollectionLike, 'updateOne' | 'findOne'>,
@@ -125,6 +128,7 @@ export function updateWithRevision(
  * The replacement's revision field is overwritten with the next revision.
  *
  * @throws {RevisionConflictError} when nothing matched
+ * @experimental New in 2.3
  */
 export function replaceWithRevision(
   collection: RevisionedCollectionLike | Pick<RevisionedCollectionLike, 'replaceOne' | 'findOne'>,
@@ -140,6 +144,7 @@ export function replaceWithRevision(
  * `returnDocument: 'before'` — on every driver version alike.
  *
  * @throws {RevisionConflictError} when nothing matched
+ * @experimental New in 2.3
  */
 export function findOneAndUpdateWithRevision<TDocument = Record<string, unknown>>(
   collection:
@@ -172,6 +177,7 @@ export interface RetryOnConflictOptions {
  * Run `fn` — read, decide, write with a revision guard — again after a
  * revision conflict. A `not-found` is never retried; any other error is
  * thrown at once.
+ * @experimental New in 2.3
  */
 export function retryOnConflict<T>(
   fn: (attempt: number) => T | Promise<T>,
@@ -182,6 +188,7 @@ export function retryOnConflict<T>(
  * `update` with the revision bumped — for a write that is not guarded but
  * must still move the revision (every write to a collection with revisions
  * must, or an optimistic filter cannot see it).
+ * @experimental New in 2.3
  */
 export function bumpRevision<U extends UpdateLike>(
   update: U,
@@ -324,6 +331,7 @@ export type BackgroundMigrationFor<
  * Whether `doc` is at version `version` (a missing field is version 0) — a
  * type guard over a union of shapes. A document that is not a plain object
  * (a hydrated Mongoose document) is refused: read it with `.lean()`.
+ * @experimental New in 2.3
  */
 export function isVersion<D extends object, V extends number, F extends string = '__v'>(
   doc: D,
@@ -352,6 +360,7 @@ export interface UpcasterOptions {
  * The shape changes of one collection, usable as the `migrate` of a
  * background migration (`step`) and — the exception — to lift a document in
  * memory on read (`upcast`).
+ * @experimental New in 2.3
  */
 export interface Upcaster {
   readonly current: number;
@@ -377,9 +386,10 @@ export interface Upcaster {
  * versioning block.
  * @throws {ConfigInvalidError} when a step between `min` and `current` is
  *   missing, goes past `current`, is async or is not a function
+ * @experimental New in 2.3
  */
 export function upcaster(
-  definition: CollectionDefinitionFile | CollectionVersioning,
+  definition: CollectionDefinitionFile | CollectionVersioning | { default: CollectionDefinitionFile },
   steps: UpcastSteps,
   options?: UpcasterOptions,
 ): Upcaster;
@@ -407,21 +417,29 @@ export interface MongooseSchemaLike {
  * legacy document never is); `updateOne`/`updateMany`/`findOneAndUpdate` bump
  * the revision and stamp an upserted document. Lean `insertMany`, `bulkWrite`,
  * replacements and pipeline updates are not covered.
+ * @experimental New in 2.3
  */
 export function versioningPlugin(
   schema: MongooseSchemaLike,
-  definition: CollectionDefinitionFile | CollectionVersioning,
+  definition: CollectionDefinitionFile | CollectionVersioning | { default: CollectionDefinitionFile },
 ): void;
 
 // ─── The registry ─────────────────────────────────────────────────────────────
 
-/** The fields `stamp` adds — the default names */
+/**
+ * The fields `stamp` adds, by their default names. With custom names
+ * (`field`, `revisionField`, `revision: false`) the typed registry —
+ * `defineShapes<Shapes>()(…)` — types the stamped document by them.
+ */
 export interface VersionStamp {
   __v: number;
   __rev: number;
 }
 
-/** The application's view of its versioned collections */
+/**
+ * The application's view of its versioned collections
+ * @experimental New in 2.3
+ */
 export interface ShapeRegistry<Name extends string = string> {
   /** Every versioned collection, in declaration order */
   readonly names: readonly Name[];
@@ -466,7 +484,10 @@ export type BoundRevisionWriteOptions = Omit<RevisionWriteOptions, 'field' | 're
   revisionField?: never;
 };
 
-/** {@link ShapeRegistry.occ}: the revision guards with one collection's field names */
+/**
+ * {@link ShapeRegistry.occ}: the revision guards with one collection's field names
+ * @experimental New in 2.3
+ */
 export interface BoundRevisionGuards {
   updateWithRevision(
     collection: RevisionedCollectionLike | Pick<RevisionedCollectionLike, 'updateOne' | 'findOne'>,
@@ -555,7 +576,10 @@ export type NewerShape<N extends ShapeFieldNames = DefaultShapeFieldNames> = {
   [K in N['field']]: number;
 } & Record<string, unknown>;
 
-/** An upcaster typed by the shape map */
+/**
+ * An upcaster typed by the shape map
+ * @experimental New in 2.3
+ */
 export interface TypedUpcaster<
   S extends ShapeMap,
   C extends keyof S,
@@ -577,7 +601,10 @@ export interface TypedUpcaster<
   ): (doc: ShapeAt<S, C, F, N>) => ShapeAt<S, C, T, N>;
 }
 
-/** The registry typed by a shape map — what `defineShapes<Shapes>()(definitions)` returns */
+/**
+ * The registry typed by a shape map — what `defineShapes<Shapes>()(definitions)` returns
+ * @experimental New in 2.3
+ */
 export interface TypedShapeRegistry<S extends ShapeMap, D> extends Omit<
   ShapeRegistry<Extract<keyof S, string>>,
   'current' | 'stamp' | 'isCurrent' | 'isVersion' | 'upcaster'
@@ -619,6 +646,7 @@ export interface TypedShapeRegistry<S extends ShapeMap, D> extends Omit<
  * the definitions are inferred: `defineShapes<Shapes>()(definitions)`. The
  * definitions must cover exactly the shape map's collections, each with a
  * `current` that is its highest version (when literal — `as const`).
+ * @experimental New in 2.3
  */
 export function defineShapes<S extends ShapeMap>(): <const D extends ShapeDefinitions<S>>(
   definitions: D & Hold<NoExtraCollections<S, D> & CurrentCheck<S, D>>,
@@ -627,10 +655,12 @@ export function defineShapes<S extends ShapeMap>(): <const D extends ShapeDefini
  * The registry of the versioned collections among `definitions` — the same
  * definition files converge declares them with, as `{ name: definition }` or
  * a list of definitions with a `name` (unversioned ones are skipped).
+ * @experimental New in 2.3
  */
 export function defineShapes<const D extends Record<string, CollectionDefinitionFile>>(
   definitions: D,
 ): ShapeRegistry<Extract<keyof D, string>>;
+/** @experimental New in 2.3 */
 export function defineShapes(definitions: readonly CollectionDefinition[]): ShapeRegistry;
 
 export type { Body, CollectionVersioning, DefaultShapeFieldNames, ShapeFieldNames };

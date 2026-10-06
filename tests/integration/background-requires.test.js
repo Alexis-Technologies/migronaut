@@ -211,15 +211,15 @@ describe('requires — a migration waits for background migrations (integration)
     assert.deepStrictEqual(
       rows.map((row) => ({
         file: row.file,
-        background: row.background,
+        kind: row.kind,
         requires: row.requires,
         waitsFor: row.waitsFor,
       })),
       [
-        { file: '0001-orders-v2.js', background: true, requires: undefined, waitsFor: undefined },
+        { file: '0001-orders-v2.js', kind: 'background', requires: undefined, waitsFor: undefined },
         {
           file: '0002-contract.js',
-          background: undefined,
+          kind: undefined,
           requires: ['0001-orders-v2.js'],
           waitsFor: ['0001-orders-v2.js'],
         },

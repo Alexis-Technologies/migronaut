@@ -69,6 +69,29 @@ shape may still change in a minor release (named here).
 - **Errors and exit codes**: `REVISION_CONFLICT` (29), `SHAPE_VERSION_UNSUPPORTED` (30),
   `BACKGROUND_PENDING` (31), `BACKGROUND_FAILED` (32), `BACKGROUND_CONFLICT` (33),
   `SANDBOX_REFUSED` (34).
+- **`shapes.occ(name)`** — the revision guards and `bumpRevision` bound to a collection's field
+  names; `RevisionConflictContext` types an error's `context`.
+- **`startBackgroundRunner().stop({ timeoutMs })`**, `RunnableBackground` (what
+  `runnableBackground()` now returns: live leases, last progress, coordinator), `previous` on a
+  background status (the registration a re-registration replaced), `plan.atLeast`.
+
+### Changed
+
+For code written against 2.2 — the queue adapter's types and results, and two type-level details:
+
+- **`SyncJobResult.held` means a failure again, only.** A tick whose next migration waits for a
+  background migration reports `waiting: { migration, waitsFor }` instead; while it still waits
+  for the same thing, later ticks say so without planning. A group that stops at such a migration
+  has `upToDate: false` (`MigrationGroup.waiting` says why).
+- **`JOB_NAMES` has three more values** (`background`, `background-lane`, `background-verify`) and
+  `MigrationJobView.returnvalue` three more result types: an exhaustive `Record` over either needs
+  them.
+- **`MigronautErrorCode` has six more members** (above): an exhaustive `switch` with a `never`
+  default needs a case for each — as with the codes 2.1 added.
+- **`CollectionDefinition.indexes` and `searchIndexes` are `readonly` arrays**, so a definition
+  declared `as const` type-checks; code that pushes into a typed definition's array must copy it.
+- **Background metric names** (experimental): `migronaut.background.throttled`,
+  `migronaut.background.drift.detected`, `migronaut.background.transaction.retried`.
 
 ### Notes
 
@@ -77,6 +100,15 @@ shape may still change in a minor release (named here).
   names the two versions ("Type '3' is not assignable to type '2'").
 - The shard-aware mode needs `clusterMonitor` (it reads `config.collections` and
   `config.chunks`); without it, a sharded collection is partitioned by `_id`.
+- Fail-closed limits: `maxDocumentErrors` is at most 1000 (the ids a state keeps); a revision
+  guard refuses an `_id` given as an operator; a background `filter` may not run server-side
+  JavaScript; `create --background`'s placeholder collection (`'TODO'`) is refused by `up`;
+  `watchBackground`, `enqueueBackground` and `createBackgroundProcessor` refuse options they do
+  not know.
+- A lane stopped by its process (a shutdown, a deploy) is not a failed slice, and
+  `maxSliceFailures` counts failed slices in a row. `down` of a one-way background migration pauses
+  it and waits for its lanes before it decides; a `step` migration counts as having rewritten
+  documents once one step was checkpointed.
 
 ## v2.2.0 — 2026-10-05
 

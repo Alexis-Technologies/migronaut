@@ -1676,10 +1676,8 @@ class MigratorKit extends EventEmitter {
       return;
     }
     if (loaded === null) return;
-    if (loaded.kind === 'background') {
-      row.background = true;
-      row.kind = 'background';
-    }
+    // One fact, one field: `kind`, as a status row says it.
+    if (loaded.kind === 'background') row.kind = 'background';
     const requires = loaded.requires ?? [];
     if (requires.length === 0) return;
     row.requires = requires;
@@ -1909,6 +1907,12 @@ class MigratorKit extends EventEmitter {
    * fail (or reach the network at all) when that manager is unreachable.
    */
   async create(name, options = {}) {
+    if (options.background && options.template !== undefined) {
+      throw new ConfigInvalidError(
+        'create: background and template do not combine — a background migration is ' +
+          'scaffolded from its own template',
+      );
+    }
     const config = await this.#ensureConfig(false, true);
     const dir = this.#migrationsPath();
     await fs.mkdir(dir, { recursive: true });

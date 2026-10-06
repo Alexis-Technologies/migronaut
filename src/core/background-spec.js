@@ -62,6 +62,9 @@ const INTEGER_SETTINGS = [
   ['shardConcurrency', 1, 64],
 ];
 
+/** The collection `create --background` leaves for the author to fill in */
+const SCAFFOLD_PLACEHOLDER = 'TODO';
+
 /** Operators that run JavaScript on the server */
 const SERVER_JS = new Set(['$where', '$function', '$accumulator']);
 
@@ -266,6 +269,10 @@ function backgroundIssues(spec, { versioning } = {}) {
 
   if (spec.collection === undefined) {
     report('collection', 'is required');
+  } else if (spec.collection === SCAFFOLD_PLACEHOLDER) {
+    // Registered as is, it would "complete" at once over an empty collection
+    // — and satisfy whatever requires it.
+    report('collection', `is still the scaffold's placeholder ('${SCAFFOLD_PLACEHOLDER}')`);
   } else if (!isCollectionName(spec.collection)) {
     report('collection', 'must be a valid collection name');
   }

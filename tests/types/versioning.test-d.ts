@@ -108,3 +108,10 @@ expectType<Promise<RevisionWriteResult>>(
 expectType<{ $set: { status: string } }>(bound.bumpRevision({ $set: { status: 'x' } }));
 expectError(bound.updateWithRevision(orders, { _id: 1 }, 0, {}, { revisionField: 'other' }));
 expectError(boundShapes.occ('customers'));
+
+// ─── A conflict's context is typed; an ES-module definition is taken as it is ─
+declare const conflict: RevisionConflictError;
+expectType<'conflict' | 'not-found' | 'unknown' | undefined>(conflict.context?.reason);
+expectType<number | undefined>(conflict.context?.actual);
+declare const esModule: { default: { versioning: { current: 2 } } };
+expectAssignable<Upcaster>(upcaster(esModule, { 1: (doc) => doc }));

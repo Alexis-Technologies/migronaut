@@ -292,10 +292,16 @@ export const background = {
     const content = readFileSync(path.join(project.dir, file), 'utf8');
     assert.match(content, /export const background = \{/);
     assert.match(content, /migrate: \(doc\) =>/);
+    // No identity revert: down would stamp the old version on the new shape.
+    assert.match(content, /\/\/ revert:/);
     assert.strictEqual(
       (await runCli(args('create', 'x', '--background', '--template', 'a.js'))).code,
       EXIT_CODES.CONFIG_INVALID,
     );
+    // As it is, the scaffold is refused by up — its placeholder collection would "complete" at once.
+    const up = await runCli(args('up'));
+    assert.strictEqual(up.code, EXIT_CODES.MIGRATION_INVALID_EXPORT, up.stderr);
+    assert.match(up.stderr + up.stdout, /placeholder/);
   });
 });
 

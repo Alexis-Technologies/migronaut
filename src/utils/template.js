@@ -158,6 +158,7 @@ function defaultBackgroundTemplate(js, esm = false) {
     : "import type { DeclarativeBackgroundMigration } from '@alexify/migronaut';\n\n";
   const annotation = js ? '' : ': DeclarativeBackgroundMigration';
   const body = `{
+  // The collection to rewrite (\`up\` refuses this placeholder).
   collection: 'TODO',
   // Documents at version \`from\` (0: no version field yet) become version \`to\`.
   from: 1,
@@ -165,11 +166,13 @@ function defaultBackgroundTemplate(js, esm = false) {
   // The new document for one old one — return it reshaped; migronaut sets the
   // version, bumps the revision and writes only the fields that changed.
   migrate: (doc) => {
-    // TODO: reshape doc
-    return doc;
+    // TODO: reshape doc, and return it
+    throw new Error('migrate is not written yet');
   },
-  // The way back, for \`down\` — remove it if there is none.
-  revert: (doc) => doc,
+  // The way back, for \`down\`. Without one, \`down\` refuses once documents
+  // were rewritten. Never \`(doc) => doc\`: that would stamp the old version
+  // on documents still in the new shape.
+  // revert: ({ shipping, ...doc }) => ({ ...doc, address: shipping.address }),
   // Partitions worked at once, across every process (default 1).
   // maxParallel: 4,
 }`;

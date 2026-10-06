@@ -58,9 +58,9 @@ const METRICS = {
   BACKGROUND_DOCUMENTS: 'migronaut.background.documents',
   BACKGROUND_SLICE_DURATION: 'migronaut.background.slice.duration',
   BACKGROUND_BATCH_WRITE_DURATION: 'migronaut.background.batch.write.duration',
-  BACKGROUND_THROTTLE: 'migronaut.background.throttle',
-  BACKGROUND_DRIFT: 'migronaut.background.drift',
-  BACKGROUND_TRANSACTION_RETRIES: 'migronaut.background.transaction.retries',
+  BACKGROUND_THROTTLE: 'migronaut.background.throttled',
+  BACKGROUND_DRIFT: 'migronaut.background.drift.detected',
+  BACKGROUND_TRANSACTION_RETRIES: 'migronaut.background.transaction.retried',
   BACKGROUND_LEASES_RECLAIMED: 'migronaut.background.leases.reclaimed',
   BACKGROUND_WATCH_DELAY: 'migronaut.background.watch.delay',
 };

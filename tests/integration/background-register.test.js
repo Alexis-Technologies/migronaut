@@ -276,6 +276,14 @@ export const background = { collection: 'orders', from: 1, to: 2, migrate: (doc)
     assert.strictEqual(await store().get('0001-orders.js'), null, 'withdrawn');
   });
 
+  it('should refuse a template for a background migration in the kit too, not only the CLI', async () => {
+    const kit = kitWith();
+    await assert.rejects(
+      kit.create('orders v2', { background: true, template: 'custom.js' }),
+      /do not combine/,
+    );
+  });
+
   it('should refuse a file with both background and up/down', async () => {
     const kit = kitWith();
     project.write(

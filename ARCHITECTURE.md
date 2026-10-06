@@ -1011,9 +1011,11 @@ line above, and for a reason that does not apply there: the ordering truth stays
   child strands the parent in `waiting-children` for good. A lane's id is new for every spawn
   (`…-r<round>-s<spawn>-l<k>`): BullMQ will not move an existing job to another parent, and
   deduplication cannot be combined with `parent`.
-- **Rounds.** A coordinator chain takes the round after the last one recorded on the state
-  document and keeps it in its job data; the kit refuses an older round (`superseded`). That is
-  what makes a **stall takeover** safe: a heal (worker start, every sync tick, every drift-watch
+- **Rounds.** A coordinator chain asks the kit for a round at its first step and keeps it in its
+  job data; `coordinateBackground` hands out the one after the last under the coordinator lock, so
+  two chains started at once never share one, and refuses any round but the latest
+  (`superseded`) — one it never handed out is never written. That is what makes a **stall
+  takeover** safe: a heal (worker start, every sync tick, every drift-watch
   tick) adds a coordinator for every runnable background migration — absorbed by the chain that
   is alive — plus, for one nothing has moved for `stallMs`, a takeover deduplicated per round.
 - **Heals are the recovery for everything Redis can lose.** Plans, cursors, leases and counters
@@ -1304,7 +1306,7 @@ has no rule for either) — catch these in review.
 - **Types:** plain CommonJS, not TypeScript — no `import`/`export` syntax, no type annotations in
   `src/`/`bin/`. JSDoc comments document intent for the reader/editor but are never type-checked
   (no `tsc`/`checkJs` pass over them). The only checked type surface is the hand-written
-  [index.d.ts](index.d.ts) and [bullmq.d.ts](bullmq.d.ts), verified against
+  [index.d.ts](index.d.ts), [bullmq.d.ts](bullmq.d.ts) and [versioning.d.ts](versioning.d.ts), verified against
   [tests/types/](tests/types/) via `tsd`. JSDoc on public methods is still expected.
 - **Errors:** never `throw new Error`. Always a `MigronautError` subclass with a typed `code`. Never
   swallow — rethrow or route to `onError`.
@@ -1317,7 +1319,8 @@ has no rule for either) — catch these in review.
 - **Public surface:** anything users should touch must be re-exported from an entry point's barrel
   **and** typed in that entry's declaration file — [src/index.js](src/index.js) +
   [index.d.ts](index.d.ts) for the package root, [src/bullmq/index.js](src/bullmq/index.js) +
-  [bullmq.d.ts](bullmq.d.ts) for the subpath. Each pair is maintained by hand in lockstep. If it's
+  [bullmq.d.ts](bullmq.d.ts) and [src/versioning/index.js](src/versioning/index.js) +
+  [versioning.d.ts](versioning.d.ts) for the subpaths. Each pair is maintained by hand in lockstep. If it's
   not in both, it's private — and the `exports` map makes that literal: nothing else is reachable.
 - **Injected, never required:** third-party integrations come in through options. `src/` never
   requires `bullmq` (a unit test greps for it), and no `.d.ts` imports an optional package. An id
@@ -1473,6 +1476,24 @@ The high-impact ones for code changes:
   registers the way back; without one it refuses once documents were rewritten
   (`IrreversibleMigrationError`). A file may not export both `background` and `up`/`down`: the
   expand step is a migration of its own.
+- **`down` of a one-way background migration pauses it first.** Once a plan exists, lanes may be
+  mid-batch: `down` pauses it, waits for its lanes, then decides — by `migrated` for a declarative
+  migration, by any checkpointed step for a `step` one (it reports `migrated` only when it wants
+  to); a refused `down` resumes it. A never-planned one is removed by one conditional delete
+  (`generation: 0`). `down` goes by the spec stored at registration, so a definition file broken
+  since never blocks it.
+- **A stop is not a failure.** A lane whose caller aborts (a shutdown, a deploy) returns `stopped`
+  and releases its lease; only a slice that fails on its own is counted, and `maxSliceFailures`
+  counts them in a row (a checkpoint resets the count) — a few rolling deploys must never fail a
+  partition.
+- **The kit hands out coordinator rounds.** A queue chain starts without a round and gets the next
+  one from `coordinateBackground` under the coordinator lock; a chain whose round is not the latest
+  is `superseded`. Two chains started at once never share one, and a round the kit never handed out
+  is never written. The round sits beside the coordinator record, so a CLI or runner step keeps it.
+- **Waiting is not held.** A sync tick behind a migration that requires an unfinished background
+  migration reports `waiting`; `held` stays the circuit breaker on a failed, unchanged migration.
+- **`maxDocumentErrors` is at most 1000** — the bad ids a state keeps (they are left out of later
+  passes and of the final count, so a larger budget could never be told).
 - **Completion is a count, not a sum of partitions.** A pass ends when no partition is open; the
   background migration completes only when counting what still matches finds nothing. Gaps between
   partitions and documents written meanwhile are why — the partitioner may sample and round freely.
@@ -1608,10 +1629,11 @@ MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admi
 - **No build step, ever.** migronaut ships exactly what's in `src/`/`bin/` — plain CommonJS, no
   compile pass for authors or consumers. The package version is read from `package.json` at
   runtime (`bin/migronaut.js`), not injected at build time.
-- **Types:** two hand-written declaration files at the package root, one per entry point —
-  [index.d.ts](index.d.ts) and [bullmq.d.ts](bullmq.d.ts). There is no generation step and no `tsc`
-  pass over `src/`. Correctness is enforced by `tsd` (`pnpm run test:types`) against
-  [tests/types/](tests/types/), and `pnpm run check:dts` compiles both files in one program.
+- **Types:** three hand-written declaration files at the package root, one per entry point —
+  [index.d.ts](index.d.ts), [bullmq.d.ts](bullmq.d.ts) and [versioning.d.ts](versioning.d.ts).
+  There is no generation step and no `tsc` pass over `src/`. Correctness is enforced by `tsd`
+  (`pnpm run test:types`) against [tests/types/](tests/types/), and `pnpm run check:dts` compiles
+  the three files in one program.
 - **Lint/format:** `pnpm run lint` (`oxlint src bin scripts tests bench examples`), `pnpm run format`
   (`oxfmt` to fix formatting), `pnpm run format:check` (`oxfmt --check`, no writes). The two root
   shims (`index.js`, `bullmq.js`) are one-line re-exports and are not in the globs.

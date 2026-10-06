@@ -424,9 +424,9 @@ if (summary.waiting) {
 ```
 
 `kit.up(undefined, { onBackgroundPending: 'stop' })` takes the same option. A `dryRun('up')` row
-says `background: true` for a background file, and `requires` / `waitsFor` for a migration that
-waits. In [inline mode](#inline-backgroundinline) the required background migrations run first,
-right there.
+says `kind: 'background'` for a background file (as `status()` does), and `requires` / `waitsFor`
+for a migration that waits. In [inline mode](#inline-backgroundinline) the required background
+migrations run first, right there.
 
 ### Between background migrations
 

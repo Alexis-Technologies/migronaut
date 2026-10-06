@@ -221,8 +221,8 @@ pnpm run test:unit                 # unit only — fast, no MongoDB
 pnpm run test:integration            # integration only, serial (--test-concurrency=1)
 node --test tests/integration/up.test.js   # single file
 pnpm run test:coverage             # node --test under c8, gated at 90/90/90
-pnpm run test:types                  # tsd — checks index.d.ts + bullmq.d.ts against tests/types/*.test-d.ts
-pnpm run check:dts                     # tsc --noEmit --strict over both .d.ts files on their own
+pnpm run test:types                  # tsd — checks index.d.ts, bullmq.d.ts and versioning.d.ts against tests/types/*.test-d.ts
+pnpm run check:dts                     # tsc --noEmit --strict over the three .d.ts files on their own
 node bin/migronaut.js --help           # run the CLI directly — no build, ever
 pnpm run size                            # esbuild bundle-size report (library, CLI, queue adapter), no publish artifact
 # The real-BullMQ suite is opt-in (CI runs it; everything else needs no Redis):
@@ -244,7 +244,7 @@ pnpm run docs:dev                        # vitepress dev docs
 `prepublishOnly` runs lint + format:check + test:coverage + test:types + check:dts — treat that as
 the pre-merge gate. There is no `build` script and nothing to run before testing or publishing;
 `files` in `package.json` ships `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`,
-`migronaut.schema.json`, `bin/`, and `src/` as-is.
+`versioning.js`, `versioning.d.ts`, `migronaut.schema.json`, `bin/`, and `src/` as-is.
 
 ## Conventions (enforced by oxlint/oxfmt + review)
 
@@ -306,7 +306,7 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
   parallel (13 concurrent `mongodb-memory-server` replica sets) can make timing-sensitive tests
   flaky under heavy CPU contention — they're stable in isolation. Not a correctness issue.
 - Type coverage of the public surface lives in `tests/types/*.test-d.ts`, checked by `tsd`
-  (`pnpm run test:types`) — update these when `index.d.ts` or `bullmq.d.ts` changes.
+  (`pnpm run test:types`) — update these when `index.d.ts`, `bullmq.d.ts` or `versioning.d.ts` changes.
   `bullmq.test-d.ts` is also where the real BullMQ classes are checked against the structural
   `BullMQ*Like` types, and `index.test-d.ts` where the real `@opentelemetry/api` types are checked
   against `MigronautTracer` / `MigronautMeter` — part by part (span, options, instruments), since a
@@ -379,7 +379,15 @@ release that keeps writing exhausts `maxPasses` and fails visibly; the coordinat
 the kit recorded (its coordinator decides from MongoDB), lanes carry `ignoreDependencyOnFailure`
 (the other three failure policies strand or wake the coordinator wrongly) and get a new job id per
 spawn (BullMQ will not move a job to another parent); `stampedDiff` writes only the fields that
-changed, so untouched fields keep their BSON types; a shard-aware read may reach two shards (a
+changed, so untouched fields keep their BSON types; a lane stopped by its caller (a shutdown) is
+`stopped`, never a failed slice, and `maxSliceFailures` counts failed slices in a row (a checkpoint
+resets it); `down` of a one-way background migration pauses it and waits for its lanes before it
+decides (a `step` one counts any checkpointed step as rewritten) and goes by the spec stored at
+registration; coordinator rounds are handed out by the kit under the coordinator lock (a queue
+chain asks without one), and a sync tick that waits for a background migration reports `waiting`,
+never `held`; `maxDocumentErrors` is capped at the 1000 bad ids a state keeps; the scaffold's
+placeholder collection `'TODO'` is refused by `up`; a revision guard refuses an operator-valued
+`_id`; background document errors mask dup-key values (`documentErrorText`); a shard-aware read may reach two shards (a
 mongos takes a `$lt` bound as inclusive when it picks shards); the shard-key guard compares
 numbers by value; the live watcher opens its stream *before* it probes the past; a typed
 `current` past the highest shape, written inline, errors as "not assignable to type 'never'"

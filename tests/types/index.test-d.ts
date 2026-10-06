@@ -543,7 +543,10 @@ for (const code of [
   expectAssignable<MigronautErrorCode>(code);
   expectType<number>(EXIT_CODES[code]);
 }
-expectType<MigronautError>(new RevisionConflictError('conflict', { reason: 'conflict' }));
+expectAssignable<MigronautError>(new RevisionConflictError('conflict', { reason: 'conflict' }));
+expectType<'conflict' | 'not-found' | 'unknown' | undefined>(
+  new RevisionConflictError('conflict').context?.reason,
+);
 expectType<MigronautError>(new ShapeVersionError('newer', { reason: 'newer' }));
 expectType<MigronautError>(new BackgroundPendingError('pending', { waitsFor: [] }));
 expectType<MigronautError>(new BackgroundFailedError('failed'));
