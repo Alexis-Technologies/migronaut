@@ -1,5 +1,12 @@
+const { mapLimit } = require('../utils/concurrency.js');
 const { sameValue } = require('../versioning/internal.js');
-const { targetPartitions } = require('./background-partition.js');
+const {
+  MAX_TIME_EXPIRED,
+  SAMPLE_TIMEOUT_MS,
+  largestFirst,
+  sampleRequest,
+  targetPartitions,
+} = require('./background-partition.js');
 const { loadBson } = require('./bson-peer.js');
 const { READ_OPTIONS } = require('./server-info.js');
 const { shardedVersionIndexKey } = require('./versioning-spec.js');
@@ -35,10 +42,10 @@ const { shardedVersionIndexKey } = require('./versioning-spec.js');
 const PARTITIONS_PER_SHARD = 8;
 /** Documents a draining partition steps over before it leaves them to the next pass */
 const MAX_STUCK = 100;
-/** How long a sample may take before a run stays one partition */
-const SAMPLE_TIMEOUT_MS = 30_000;
-/** Server error: the operation ran out of its `maxTimeMS` */
-const MAX_TIME_EXPIRED = 50;
+/** Runs sampled at once while a plan is drawn (under the coordinator lock) */
+const SAMPLE_CONCURRENCY = 4;
+/** A run this many times larger than its sample is sampled collection-first */
+const SAMPLE_FIRST_FACTOR = 20;
 
 const HASH_MIN = -(2n ** 63n);
 const HASH_END = 2n ** 63n;
@@ -249,17 +256,21 @@ function splitHashed(run, fields, parts) {
  * by the server. Only tuples whose first field lies strictly inside the run
  * are sampled — each is then a valid boundary, whatever the other fields
  * hold. A hashed field further in the key is sampled as its hash, the value
- * the index orders by. Returns the run whole when that cannot be drawn
- * (bounds of two types, a sample that times out or comes back too small).
+ * the index orders by. A run far larger than its sample is sampled from the
+ * collection first (a random cursor, `share` being the run's part of it) and
+ * filtered after; a `$match` first would read every document of the run and
+ * sort them all at random. Resolves to `{ pieces, degraded? }` — the run
+ * whole when it cannot be split (bounds of two types, a sample too small),
+ * and `degraded: 'sample-timeout'` when the sample ran out of time.
  */
-async function splitSampled(collection, match, run, fields, key, parts) {
+async function splitSampled(collection, match, run, fields, key, parts, { total, share }) {
   const [first] = fields;
   const lo = run.min[first];
   const hi = run.max[first];
   const condition = {};
   if (!isMinKey(lo)) condition.$gt = lo;
   if (!isMaxKey(hi)) condition.$lt = hi;
-  if (!isBound(lo) && !isBound(hi) && classOf(lo) !== classOf(hi)) return [run];
+  if (!isBound(lo) && !isBound(hi) && classOf(lo) !== classOf(hi)) return { pieces: [run] };
   const projection = { _id: 0 };
   const sort = {};
   for (const field of fields) {
@@ -267,24 +278,27 @@ async function splitSampled(collection, match, run, fields, key, parts) {
     sort[field] = 1;
   }
   const filter = Object.keys(condition).length > 0 ? { [first]: condition } : {};
+  const inRun = { $and: [match, filter] };
+  const size = Math.min(10_000, 100 * parts);
+  const sampleFirst = total !== undefined && total * share > SAMPLE_FIRST_FACTOR * size;
+  const pipeline = sampleFirst
+    ? [{ $sample: { size: sampleRequest(size, share, total) } }, { $match: inRun }]
+    : [{ $match: inRun }, { $sample: { size } }];
   let sample;
   try {
     sample = await collection
-      .aggregate(
-        [
-          { $match: { $and: [match, filter] } },
-          { $sample: { size: Math.min(10_000, 100 * parts) } },
-          { $project: projection },
-          { $sort: sort },
-        ],
-        { maxTimeMS: SAMPLE_TIMEOUT_MS, allowDiskUse: true, ...READ_OPTIONS, promoteLongs: false },
-      )
+      .aggregate([...pipeline, { $project: projection }, { $sort: sort }], {
+        maxTimeMS: SAMPLE_TIMEOUT_MS,
+        allowDiskUse: true,
+        ...READ_OPTIONS,
+        promoteLongs: false,
+      })
       .toArray();
   } catch (error) {
-    if (error?.code === MAX_TIME_EXPIRED) return [run];
+    if (error?.code === MAX_TIME_EXPIRED) return { pieces: [run], degraded: 'sample-timeout' };
     throw error;
   }
-  if (sample.length < parts) return [run];
+  if (sample.length < parts) return { pieces: [run] };
   const slices = [];
   let min = run.min;
   let previous;
@@ -298,17 +312,12 @@ async function splitSampled(collection, match, run, fields, key, parts) {
     previous = max;
   }
   slices.push({ ...run, min, max: run.max });
-  return slices;
+  return { pieces: slices };
 }
 
 function sameTuple(a, b, fields) {
   for (const field of fields) if (!sameValue(a[field], b[field])) return false;
   return true;
-}
-
-/** Largest first: a lane starts on the work that would otherwise finish last */
-function largestFirst(partitions) {
-  return partitions.sort((a, b) => b.estimate - a.estimate);
 }
 
 /**
@@ -366,32 +375,54 @@ function createShardPartitioner({ key, field, source, readChunks, epoch }) {
     const { MaxKey, MinKey } = loadBson();
     const chunks = await readChunks();
     const grouped = chunks !== undefined && chunks.length > 0;
+    const allRuns = grouped ? runsOf(chunks) : undefined;
     const runs = grouped
-      ? capRuns(runsOf(chunks), settings.maxPartitions)
+      ? capRuns(allRuns, settings.maxPartitions)
       : [{ min: edge(fields, MinKey), max: edge(fields, MaxKey), shard: undefined, chunks: 1 }];
+    // More runs than partitions allowed: blocks were merged across shards, and
+    // a merged block has no shard to cap its lanes by.
+    let ungrouped = false;
+    if (grouped && runs.length < allRuns.length) {
+      for (const run of runs) if (run.shard === undefined) ungrouped = true;
+    }
     // A few partitions per lane: per shard when the lanes are capped per shard.
     const perShard = grouped
       ? Math.min(PARTITIONS_PER_SHARD, settings.overPartition * shardConcurrency, aim)
       : aim;
     const runsPerShard = new Map();
-    for (const run of runs) runsPerShard.set(run.shard, (runsPerShard.get(run.shard) ?? 0) + 1);
+    let totalChunks = 0;
+    for (const run of runs) {
+      runsPerShard.set(run.shard, (runsPerShard.get(run.shard) ?? 0) + 1);
+      totalChunks += run.chunks;
+    }
     const budget = Math.max(runs.length, settings.maxPartitions);
     const wanted = Math.max(1, Math.min(aim, Math.ceil(count / settings.minPartitionDocs)));
-    let totalChunks = 0;
-    for (const run of runs) totalChunks += run.chunks;
-    const slices = [];
-    for (const run of runs) {
+    // The collection's size, for a run that is sampled collection-first.
+    const total =
+      typeof collection.estimatedDocumentCount === 'function'
+        ? await collection.estimatedDocumentCount().catch(() => undefined)
+        : undefined;
+    // Runs are sampled a few at a time: one after another, a plan of many runs
+    // would hold the coordinator lock for a sample timeout per run.
+    const split = await mapLimit(runs, SAMPLE_CONCURRENCY, async (run) => {
       const parts = Math.min(
         Math.ceil(perShard / runsPerShard.get(run.shard)),
         Math.max(1, Math.floor(budget / runs.length)),
         wanted,
       );
-      const pieces =
-        parts <= 1
-          ? [run]
-          : fields[0] === hashed
-            ? splitHashed(run, fields, parts)
-            : await splitSampled(collection, match, run, fields, key, parts);
+      if (parts <= 1) return { pieces: [run] };
+      if (fields[0] === hashed) return { pieces: splitHashed(run, fields, parts) };
+      return splitSampled(collection, match, run, fields, key, parts, {
+        total,
+        share: run.chunks / totalChunks,
+      });
+    });
+    const slices = [];
+    let timedOut = false;
+    for (let i = 0; i < runs.length; i++) {
+      const run = runs[i];
+      const { pieces, degraded } = split[i];
+      if (degraded !== undefined) timedOut = true;
       for (const piece of pieces) {
         slices.push({
           scope: { kind: 'key-range', min: piece.min, max: piece.max },
@@ -400,10 +431,12 @@ function createShardPartitioner({ key, field, source, readChunks, epoch }) {
         });
       }
     }
+    const degraded = timedOut ? 'sample-timeout' : ungrouped ? 'ungrouped' : undefined;
     return {
       epoch: planned,
       method: grouped ? 'chunks' : 'sampled',
       estimate: count,
+      ...(degraded !== undefined ? { degraded } : {}),
       partitions: largestFirst(slices),
     };
   }

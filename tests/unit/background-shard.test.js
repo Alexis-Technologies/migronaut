@@ -337,6 +337,7 @@ describe('createShardPartitioner — planning', () => {
       shardConcurrency: 4,
     });
     assert.strictEqual(plan.partitions.length, 1);
+    assert.strictEqual(plan.degraded, 'sample-timeout', 'said, not silent');
     const broken = {
       countDocuments: async () => 1000,
       aggregate: () => ({
@@ -355,6 +356,56 @@ describe('createShardPartitioner — planning', () => {
       }),
       /down/,
     );
+  });
+
+  it('should sample a run far larger than its sample collection-first, under the random cursor', async () => {
+    const coll = {
+      countDocuments: async () => 1000,
+      estimatedDocumentCount: async () => 10_000_000,
+      aggregate: mock.fn(() => ({
+        toArray: async () => Array.from({ length: 400 }, (_, i) => ({ k: i * 10 })),
+      })),
+    };
+    const partitioner = createShardPartitioner({
+      key: { k: 1 },
+      field: '__v',
+      source: 1,
+      readChunks: async () => [chunk(MIN, 100, 's1'), chunk(100, MAX, 's2')],
+    });
+    await partitioner.plan({
+      collection: coll,
+      match: {},
+      maxParallel: 4,
+      settings: settings(),
+      shardConcurrency: 4,
+    });
+    for (const call of coll.aggregate.mock.calls) {
+      const [first] = call.arguments[0];
+      assert.ok(first.$sample, 'the sample first');
+      assert.ok(first.$sample.size < 10_000_000 * 0.05, 'within the random cursor');
+    }
+  });
+
+  it('should say when merged runs span shards (more runs than maxPartitions)', async () => {
+    const chunks = [];
+    for (let i = 0; i < 6; i++) {
+      const min = i === 0 ? MIN : i * 10;
+      const max = i === 5 ? MAX : (i + 1) * 10;
+      chunks.push(chunk(min, max, i % 2 ? 's2' : 's1'));
+    }
+    const partitioner = createShardPartitioner({
+      key: { k: 1 },
+      field: '__v',
+      source: 1,
+      readChunks: async () => chunks,
+    });
+    const plan = await partitioner.plan({
+      collection: collection(),
+      match: {},
+      maxParallel: 1,
+      settings: { ...settings(), maxPartitions: 2 },
+    });
+    assert.strictEqual(plan.degraded, 'ungrouped');
   });
 
   it('should sample the whole key space, ungrouped, when the chunks cannot be read', async () => {
@@ -520,5 +571,22 @@ describe('partitionerFor — which partitioner a collection gets', () => {
     const none = deps({ indexes: [{ key: { region: 1 } }] });
     assert.strictEqual(await probeHint(none, spec), undefined);
     assert.match(none.warnings[0], /has no \{ __v: 1, _id: 1 \} index/);
+  });
+});
+
+describe('sampleRequest — a sample-first pass under the random cursor', () => {
+  const { RANDOM_CURSOR_SHARE, sampleRequest } = require('../../src/core/background-partition.js');
+
+  it('should oversample by how little matches, never to 5% of the collection', () => {
+    // 100 matches wanted, half the collection matching: 200 asked.
+    assert.strictEqual(sampleRequest(100, 0.5, 1_000_000), 200);
+    // The default sizing used to land on exactly 5% — a full scan and sort.
+    const asked = sampleRequest(2000, (2000 * 20) / 1_000_000, 1_000_000);
+    assert.ok(asked < 1_000_000 * 0.05, `asked ${asked}`);
+    assert.strictEqual(asked, 1_000_000 * RANDOM_CURSOR_SHARE);
+    // The match share is taken as at least 1%; never past the cap, never below one.
+    assert.strictEqual(sampleRequest(100, 0.0001, 1e12), 10_000);
+    assert.strictEqual(sampleRequest(10_000, 0.05, 1e12), 100_000);
+    assert.strictEqual(sampleRequest(1, 1, 10), 1);
   });
 });

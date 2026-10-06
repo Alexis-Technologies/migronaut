@@ -36,6 +36,26 @@ const { shardedVersionIndexKey } = require('./versioning-spec.js');
  * token keeps a stale plan from committing, and the leases cap the lanes.
  */
 
+/**
+ * How long a collection's index keys are reused (`deps.indexCache`): every
+ * slice plans its reads by them, and indexes change on a deploy, not a batch.
+ */
+const INDEX_CACHE_MS = 30_000;
+
+/** What a lane's control read needs of the state */
+const CONTROL_FIELDS = Object.freeze({ status: 1, generation: 1, 'plan.token': 1 });
+
+/** What frequent readers of every state leave out — the history and the document errors */
+const STATE_SUMMARY = Object.freeze({ history: 0, docErrors: 0 });
+
+/** What a degraded plan means, for its warning */
+const DEGRADED = {
+  'sample-timeout': 'the sample ran out of time — some ranges stay whole this pass (fewer lanes)',
+  ungrouped:
+    'more runs of chunks than maxPartitions — merged blocks span shards and are not capped by ' +
+    'shardConcurrency',
+};
+
 /** How long a coordinator waits before it looks at its lanes again, without a driver that wakes it */
 const POLL_MS = 5_000;
 
@@ -48,10 +68,15 @@ const retrySoon = (deps, reason) => ({
 
 /** The keys of a collection's indexes — none for one that does not exist yet */
 async function indexKeys(deps, collection) {
+  const cache = deps.indexCache;
+  const hit = cache?.get(collection);
+  const now = Date.now();
+  if (hit !== undefined && now - hit.at < INDEX_CACHE_MS) return hit.keys;
   try {
     const indexes = await deps.db.collection(collection).listIndexes(READ_OPTIONS).toArray();
     const keys = [];
     for (const index of indexes) keys.push(index.key);
+    cache?.set(collection, { at: now, keys });
     return keys;
   } catch {
     return [];
@@ -472,7 +497,7 @@ async function planPass(deps, job, state, hash, { newPass = true } = {}) {
   });
   if (plan.degraded) {
     deps.logger.warn(
-      `⚠ ${state._id}: the _id sample timed out — one partition per type this pass`,
+      `⚠ ${state._id}: ${DEGRADED[plan.degraded] ?? plan.degraded}`,
       deps.fields({ background: state._id, degraded: plan.degraded }),
     );
   }
@@ -785,9 +810,10 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
           throttle,
           adaptive,
           now,
+          // Every batch of every lane asks: only what it decides on is read.
           readControl: () =>
             store
-              .get(name)
+              .get(name, { projection: CONTROL_FIELDS })
               .then((current) =>
                 current === null
                   ? null
@@ -1116,7 +1142,7 @@ async function stillDirty(deps, state) {
  * `streaming`: collections a live watcher leads right now — skipped too.
  */
 async function verify(deps, { onDrift = 'reopen', collections, streaming } = {}) {
-  const states = await deps.store.list();
+  const states = await deps.store.list({}, { projection: STATE_SUMMARY });
   const active = new Set();
   for (const state of states) {
     if (ACTIVE.has(state.status) && state.spec?.collection) active.add(state.spec.collection);
@@ -1184,12 +1210,25 @@ const STALL_MS = 15 * 60_000;
  * background records.
  */
 async function auditFindings(deps, { now = Date.now() } = {}) {
-  const states = await deps.store.list();
+  const states = await deps.store.list({}, { projection: STATE_SUMMARY });
   const records = await deps.backgroundRecords();
   if (states.length === 0 && records.length === 0) return null;
   const failures = [];
   const warnings = [];
-  const byName = new Map(states.map((state) => [state._id, state]));
+  const byName = new Map();
+  const running = [];
+  for (const state of states) {
+    byName.set(state._id, state);
+    if (state.status === 'running') running.push(state._id);
+  }
+  // Read once for all of them, not once per state.
+  const live = await deps.store.liveLeasesOf(running);
+  const hints = new Map();
+  const hintOf = async (spec) => {
+    const key = `${spec.collection}\u0000${spec.field}`;
+    if (!hints.has(key)) hints.set(key, await probeHint(deps, spec));
+    return hints.get(key);
+  };
   const counts = {};
   for (const state of states) {
     const name = state._id;
@@ -1209,8 +1248,7 @@ async function auditFindings(deps, { now = Date.now() } = {}) {
     }
     if (state.status === 'paused') warnings.push(`${name} is paused`);
     if (state.status === 'running') {
-      const { live } = await deps.store.leases(name);
-      if (live === 0 && now - progressAt > STALL_MS) {
+      if ((live.get(name) ?? 0) === 0 && now - progressAt > STALL_MS) {
         warnings.push(
           `${name} is running but stalled — no lane for ${Math.round((now - progressAt) / 60_000)} min`,
         );
@@ -1231,9 +1269,12 @@ async function auditFindings(deps, { now = Date.now() } = {}) {
       if (current.failed > 0 && state.status !== 'failed') {
         warnings.push(`${name} has ${current.failed} failed partition(s)`);
       }
-      const all = await deps.store.partitions(name);
-      let orphaned = 0;
-      for (const partition of all) if (partition.plan !== state.plan.token) orphaned += 1;
+      // Of the current generation only: the done partitions of the pass before
+      // are kept on purpose (finalize drops the generation before last).
+      const orphaned = await deps.store.countForeignPlans(name, {
+        generation: state.generation,
+        plan: state.plan.token,
+      });
       if (orphaned > 0) warnings.push(`${name} keeps ${orphaned} partition(s) of an old plan`);
     }
     if (state.status === 'completed') {
@@ -1243,7 +1284,7 @@ async function auditFindings(deps, { now = Date.now() } = {}) {
         );
       }
       if (state.spec?.mode === 'declarative' && state.direction !== 'revert') {
-        const hint = await probeHint(deps, state.spec);
+        const hint = await hintOf(state.spec);
         if (
           hint !== undefined &&
           (await probeOldShape(deps, state, hint).catch(() => null)) !== null
@@ -1312,6 +1353,7 @@ module.exports = {
   tryUnblock,
   verify,
   versionHint,
+  STATE_SUMMARY,
   waitForLanes,
   waitingFor,
 };

@@ -54,21 +54,29 @@ async function presentBrackets(collection, match, hint) {
 }
 
 /**
+ * `$sample` walks a random cursor only while it asks for less than 5% of the
+ * collection; at 5% or more it scans the collection and sorts it at random —
+ * every document. A sample-first request stays under it.
+ */
+const RANDOM_CURSOR_SHARE = 0.04;
+
+/** How many documents a sample-first pass asks for: `size` matches' worth, within the random cursor */
+function sampleRequest(size, ratio, total) {
+  const oversampled = Math.ceil(size / Math.max(ratio, 0.01));
+  return Math.max(1, Math.min(MAX_SAMPLE, oversampled, Math.floor(total * RANDOM_CURSOR_SHARE)));
+}
+
+/**
  * A sorted sample of the matched `_id`s with their `$type`: the server sorts
  * them (JavaScript cannot compare BSON across types the way the server does).
  * A large match samples the collection first (a random cursor) and filters
  * after, oversampling by how little of it matches; a small one filters first.
  */
-async function sampleIds(collection, match, { size, large, ratio, hint, maxTimeMS }) {
+async function sampleIds(collection, match, { size, large, hint, maxTimeMS }) {
   const project = { $project: { _id: 1, t: { $type: '$_id' } } };
   const sort = { $sort: { _id: 1 } };
   const pipeline = large
-    ? [
-        { $sample: { size: Math.min(MAX_SAMPLE, Math.ceil(size / Math.max(ratio, 0.01))) } },
-        { $match: match },
-        project,
-        sort,
-      ]
+    ? [{ $sample: { size } }, { $match: match }, project, sort]
     : [{ $match: match }, { $sample: { size } }, project, sort];
   return collection
     .aggregate(pipeline, {
@@ -173,12 +181,15 @@ async function planIdRanges({ collection, match, hint, maxParallel, settings, ma
     ratio = count / total;
   }
   const size = Math.min(settings.sampleSize, 100 * parts);
+  // A large match samples the whole collection first, oversampled by how
+  // little of it matches — but below the share past which `$sample` stops
+  // walking a random cursor and scans and sorts every document instead.
+  const requested = large ? sampleRequest(size, ratio, total) : size;
   let sample;
   try {
     sample = await sampleIds(collection, match, {
-      size,
+      size: requested,
       large,
-      ratio,
       hint,
       maxTimeMS: maxTimeMS ?? SAMPLE_TIMEOUT_MS,
     });
@@ -195,7 +206,6 @@ async function planIdRanges({ collection, match, hint, maxParallel, settings, ma
   // How many documents match, as far as the sample can tell: the bounded
   // count when it was not capped, the matched share of the sampled ones when
   // it was.
-  const requested = large ? Math.min(MAX_SAMPLE, Math.ceil(size / Math.max(ratio, 0.01))) : 0;
   const estimate = large
     ? Math.max(count, Math.round(total * Math.min(1, sample.length / requested)))
     : count;
@@ -275,7 +285,11 @@ const idRangePartitioner = Object.freeze({
 
 module.exports = {
   MAX_TIME_EXPIRED,
+  RANDOM_CURSOR_SHARE,
+  SAMPLE_TIMEOUT_MS,
   idRangePartitioner,
+  largestFirst,
+  sampleRequest,
   sliceBracket,
   targetPartitions,
 };

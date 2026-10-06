@@ -124,6 +124,33 @@ function tokenDue(lastSavedAt, now, checkpointMs, { force = false } = {}) {
   return force || lastSavedAt === undefined || now - lastSavedAt >= checkpointMs;
 }
 
+/**
+ * A leader's view of its collection, in one pass over the states: the revert
+ * it stands aside for (`suspended`), its `edges` and `target` (as
+ * {@link edgesOf}), and every state by name.
+ */
+function watchView(states, collection) {
+  const edges = new Map();
+  const byName = new Map();
+  let target;
+  let suspended;
+  for (const state of states) {
+    byName.set(state._id, state);
+    const spec = state.spec;
+    if (spec?.collection !== collection) continue;
+    if (state.direction === 'revert') {
+      if (suspended === undefined && !SETTLED.has(state.status)) suspended = state._id;
+      continue;
+    }
+    if (spec.mode !== 'declarative' || state.status !== 'completed') continue;
+    if (!edges.has(spec.from)) {
+      edges.set(spec.from, { name: state._id, from: spec.from, to: spec.to });
+    }
+    if (target === undefined || spec.to > target) target = spec.to;
+  }
+  return { suspended, edges, target, byName };
+}
+
 module.exports = {
   HISTORY_LOST,
   classifyStreamError,
@@ -133,4 +160,5 @@ module.exports = {
   suspendedBy,
   tokenDue,
   watchPipeline,
+  watchView,
 };

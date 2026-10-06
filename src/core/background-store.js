@@ -167,11 +167,11 @@ class BackgroundStore {
 
   // ─── State ──────────────────────────────────────────────────────────────────
 
-  /** A state document, read from the primary — or `null` */
-  get(name, { session } = {}) {
+  /** A state document, read from the primary — or `null`; `projection` to read less of it */
+  get(name, { session, projection } = {}) {
     return this.#states.findOne(
       { _id: name },
-      { ...READ_OPTIONS, ...(session ? { session } : {}) },
+      { ...READ_OPTIONS, ...(session ? { session } : {}), ...(projection ? { projection } : {}) },
     );
   }
 
@@ -184,9 +184,16 @@ class BackgroundStore {
     return byName;
   }
 
-  /** Every state document matching `filter`, oldest registration first */
-  list(filter = {}) {
-    return this.#states.find(filter, READ_OPTIONS).sort({ registeredAt: 1, _id: 1 }).toArray();
+  /**
+   * Every state document matching `filter`, oldest registration first —
+   * `projection` to leave out what a frequent reader does not need (the
+   * history, the document errors).
+   */
+  list(filter = {}, { projection } = {}) {
+    return this.#states
+      .find(filter, { ...READ_OPTIONS, ...(projection ? { projection } : {}) })
+      .sort({ registeredAt: 1, _id: 1 })
+      .toArray();
   }
 
   /**
@@ -461,7 +468,16 @@ class BackgroundStore {
               badIds: { $push: { $ifNull: ['$badIds', []] } },
               docErrors: { $push: { $ifNull: ['$lastDocErrors', []] } },
               failedPartitions: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
-              lastError: { $max: '$lastError' },
+              // The error of a failed partition before any other, then the
+              // newest: a document compares field by field.
+              lastError: {
+                $max: {
+                  failed: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] },
+                  has: { $cond: [{ $gt: ['$lastError', null] }, 1, 0] },
+                  at: '$updatedAt',
+                  error: '$lastError',
+                },
+              },
             },
           },
         ],
@@ -469,7 +485,8 @@ class BackgroundStore {
       )
       .toArray();
     if (row === undefined) return null;
-    const { _id: _ignored, badIds, docErrors, ...totals } = row;
+    const { _id: _ignored, badIds, docErrors, lastError, ...rest } = row;
+    const totals = { ...rest, ...(lastError?.error ? { lastError: lastError.error } : {}) };
     const ids = [];
     for (const list of badIds) ids.push(...list);
     const errors = [];
@@ -530,6 +547,11 @@ class BackgroundStore {
     };
   }
 
+  /** Partitions of a generation outside its current plan — what a lost commit race left */
+  countForeignPlans(name, { generation, plan }) {
+    return this.#partitions.countDocuments({ background: name, generation, plan: { $ne: plan } });
+  }
+
   /** Delete the partitions of generations up to `generation` — `keep` spares one */
   async dropGenerations(name, generation, { keep } = {}) {
     const filter = { background: name, generation: { $lte: generation } };
@@ -566,8 +588,9 @@ class BackgroundStore {
   async reap(name) {
     const result = await this.#partitions.updateMany(
       {
+        // Every lease has a slot: on that, the partial slot index serves the read.
         background: name,
-        lease: { $exists: true },
+        'lease.slot': { $exists: true },
         $expr: { $lt: ['$lease.renewedAt', { $subtract: ['$$NOW', '$lease.ttlMs'] }] },
       },
       [{ $set: { reclaims: plus('reclaims', 1) } }, { $unset: 'lease' }],
@@ -580,7 +603,7 @@ class BackgroundStore {
     const [row] = await this.#partitions
       .aggregate(
         [
-          { $match: { background: name, lease: { $exists: true } } },
+          { $match: { background: name, 'lease.slot': { $exists: true } } },
           {
             $group: {
               _id: null,
@@ -628,7 +651,7 @@ class BackgroundStore {
   /** Drop every lease of a background migration — their holders are fenced off at once */
   async unlockAll(name) {
     const result = await this.#partitions.updateMany(
-      { background: name, lease: { $exists: true } },
+      { background: name, 'lease.slot': { $exists: true } },
       { $unset: { lease: '' } },
     );
     return result.modifiedCount;

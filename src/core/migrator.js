@@ -230,6 +230,8 @@ class MigratorKit extends EventEmitter {
   #backgroundWarned = new Set();
   /** The adaptive throttles of this process, per background migration and group */
   #adaptiveCache = new Map();
+  /** Index keys per collection, read at most every few seconds — every slice asks */
+  #indexCache = new Map();
   /** Declared collections, for background specs — resolved once unless migrations reload */
   #backgroundDefinitions;
   /** The server's topology, read once — transactional background migrations need it */
@@ -2238,10 +2240,13 @@ class MigratorKit extends EventEmitter {
           { name, requires: required },
         );
       }
-      const loaded = await loadMigrationFile(this.#filepath(required), {
-        reload: this.#config.reloadMigrations,
-        allowBackground: true,
-      });
+      // Through the module cache: this runs for every file that requires one.
+      const loaded =
+        (await this.#peek(required)) ??
+        (await loadMigrationFile(this.#filepath(required), {
+          reload: this.#config.reloadMigrations,
+          allowBackground: true,
+        }));
       if (loaded.kind !== 'background') {
         throw new MigrationInvalidExportError(
           `${name} requires ${required}, which is not a background migration — requires ` +
@@ -2383,6 +2388,7 @@ class MigratorKit extends EventEmitter {
       owner: () => owner,
       warned: this.#backgroundWarned,
       adaptiveCache: this.#adaptiveCache,
+      indexCache: this.#indexCache,
       telemetry: this.#telemetry,
       // The third wrap site: a span per lease held (slice) and per coordinator
       // step — each opened only once the lease or the lock is held.
@@ -2555,15 +2561,20 @@ class MigratorKit extends EventEmitter {
   async #loadBackground(name, { tolerant = false } = {}) {
     assertMigrationName(name);
     const filepath = this.#filepath(name);
-    const loaded = await loadMigrationFile(filepath, {
-      reload: this.#config.reloadMigrations,
-      allowBackground: true,
-    });
+    // Once per version of the file: lanes ask on every slice, and a re-import
+    // per slice (under reloadMigrations) is a module the cache never frees.
+    // A file that cannot be read is loaded for its error.
+    const loaded =
+      (await this.#peek(name)) ??
+      (await loadMigrationFile(filepath, {
+        reload: this.#config.reloadMigrations,
+        allowBackground: true,
+      }));
     if (loaded.kind !== 'background') {
       throw new MigrationInvalidExportError(`${name} is not a background migration`, { name });
     }
     const { spec, fns } = await this.#backgroundSpec(name, loaded, { tolerant });
-    return { spec, fns, checksum: await computeChecksum(filepath) };
+    return { spec, fns, checksum: await this.#cachedChecksum(filepath) };
   }
 
   /** After one completes: the blocked ones that required it, unblocked if nothing else holds them */

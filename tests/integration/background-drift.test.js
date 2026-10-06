@@ -156,6 +156,25 @@ describe('audit — background migrations (integration)', () => {
     assert.match(check.detail, /1 background migration\(s\): 1 completed/);
   });
 
+  it('should not take the last pass partitions of a second pass for an old plan', async () => {
+    const kit = kitWith();
+    project.write('0001-v2.js', step(1, 2));
+    await kit.up();
+    // A first pass, then documents in the old shape again: a second pass.
+    await kit.coordinateBackground('0001-v2.js');
+    await kit.runBackgroundSlice('0001-v2.js');
+    await orders().insertOne({ __v: 1, __rev: 0 });
+    await kit.coordinateBackground('0001-v2.js');
+    const state = await mongo.db.collection('_migronaut_background').findOne({ _id: '0001-v2.js' });
+    assert.ok(state.generation >= 2, `generation ${state.generation}`);
+    const kept = await mongo.db
+      .collection('_migronaut_background_partitions')
+      .countDocuments({ background: '0001-v2.js', generation: { $lt: state.generation } });
+    assert.ok(kept > 0, 'the pass before is kept, on purpose');
+    const check = await checkOf(kit);
+    assert.doesNotMatch(check.detail, /old plan/);
+  });
+
   it('should fail on a failed one, and warn on stalls, drift, failed partitions, old plans and missing files', async () => {
     const kit = kitWith();
     project.write('0001-v2.js', step(1, 2));

@@ -230,8 +230,16 @@ function touchedFields(update) {
 const LOGICAL = new Set(['$and', '$or', '$nor']);
 
 /** `"$__rev"` or `"$__rev.x"` inside a serialized `$expr` — not `"$__revision"` */
-const fieldReference = (field) =>
-  new RegExp(`"\\$${field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:"|\\.)`);
+const references = new Map();
+function fieldReference(field) {
+  // Built once per field: every guarded write asks.
+  let pattern = references.get(field);
+  if (pattern === undefined) {
+    pattern = new RegExp(`"\\$${field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:"|\\.)`);
+    references.set(field, pattern);
+  }
+  return pattern;
+}
 
 /** Whether a query filter constrains `field` (at the top level, or through `$and`/`$or`/`$nor`) */
 function filterTouches(filter, field) {

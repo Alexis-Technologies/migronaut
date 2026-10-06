@@ -5,14 +5,13 @@ const { applyBatch, transactionOptions } = require('./background-engine.js');
 const { sleep } = require('./background-throttle.js');
 const {
   classifyStreamError,
-  edgesOf,
   isEnding,
   lagOf,
-  suspendedBy,
   tokenDue,
   watchPipeline,
+  watchView,
 } = require('./background-watch-plan.js');
-const { control, jobFor, verify } = require('./background.js');
+const { STATE_SUMMARY, control, jobFor, verify } = require('./background.js');
 const { runWithLock } = require('./lock.js');
 const { READ_OPTIONS } = require('./server-info.js');
 
@@ -224,7 +223,7 @@ function startWatch(deps, options = {}) {
       // A follower found no change streams here at all: nothing to supervise.
       if (unsupported !== undefined) break;
       try {
-        const wanted = wantedCollections(await deps.store.list());
+        const wanted = wantedCollections(await deps.store.list({}, { projection: STATE_SUMMARY }));
         for (const collection of wanted) {
           if (!followers.has(collection)) startFollower(collection);
         }
@@ -293,17 +292,14 @@ function startWatch(deps, options = {}) {
     let token = stored?.resumeToken;
     let failures = 0;
     while (!leadSignal.aborted) {
-      const states = await deps.store.list();
-      const suspended = suspendedBy(states, collection);
+      const states = await deps.store.list({}, { projection: STATE_SUMMARY });
+      const { suspended, edges, target, byName } = watchView(states, collection);
       if (suspended !== undefined) {
         await setState(collection, 'suspended', { leading: true });
         await sleep(settings.refreshMs, leadSignal).catch(() => undefined);
         continue;
       }
-      const { edges, target } = edgesOf(states, collection);
       if (target === undefined) return 'gone';
-      const byName = new Map();
-      for (const state of states) byName.set(state._id, state);
       const field = byName.get(edges.values().next().value.name).spec.field;
       const outcome = await serve(collection, leadSignal, { edges, byName, target, field, token });
       token = outcome.token;

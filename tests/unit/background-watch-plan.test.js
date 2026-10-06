@@ -7,6 +7,7 @@ const {
   isEnding,
   lagOf,
   suspendedBy,
+  watchView,
   tokenDue,
   watchPipeline,
 } = require('../../src/core/background-watch-plan.js');
@@ -51,6 +52,25 @@ describe('background-watch-plan — edges and suspension', () => {
     assert.strictEqual(suspendedBy([revert('completed')], 'orders'), undefined);
     assert.strictEqual(suspendedBy([revert('running')], 'users'), undefined);
     assert.strictEqual(suspendedBy([state('f.js', { status: 'running' })], 'orders'), undefined);
+  });
+
+  it('should see the edges, the suspension and every state in one pass, as the two do', () => {
+    const states = [
+      withSpec('a.js', { from: 1, to: 2 }),
+      withSpec('b.js', { from: 2, to: 3 }),
+      withSpec('dup.js', { from: 1, to: 2 }),
+      withSpec('running.js', { from: 3, to: 4 }, { status: 'running' }),
+      withSpec('r.js', { from: 4, to: 5 }, { direction: 'revert', status: 'running' }),
+      withSpec('step.js', { from: 5, to: 6, mode: 'step' }),
+      withSpec('other.js', { from: 0, to: 9, collection: 'users' }),
+    ];
+    const view = watchView(states, 'orders');
+    const { edges, target } = edgesOf(states, 'orders');
+    assert.deepStrictEqual(view.edges, edges);
+    assert.strictEqual(view.target, target);
+    assert.strictEqual(view.suspended, suspendedBy(states, 'orders'));
+    assert.strictEqual(view.byName.size, states.length);
+    assert.strictEqual(watchView(states, 'users').suspended, undefined);
   });
 });
 

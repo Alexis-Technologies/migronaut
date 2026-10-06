@@ -107,9 +107,9 @@ function createUpcaster(versioning, steps, { newer = 'throw', collection } = {})
     return version;
   };
 
-  /** `doc` lifted from `from` to `to` — every step on one private copy */
-  const lift = (doc, from, to) => {
-    let next = cloneDocument(doc);
+  /** `doc` lifted from `from` to `to` — every step on one private copy (`copy: false`: it is one) */
+  const lift = (doc, from, to, { copy = true } = {}) => {
+    let next = copy ? cloneDocument(doc) : doc;
     for (let version = from; version < to; version++) {
       const step = chain.get(version);
       if (step === undefined) {
@@ -183,7 +183,10 @@ function createUpcaster(versioning, steps, { newer = 'throw', collection } = {})
         throw new ConfigInvalidError(`${label}: no step from version ${version}`);
       }
     }
-    return (doc) => lift(doc, from, to);
+    // As a background migration's `migrate`, it is handed a private copy
+    // already (the engine's context says so): copying it again would clone
+    // every document of the collection twice. Called on its own, it copies.
+    return (doc, ctx) => lift(doc, from, to, { copy: ctx?.background === undefined });
   };
 
   return Object.freeze({ current, min, field, upcast, needsUpcast, step });

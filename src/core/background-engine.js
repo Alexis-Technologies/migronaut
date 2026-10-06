@@ -192,6 +192,24 @@ async function writeOps(collection, ops, { writeConcern, session, bare = false }
 }
 
 /**
+ * A filter for these documents: by `_id` — and, on a sharded collection,
+ * each with its shard key (an `$or` of the write filters), so the mongos
+ * reads them from their own shards instead of asking every one.
+ */
+function byIds(docs, partitioner) {
+  const ids = [];
+  const branches = [];
+  let keyed = false;
+  for (const doc of docs) {
+    ids.push(doc._id);
+    const key = partitioner?.writeFilter?.(doc) ?? {};
+    if (Object.keys(key).length > 0) keyed = true;
+    branches.push({ _id: doc._id, ...key });
+  }
+  return keyed ? { $or: branches } : { _id: { $in: ids } };
+}
+
+/**
  * Transform and write one batch, retrying documents a concurrent write moved
  * under it. Returns `{ migrated, skipped, conflicts, retried, errors }` —
  * `errors` the documents that failed (`{ id, error, reason }`), `conflicts`
@@ -253,7 +271,7 @@ async function applyBatch(
       ...(spec.revisionField ? { [spec.revisionField]: 1 } : {}),
     };
     const current = await collection
-      .find({ _id: { $in: candidates.map((doc) => doc._id) } }, { projection, ...readOptions })
+      .find(byIds(candidates, job.partitioner), { projection, ...readOptions })
       .toArray();
     const byId = new Map();
     for (const doc of current) byId.set(idKey(doc._id), doc);
@@ -274,7 +292,7 @@ async function applyBatch(
           counts.skipped += 1;
         }
       } else if (version === source) {
-        stale.push(prev._id);
+        stale.push(prev);
       } else {
         counts.skipped += 1;
       }
@@ -284,7 +302,7 @@ async function applyBatch(
     // which the server judges.
     const retry = await collection
       .find(
-        { $and: [job.match ?? matchOf(spec, job.direction), { _id: { $in: stale } }] },
+        { $and: [job.match ?? matchOf(spec, job.direction), byIds(stale, job.partitioner)] },
         readOptions,
       )
       .toArray();
@@ -444,8 +462,21 @@ function countsOf(docs, result, extra = {}) {
   };
 }
 
-const errorEntries = (errors) =>
-  errors.map(({ error, reason }) => ({ error, reason, at: new Date() }));
+/**
+ * A batch's failed documents, in one pass: their ids (`badIds`, and on the
+ * `left` list a draining partition steps over) and their error entries.
+ */
+function errorsOf(errors, left = []) {
+  const badIds = [];
+  const docErrors = [];
+  const at = new Date();
+  for (const { id, error, reason } of errors) {
+    badIds.push(id);
+    left.push(id);
+    docErrors.push({ error, reason, at });
+  }
+  return { badIds, docErrors, left };
+}
 
 /**
  * One batch without a transaction: read, transform, write, then the fenced
@@ -479,15 +510,14 @@ async function plainBatch(job, ctx, cursor, batchSize) {
     overloaded: throttle.takeLagged?.() === true,
   });
   if (change) ctx.onThrottle?.(change);
-  const left = [...result.left];
-  for (const entry of result.errors) left.push(entry.id);
+  const { badIds, docErrors, left } = errorsOf(result.errors, [...result.left]);
   const next = job.partitioner.advance(cursor, docs, { limit: batchSize, left });
   const counts = countsOf(docs, result);
   await store.checkpoint(lease, {
     cursor: next ?? cursor,
     counters: counts,
-    badIds: result.errors.map((entry) => entry.id),
-    docErrors: errorEntries(result.errors),
+    badIds,
+    docErrors,
     done: next === null,
     ...(adaptive ? { throttle: adaptive.state() } : {}),
   });
@@ -586,8 +616,7 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
           : { migrated: 0, skipped: 0, conflicts: 0, retried: 0, errors: [], left: [] };
       const errors = [...excluded.values()];
       result.errors = errors;
-      const left = [];
-      for (const entry of errors) left.push(entry.id);
+      const { badIds, docErrors, left } = errorsOf(errors);
       const next =
         docs.length < fetched.length
           ? job.partitioner.past(cursor, docs, { left })
@@ -599,8 +628,8 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
         {
           cursor: next ?? cursor,
           counters: counts,
-          badIds: errors.map((entry) => entry.id),
-          docErrors: errorEntries(errors),
+          badIds,
+          docErrors,
           done: next === null,
         },
         { session },
