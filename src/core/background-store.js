@@ -1,5 +1,5 @@
 const os = require('node:os');
-const { LockLostError } = require('../errors/index.js');
+const { ConfigInvalidError, LockLostError } = require('../errors/index.js');
 const { randomId } = require('../utils/id.js');
 const { MAX_BAD_IDS } = require('./background-spec.js');
 const { backgroundCollectionNames } = require('./config.js');
@@ -48,10 +48,41 @@ const appendSliced = (field, items, max) => ({
   $slice: [{ $concatArrays: [{ $ifNull: [`$${field}`, []] }, literal(items)] }, -max],
 });
 
+/** What the indexes are: the state's listing order, the claims, and the lease slots */
+const INDEXES = [
+  { on: 'state', key: { status: 1, registeredAt: 1 }, options: { name: 'status_registeredAt' } },
+  {
+    on: 'partitions',
+    key: { background: 1, generation: 1, plan: 1, status: 1, seq: 1 },
+    options: { name: 'claim' },
+  },
+  {
+    on: 'partitions',
+    key: { background: 1, 'lease.slot': 1 },
+    options: {
+      name: 'lease_slot',
+      unique: true,
+      partialFilterExpression: { 'lease.slot': { $exists: true } },
+    },
+  },
+  {
+    on: 'partitions',
+    key: { background: 1, 'lease.groupSlot': 1 },
+    options: {
+      name: 'lease_group_slot',
+      unique: true,
+      partialFilterExpression: { 'lease.groupSlot': { $exists: true } },
+    },
+  },
+];
+
+const NAMESPACE_NOT_FOUND = 26;
+
 class BackgroundStore {
   #db;
   #names;
   #indexed;
+  #asserted;
 
   /**
    * `collection` is the `backgroundCollection` setting: the state lives
@@ -81,33 +112,57 @@ class BackgroundStore {
    * it first).
    */
   async ensureIndexes() {
-    this.#indexed ??= Promise.all([
-      this.#states.createIndex({ status: 1, registeredAt: 1 }, { name: 'status_registeredAt' }),
-      this.#partitions.createIndex(
-        { background: 1, generation: 1, plan: 1, status: 1, seq: 1 },
-        { name: 'claim' },
-      ),
-      this.#partitions.createIndex(
-        { background: 1, 'lease.slot': 1 },
-        {
-          name: 'lease_slot',
-          unique: true,
-          partialFilterExpression: { 'lease.slot': { $exists: true } },
-        },
-      ),
-      this.#partitions.createIndex(
-        { background: 1, 'lease.groupSlot': 1 },
-        {
-          name: 'lease_group_slot',
-          unique: true,
-          partialFilterExpression: { 'lease.groupSlot': { $exists: true } },
-        },
-      ),
-    ]).catch((error) => {
+    this.#indexed ??= Promise.all(
+      INDEXES.map(({ on, key, options }) => this.#collection(on).createIndex(key, options)),
+    ).catch((error) => {
       this.#indexed = undefined;
       throw error;
     });
     await this.#indexed;
+  }
+
+  /**
+   * For `ensureIndexes: false` (a user who cannot create indexes): the lease
+   * slots are capped by unique indexes, so a lane refuses to claim without
+   * them rather than run past `maxParallel`. Checked once per store.
+   *
+   * @throws {ConfigInvalidError} naming each missing index and its key
+   */
+  async assertIndexes() {
+    this.#asserted ??= (async () => {
+      const missing = [];
+      const present = new Map();
+      for (const on of ['state', 'partitions']) {
+        let names = new Set();
+        try {
+          const indexes = await this.#collection(on).listIndexes().toArray();
+          names = new Set(indexes.map((index) => index.name));
+        } catch (error) {
+          if (error?.code !== NAMESPACE_NOT_FOUND) throw error;
+        }
+        present.set(on, names);
+      }
+      for (const { on, key, options } of INDEXES) {
+        if (!present.get(on).has(options.name)) {
+          missing.push(`${this.#names[on]}: ${JSON.stringify(key)} (${options.name})`);
+        }
+      }
+      if (missing.length > 0) {
+        throw new ConfigInvalidError(
+          'Background migrations need their indexes, and ensureIndexes is false — create ' +
+            `them (or let migronaut): ${missing.join('; ')}`,
+          { missing },
+        );
+      }
+    })().catch((error) => {
+      this.#asserted = undefined;
+      throw error;
+    });
+    await this.#asserted;
+  }
+
+  #collection(on) {
+    return on === 'state' ? this.#states : this.#partitions;
   }
 
   // ─── State ──────────────────────────────────────────────────────────────────

@@ -96,7 +96,7 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `onLockLost` | `'abort' \| 'warn'` | `'abort'` | What to do if the lock is lost mid-run |
 | `onOutOfOrder` | `'warn' \| 'error' \| 'allow'` | `'warn'` | What a bulk `up` does with a pending migration that sorts before the newest applied one |
 | `envFile` | `string \| false` | `'.env'` | `.env` file to load, or `false` to load none |
-| `ensureIndexes` | `boolean` | `true` | Create the changelog indexes on first connect |
+| `ensureIndexes` | `boolean` | `true` | Create migronaut's indexes: the changelog's on first connect, the background collections' on first use. With `false` they are expected to exist; a background lane refuses to claim without its slot indexes (the error names them) |
 | `clientOptions` | `MongoClientOptions` | — | Driver options: TLS, AWS IAM / X.509 auth, proxies, pool sizing |
 | `client` | `MongoClient` | — | An already-connected client to reuse; migronaut never closes it |
 | `timeoutMs` | `number` | — | Stop the run when one migration exceeds this (best-effort) |

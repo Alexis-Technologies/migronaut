@@ -113,7 +113,10 @@ async function previewSample(deps, name, loaded, options = {}) {
     const rows = await transformRows(job, docs);
     return { ...base, ...tally(rows), documents: rows };
   }
-  return { ...base, ...(await validateRows(deps, job, docs)) };
+  return {
+    ...base,
+    ...(await validateRows(deps, job, docs, { deadlineMs: deadlineOf(options) })),
+  };
 }
 
 /** Each document before, and after its transformation as it would be written */
@@ -164,7 +167,21 @@ function tally(rows) {
  * A write error aborts the sandbox's transaction on the server — so the rest
  * go on in a fresh sandbox, one transaction per failure, not per document.
  */
-async function validateRows(deps, job, docs) {
+/** The longest a sandbox runs — under the server's 60-second transaction limit */
+const MAX_DEADLINE_MS = 50_000;
+
+/** `deadlineMs`, checked: 1 to 50 000 (the default) */
+function deadlineOf(options) {
+  const ms = options.deadlineMs ?? MAX_DEADLINE_MS;
+  if (!Number.isSafeInteger(ms) || ms < 1 || ms > MAX_DEADLINE_MS) {
+    throw new ConfigInvalidError(`deadlineMs must be an integer from 1 to ${MAX_DEADLINE_MS}`, {
+      deadlineMs: ms,
+    });
+  }
+  return ms;
+}
+
+async function validateRows(deps, job, docs, { deadlineMs } = {}) {
   const rows = new Map();
   const ops = [];
   const refusals = [];
@@ -180,6 +197,7 @@ async function validateRows(deps, job, docs) {
         forbidden: deps.forbidden,
         topology: await deps.topology(),
         isSharded: shardedCheck(deps),
+        ...(deadlineMs !== undefined ? { deadlineMs } : {}),
       },
       async (handles) => {
         for (const doc of remaining) {
@@ -220,13 +238,16 @@ async function validateRows(deps, job, docs) {
     for (const document of report.documents) {
       if (document.collection !== job.spec.collection) sideEffects.push(document);
     }
-    if (report.error !== undefined && done < remaining.length) {
+    const stopped =
+      report.error ??
+      (report.stoppedBy === 'deadline' ? 'the dry run reached its deadline' : undefined);
+    if (stopped !== undefined && done < remaining.length) {
       // The sandbox stopped on something else (a refusal, the deadline): say so on the next row.
       const doc = remaining[done];
       rows.set(idKey(doc._id), {
         _id: ejson(doc._id),
         before: ejson(doc),
-        error: report.error,
+        error: stopped,
         validation: 'failed',
       });
       done += 1;
@@ -283,7 +304,7 @@ async function previewSteps(deps, name, loaded, options = {}) {
   };
   const log = [];
   let stoppedBy = 'steps';
-  const deadlineMs = options.deadlineMs ?? 50_000;
+  const deadlineMs = deadlineOf(options);
   const report = await runSandbox(
     {
       client: deps.client,

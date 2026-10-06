@@ -272,7 +272,11 @@ function checkPipeline(state, method, collection, pipeline) {
         throw refuse(state, method, `it uses ${name}`, collection);
       }
       const target =
-        name === '$lookup' ? spec?.from : name === '$unionWith' ? (spec?.coll ?? spec) : undefined;
+        name === '$lookup' || name === '$graphLookup'
+          ? spec?.from
+          : name === '$unionWith'
+            ? (spec?.coll ?? spec)
+            : undefined;
       if (typeof target === 'string' && isForbidden(state, target)) {
         throw refuse(state, method, `it reads ${target}`, collection);
       }
@@ -587,6 +591,8 @@ function proxyCursor(state, cursor) {
       if (typeof property === 'symbol' || INERT.has(property)) return undefined;
       if (CURSOR_BUILDERS.has(property)) {
         return (...args) => {
+          // A stage added to an aggregation cursor is held to the pipeline's rules.
+          if (property === 'addStage') checkPipeline(state, 'cursor.addStage', undefined, args);
           cursor[property](...args);
           return proxy;
         };

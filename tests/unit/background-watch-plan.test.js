@@ -125,6 +125,9 @@ describe('watchOptions', () => {
       { collections: 'orders' },
       { signal: {} },
       { onError: 'x' },
+      // A refresh that re-lists every state in a loop, and a typo.
+      { refreshMs: 1 },
+      { refreshMS: 1000 },
     ]) {
       assert.throws(() => watchOptions(bad), ConfigInvalidError);
     }

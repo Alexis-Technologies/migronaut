@@ -1,5 +1,6 @@
 const { ConfigInvalidError, LockAlreadyHeldError } = require('../../errors/index.js');
 const { createColors } = require('../../utils/colors.js');
+const { errorText } = require('../../utils/error.js');
 const { confirm, defineCommand, EXIT_CODES } = require('../shared.js');
 const { renderTable } = require('../table.js');
 
@@ -160,7 +161,7 @@ async function watchAction(migrator, opts, collection, { logger, json }) {
       ...(opts.report ? { upgrade: false } : {}),
       signal: controller.signal,
       onError: (error, where) =>
-        logger.warn(`⚠ Drift watcher${where ? ` (${where})` : ''}: ${error?.message ?? error}`),
+        logger.warn(`⚠ Drift watcher${where ? ` (${where})` : ''}: ${errorText(error)}`),
     });
     if (!json) logger.info('Watching for old-shape writes — Ctrl-C to stop');
     await stopped;
@@ -191,16 +192,7 @@ async function runAction(migrator, opts, name, { logger }) {
   const handlers = ['SIGINT', 'SIGTERM'].map((signal) => [signal, () => onSignal(signal)]);
   for (const [signal, handler] of handlers) process.on(signal, handler);
   try {
-    const names = [];
-    if (opts.all) {
-      for (const state of await migrator.backgroundStatus()) {
-        if (RUNNABLE.has(state.status)) names.push(state.migration);
-      }
-    } else {
-      names.push(name);
-    }
-    const results = [];
-    for (const target of names) {
+    const runOne = async (target) => {
       const status = await migrator.backgroundStatus(target);
       if (status === null) {
         throw new ConfigInvalidError(
@@ -224,15 +216,30 @@ async function runAction(migrator, opts, name, { logger }) {
           });
         }
       }
-      results.push(
-        await migrator.runBackground(target, {
-          signal: controller.signal,
-          concurrency,
-          untilDone: !opts.once,
-        }),
-      );
+      return migrator.runBackground(target, {
+        signal: controller.signal,
+        concurrency,
+        untilDone: !opts.once,
+      });
+    };
+    if (!opts.all) return [await runOne(name)];
+    // Round after round: one that waited for another (run later in the same
+    // round) is unblocked when that one completes, and runs in the next.
+    // Done when a round changes nothing, or after one with --once.
+    const results = new Map();
+    let previous;
+    for (;;) {
+      const runnable = [];
+      for (const state of await migrator.backgroundStatus()) {
+        if (RUNNABLE.has(state.status)) runnable.push(state.migration);
+      }
+      const key = runnable.join('\n');
+      if (runnable.length === 0 || key === previous) break;
+      previous = key;
+      for (const target of runnable) results.set(target, await runOne(target));
+      if (opts.once) break;
     }
-    return results;
+    return [...results.values()];
   } finally {
     for (const [signal, handler] of handlers) process.off(signal, handler);
   }

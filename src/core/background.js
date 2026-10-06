@@ -131,7 +131,9 @@ async function assertTransactions(deps, name, spec) {
 
 /** The job a lane or a coordinator works with: the spec, the functions, and what they scan */
 async function jobFor(deps, name, state, { direction } = {}) {
-  const loaded = await deps.load(name);
+  // The state's spec wins below: a definition file broken since the
+  // registration must not stop its lanes (`tolerant`).
+  const loaded = await deps.load(name, { tolerant: true });
   if (state.checksum !== undefined && loaded.checksum !== state.checksum) {
     throw new ChecksumMismatchError(
       `Background migration ${name} changed on disk since it was registered — finish the ` +
@@ -317,7 +319,9 @@ async function coordinateStep(deps, name, { signal, driver }) {
   try {
     await assertTransactions(deps, name, job.spec);
   } catch (error) {
-    // Not something a retry fixes: the deployment cannot do it.
+    // Not something a retry fixes: the deployment cannot do it. Anything
+    // else (the server could not be asked) is the step's to retry.
+    if (!(error instanceof TransactionsUnsupportedError)) throw error;
     return failState(deps, state, error.message);
   }
   const hash = matchHash(job.spec, job.direction === 'revert' ? 'revert' : 'forward');

@@ -669,6 +669,12 @@ the event names.
 | `maxLagMs` | `60000` | Lag past which the stream gives up its backlog |
 | `signal`, `onError` | — | Stop the watcher; hear every failure (the watcher never throws) |
 
+`refreshMs` is at least 100 ms, `checkpointMs` and `leaderRetryMs` at least 10 ms; an option it does
+not know is refused. Lag is measured against the server's clock (`hello`), so a host whose clock
+runs ahead does not read every event as late. A document the watcher cannot upgrade (it keeps losing
+to other writes, or the migration's file is mid-deploy) goes back to the lanes: with
+`backgroundOnDrift: 'reopen'` its background migration is reopened, otherwise the drift is reported.
+
 It returns `{ running, status(), stop() }`. `status()` gives, per collection, the `state`
 (`following`, `catching-up`, `streaming`, `history-lost`, `overloaded`, `restarting`, `suspended`,
 `fallback` or `stopped`), whether this process leads it, and counters. `kit.backgroundWatchStatus()`

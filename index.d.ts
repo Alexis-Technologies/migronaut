@@ -2272,7 +2272,7 @@ export interface BackgroundDryRunOptions {
   maxDocuments?: number;
   /** Step migrations: from no checkpoint, not the pinned one */
   fromStart?: boolean;
-  /** Step migrations: stop the sandbox after this long (default 50 000 ms) */
+  /** Stop the sandbox after this long (default 50 000 ms) — steps, or a `validate` sample */
   deadlineMs?: number;
 }
 
@@ -2520,8 +2520,12 @@ export interface BackgroundRunner {
   readonly running: boolean;
   /** The live drift watcher this runner hosts, once started — or undefined */
   readonly watcher: BackgroundWatcher | undefined;
-  /** Stop at the next batch, release every lease, and close the kit the runner made */
-  stop(): Promise<void>;
+  /**
+   * Stop at the next batch, release every lease, and close the kit the runner
+   * made. `timeoutMs`: stop waiting for a lane stuck in its transformation
+   * (its lease expires; the work resumes from the last checkpoint)
+   */
+  stop(options?: { timeoutMs?: number }): Promise<void>;
 }
 
 /**

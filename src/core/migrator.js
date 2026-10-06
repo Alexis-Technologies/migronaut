@@ -127,6 +127,7 @@ function shardingView(sharding) {
 const { runImport } = require('./import-runner.js');
 const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
 const {
+  assertActorValid,
   assertConvergeOptions,
   assertDownOptions,
   assertDryRunOptions,
@@ -935,7 +936,7 @@ class MigratorKit extends EventEmitter {
     let migration = loaded;
     if (loaded.kind === 'background') {
       // Indexes cannot be created inside a transaction — the registration may run in one.
-      await this.#backgroundStore().ensureIndexes();
+      await this.#backgroundIndexes();
       migration = await this.#asBackground(name, loaded, direction);
     }
     const useTransaction = migration.useTransaction ?? config.useTransaction;
@@ -2156,8 +2157,12 @@ class MigratorKit extends EventEmitter {
    */
   async #asBackground(name, loaded, direction) {
     // Validated before it runs: an invalid file is reported as itself, not as
-    // a failed execution — and nothing is written.
-    const { spec } = await this.#backgroundSpec(name, loaded);
+    // a failed execution — and nothing is written. A down goes by the spec it
+    // was registered with: a definition file broken since must not block it.
+    const { spec } =
+      direction === 'down'
+        ? await this.#registeredSpec(name, loaded)
+        : await this.#backgroundSpec(name, loaded);
     if (direction === 'up') await this.#assertRequiresAreBackground(name, loaded.requires ?? []);
     const migration = {
       kind: 'background',
@@ -2173,10 +2178,23 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * The spec of a background migration file, resolved against the
-   * collection's declared versioning (when it has one).
+   * The spec a registered background migration runs by — the one stored at
+   * its registration — with the file's functions. Not registered: the file's.
    */
-  async #backgroundSpec(name, loaded) {
+  async #registeredSpec(name, loaded) {
+    const state = await this.#backgroundStore().get(name);
+    if (state?.spec === undefined) return this.#backgroundSpec(name, loaded);
+    const { fns } = await this.#backgroundSpec(name, loaded, { tolerant: true });
+    return { spec: state.spec, fns };
+  }
+
+  /**
+   * The spec of a background migration file, resolved against the
+   * collection's declared versioning (when it has one). `tolerant`: for a
+   * registered one, whose stored spec stands — a definition file that does
+   * not load is warned about and passed over (only its functions are used).
+   */
+  async #backgroundSpec(name, loaded, { tolerant = false } = {}) {
     const raw = loaded.background;
     let versioning;
     const collection = raw?.collection;
@@ -2189,14 +2207,16 @@ class MigratorKit extends EventEmitter {
       }
       const config = this.#config;
       if (config.collections !== undefined || config.collectionsDir !== undefined) {
-        const definitions = config.reloadMigrations
-          ? await this.#resolveCollections()
-          : (this.#backgroundDefinitions ??= await this.#resolveCollections());
-        for (const definition of definitions) {
-          if (definition.name === collection) {
-            versioning = definition.versioning;
-            break;
-          }
+        try {
+          versioning = await this.#versioningOf(collection, { strict: true });
+        } catch (error) {
+          if (!tolerant) throw error;
+          this.#warnOnce(
+            `definitions:${collection}`,
+            `⚠ The collection definitions do not load (${errorText(error)}) — ${name} goes by ` +
+              'the spec it was registered with',
+            { background: name },
+          );
         }
       }
     }
@@ -2275,7 +2295,7 @@ class MigratorKit extends EventEmitter {
   async #assertBackgroundRevertible(name) {
     const loaded = await this.#peek(name);
     if (loaded === null || loaded.kind !== 'background') return;
-    const { spec } = await this.#backgroundSpec(name, loaded);
+    const { spec } = await this.#registeredSpec(name, loaded);
     if (spec.reversible) return;
     if (await this.#hasRewritten(name, spec)) throw irreversibleBackground(name);
   }
@@ -2358,7 +2378,7 @@ class MigratorKit extends EventEmitter {
           id: `background:${name}`,
           label: 'background coordinator lock',
         }),
-      load: (name) => this.#loadBackground(name),
+      load: (name, options) => this.#loadBackground(name, options),
       ttlMs: config.lockTTLSeconds * 1000,
       owner: () => owner,
       warned: this.#backgroundWarned,
@@ -2378,7 +2398,7 @@ class MigratorKit extends EventEmitter {
         ),
       onCompleted: (name) => this.#unblockDependents(name),
       adoptedOf: (names) => this.#requireChangelog().getAdoptedNames(db, names),
-      topology: () => (this.#topology ??= readServer(db).then((server) => server.topology)),
+      topology: () => this.#serverTopology(db),
       shardAware: config.backgroundShardAware,
       shardKeyOf: (collection) => readShardKey(this.#client, db.databaseName, collection),
       chunksOf: (collection, sharding) =>
@@ -2387,21 +2407,44 @@ class MigratorKit extends EventEmitter {
     };
   }
 
-  /** A declared collection's versioning, or `undefined` — for the drift watch */
-  async #versioningOf(collection) {
+  /**
+   * The server's topology, read once it is known. A `hello` that failed (an
+   * election, a blip) is not remembered as "not sharded": it is asked again.
+   */
+  async #serverTopology(db) {
+    if (this.#topology !== undefined) return this.#topology;
+    const { topology } = await readServer(db);
+    if (topology !== undefined) this.#topology = topology;
+    return topology;
+  }
+
+  /**
+   * A declared collection's versioning, or `undefined`. Definitions that do
+   * not load are converge's to report — `undefined` too, unless `strict`.
+   */
+  async #versioningOf(collection, { strict = false } = {}) {
     const config = this.#config;
     if (config.collections === undefined && config.collectionsDir === undefined) return undefined;
+    let definitions;
     try {
-      const definitions = config.reloadMigrations
+      definitions = config.reloadMigrations
         ? await this.#resolveCollections()
         : (this.#backgroundDefinitions ??= await this.#resolveCollections());
-      for (const definition of definitions) {
-        if (definition.name === collection) return definition.versioning;
-      }
-    } catch {
-      // Definitions that do not load are converge's to report.
+    } catch (error) {
+      if (strict) throw error;
+      return undefined;
+    }
+    for (const definition of definitions) {
+      if (definition.name === collection) return definition.versioning;
     }
     return undefined;
+  }
+
+  /** Say something about background migrations once per kit */
+  #warnOnce(id, message, fields) {
+    if (this.#backgroundWarned.has(id)) return;
+    this.#backgroundWarned.add(id);
+    this.#logger.warn(message, this.#fields(fields));
   }
 
   /**
@@ -2509,7 +2552,7 @@ class MigratorKit extends EventEmitter {
   }
 
   /** A background migration file, loaded and resolved: `{ spec, fns, checksum }` */
-  async #loadBackground(name) {
+  async #loadBackground(name, { tolerant = false } = {}) {
     assertMigrationName(name);
     const filepath = this.#filepath(name);
     const loaded = await loadMigrationFile(filepath, {
@@ -2519,7 +2562,7 @@ class MigratorKit extends EventEmitter {
     if (loaded.kind !== 'background') {
       throw new MigrationInvalidExportError(`${name} is not a background migration`, { name });
     }
-    const { spec, fns } = await this.#backgroundSpec(name, loaded);
+    const { spec, fns } = await this.#backgroundSpec(name, loaded, { tolerant });
     return { spec, fns, checksum: await computeChecksum(filepath) };
   }
 
@@ -2594,7 +2637,7 @@ class MigratorKit extends EventEmitter {
     const requires = loaded.requires ?? [];
     if (requires.length === 0) return [];
     await this.#assertRequiresAreBackground(name, requires);
-    await this.#backgroundStore().ensureIndexes();
+    await this.#backgroundIndexes();
     let waiting = await this.#unsatisfied(requires);
     if (waiting.length > 0 && this.#config.backgroundInline) {
       for (const entry of waiting) {
@@ -2621,7 +2664,7 @@ class MigratorKit extends EventEmitter {
       `⧗ Running   ${name} inline`,
       this.#fields({ background: name, inline: true }),
     );
-    await this.#backgroundReady(name);
+    await this.#backgroundReady(name, { lanes: true });
     const status = await this.#drive(name, {
       signal,
       concurrency: state.spec?.maxParallel ?? 1,
@@ -2635,12 +2678,26 @@ class MigratorKit extends EventEmitter {
     }
   }
 
-  /** Config and connection for a background method — no run, no migration lock */
-  async #backgroundReady(name) {
+  /**
+   * Config and connection for a background method — no run, no migration
+   * lock. `lanes`: it claims partitions, and needs the slot indexes.
+   */
+  async #backgroundReady(name, { lanes = false } = {}) {
     if (name !== undefined) assertMigrationName(name);
     await this.#ensureConfig();
     await this.connect();
-    await this.#backgroundStore().ensureIndexes();
+    await this.#backgroundIndexes({ lanes });
+  }
+
+  /**
+   * The background collections' indexes, created on first use — unless
+   * `ensureIndexes: false` (a user who cannot create indexes): then they are
+   * expected to exist, and only what claims partitions checks they do.
+   */
+  async #backgroundIndexes({ lanes = false } = {}) {
+    const store = this.#backgroundStore();
+    if (this.#config.ensureIndexes) await store.ensureIndexes();
+    else if (lanes) await store.assertIndexes();
   }
 
   /** The state, or NotAppliedError — a control action needs a registered background migration */
@@ -2674,7 +2731,7 @@ class MigratorKit extends EventEmitter {
    */
   async runBackgroundSlice(name, { signal, sliceMs } = {}) {
     if (sliceMs !== undefined) assertSliceMs(sliceMs);
-    await this.#backgroundReady(name);
+    await this.#backgroundReady(name, { lanes: true });
     const owner = this.#newId();
     return runSlice(this.#backgroundDeps(owner), name, { signal, sliceMs, owner });
   }
@@ -2688,7 +2745,7 @@ class MigratorKit extends EventEmitter {
    * @experimental
    */
   async runBackground(name, { signal, sliceMs, untilDone = true, concurrency = 1 } = {}) {
-    await this.#backgroundReady(name);
+    await this.#backgroundReady(name, { lanes: true });
     if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
       throw new ConfigInvalidError('concurrency must be a positive integer', { concurrency });
     }
@@ -2945,6 +3002,8 @@ class MigratorKit extends EventEmitter {
 
   /** A control action, after the checks every one shares */
   async #controlBackground(name, action, options = {}) {
+    // Who and why go into the state's history: held to the changelog's limits.
+    assertActorValid(options);
     await this.#backgroundReady(name);
     await this.#registered(name);
     const deps = this.#backgroundDeps();
@@ -2988,6 +3047,7 @@ class MigratorKit extends EventEmitter {
    * @experimental
    */
   async repinBackground(name, options = {}) {
+    assertActorValid(options);
     await this.#backgroundReady(name);
     await this.#registered(name);
     const result = await repinBackgroundState(this.#backgroundDeps(), name, options);
@@ -3013,7 +3073,9 @@ class MigratorKit extends EventEmitter {
       client: this.#client,
       logger: this.#logger,
       forbidden: this.#bookkeepingNames(),
-      topology: () => (this.#topology ??= readServer(db).then((server) => server.topology)),
+      topology: () => this.#serverTopology(db),
+      // The sandbox refuses a sharded collection's distinct (a mongos cannot run it in a transaction).
+      shardKeyOf: (collection) => readShardKey(this.#client, db.databaseName, collection),
     };
     if (loaded.spec.mode === 'step' || options.steps !== undefined) {
       if (loaded.spec.mode !== 'step') {

@@ -62,6 +62,22 @@ const INTEGER_SETTINGS = [
   ['shardConcurrency', 1, 64],
 ];
 
+/** Operators that run JavaScript on the server */
+const SERVER_JS = new Set(['$where', '$function', '$accumulator']);
+
+/** Whether a filter runs JavaScript on the server, anywhere in it ($expr included) */
+function usesServerJs(value) {
+  if (Array.isArray(value)) {
+    for (const item of value) if (usesServerJs(item)) return true;
+    return false;
+  }
+  if (!isPlainObject(value)) return false;
+  for (const [key, item] of Object.entries(value)) {
+    if (SERVER_JS.has(key) || usesServerJs(item)) return true;
+  }
+  return false;
+}
+
 /** The longest slice — for a caller that overrides the spec's (a runner, the CLI, a test) too */
 const [, , MAX_SLICE_MS] = INTEGER_SETTINGS.find(([key]) => key === 'sliceMs');
 
@@ -285,7 +301,13 @@ function backgroundIssues(spec, { versioning } = {}) {
     } else {
       const reason = unsendable(spec.filter);
       if (reason) report('filter', reason);
-      else if (filterTouches(spec.filter, versionName)) {
+      else if (usesServerJs(spec.filter)) {
+        report(
+          'filter',
+          'must not run JavaScript on the server ($where, $function, $accumulator) — it ' +
+            'cannot use an index, and many deployments turn it off',
+        );
+      } else if (filterTouches(spec.filter, versionName)) {
         report('filter', `must not constrain "${versionName}" — from and to do`);
       }
     }

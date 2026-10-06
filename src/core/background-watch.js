@@ -51,6 +51,27 @@ const DEFAULTS = Object.freeze({
   maxLagMs: 60_000,
 });
 
+/**
+ * The integer options: `[key, min, max]`. The floor of `refreshMs` keeps a
+ * watcher from re-listing every state and reopening its streams in a loop.
+ */
+const BOUNDS = [
+  ['refreshMs', 100, 3_600_000],
+  ['checkpointMs', 10, 3_600_000],
+  ['leaderRetryMs', 10, 3_600_000],
+  ['maxCollections', 1, 1_000],
+  ['maxLagMs', 1, 86_400_000],
+];
+
+/** Every option watchBackground takes — anything else is refused, not ignored */
+const OPTION_KEYS = new Set([
+  ...BOUNDS.map(([key]) => key),
+  'upgrade',
+  'collections',
+  'signal',
+  'onError',
+]);
+
 /** Hops one event may take up a chain (v1 → v2 → v3 …) */
 const MAX_HOPS = 16;
 /** The longest a failing stream backs off before it reopens */
@@ -63,12 +84,19 @@ function watchOptions(options) {
   if (options === null || typeof options !== 'object') {
     throw new ConfigInvalidError('watchBackground options must be an object');
   }
+  for (const key of Object.keys(options)) {
+    if (!OPTION_KEYS.has(key)) {
+      throw new ConfigInvalidError(`"${key}" is not a watchBackground option`, { key });
+    }
+  }
   const resolved = { ...DEFAULTS };
-  for (const key of ['refreshMs', 'checkpointMs', 'leaderRetryMs', 'maxCollections', 'maxLagMs']) {
+  for (const [key, min, max] of BOUNDS) {
     const value = options[key];
     if (value === undefined) continue;
-    if (!Number.isSafeInteger(value) || value < 1) {
-      throw new ConfigInvalidError(`${key} must be a positive integer`, { [key]: value });
+    if (!Number.isSafeInteger(value) || value < min || value > max) {
+      throw new ConfigInvalidError(`${key} must be an integer from ${min} to ${max}`, {
+        [key]: value,
+      });
     }
     resolved[key] = value;
   }

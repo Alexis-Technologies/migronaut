@@ -1,3 +1,5 @@
+const { mkdirSync, writeFileSync } = require('node:fs');
+const path = require('node:path');
 const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
 const { BackgroundStore } = require('../../src/core/background-store.js');
@@ -254,6 +256,24 @@ export const background = { collection: 'orders', from: 1, to: 2, migrate: (doc)
       await mongo.db.collection('_migronaut_background_partitions').countDocuments(),
       0,
     );
+  });
+
+  it('should withdraw on down by the spec it was registered with, though the definitions broke since', async () => {
+    project = makeProject();
+    const dir = path.join(project.dir, 'collections');
+    mkdirSync(dir);
+    const definition = path.join(dir, 'orders.json');
+    writeFileSync(
+      definition,
+      JSON.stringify({ name: 'orders', versioning: { current: 2, field: 'schemaVersion' } }),
+    );
+    project.write('0001-orders.js', ONE_WAY);
+    await kitWith({ collectionsDir: dir }).up();
+    assert.strictEqual((await store().get('0001-orders.js')).spec.field, 'schemaVersion');
+    // A deploy breaks a definition file: an emergency down must still work.
+    writeFileSync(definition, '{ nope');
+    await kitWith({ collectionsDir: dir }).down();
+    assert.strictEqual(await store().get('0001-orders.js'), null, 'withdrawn');
   });
 
   it('should refuse a file with both background and up/down', async () => {

@@ -128,6 +128,17 @@ describe('backgroundIssues — declarative', () => {
     );
   });
 
+  it('should refuse a filter that runs JavaScript on the server', () => {
+    for (const filter of [
+      { $where: 'this.a > 1' },
+      { $expr: { $function: { body: 'return true', args: [], lang: 'js' } } },
+      { $and: [{ a: 1 }, { $where: 'true' }] },
+    ]) {
+      assert.match(messageAt({ ...base, filter }, 'background.filter'), /JavaScript/);
+    }
+    assert.deepStrictEqual(pathsOf({ ...base, filter: { status: 'open' } }), []);
+  });
+
   it('should check the settings ranges', () => {
     const at = (key, value) => messageAt({ ...base, [key]: value }, `background.${key}`);
     assert.match(at('batchSize', 0), /from 1 to 10000/);

@@ -150,6 +150,34 @@ describe('in-process background runner (integration)', () => {
     assert.strictEqual(await mongo.db.collection('orders').countDocuments({ __v: 1 }), 0);
   });
 
+  it('should not hold a shutdown for a transformation that never returns, given a timeout', async () => {
+    await seed(10);
+    const kit = kitWith();
+    project.write(
+      NAME,
+      `export const background = {
+  collection: 'orders',
+  from: 1,
+  to: 2,
+  pauseMs: 0,
+  migrateBatch: () => new Promise(() => {}),
+};
+`,
+    );
+    await kit.up();
+    const runner = startBackgroundRunner({
+      config: config(),
+      pollIntervalMs: 50,
+      verifyIntervalMs: false,
+    });
+    await new Promise((resolve) => runner.kit.once('background:slice:start', resolve));
+    const started = Date.now();
+    await runner.stop({ timeoutMs: 200 });
+    assert.ok(Date.now() - started < 5_000, 'did not wait for the stuck lane');
+    assert.strictEqual(runner.running, false);
+    await assert.rejects(runner.stop({ timeoutMs: -1 }), /timeoutMs/);
+  });
+
   it('should catch drift with its periodic watch', async () => {
     await seed(100);
     const kit = kitWith();

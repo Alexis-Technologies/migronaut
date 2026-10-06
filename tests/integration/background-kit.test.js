@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
 const {
   ChecksumMismatchError,
+  ConfigInvalidError,
   NotAppliedError,
   RunAbortedError,
 } = require('../../src/errors/index.js');
@@ -336,6 +337,30 @@ export async function down() {}
       assert.ok(cause instanceof ChecksumMismatchError, String(error));
       return true;
     });
+  });
+
+  it('should create no index with ensureIndexes false, and claim nothing without the slot indexes', async () => {
+    await seed(10);
+    const kit = kitWith({ ensureIndexes: false });
+    project.write(NAME, spec('migrate: (doc) => ({ ...doc, done: true }),'));
+    await kit.up();
+    assert.strictEqual((await kit.backgroundStatus(NAME)).status, 'pending');
+    const indexes = await partitions()
+      .listIndexes()
+      .toArray()
+      .catch(() => []);
+    assert.ok(!indexes.some((index) => index.name === 'lease_slot'), 'no index created');
+    await assert.rejects(kit.runBackground(NAME), (error) => {
+      assert.ok(error instanceof ConfigInvalidError);
+      assert.match(error.message, /lease_slot/);
+      return true;
+    });
+    // Once they exist (made by someone who may), it runs.
+    await kitWith().backgroundStatus(NAME);
+    assert.strictEqual(
+      (await kitWith({ ensureIndexes: false }).runBackground(NAME)).status,
+      'completed',
+    );
   });
 
   it('should refuse a slice length that would never make progress', async () => {

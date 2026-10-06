@@ -263,6 +263,73 @@ describe('dry runs of step migrations (integration)', () => {
     await assert.rejects(kit.dryRunBackground(NAME, { validate: true }), /by steps/);
   });
 
+  it('should report a validated document the deadline stopped as failed, and go on', async () => {
+    const kit = kitWith();
+    project.write(
+      NAME,
+      `export const background = {
+  collection: 'orders',
+  from: 1,
+  to: 2,
+  migrate: async (doc) => {
+    if (doc.i === 1) await new Promise((resolve) => setTimeout(resolve, 400));
+    return { ...doc, done: true };
+  },
+};
+`,
+    );
+    const preview = await kit.dryRunBackground(NAME, { first: 3, validate: true, deadlineMs: 200 });
+    assert.strictEqual(preview.documents.length, 3);
+    const slow = preview.documents.find((row) => row._id === 1);
+    assert.strictEqual(slow.validation, 'failed');
+    assert.match(slow.error, /deadline/);
+    assert.strictEqual(preview.documents.find((row) => row._id === 2).validation, 'ok');
+    await assert.rejects(
+      kit.dryRunBackground(NAME, { first: 3, validate: true, deadlineMs: 0 }),
+      /deadlineMs/,
+    );
+  });
+
+  it('should hold stages added to a cursor, and $graphLookup, to the pipeline rules', async () => {
+    const kit = kitWith({ reloadMigrations: true });
+    for (const [method, pipeline] of [
+      [
+        'addStage',
+        `{ $lookup: { from: '_migronaut_migrations', localField: 'i', foreignField: 'x', as: 'm' } }`,
+      ],
+      ['addStage', `{ $out: 'elsewhere' }`],
+    ]) {
+      project.write(
+        NAME,
+        `export const background = {
+  step: async ({ db }) => {
+    await db.collection('orders').aggregate([]).${method}(${pipeline}).toArray();
+    return { checkpoint: null, done: true };
+  },
+};
+`,
+      );
+      const report = await kit.dryRunBackground(NAME);
+      assert.strictEqual(report.ok, false, pipeline);
+      assert.strictEqual(report.refusals[0].method, 'cursor.addStage');
+    }
+    project.write(
+      NAME,
+      `export const background = {
+  step: async ({ db }) => {
+    await db.collection('orders').aggregate([
+      { $graphLookup: { from: '_migronaut_migrations', startWith: '$i', connectFromField: 'x', connectToField: 'y', as: 'g' } },
+    ]).toArray();
+    return { checkpoint: null, done: true };
+  },
+};
+`,
+    );
+    const graph = await kit.dryRunBackground(NAME);
+    assert.strictEqual(graph.ok, false);
+    assert.match(graph.refusals[0].reason, /_migronaut_migrations/);
+  });
+
   it('should run the whole sandbox again after a write conflict', async () => {
     const kit = kitWith();
     project.write(

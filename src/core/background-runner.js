@@ -253,7 +253,18 @@ function startBackgroundRunner(options = {}) {
     get watcher() {
       return hosted;
     },
-    stop() {
+    /**
+     * Stop: each lane at its next batch boundary, releasing its lease.
+     * `timeoutMs`: stop waiting for a lane stuck in its transformation (its
+     * lease expires on its own, and the next lane resumes from the last
+     * checkpoint) — so a shutdown is never held for good.
+     */
+    stop({ timeoutMs } = {}) {
+      if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0)) {
+        return Promise.reject(
+          new ConfigInvalidError('timeoutMs must be an integer ≥ 0', { timeoutMs }),
+        );
+      }
       stopping ??= (async () => {
         if (!signal.aborted) {
           controller.abort(
@@ -262,8 +273,29 @@ function startBackgroundRunner(options = {}) {
             }),
           );
         }
-        await (await watching)?.stop();
-        await work;
+        const settled = (async () => {
+          await (await watching)?.stop();
+          await work;
+        })();
+        if (timeoutMs === undefined) {
+          await settled;
+        } else {
+          let timer;
+          const timedOut = await Promise.race([
+            settled.then(() => false),
+            new Promise((resolve) => {
+              timer = setTimeout(() => resolve(true), timeoutMs);
+            }),
+          ]);
+          clearTimeout(timer);
+          if (timedOut) {
+            kit.logger.warn(
+              `⚠ Background runner: lanes still at work after ${timeoutMs}ms — not waiting ` +
+                'for them (their leases expire, and the work resumes from the last checkpoint)',
+              { timeoutMs },
+            );
+          }
+        }
         options.signal?.removeEventListener('abort', onOuterAbort);
         if (ownsKit) await kit.disconnect().catch(() => undefined);
       })();

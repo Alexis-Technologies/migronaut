@@ -269,6 +269,7 @@ function assertImportOptions(options) {
 }
 
 module.exports = {
+  assertActorValid,
   assertBackgroundPendingValid,
   assertConvergeOptions,
   assertDownOptions,

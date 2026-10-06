@@ -109,6 +109,35 @@ describe('migronaut background (CLI)', () => {
     assert.strictEqual(drift.code, EXIT_CODES.BACKGROUND_PENDING);
   });
 
+  it('should run --all until nothing is left, even one listed before what it waits for', async () => {
+    project.write(NAME, spec());
+    project.write(
+      '0002-orders-v3.js',
+      `export const requires = ['${NAME}'];
+export const background = {
+  collection: 'orders',
+  from: 2,
+  to: 3,
+  pauseMs: 0,
+  migrate: (doc) => doc,
+};
+`,
+    );
+    assert.strictEqual((await runCli(args('up'))).code, 0);
+    // Registered again: now listed after the one that waits for it.
+    const again = await runCli(args('up', NAME, '--force', '--yes'));
+    assert.strictEqual(again.code, 0, again.stderr);
+    const run = await runCli(args('--json', 'background', 'run', '--all'));
+    assert.strictEqual(run.code, 0, run.stderr);
+    const status = await runCli(args('--json', 'background', 'status'));
+    const states = JSON.parse(status.stdout).background;
+    assert.deepStrictEqual(states.map((state) => [state.migration, state.status]).sort(), [
+      [NAME, 'completed'],
+      ['0002-orders-v3.js', 'completed'],
+    ]);
+    assert.strictEqual(await mongo.db.collection('orders').countDocuments({ __v: 3 }), 300);
+  });
+
   it('should control it, refuse what does not fit (33) and what is not registered (9)', async () => {
     project.write(NAME, spec());
     await runCli(args('up'));
