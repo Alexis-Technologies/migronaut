@@ -203,6 +203,42 @@ describe('transactional background migrations (integration)', () => {
     }
   });
 
+  it('should give up on reads that keep running out of time, not retry them forever', async () => {
+    await seed(20);
+    const kit = kitWith(mongo.uri, DB);
+    project.write(
+      NAME,
+      TRANSACTIONAL.replace(
+        'transaction: { timeoutMs: 5000, maxRetries: 8 },\n  batchSize: 50,',
+        'transaction: { timeoutMs: 5000, maxRetries: 2 },\n  batchSize: 4,\n  maxSliceFailures: 1,',
+      ),
+    );
+    await kit.up();
+    await kit.coordinateBackground(NAME);
+    const stuck = new MongoClient(mongo.uri, { appName: 'txn-stuck' });
+    await stuck.connect();
+    await mongo.client.db('admin').command({
+      configureFailPoint: 'failCommand',
+      mode: 'alwaysOn',
+      data: {
+        failCommands: ['find'],
+        errorCode: 50,
+        appName: 'txn-stuck',
+        namespace: `${DB}.orders`,
+      },
+    });
+    try {
+      const throughStuck = makeMigrator(undefined, DB, project.dir, { client: stuck });
+      kits.push(throughStuck);
+      await assert.rejects(throughStuck.runBackgroundSlice(NAME), (error) => error.code === 50);
+      const partition = await mongo.db.collection('_migronaut_background_partitions').findOne({});
+      assert.strictEqual(partition.status, 'failed');
+    } finally {
+      await mongo.client.db('admin').command({ configureFailPoint: 'failCommand', mode: 'off' });
+      await stuck.close();
+    }
+  });
+
   it('should run a step migration in a transaction with its checkpoint', async () => {
     const kit = kitWith();
     project.write(

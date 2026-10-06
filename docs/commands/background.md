@@ -130,8 +130,9 @@ migronaut background repin 20261004120000-orders-shipping.js
 ```
 
 - **`retry`** on a `failed` or `cancelled` background migration goes on from where it was: its
-  failed and cancelled partitions are pending again, in the same pass. On a `completed` one it
-  reopens it over whatever old-shape documents are left.
+  failed and cancelled partitions are pending again, in the same pass. When that pass had already
+  closed (it failed on a partition at the end of a pass, or on `maxPasses`), a new pass takes what
+  is left instead. On a `completed` one it reopens it over whatever old-shape documents are left.
 - **`repin`** pins the file now on disk as the background migration's version: its checksum, in the
   changelog too, and its spec. Use it after deliberately changing a registered background
   migration. Until then, coordinators and lanes treat a changed file as a deploy in progress and

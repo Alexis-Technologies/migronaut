@@ -622,3 +622,6 @@ kit.on('background:watch', (event) => {
   );
 });
 expectType<Promise<'poll' | 'stream' | 'both'>>(kit.driftMode());
+const backgroundState = await kit.backgroundStatus('0001-orders.js');
+expectType<string | undefined>(backgroundState?.previous?.registration);
+expectType<number | undefined>(backgroundState?.previous?.totals.migrated);

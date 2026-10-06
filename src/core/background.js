@@ -9,7 +9,7 @@ const {
 } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { versionIndexKey } = require('../versioning/document.js');
-const { matchOf, processPartition } = require('./background-engine.js');
+const { idKey, matchOf, processPartition } = require('./background-engine.js');
 const { idRangePartitioner } = require('./background-partition.js');
 const { createShardPartitioner, withShardKey } = require('./background-shard.js');
 const { TERMINAL, matchHash, transition } = require('./background-spec.js');
@@ -412,7 +412,12 @@ async function planPass(deps, job, state, hash, { newPass = true } = {}) {
   const committed = await store.commitPlan(state._id, {
     generation: state.generation,
     previousToken: state.plan?.token,
-    filter: { status: { $in: ['pending', 'running'] } },
+    // A repin while this pass was planned changed the spec under it: the
+    // commit loses, and the next step plans with the new one.
+    filter: {
+      status: { $in: ['pending', 'running'] },
+      ...(state.checksum !== undefined ? { checksum: state.checksum } : {}),
+    },
     plan: {
       partitioner: spec.mode === 'step' ? 'step' : job.partitioner.id,
       method: plan.method,
@@ -470,13 +475,17 @@ async function finalize(deps, job, state) {
         inc[`totals.${key}`] = value;
       }
     }
+    // One id, one entry — by its canonical form, so a string _id never
+    // stands in for an ObjectId with the same hex.
     const badIds = [];
     const seen = new Set();
-    for (const id of [...(state.badIds ?? []), ...(rolled?.badIds ?? [])]) {
-      const key = JSON.stringify(id);
-      if (!seen.has(key)) {
-        seen.add(key);
-        badIds.push(id);
+    for (const list of [state.badIds ?? [], rolled?.badIds ?? []]) {
+      for (const id of list) {
+        const key = idKey(id);
+        if (!seen.has(key)) {
+          seen.add(key);
+          badIds.push(id);
+        }
       }
     }
     const updated = await store.cas(
@@ -547,7 +556,8 @@ async function finalize(deps, job, state) {
           `${completed.pass} pass(es))`,
         deps.fields({ background: name }),
       );
-      await deps.onCompleted?.(name);
+      // A completed revert unblocks nothing: what required it needs the forward shape.
+      if (job.direction !== 'revert') await deps.onCompleted?.(name);
     }
     return { next: 'done', status: completed?.status ?? (await store.get(name))?.status };
   }
@@ -593,15 +603,49 @@ async function failState(deps, state, message) {
 }
 
 /**
- * A blocked one whose `requires` are all completed moves to `pending`
- * (phase 20 adds the data probe). Returns the state after, or `null`.
+ * Where each of `requires` stands, in order — the one rule every guard
+ * shares: `[{ migration, status, done, state? }]`. A background migration is
+ * done when its state completed forward, or — with no state at all — when
+ * the changelog has it from a history that predates migronaut (a baseline,
+ * an import: `deps.adoptedOf(names)`). A completed revert is not done: what
+ * required it needs the forward shape.
+ */
+async function requiresStatus(deps, requires) {
+  if (requires.length === 0) return [];
+  const states = await deps.store.getMany(requires);
+  const missing = [];
+  for (const name of requires) if (!states.has(name)) missing.push(name);
+  const adopted = new Set(missing.length > 0 ? ((await deps.adoptedOf?.(missing)) ?? []) : []);
+  const rows = [];
+  for (const migration of requires) {
+    const state = states.get(migration);
+    if (state === undefined) {
+      const done = adopted.has(migration);
+      rows.push({ migration, status: done ? 'adopted' : 'unregistered', done });
+    } else if (state.direction === 'revert') {
+      rows.push({ migration, status: 'reverted', done: false, state });
+    } else {
+      rows.push({ migration, status: state.status, done: state.status === 'completed', state });
+    }
+  }
+  return rows;
+}
+
+/** The names among `requires` not done yet, in order */
+async function waitingFor(deps, requires) {
+  const waitsFor = [];
+  for (const row of await requiresStatus(deps, requires)) {
+    if (!row.done) waitsFor.push(row.migration);
+  }
+  return waitsFor;
+}
+
+/**
+ * A blocked one whose `requires` are all done moves to `pending`. Returns
+ * the state after, or `null`.
  */
 async function tryUnblock(deps, state) {
-  const waitsFor = [];
-  for (const required of state.requires ?? []) {
-    const other = await deps.store.get(required);
-    if (other === null || other.status !== 'completed') waitsFor.push(required);
-  }
+  const waitsFor = await waitingFor(deps, state.requires ?? []);
   if (waitsFor.length > 0) {
     if (JSON.stringify(waitsFor) !== JSON.stringify(state.waitsFor ?? [])) {
       await deps.store.set(state._id, { waitsFor });
@@ -640,6 +684,9 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
   if (state.status !== 'running' || state.phase !== 'process' || state.plan === undefined) {
     return { outcome: state.status === 'completed' ? 'exhausted' : 'stale', counters: {} };
   }
+  // A newer release's state (an old pod mid-deploy): its plan may hold scopes
+  // this one cannot read. The coordinator waits; so does the lane.
+  if (state.schema > STATE_SCHEMA) return { outcome: 'stale', counters: {} };
   let job;
   try {
     job = await jobFor(deps, name, state);
@@ -862,10 +909,7 @@ async function control(deps, name, action, { requestedBy, reason, fromStart = fa
   const fields = { control: stamp };
   if (action === 'resume') {
     // Back to where it was: blocked if what it requires is still not done.
-    const waitsFor = [];
-    for (const required of state.requires ?? []) {
-      if ((await store.get(required))?.status !== 'completed') waitsFor.push(required);
-    }
+    const waitsFor = await waitingFor(deps, state.requires ?? []);
     if (waitsFor.length > 0) {
       target = 'blocked';
       fields.waitsFor = waitsFor;
@@ -877,13 +921,20 @@ async function control(deps, name, action, { requestedBy, reason, fromStart = fa
     fields.phase = 'partition';
     fields.reopened = (state.reopened ?? 0) + 1;
   }
+  // A pass that already closed (its counters rolled up) is not resumed: its
+  // partitions' work since would never be counted. A new pass takes what is left.
+  const closed = state.plan !== undefined && (state.rolledGeneration ?? 0) >= state.generation;
   if (action === 'retry' && fromStart) {
     fields.phase = 'partition';
     fields.pass = 0;
     fields.badIds = [];
     fields.failedPartitions = 0;
+    // Diagnostics of the runs before; `totals` stays — it is what was rewritten.
+    fields.docErrors = [];
+    fields.lastError = null;
   } else if (action === 'retry') {
     fields.failedPartitions = 0;
+    if (closed) fields.phase = 'partition';
   }
   const moved = await store.move(name, {
     from: [state.status],
@@ -908,7 +959,7 @@ async function control(deps, name, action, { requestedBy, reason, fromStart = fa
       });
     } else if (action === 'retry' && fromStart) {
       await store.dropGenerations(name, state.generation);
-    } else if (action === 'retry' && effective !== 'reopen') {
+    } else if (action === 'retry' && effective !== 'reopen' && !closed) {
       await store.setOpenPartitions(name, {
         generation: state.generation,
         plan: plan.token,
@@ -1224,10 +1275,12 @@ module.exports = {
   partitionerFor,
   probeHint,
   repin,
+  requiresStatus,
   runSlice,
   stillDirty,
   tryUnblock,
   verify,
   versionHint,
   waitForLanes,
+  waitingFor,
 };

@@ -42,12 +42,19 @@ const DEFAULTS = Object.freeze({
   maxPauseMs: 30_000,
 });
 
+/**
+ * The most documents a background migration may fail and still complete —
+ * as many as its state keeps the ids of (they are left out of later passes
+ * and of the final count, so a budget past them could never be told).
+ */
+const MAX_BAD_IDS = 1000;
+
 /** Integer settings: `[key, min, max]` */
 const INTEGER_SETTINGS = [
   ['batchSize', 1, 10_000],
   ['pauseMs', 0, 3_600_000],
   ['sliceMs', 1_000, 3_600_000],
-  ['maxDocumentErrors', 0, 1_000_000],
+  ['maxDocumentErrors', 0, MAX_BAD_IDS],
   ['maxPasses', 1, 1_000],
   ['maxConflictRetries', 0, 100],
   ['maxSliceFailures', 1, 100],
@@ -558,6 +565,7 @@ const keysetFilter = (lastId) => (lastId === undefined ? {} : { _id: { $gt: last
 module.exports = {
   BACKGROUND_DEFAULTS: DEFAULTS,
   ID_BRACKETS,
+  MAX_BAD_IDS,
   MAX_CHECKPOINT_BYTES,
   STATUSES,
   TERMINAL,

@@ -44,11 +44,13 @@ const {
   coordinate,
   failedError,
   repin: repinBackgroundState,
+  requiresStatus,
   runSlice,
   stillDirty,
   tryUnblock,
   verify: verifyDrift,
   waitForLanes,
+  waitingFor,
 } = require('./background.js');
 const { assertSliceMs, resolveBackgroundSpec } = require('./background-spec.js');
 const { previewSample, previewSteps } = require('./background-dry-run.js');
@@ -2230,14 +2232,9 @@ class MigratorKit extends EventEmitter {
     }
   }
 
-  /** The required background migrations not completed yet, in order */
-  async #waitsFor(requires) {
-    const store = this.#backgroundStore();
-    const waitsFor = [];
-    for (const required of requires) {
-      if ((await store.get(required))?.status !== 'completed') waitsFor.push(required);
-    }
-    return waitsFor;
+  /** The required background migrations not done yet, in order */
+  #waitsFor(requires) {
+    return waitingFor(this.#backgroundDeps(), requires);
   }
 
   /** Register a background migration (again): `blocked` while what it requires is not done */
@@ -2380,6 +2377,7 @@ class MigratorKit extends EventEmitter {
           },
         ),
       onCompleted: (name) => this.#unblockDependents(name),
+      adoptedOf: (names) => this.#requireChangelog().getAdoptedNames(db, names),
       topology: () => (this.#topology ??= readServer(db).then((server) => server.topology)),
       shardAware: config.backgroundShardAware,
       shardKeyOf: (collection) => readShardKey(this.#client, db.databaseName, collection),
@@ -2564,37 +2562,23 @@ class MigratorKit extends EventEmitter {
    * shapes reappeared.
    */
   async #unsatisfied(requires, { reopen = true } = {}) {
-    const store = this.#backgroundStore();
-    const changelog = this.#requireChangelog();
-    const db = this.#requireDb();
+    const deps = this.#backgroundDeps();
     const waiting = [];
-    for (const required of requires) {
-      const record = await changelog.getByName(db, required);
-      if (
-        record?.status === 'applied' &&
-        (record.origin === 'baseline' || record.origin === 'migrate-mongo')
-      ) {
-        continue;
-      }
-      const state = await store.get(required);
-      if (state === null) {
-        waiting.push({ migration: required, status: 'unregistered' });
-      } else if (state.direction === 'revert') {
-        waiting.push({ migration: required, status: 'reverted' });
-      } else if (state.status !== 'completed') {
-        waiting.push({ migration: required, status: state.status });
-      } else if (await stillDirty(this.#backgroundDeps(), state)) {
+    for (const row of await requiresStatus(deps, requires)) {
+      if (!row.done) {
+        waiting.push({ migration: row.migration, status: row.status });
+      } else if (row.state !== undefined && (await stillDirty(deps, row.state))) {
         if (reopen) {
-          await controlBackground(this.#backgroundDeps(), required, 'retry', {
+          await controlBackground(deps, row.migration, 'retry', {
             reason: 'old-shape documents reappeared',
           });
           this.#emit('background:drift', {
-            migration: required,
+            migration: row.migration,
             source: 'requires',
             action: 'reopened',
           });
         }
-        waiting.push({ migration: required, status: reopen ? 'running' : 'completed' });
+        waiting.push({ migration: row.migration, status: reopen ? 'running' : 'completed' });
       }
     }
     return waiting;
@@ -2875,6 +2859,7 @@ class MigratorKit extends EventEmitter {
       ...(state.lastProgressAt ? { lastProgressAt: state.lastProgressAt } : {}),
       ...(state.lastError ? { lastError: state.lastError } : {}),
       ...(state.description ? { description: state.description } : {}),
+      ...(state.previous ? { previous: { ...state.previous } } : {}),
     };
   }
 

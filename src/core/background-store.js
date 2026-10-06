@@ -1,6 +1,7 @@
 const os = require('node:os');
 const { LockLostError } = require('../errors/index.js');
 const { randomId } = require('../utils/id.js');
+const { MAX_BAD_IDS } = require('./background-spec.js');
 const { backgroundCollectionNames } = require('./config.js');
 const { READ_OPTIONS } = require('./server-info.js');
 
@@ -24,9 +25,6 @@ const { READ_OPTIONS } = require('./server-info.js');
 
 /** The state document's schema — a worker refuses a newer one (an old release mid-deploy) */
 const STATE_SCHEMA = 2;
-
-/** At most this many document ids are kept as "bad" — beyond any sane error budget */
-const MAX_BAD_IDS = 1000;
 
 /** The last document errors kept, per partition and in the state */
 const MAX_DOC_ERRORS = 20;
@@ -122,6 +120,15 @@ class BackgroundStore {
     );
   }
 
+  /** The state documents of `names`, by name — one read */
+  async getMany(names) {
+    const byName = new Map();
+    if (names.length === 0) return byName;
+    const docs = await this.#states.find({ _id: { $in: names } }, READ_OPTIONS).toArray();
+    for (const doc of docs) byName.set(doc._id, doc);
+    return byName;
+  }
+
   /** Every state document matching `filter`, oldest registration first */
   list(filter = {}) {
     return this.#states.find(filter, READ_OPTIONS).sort({ registeredAt: 1, _id: 1 }).toArray();
@@ -130,11 +137,37 @@ class BackgroundStore {
   /**
    * Register (or register again) a background migration: a fresh state
    * document under a new `registration` id, and no partitions — a plan of
-   * the old registration must not be resumed against the new one.
+   * the old registration must not be resumed against the new one. A new
+   * registration keeps the old one's history, and a summary of it as
+   * `previous` (a revert replacing a forward run must not erase its trail).
    */
   async register(name, fields, { session } = {}) {
     const options = session ? { session } : {};
     const now = new Date();
+    const old = await this.#states.findOne(
+      { _id: name },
+      {
+        projection: {
+          registration: 1,
+          status: 1,
+          direction: 1,
+          pass: 1,
+          totals: 1,
+          registeredAt: 1,
+          completedAt: 1,
+          history: 1,
+        },
+        ...READ_OPTIONS,
+        ...options,
+      },
+    );
+    const history = Array.isArray(old?.history) ? old.history.slice(-(MAX_HISTORY - 1)) : [];
+    history.push({
+      at: now,
+      action: 'register',
+      ...(old ? { from: old.status } : {}),
+      to: fields.status,
+    });
     const doc = {
       _id: name,
       schema: STATE_SCHEMA,
@@ -148,13 +181,29 @@ class BackgroundStore {
       docErrors: [],
       failures: 0,
       reopened: 0,
-      history: [{ at: now, action: 'register', to: fields.status }],
+      history,
+      ...(old
+        ? {
+            previous: {
+              registration: old.registration,
+              status: old.status,
+              direction: old.direction,
+              pass: old.pass,
+              totals: old.totals ?? {},
+              registeredAt: old.registeredAt,
+              ...(old.completedAt ? { completedAt: old.completedAt } : {}),
+            },
+          }
+        : {}),
       registeredAt: now,
       updatedAt: now,
       ...fields,
     };
-    await this.#states.replaceOne({ _id: name }, doc, { upsert: true, ...options });
+    // The old partitions go first: a crash in between leaves a state with no
+    // partitions (the coordinator plans again), never partitions of an old
+    // registration that a new one's generation numbers would count as its own.
     await this.#partitions.deleteMany({ background: name }, options);
+    await this.#states.replaceOne({ _id: name }, doc, { upsert: true, ...options });
     return doc;
   }
 
@@ -718,7 +767,9 @@ class BackgroundStore {
         partition: String(lease.partitionId),
       });
     }
-    lease.touch();
+    // Inside a transaction the renewal lands only with the commit: the caller
+    // touches the lease then — a failed commit must not skip the heartbeat.
+    if (session === undefined) lease.touch();
   }
 
   /**
@@ -755,6 +806,8 @@ class BackgroundStore {
     await this.#partitions.updateOne(
       {
         _id: lease.partitionId,
+        // Not one another lane has finished since (done, its lease gone).
+        status: { $in: OPEN_PARTITION },
         $or: [{ 'lease.token': lease.token }, { lease: { $exists: false } }],
       },
       [

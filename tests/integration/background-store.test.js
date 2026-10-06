@@ -63,10 +63,27 @@ describe('BackgroundStore — registration and state (integration)', () => {
     assert.strictEqual((await store.partitions(NAME)).length, 0);
     const stored = await store.get(NAME);
     assert.strictEqual(stored.status, 'blocked');
+    // The old registration's trail is kept, the new one appended.
     assert.deepStrictEqual(
       stored.history.map((entry) => entry.to),
-      ['blocked'],
+      ['pending', 'blocked'],
     );
+  });
+
+  it('should keep the history and a summary of the old registration when registering again', async () => {
+    const first = await planned(1);
+    await store.set(NAME, { totals: { migrated: 9 }, status: 'completed' });
+    const again = await store.register(NAME, { status: 'pending', direction: 'revert' });
+    assert.notStrictEqual(again.registration, first.registration);
+    assert.deepStrictEqual(
+      again.history.map((entry) => entry.action),
+      ['register', 'register'],
+    );
+    assert.strictEqual(again.history[1].from, 'completed');
+    assert.strictEqual(again.previous.registration, first.registration);
+    assert.strictEqual(again.previous.status, 'completed');
+    assert.deepStrictEqual(again.previous.totals, { migrated: 9 });
+    assert.deepStrictEqual(again.totals, {});
   });
 
   it('should move a state only from the expected statuses, keeping its history', async () => {

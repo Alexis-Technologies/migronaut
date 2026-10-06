@@ -153,9 +153,9 @@ export interface BackgroundMigrationSettings {
   pauseMs?: number;
   /** How long a lane holds a partition before it yields: 30 000 ms */
   sliceMs?: number;
-  /** Default `{ w: 'majority' }` */
+  /** Every batch write's, transactions included — default `{ w: 'majority' }` */
   writeConcern?: { w?: number | 'majority'; j?: boolean; wtimeoutMS?: number };
-  /** Documents that may fail before the background migration does: 0 */
+  /** Documents that may fail before the background migration does: 0 (at most 1000) */
   maxDocumentErrors?: number;
   /** Passes over the remaining old-shape documents before giving up: 10 */
   maxPasses?: number;
@@ -2198,6 +2198,16 @@ export interface BackgroundStatus {
   lastProgressAt?: Date;
   lastError?: string;
   description?: string;
+  /** The registration this one replaced (`up --force`, `redo`, `down`), as it stood then */
+  previous?: {
+    registration: string;
+    status: BackgroundState;
+    direction: 'forward' | 'revert';
+    pass: number;
+    totals: BackgroundCounters & { slices?: number; reclaims?: number };
+    registeredAt: Date;
+    completedAt?: Date;
+  };
 }
 
 /** One partition of a background migration */

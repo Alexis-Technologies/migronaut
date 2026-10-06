@@ -4,9 +4,11 @@ const { ObjectId } = require('mongodb');
 const {
   BACKGROUND_DEFAULTS,
   ID_BRACKETS,
+  MAX_BAD_IDS,
   STATUSES,
   TERMINAL,
   TRANSITIONS,
+  assertSliceMs,
   backgroundIssues,
   bracketOfType,
   keysetFilter,
@@ -131,6 +133,9 @@ describe('backgroundIssues — declarative', () => {
     assert.match(at('batchSize', 0), /from 1 to 10000/);
     assert.match(at('sliceMs', 10), /from 1000/);
     assert.match(at('maxParallel', 65), /from 1 to 64/);
+    // Past the ids a state keeps, a budget could never be told.
+    assert.match(at('maxDocumentErrors', MAX_BAD_IDS + 1), /from 0 to 1000/);
+    assert.deepStrictEqual(pathsOf({ ...base, maxDocumentErrors: MAX_BAD_IDS }), []);
     assert.match(at('maxReplicationLagMs', -1), /false or an integer/);
     assert.match(at('writeConcern', 'majority'), /write concern object/);
     assert.match(at('writeConcern', { w: 0 }), /acknowledged/);
@@ -159,6 +164,13 @@ describe('backgroundIssues — declarative', () => {
       ),
       /must not exceed/,
     );
+  });
+
+  it('should hold a caller sliceMs to a positive integer up to the spec maximum', () => {
+    for (const ok of [1, 100, 3_600_000]) assert.doesNotThrow(() => assertSliceMs(ok));
+    for (const bad of [0, -5, 1.5, Number.NaN, '1000', 3_600_001]) {
+      assert.throws(() => assertSliceMs(bad), ConfigInvalidError);
+    }
   });
 
   it('should check the spec against the collection versioning', () => {

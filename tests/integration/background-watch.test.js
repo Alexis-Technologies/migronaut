@@ -128,6 +128,15 @@ describe('live drift watcher (integration)', () => {
     assert.strictEqual((await orders().findOne({ _id: doc._id })).__v, undefined);
   });
 
+  it('should hand a document it cannot upgrade back to the lanes', async () => {
+    const { kit, drift } = await watched();
+    // An edited file (a deploy in progress): the watcher cannot load the migration.
+    project.write(NAME, spec({ extra: 'batchSize: 7,' }));
+    await orders().insertOne({ __v: 1, __rev: 0, late: true });
+    await until('the hand-back', () => drift.some((event) => event.action === 'reopened'));
+    assert.strictEqual((await kit.backgroundStatus(NAME)).status, 'running');
+  });
+
   it('should take a document up a chain of background migrations', async () => {
     const kit = kitWith();
     await orders().insertOne({ __v: 1, __rev: 0 });

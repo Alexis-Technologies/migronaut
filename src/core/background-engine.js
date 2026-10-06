@@ -349,6 +349,22 @@ function readStepResult(result) {
   };
 }
 
+/**
+ * How every transaction of a background migration starts: a snapshot read
+ * on the primary, the spec's write concern (majority by default), and the
+ * spec's time limit on the commit.
+ */
+function transactionOptions(spec) {
+  return {
+    readConcern: { level: 'snapshot' },
+    writeConcern: spec.writeConcern ?? { w: 'majority' },
+    readPreference: 'primary',
+    ...(spec.transaction?.timeoutMs !== undefined
+      ? { maxCommitTimeMS: spec.transaction.timeoutMs }
+      : {}),
+  };
+}
+
 /** A write that failed for want of capacity, not for a fault of the data */
 function isOverload(error) {
   if (error?.err !== undefined || error?.writeConcernError !== undefined) return true;
@@ -399,14 +415,10 @@ async function runStep(job, ctx, cursor) {
   for (let attempt = 0; ; attempt++) {
     const session = client.startSession();
     try {
-      session.startTransaction({
-        readConcern: { level: 'snapshot' },
-        writeConcern: { w: 'majority' },
-        readPreference: 'primary',
-        maxCommitTimeMS: job.spec.transaction.timeoutMs,
-      });
+      session.startTransaction(transactionOptions(job.spec));
       const saved = await save(readStepResult(await fn(stepContext(session))), session);
       await commit(session);
+      lease.touch();
       return saved;
     } catch (error) {
       await session.abortTransaction().catch(() => undefined);
@@ -550,12 +562,7 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
     const session = client.startSession();
     let docs = [];
     try {
-      session.startTransaction({
-        readConcern: { level: 'snapshot' },
-        writeConcern: { w: 'majority' },
-        readPreference: 'primary',
-        maxCommitTimeMS: timeoutMs,
-      });
+      session.startTransaction(transactionOptions(spec));
       const query = job.partitioner.batchQuery(partition.scope, cursor, {
         limit: size,
         match: job.match,
@@ -599,6 +606,7 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
         { session },
       );
       await commit(session);
+      lease.touch();
       ctx.txn.clean += 1;
       if (ctx.txn.clean >= 5 && size < batchSize) {
         ctx.txn.size = Math.min(batchSize, Math.ceil(size * 1.5));
@@ -639,11 +647,15 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
           };
         }
       }
-      attempts += 1;
-      if (timeOrSize) {
+      // Too slow or too big: halve the batch at once. At one document that
+      // is not the answer any more (the read itself ran out of time — a
+      // filter the index does not cover): it is retried like a transient
+      // error, with a backoff, and fails the slice after maxRetries.
+      if (timeOrSize && size > 1) {
         size = Math.max(1, Math.floor(size / 2));
         continue;
       }
+      attempts += 1;
       if (attempts > maxRetries) throw error;
       if (attempts > maxRetries / 2) size = Math.max(1, Math.floor(size / 2));
       await sleepFor(Math.random() * Math.min(2000, 50 * 2 ** attempts), signal);
@@ -773,5 +785,6 @@ module.exports = {
   matchOf,
   processPartition,
   readStepResult,
+  transactionOptions,
   transformContext,
 };

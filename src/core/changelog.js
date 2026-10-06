@@ -109,6 +109,26 @@ class Changelog {
     return failed;
   }
 
+  /**
+   * Which of `names` are applied from a history that predates migronaut — a
+   * `baseline` or an import from migrate-mongo: never run here, so a
+   * background migration among them has no state, and counts as done.
+   */
+  async getAdoptedNames(db, names) {
+    if (names.length === 0) return [];
+    const docs = await this.#coll(db)
+      .find({
+        status: 'applied',
+        origin: { $in: ['baseline', 'migrate-mongo'] },
+        name: { $in: names },
+      })
+      .project({ name: 1, _id: 0 })
+      .toArray();
+    const adopted = [];
+    for (const doc of docs) adopted.push(doc.name);
+    return adopted;
+  }
+
   /** Return a single record by migration name, or null */
   async getByName(db, name) {
     return this.#coll(db).findOne({ name });

@@ -1,7 +1,7 @@
 const { ConfigInvalidError, LockAlreadyHeldError, RunAbortedError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { belowVersionFilter, versionOf } = require('../versioning/document.js');
-const { applyBatch } = require('./background-engine.js');
+const { applyBatch, transactionOptions } = require('./background-engine.js');
 const { sleep } = require('./background-throttle.js');
 const {
   classifyStreamError,
@@ -96,6 +96,30 @@ function watchOptions(options) {
     throw new ConfigInvalidError('onError must be a function');
   }
   return resolved;
+}
+
+/** The background migration that takes a collection to its target — the edge reaching highest */
+function lastEdge(edges) {
+  let last;
+  for (const edge of edges.values()) if (last === undefined || edge.to > last.to) last = edge;
+  return last?.name;
+}
+
+/**
+ * How far this host's clock runs ahead of the server's, in milliseconds —
+ * from `hello`'s `localTime`, halfway through the round trip. 0 when the
+ * server will not say.
+ */
+async function clockSkew(db) {
+  try {
+    const before = Date.now();
+    const hello = await db.admin().command({ hello: 1 });
+    const after = Date.now();
+    const server = hello?.localTime instanceof Date ? hello.localTime.getTime() : undefined;
+    return server === undefined ? 0 : Math.round((before + after) / 2) - server;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -316,6 +340,9 @@ function startWatch(deps, options = {}) {
       });
       savedAt = Date.now();
     };
+    // Lag is judged against the server's clock: a host running ahead would
+    // otherwise read every event as late and shed the collection each time.
+    const skew = await clockSkew(deps.db);
     try {
       // The first read opens the cursor: from here on the stream has every
       // write. Only then is a fresh start's past probed — from "now" (no
@@ -348,7 +375,7 @@ function startWatch(deps, options = {}) {
             end: event.operationType === 'invalidate' ? undefined : 'gone',
           };
         }
-        const lag = lagOf(event, Date.now());
+        const lag = lagOf(event, Date.now() - skew);
         if (lag !== undefined && lag > settings.maxLagMs) {
           await shed(collection, edges);
           token = undefined;
@@ -409,7 +436,7 @@ function startWatch(deps, options = {}) {
       }
       const edge = edges.get(versionOf(doc, field));
       if (edge === undefined || !settings.upgrade) {
-        drift(collection, edge?.name ?? byName.keys().next().value, 'reported');
+        drift(collection, edge?.name ?? lastEdge(edges), 'reported');
         return;
       }
       let job = jobs.get(edge.name);
@@ -417,8 +444,9 @@ function startWatch(deps, options = {}) {
         try {
           job = await jobFor(deps, edge.name, byName.get(edge.name));
         } catch (error) {
-          // Mid-deploy: another version of the file — the poll will see to it.
+          // Mid-deploy: another version of the file — the lanes take the document.
           report(error, collection);
+          await handBack(collection, edge.name, 'the drift watcher could not load the migration');
           return;
         }
         jobs.set(edge.name, job);
@@ -426,7 +454,12 @@ function startWatch(deps, options = {}) {
       const fresh = await coll.findOne({ $and: [key, job.match] }, READ_OPTIONS);
       if (fresh === null) return;
       const result = await rewrite(job, fresh);
-      if (result === null) return;
+      if (result === null) {
+        // Still in the way after every retry: in 'stream' mode no poll would
+        // look at this collection, so the lanes take what is left.
+        await handBack(collection, edge.name, 'the drift watcher kept losing to other writes');
+        return;
+      }
       if (result.errors.length > 0) {
         count('failed');
         drift(collection, edge.name, 'failed');
@@ -449,36 +482,56 @@ function startWatch(deps, options = {}) {
   /**
    * One document through the lanes' write path — in a transaction for a
    * transactional background migration, so its side writes commit with it
-   * (and the driver retries a transient failure). `null`: a concurrent write
-   * moved it first; the event that write made comes next.
+   * (and the driver retries a transient failure). A concurrent write that
+   * moves it first is read again and retried, up to `maxConflictRetries`
+   * times, as a lane would; `null` when it is still in the way after that.
    */
   async function rewrite(job, doc) {
     if (!job.spec.transaction) return applyBatch(job, [doc], { db: deps.db });
-    const session = deps.client.startSession();
-    try {
-      let result;
-      await session.withTransaction(
-        async () => {
-          result = await applyBatch(job, [doc], {
+    let current = doc;
+    for (let attempt = 0; ; attempt++) {
+      const session = deps.client.startSession();
+      try {
+        let result;
+        await session.withTransaction(async () => {
+          result = await applyBatch(job, [current], {
             db: deps.db,
             session,
             ctxExtra: { session, db: deps.db, client: deps.client },
             abortOnConflict: true,
             strict: true,
           });
-        },
-        { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } },
-      );
-      return result;
-    } catch (error) {
-      if (error?.context?.reason === 'write-conflict') return null;
-      if (error?.context?.reason === 'document') {
-        return { migrated: 0, errors: [error.context.document] };
+        }, transactionOptions(job.spec));
+        return result;
+      } catch (error) {
+        if (error?.context?.reason === 'document') {
+          return { migrated: 0, errors: [error.context.document] };
+        }
+        if (error?.context?.reason !== 'write-conflict') throw error;
+        if (attempt >= job.spec.maxConflictRetries) return null;
+        current = await deps.db
+          .collection(job.spec.collection)
+          .findOne({ $and: [{ _id: doc._id }, job.match] }, READ_OPTIONS);
+        // Upgraded, or no longer one to upgrade, by the write that won.
+        if (current === null) return { migrated: 0, errors: [] };
+      } finally {
+        await session.endSession().catch(() => undefined);
       }
-      throw error;
-    } finally {
-      await session.endSession().catch(() => undefined);
     }
+  }
+
+  /**
+   * What the watcher could not upgrade goes back to the lanes: with
+   * `onDrift: 'reopen'` the background migration is reopened (a pass over
+   * what is left), otherwise the drift is reported.
+   */
+  async function handBack(collection, migration, reason) {
+    if (deps.onDrift !== 'reopen') {
+      drift(collection, migration, 'reported');
+      return;
+    }
+    drift(collection, migration, 'reopened');
+    await control(deps, migration, 'retry', { reason }).catch((error) => report(error, collection));
   }
 
   function drift(collection, migration, action) {

@@ -84,7 +84,7 @@ async function register(deps, name, status = 'pending') {
 }
 
 /** Drive a background migration the way a runtime would, until the coordinator is done */
-async function drive(deps, name, { lanes = 2, maxSteps = 50 } = {}) {
+async function drive(deps, name, { lanes = 2, maxSteps = 50, tolerate = false } = {}) {
   for (let step = 0; step < maxSteps; step++) {
     const answer = await coordinate(deps, name);
     if (answer.next === 'done') return answer;
@@ -92,7 +92,14 @@ async function drive(deps, name, { lanes = 2, maxSteps = 50 } = {}) {
       await Promise.all(
         Array.from({ length: lanes }, async () => {
           for (;;) {
-            const slice = await runSlice(deps, name, { sliceMs: 60_000 });
+            let slice;
+            try {
+              slice = await runSlice(deps, name, { sliceMs: 60_000 });
+            } catch (error) {
+              // `tolerate`: a failed slice is counted on its partition; the coordinator decides.
+              if (!tolerate) throw error;
+              return undefined;
+            }
             if (slice.outcome !== 'yielded') return slice;
           }
         }),
@@ -473,6 +480,58 @@ describe('background coordinator (integration)', () => {
     await assert.rejects(runSlice(deps, NAME, { signal: new AbortController().signal }), /broken/);
     const [partition] = await deps.store.partitions(NAME);
     assert.strictEqual(partition.status, 'failed');
+  });
+
+  it('should count the work of a retry after its pass closed on a failed partition', async () => {
+    await seed(40);
+    let broken = true;
+    const deps = makeDeps({
+      [NAME]: {
+        background: {
+          collection: 'orders',
+          from: 1,
+          to: 2,
+          pauseMs: 0,
+          batchSize: 10,
+          maxSliceFailures: 1,
+          migrateBatch: (docs) => {
+            if (broken) throw new Error('broken for now');
+            return docs.map(moveAddress);
+          },
+        },
+      },
+    });
+    await register(deps, NAME);
+    assert.strictEqual((await drive(deps, NAME, { tolerate: true })).status, 'failed');
+    broken = false;
+    assert.deepStrictEqual(await control(deps, NAME, 'retry'), {
+      applied: 'changed',
+      status: 'pending',
+    });
+    assert.strictEqual((await drive(deps, NAME)).status, 'completed');
+    const state = await deps.store.get(NAME);
+    assert.strictEqual(state.totals.migrated, 40, 'the retried pass is counted');
+    assert.strictEqual(await mongo.db.collection('orders').countDocuments({ __v: 2 }), 40);
+  });
+
+  it('should not unblock what requires a completed revert, and count an adopted one as done', async () => {
+    await seed(5);
+    const deps = makeDeps({
+      [NAME]: { background: { collection: 'orders', from: 1, to: 2, migrate: moveAddress } },
+      '0002-next.js': {
+        requires: [NAME],
+        background: { collection: 'orders', from: 2, to: 3, migrate: (doc) => doc },
+      },
+    });
+    await register(deps, NAME);
+    await deps.store.set(NAME, { direction: 'revert', status: 'completed' });
+    await register(deps, '0002-next.js', 'blocked');
+    assert.strictEqual((await coordinate(deps, '0002-next.js')).status, 'blocked');
+    // No state at all, but baselined: done.
+    await deps.store.remove(NAME);
+    deps.adoptedOf = async (names) => names.filter((name) => name === NAME);
+    assert.notStrictEqual((await coordinate(deps, '0002-next.js')).status, 'blocked');
+    assert.notStrictEqual((await deps.store.get('0002-next.js')).status, 'blocked');
   });
 
   it('should keep a blocked one blocked until what it requires completes', async () => {

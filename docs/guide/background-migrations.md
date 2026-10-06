@@ -112,7 +112,7 @@ Every setting sits next to `collection` in the same object.
 | `pauseMs` | `100` | Pause between batches |
 | `sliceMs` | `30000` | How long a lane holds a partition before it yields (≥ 1000) |
 | `writeConcern` | `{ w: 'majority' }` | Of every batch write. `w: 0` is refused: an unacknowledged write cannot see a conflict |
-| `maxDocumentErrors` | `0` | Documents that may fail before the background migration does (see [Document errors](#document-errors)) |
+| `maxDocumentErrors` | `0` | Documents that may fail before the background migration does, at most 1000 (see [Document errors](#document-errors)) |
 | `maxPasses` | `10` | Passes over what is left before it fails |
 | `maxConflictRetries` | `3` | Rounds of re-reading documents a concurrent write moved under a batch |
 | `maxSliceFailures` | `3` | Failed slices of one partition in a row before that partition fails |
@@ -232,7 +232,8 @@ pausing a completed one. A control whose result is already in place is not an er
   `migrated`.
 
 **`up --force` and `redo`** register it again. It gets a new `registration` id, the old plan's
-partitions are deleted, and the pass count goes back to 0. Documents already at `to` no longer
+partitions are deleted, and the pass count goes back to 0. Its history is kept, and the old
+registration is summed up as `previous` (status, direction, passes, totals). Documents already at `to` no longer
 match, so it covers only what is left. `redo` is a `down` and an `up`: it ends registered forward,
 and it is refused like `down` when there is no `revert` and documents were already rewritten.
 
@@ -745,7 +746,7 @@ lease holder (host and pid, never its token) and throttle state.
 | pause | `pauseBackground(name, { wait? })` | Lanes stop at their next batch boundary, checkpoint, and release. Every partition keeps its cursor |
 | resume | `resumeBackground(name)` | Back to where it was: `running` (or `pending`, or `blocked` if what it requires is not done) |
 | cancel | `cancelBackground(name, { wait? })` | Its open partitions are cancelled. `retry` can bring it back |
-| retry | `retryBackground(name, { fromStart?, repin? })` | A failed or cancelled one goes on from where it was: its failed and cancelled partitions are pending again. `fromStart` plans everything again, from pass 0, with a clean list of failed documents. A completed one is reopened over what is left |
+| retry | `retryBackground(name, { fromStart?, repin? })` | A failed or cancelled one goes on from where it was: its failed and cancelled partitions are pending again — or, when its pass had already closed (a failed partition found at the end of a pass, `maxPasses`), a new pass takes what is left. `fromStart` plans everything again, from pass 0, with a clean list of failed documents (the totals stay: they are what was rewritten). A completed one is reopened over what is left |
 | repin | `repinBackground(name)` | Pin the file on disk: its checksum (in the changelog too) and its spec. A change to what it matches (`from`, `to`, `filter`, field names), to `maxParallel` or to `partitions` replans the pass |
 | unlock | `unlockBackground(name)` | Clear a stuck coordinator lock and every partition lease. A lane still alive is fenced off at its next write |
 
