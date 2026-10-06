@@ -142,7 +142,17 @@ async function runAudit(deps) {
   // 7. Search — only where declared collections hold search indexes.
   await auditSearch(deps, db, config, record);
 
-  // 8. Runtime. TypeScript migrations need a runtime that can strip types.
+  // 8. Background migrations — only where any is registered.
+  if (typeof deps.background === 'function') {
+    try {
+      const finding = await deps.background();
+      if (finding !== null) record('background', finding.status, finding.detail);
+    } catch (error) {
+      record('background', 'warn', `Could not check background migrations: ${errorText(error)}`);
+    }
+  }
+
+  // 9. Runtime. TypeScript migrations need a runtime that can strip types.
   // Feature detection instead of version parsing: it also catches a run
   // under `--no-experimental-strip-types` on an otherwise capable Node.
   const nodeVersion = process.versions.node;

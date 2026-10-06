@@ -41,6 +41,7 @@ const { MigratorKit, RECORD_LOCK_WAIT } = require('./migrator.js');
 async function runMigrations(config = {}, options = {}) {
   const {
     noLock,
+    onBackgroundPending,
     onLockHeld = 'throw',
     // Left undefined unless given: the default then follows the holder's TTL.
     lockWaitTimeoutMs,
@@ -71,6 +72,11 @@ async function runMigrations(config = {}, options = {}) {
   kit.on('converge:end', (event) => {
     if (event.trigger === 'up' && event.success) converge = event.result;
   });
+  // With onBackgroundPending: 'stop', where the run stopped and what for.
+  const waiting = [];
+  kit.on('background:waiting', (event) => {
+    waiting.push({ migration: event.migration, waitsFor: event.waitsFor });
+  });
 
   // An abort reaches the run wherever it is: the wait loop sees the signal
   // between polls, and kit.stop() stops a run that is setting up or between
@@ -90,20 +96,28 @@ async function runMigrations(config = {}, options = {}) {
       waited,
       waitedMs,
       attempts,
-    } = await withLockWait(() => kit.up(undefined, noLock ? { noLock: true } : {}), {
-      onLockHeld,
-      ...(lockWaitTimeoutMs !== undefined ? { lockWaitTimeoutMs } : {}),
-      ...(lockPollIntervalMs !== undefined ? { lockPollIntervalMs } : {}),
-      // Resolved AFTER connect, from the kit's own merged config: a `logger:
-      // null` in the config file must silence the wait lines too, not only
-      // the kit's own.
-      logger: kit.logger,
-      ...(signal ? { signal } : {}),
-      onSettle: (wait) => kit[RECORD_LOCK_WAIT](wait),
-    });
+    } = await withLockWait(
+      () =>
+        kit.up(undefined, {
+          ...(noLock ? { noLock: true } : {}),
+          ...(onBackgroundPending !== undefined ? { onBackgroundPending } : {}),
+        }),
+      {
+        onLockHeld,
+        ...(lockWaitTimeoutMs !== undefined ? { lockWaitTimeoutMs } : {}),
+        ...(lockPollIntervalMs !== undefined ? { lockPollIntervalMs } : {}),
+        // Resolved AFTER connect, from the kit's own merged config: a `logger:
+        // null` in the config file must silence the wait lines too, not only
+        // the kit's own.
+        logger: kit.logger,
+        ...(signal ? { signal } : {}),
+        onSettle: (wait) => kit[RECORD_LOCK_WAIT](wait),
+      },
+    );
     return {
       applied,
-      upToDate: applied.length === 0,
+      upToDate: applied.length === 0 && waiting.length === 0,
+      ...(waiting.length > 0 ? { waiting } : {}),
       waited,
       waitedMs,
       attempts,

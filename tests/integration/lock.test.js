@@ -123,3 +123,39 @@ describe('MigrationLock (integration)', () => {
     assert.strictEqual(warn.mock.callCount(), 1);
   });
 });
+
+describe('MigrationLock — locks with other ids (integration)', () => {
+  it('should hold locks with different ids independently', async () => {
+    const migration = new MigrationLock(mongo.db, COLLECTION, 60);
+    const background = new MigrationLock(mongo.db, COLLECTION, 60, {
+      id: 'background:0002-orders.js',
+      label: 'background coordinator lock',
+    });
+    const other = new MigrationLock(mongo.db, COLLECTION, 60, { id: 'background:0003-users.js' });
+    await migration.acquire();
+    await background.acquire();
+    await other.acquire();
+    await assert.rejects(
+      new MigrationLock(mongo.db, COLLECTION, 60, { id: 'background:0002-orders.js' }).acquire(),
+      LockAlreadyHeldError,
+    );
+    await background.release();
+    assert.notStrictEqual(await migration.inspect(), null, 'the migration lock is untouched');
+    assert.strictEqual(await background.inspect(), null);
+  });
+
+  it('should never let forceRelease of the migration lock touch the others', async () => {
+    const background = new MigrationLock(mongo.db, COLLECTION, 60, { id: 'background:x.js' });
+    const watch = new MigrationLock(mongo.db, COLLECTION, 60, { id: 'watch:orders' });
+    await background.acquire();
+    await watch.acquire();
+    await new MigrationLock(mongo.db, COLLECTION, 60).acquire();
+    const removed = await new MigrationLock(mongo.db, COLLECTION, 60).forceRelease();
+    assert.strictEqual(removed._id, LOCK_ID);
+    const left = await mongo.db.collection(COLLECTION).find({}).sort({ _id: 1 }).toArray();
+    assert.deepStrictEqual(
+      left.map((doc) => doc._id),
+      ['background:x.js', 'watch:orders'],
+    );
+  });
+});

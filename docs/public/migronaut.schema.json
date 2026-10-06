@@ -182,6 +182,43 @@
       "minimum": 1,
       "default": 600000,
       "description": "How long waitForSearchIndexes waits, in milliseconds, before the converge fails (the build goes on)"
+    },
+    "backgroundCollection": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!system\\.)[^$\\u0000]+$",
+      "default": "_migronaut_background",
+      "description": "Where background migrations keep their state — and, named after it, their partitions (<name>_partitions) and drift-watch resume tokens (<name>_watch). Experimental"
+    },
+    "backgroundInline": {
+      "type": "boolean",
+      "default": false,
+      "description": "Run a background migration to the end inside the up that registers it, under the migration lock (small collections, tests). Experimental"
+    },
+    "backgroundOnDrift": {
+      "enum": [
+        "reopen",
+        "report"
+      ],
+      "default": "reopen",
+      "description": "What the drift watch does with old-shape documents after a background migration completed: reopen it, or only report. Experimental"
+    },
+    "backgroundDrift": {
+      "enum": [
+        "poll",
+        "stream",
+        "both"
+      ],
+      "default": "poll",
+      "description": "How drift is watched: a periodic check (poll), change streams (stream, with the poll as a backstop), or both in full. Experimental"
+    },
+    "backgroundShardAware": {
+      "enum": [
+        "auto",
+        "off"
+      ],
+      "default": "auto",
+      "description": "Partition a sharded collection by its shard key and target each write at one shard (auto), or treat it like any other (off). Experimental"
     }
   },
   "definitions": {
@@ -205,6 +242,11 @@
         {
           "required": [
             "searchIndexes"
+          ]
+        },
+        {
+          "required": [
+            "versioning"
           ]
         }
       ],
@@ -246,7 +288,7 @@
             "strict",
             "moderate"
           ],
-          "description": "How the validator applies to updates. Defaults to 'strict'"
+          "description": "How the validator applies to updates. Defaults to 'strict' — 'moderate' when the only rules are the ones versioning adds"
         },
         "validationAction": {
           "enum": [
@@ -259,6 +301,56 @@
         "prune": {
           "type": "boolean",
           "description": "Drop indexes (and search indexes, when declared) this definition does not declare — otherwise they are kept and reported"
+        },
+        "versioning": {
+          "$ref": "#/definitions/versioning"
+        }
+      }
+    },
+    "versioning": {
+      "type": "object",
+      "required": [
+        "current"
+      ],
+      "additionalProperties": false,
+      "description": "Document shape versioning: a validator rule and an index for the version field (and the revision field, for optimistic concurrency). Experimental",
+      "properties": {
+        "current": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The shape version new documents are written at"
+        },
+        "min": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1,
+          "description": "The oldest shape version still allowed — 0 types the fields without requiring them. Converge refuses to raise it while documents below it remain"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(?!\\$)(?!_id$)[^.\\u0000]+$",
+          "default": "__v",
+          "description": "The version field"
+        },
+        "revision": {
+          "type": "boolean",
+          "default": true,
+          "description": "Also manage a revision field for optimistic concurrency"
+        },
+        "revisionField": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(?!\\$)(?!_id$)[^.\\u0000]+$",
+          "default": "__rev",
+          "description": "The revision field"
+        },
+        "index": {
+          "type": "boolean",
+          "default": true,
+          "description": "Declare the { <field>: 1, _id: 1 } index background migrations scan"
         }
       }
     },

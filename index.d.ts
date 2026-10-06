@@ -41,11 +41,226 @@ export interface MigrationContext {
 export interface MigrationModule {
   up: (ctx: MigrationContext) => Promise<void>;
   down: (ctx: MigrationContext) => Promise<void>;
+  /**
+   * Background migrations (file names, each sorting before this file) that
+   * must have completed before this migration runs.
+   * @experimental New in 2.3
+   */
+  requires?: readonly string[];
   /** If true, wraps this migration in a MongoDB session + transaction */
   useTransaction?: boolean;
   /** Overrides `MigronautConfig.timeoutMs` for this migration only */
   timeoutMs?: number;
   /** Optional description shown in status table */
+  description?: string;
+}
+
+// ─── Document shapes and background migrations ───────────────────────────────
+
+/** The system field names of a versioned collection — `revisionField` is `null` without revisions */
+export interface ShapeFieldNames {
+  field: string;
+  revisionField: string | null;
+}
+
+/** The default system field names: `__v` and `__rev` */
+export interface DefaultShapeFieldNames {
+  field: '__v';
+  revisionField: '__rev';
+}
+
+/**
+ * A document type without its system fields (the version and the revision),
+ * distributed over a union. What a shape body is declared as, and what a
+ * background transformation returns: migronaut writes the system fields.
+ * @experimental New in 2.3
+ */
+export type Body<T, N extends ShapeFieldNames = DefaultShapeFieldNames> = T extends unknown
+  ? Omit<T, N['field'] | Extract<N['revisionField'], string>>
+  : never;
+
+/**
+ * What a background migration's transformation gets besides the document.
+ * `session`, `db` and `client` are there only in a `transaction` background
+ * migration — writes to other collections must pass `session` to commit
+ * with the batch.
+ * @experimental New in 2.3
+ */
+export interface BackgroundMigrationContext {
+  /** Aborted when the slice is stopping (lease lost, pause, shutdown) */
+  signal: AbortSignal;
+  logger: MigronautLogger;
+  direction: 'forward' | 'revert';
+  background: { name: string; generation: number; partition: string };
+  session?: ClientSession;
+  db?: Db;
+  client?: MongoClient;
+  /** True in a dry run — the writes are rolled back */
+  dryRun?: boolean;
+}
+
+/** How a background migration splits its collection into partitions */
+export interface BackgroundPartitionSettings {
+  /** Partitions per lane (default 4), so a slow partition does not hold the pass */
+  overPartition?: number;
+  /** Default 256 */
+  maxPartitions?: number;
+  /** No partition is planned smaller than this (default 4 × batchSize) */
+  minPartitionDocs?: number;
+  /** Ids sampled to place the boundaries (default min(10 000, 100 × partitions)) */
+  sampleSize?: number;
+}
+
+/** A transactional background migration's budget */
+export interface BackgroundTransactionSettings {
+  /** Per batch, ≤ 50 000 (default 10 000) */
+  timeoutMs?: number;
+  /** Retries of a batch on a transient transaction error (default 5) */
+  maxRetries?: number;
+}
+
+/** The latency-driven throttle (AIMD) */
+export interface BackgroundAdaptiveSettings {
+  /** A batch write slower than this halves the batch (default 500) */
+  targetLatencyMs?: number;
+  /** Default 10 */
+  minBatchSize?: number;
+  /** Never above `batchSize` (the default) */
+  maxBatchSize?: number;
+  /** Default 30 000 */
+  maxPauseMs?: number;
+}
+
+/** What a `throttle` hook is told before every batch */
+export interface BackgroundThrottleContext {
+  name: string;
+  collection?: string;
+  generation: number;
+  partition: string;
+  batchSize: number;
+  signal: AbortSignal;
+}
+
+/**
+ * Settings every background migration may carry, with their defaults.
+ * @experimental New in 2.3
+ */
+export interface BackgroundMigrationSettings {
+  description?: string;
+  /** Documents per batch: 500 (100 with `transaction`) */
+  batchSize?: number;
+  /** Pause between batches: 100 ms */
+  pauseMs?: number;
+  /** How long a lane holds a partition before it yields: 30 000 ms */
+  sliceMs?: number;
+  /** Every batch write's, transactions included — default `{ w: 'majority' }` */
+  writeConcern?: { w?: number | 'majority'; j?: boolean; wtimeoutMS?: number };
+  /** Documents that may fail before the background migration does: 0 (at most 1000) */
+  maxDocumentErrors?: number;
+  /** Passes over the remaining old-shape documents before giving up: 10 */
+  maxPasses?: number;
+  /** Re-read rounds for documents a concurrent write changed under a batch: 3 */
+  maxConflictRetries?: number;
+  /** Failed slices of one partition in a row (no checkpoint between) before it fails: 3 */
+  maxSliceFailures?: number;
+  /** Wait while a secondary lags more than this: 10 000 ms (`false`: never) */
+  maxReplicationLagMs?: number | false;
+  /** Called before every batch; a number it returns is an extra pause (ms) */
+  throttle?(ctx: BackgroundThrottleContext): number | void | Promise<number | void>;
+  /** Partitions processed at once, across every process: 1 (at most 64) */
+  maxParallel?: number;
+  partitions?: BackgroundPartitionSettings;
+  /** Batch and checkpoint in one transaction (needs a replica set or mongos): false */
+  transaction?: boolean | BackgroundTransactionSettings;
+  /** The latency-driven throttle: true */
+  adaptive?: boolean | BackgroundAdaptiveSettings;
+  /** Lanes per shard on a sharded collection: 1 */
+  shardConcurrency?: number;
+}
+
+/**
+ * A declarative background migration: every document of `collection` at
+ * version `from` (and matching `filter`) rewritten to version `to` by
+ * `migrate` (or `migrateBatch`), in partitions, behind an optimistic guard.
+ * `From` and `To` type the documents — see `BackgroundMigrationFor` in
+ * `@alexify/migronaut/versioning` for the shape-map form.
+ *
+ * The callbacks are declared as methods, so a transformation typed for the
+ * stored document (with its version) or for its body fits either way.
+ * @experimental New in 2.3
+ */
+export interface DeclarativeBackgroundMigration<
+  From extends object = Record<string, any>,
+  To extends object = Record<string, any>,
+> extends BackgroundMigrationSettings {
+  collection: string;
+  /** The version rewritten — 0 for documents without a version field */
+  from: number;
+  to: number;
+  filter?: Record<string, unknown>;
+  /** The new document for one old one; the engine sets the version and bumps the revision */
+  migrate?(doc: From, ctx: BackgroundMigrationContext): To | Promise<To>;
+  /** The new documents for a batch, aligned — an `Error` fails just that document */
+  migrateBatch?(docs: From[], ctx: BackgroundMigrationContext): (To | Error)[] | Promise<(To | Error)[]>;
+  /** The way back, for `down` */
+  revert?(doc: To, ctx: BackgroundMigrationContext): From | Promise<From>;
+  revertBatch?(docs: To[], ctx: BackgroundMigrationContext): (From | Error)[] | Promise<(From | Error)[]>;
+  /** Default: the collection's `versioning.field`, else `'__v'` */
+  versionField?: string;
+  /** Default: the collection's `versioning.revisionField`, else `'__rev'` */
+  revisionField?: string;
+  /**
+   * `'revision'` (default) guards each write with the revision; a collection
+   * without revisions must say `'version-only'` — a concurrent write that
+   * leaves the version alone is then invisible to it.
+   */
+  occ?: 'revision' | 'version-only';
+}
+
+/** What a `step` background migration gets */
+export interface BackgroundStepContext extends BackgroundMigrationContext {
+  db: Db;
+  client: MongoClient;
+  /** What the previous step returned (`null` at the start) */
+  checkpoint: unknown;
+  /** Epoch ms the step should return by — the slice ends then */
+  deadline: number;
+}
+
+/** What a `step` returns */
+export interface BackgroundStepResult {
+  /** Saved (≤ 64 KiB of BSON) and handed to the next step */
+  checkpoint: unknown;
+  /** True once there is nothing left */
+  done: boolean;
+  processed?: number;
+  migrated?: number;
+  /** For progress, when known */
+  total?: number;
+}
+
+/**
+ * A free-form background migration — the escape hatch: migronaut runs `step`
+ * again and again with its last checkpoint until it says `done`, owning the
+ * lease, the slices, the throttle and the controls. One partition only; the
+ * writes must be idempotent.
+ * @experimental New in 2.3
+ */
+export interface StepBackgroundMigration extends BackgroundMigrationSettings {
+  /** Shown in status — the collection it works on, if one */
+  collection?: string;
+  step(ctx: BackgroundStepContext): BackgroundStepResult | Promise<BackgroundStepResult>;
+  revertStep?(ctx: BackgroundStepContext): BackgroundStepResult | Promise<BackgroundStepResult>;
+}
+
+/** A background migration, as a migration file exports it: `export const background = {…}` */
+export type BackgroundMigration = DeclarativeBackgroundMigration | StepBackgroundMigration;
+
+/** Shape of a background migration file module — no `up`/`down` */
+export interface BackgroundMigrationModule {
+  background: BackgroundMigration;
+  /** Background migrations that must complete first (each sorting before this file) */
+  requires?: readonly string[];
   description?: string;
 }
 
@@ -93,6 +308,12 @@ export interface MigrationRecord {
    * `migronaut import` — these are not reversible by migronaut. Absent for native records.
    */
   origin?: MigrationOrigin;
+  /**
+   * `'background'` for a background migration file — applying it registered
+   * the background migration; its documents are rewritten later.
+   * @experimental New in 2.3
+   */
+  kind?: 'background';
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -316,6 +537,37 @@ export interface MigronautConfig {
    * @experimental New in 2.2
    */
   searchIndexWaitTimeoutMs?: number;
+  /**
+   * Where background migrations keep their state — and, named after it,
+   * their partitions (`<name>_partitions`) and the drift watcher's resume
+   * tokens (`<name>_watch`). Default `'_migronaut_background'`.
+   * @experimental New in 2.3
+   */
+  backgroundCollection?: string;
+  /**
+   * Run a background migration to the end inside the `up` that registers it,
+   * under the migration lock — for small collections and tests. Default false.
+   * @experimental New in 2.3
+   */
+  backgroundInline?: boolean;
+  /**
+   * What the drift watch does with old-shape documents that appear after a
+   * background migration completed: `'reopen'` it (default) or only `'report'`.
+   * @experimental New in 2.3
+   */
+  backgroundOnDrift?: 'reopen' | 'report';
+  /**
+   * How drift is watched: `'poll'` (default — a check every 10 minutes),
+   * `'stream'` (change streams, the check as a backstop) or `'both'`.
+   * @experimental New in 2.3
+   */
+  backgroundDrift?: 'poll' | 'stream' | 'both';
+  /**
+   * Partition a sharded collection by its shard key and target each write at
+   * one shard (`'auto'`, default), or treat it like any other (`'off'`).
+   * @experimental New in 2.3
+   */
+  backgroundShardAware?: 'auto' | 'off';
   /** Mongoose instance — required only if your migrations use Mongoose models */
   mongoose?: MongooseLike;
   hooks?: MigrationHooks;
@@ -496,25 +748,65 @@ export interface CollectionDefinition {
    * Every index besides `_id`. Undeclared live indexes are kept (and reported)
    * unless `prune` is on.
    */
-  indexes?: IndexDefinition[];
+  indexes?: readonly IndexDefinition[];
   /**
    * Atlas Search and Vector Search indexes (Atlas, an Atlas CLI local
    * deployment, or MongoDB 8.3+ with mongot). Undeclared live ones are kept
    * unless `prune` is on; leave the key out and they are not managed at all.
    * @experimental New in 2.2
    */
-  searchIndexes?: SearchIndexDefinition[];
-  /** A query or `{ $jsonSchema }` document; `null` (or `{}`) for no validator */
+  searchIndexes?: readonly SearchIndexDefinition[];
+  /**
+   * A query or `{ $jsonSchema }` document; `null` (or `{}`) for no validator.
+   * With `versioning`, its rules are merged in — and `null` is refused.
+   */
   validator?: Record<string, unknown> | null;
-  /** Default: 'strict'. Only with a validator */
+  /**
+   * Default: 'strict' — 'moderate' when the only rules are the ones
+   * `versioning` adds. Only with a validator (or `versioning`)
+   */
   validationLevel?: ValidationLevel;
-  /** Default: 'error'. Only with a validator */
+  /** Default: 'error'. Only with a validator (or `versioning`) */
   validationAction?: ValidationAction;
   /**
    * Drop live indexes (and search indexes, when `searchIndexes` is declared)
-   * this definition does not declare. Default: the call's `prune`, else false
+   * this definition does not declare. Default: the call's `prune`, else false.
+   * With `versioning` and no `indexes`, only the version index is managed —
+   * prune leaves the others alone.
    */
   prune?: boolean;
+  /**
+   * Document shape versioning: the version (and revision) field typed and
+   * required by the validator, and the version index background migrations
+   * scan. The source of truth `defineShapes` reads too.
+   * @experimental New in 2.3
+   */
+  versioning?: CollectionVersioning;
+}
+
+/**
+ * The `versioning` block of a collection definition.
+ * @experimental New in 2.3
+ */
+export interface CollectionVersioning {
+  /** The shape version new documents are written at (≥ 1) */
+  current: number;
+  /**
+   * The oldest shape still allowed (default 1, ≤ `current`). `0` types the
+   * fields without requiring them — for a collection that predates
+   * versioning. Converge refuses to raise it while documents below it remain.
+   * There is deliberately no maximum: a newer release may write ahead of the
+   * declaration during a rolling deploy.
+   */
+  min?: number;
+  /** The version field. Default `'__v'` */
+  field?: string;
+  /** Also manage a revision field for optimistic concurrency. Default `true` */
+  revision?: boolean;
+  /** The revision field. Default `'__rev'` */
+  revisionField?: string;
+  /** Declare the `{ <field>: 1, _id: 1 }` index. Default `true` */
+  index?: boolean;
 }
 
 /** What a `collectionsDir` file exports: a definition whose name defaults to the file name */
@@ -941,6 +1233,12 @@ export interface StatusRow {
   origin?: MigrationOrigin;
   /** Redacted message of the last failed attempt (status `'failed'` only) */
   error?: string;
+  /**
+   * `'background'` for a background migration file (applied = registered) —
+   * in `status()` and `dryRun('up')` rows alike
+   * @experimental New in 2.3
+   */
+  kind?: 'background';
   /** When the last failed attempt was recorded (status `'failed'` only) */
   failedAt?: Date;
   /**
@@ -961,6 +1259,16 @@ export interface StatusRow {
    * (`up(file, { checksum })`).
    */
   checksum?: string;
+  /**
+   * `dryRun('up')` rows: the background migrations the file requires
+   * @experimental New in 2.3
+   */
+  requires?: string[];
+  /**
+   * `dryRun('up')` rows: those of `requires` not completed yet
+   * @experimental New in 2.3
+   */
+  waitsFor?: string[];
   /** Who asked for the apply, and why — when the run said (`requestedBy` / `reason` options) */
   requestedBy?: string;
   reason?: string;
@@ -1061,7 +1369,13 @@ export type MigronautErrorCode =
   | 'MIGRATION_BLOCKED'
   | 'QUEUE_JOB_INVALID'
   | 'QUEUE_JOB_FAILED'
-  | 'CONVERGE_FAILED';
+  | 'CONVERGE_FAILED'
+  | 'REVISION_CONFLICT'
+  | 'SHAPE_VERSION_UNSUPPORTED'
+  | 'BACKGROUND_PENDING'
+  | 'BACKGROUND_FAILED'
+  | 'BACKGROUND_CONFLICT'
+  | 'SANDBOX_REFUSED';
 
 // ─── Config file format ─────────────────────────────────────────────────────────
 
@@ -1123,6 +1437,14 @@ export interface UpOptions {
    * with a filename or `to`.
    */
   converge?: boolean;
+  /**
+   * What the run does at a migration that `requires` a background migration
+   * not completed yet: `'error'` (default) throws {@link BackgroundPendingError};
+   * `'stop'` ends the run there, cleanly (`background:waiting`). Either way
+   * that migration fires no hook and leaves no failed trace.
+   * @experimental New in 2.3
+   */
+  onBackgroundPending?: 'error' | 'stop';
   /**
    * Who asked for this run (≤ 128 characters) — stamped on the changelog
    * records it writes. `executedBy` is the OS user that ran it; on a queue
@@ -1319,14 +1641,52 @@ export interface MigronautEvents {
   'converge:action': (event: ConvergeActionEvent) => void;
   'converge:wait': (event: ConvergeWaitEvent) => void;
   'converge:end': (event: ConvergeEndEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:registered': (event: BackgroundRegisteredEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:waiting': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:drift': (event: BackgroundEvent) => void;
+  /**
+   * A collection's live drift watcher changed state
+   * @experimental New in 2.3
+   */
+  'background:watch': (event: {
+    runId?: string;
+    collection: string;
+    state: BackgroundWatchState;
+  }) => void;
+  /** @experimental New in 2.3 */
+  'background:unblocked': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:partitioned': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:pass': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:slice:start': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:batch': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:slice:end': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:lease:lost': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:throttle': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:control': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:completed': (event: BackgroundEvent) => void;
+  /** @experimental New in 2.3 */
+  'background:failed': (event: BackgroundEvent) => void;
 }
 
 /** One check performed by {@link MigratorKit.audit} */
 export interface AuditCheck {
   /**
    * e.g. 'config', 'connection', 'transactions', 'indexes', 'lock', 'checksums',
-   * 'pending', 'ordering', 'runtime' — and 'search' when declared collections
-   * hold search indexes
+   * 'pending', 'ordering', 'runtime' — 'search' when declared collections
+   * hold search indexes, and 'background' when background migrations are
+   * registered
    */
   name: string;
   status: 'pass' | 'warn' | 'fail';
@@ -1367,6 +1727,12 @@ export interface CreateOptions {
    * `createExtension`. Leave unset to let the config decide (default: `'js'`).
    */
   js?: boolean;
+  /**
+   * Generate a background migration (`export const background`) instead of
+   * `up`/`down`. Not combined with `template`.
+   * @experimental New in 2.3
+   */
+  background?: boolean;
 }
 
 /** Options for {@link MigratorKit.init} */
@@ -1563,10 +1929,513 @@ export class MigratorKit extends EventEmitter {
    */
   convergesAfterUp(): Promise<boolean>;
   /**
+   * How drift is watched — the `backgroundDrift` setting — which a runner or
+   * a queue worker hosting this kit follows. Resolves the config; does not
+   * connect. @experimental
+   */
+  driftMode(): Promise<'poll' | 'stream' | 'both'>;
+  /**
    * The converge history, newest first (`limit` 1–1000, default 20): one entry
    * per converge that changed something or failed. Read-only.
    */
   convergeHistory(options?: { limit?: number }): Promise<ConvergeHistoryEntry[]>;
+
+  // ─── Background migrations (experimental, new in 2.3) ─────────────────────
+  // Reentrant: none of these is a run — no migration lock, no run id; one kit
+  // may drive many at once.
+
+  /** One coordinator step — see {@link BackgroundCoordinatorAnswer}. @experimental */
+  coordinateBackground(
+    name: string,
+    options?: { signal?: AbortSignal; driver?: BackgroundDriver },
+  ): Promise<BackgroundCoordinatorAnswer>;
+  /** One slice of one lane: claim a partition and a slot, work it, release. @experimental */
+  runBackgroundSlice(
+    name: string,
+    options?: { signal?: AbortSignal; sliceMs?: number },
+  ): Promise<BackgroundSliceResult>;
+  /**
+   * Drive a background migration from this process until it is done (or one
+   * round, `untilDone: false`) with up to `concurrency` lanes (≤ its
+   * `maxParallel`). A failed one throws {@link BackgroundFailedError}; a stop
+   * {@link RunAbortedError} — it goes on from there next time. @experimental
+   */
+  runBackground(
+    name: string,
+    options?: {
+      signal?: AbortSignal;
+      sliceMs?: number;
+      untilDone?: boolean;
+      concurrency?: number;
+    },
+  ): Promise<BackgroundStatus>;
+  /** One background migration's status, or `null` when it is not registered. @experimental */
+  backgroundStatus(name: string): Promise<BackgroundStatus | null>;
+  /** Every background migration's status, oldest registration first. @experimental */
+  backgroundStatus(): Promise<BackgroundStatus[]>;
+  /** The partitions of a background migration's latest generation. @experimental */
+  backgroundPartitions(name: string): Promise<BackgroundPartitionInfo[]>;
+  /** The background migrations with work to do (blocked ones unblocked on the way). @experimental */
+  runnableBackground(): Promise<RunnableBackground[]>;
+  /** Pause; its lanes stop at the next batch (`wait` until they have). @experimental */
+  pauseBackground(name: string, options?: BackgroundControlOptions): Promise<BackgroundControlResult>;
+  /** Resume a paused one. @experimental */
+  resumeBackground(name: string, options?: BackgroundControlOptions): Promise<BackgroundControlResult>;
+  /** Cancel (`wait` until its lanes have stopped). @experimental */
+  cancelBackground(name: string, options?: BackgroundControlOptions): Promise<BackgroundControlResult>;
+  /**
+   * Retry a failed or cancelled one — the same generation, or `fromStart`;
+   * `repin` pins the file on disk first. A completed one is reopened. @experimental
+   */
+  retryBackground(
+    name: string,
+    options?: BackgroundControlOptions & { fromStart?: boolean; repin?: boolean },
+  ): Promise<BackgroundControlResult>;
+  /** Pin the file on disk (checksum, spec — and the changelog's checksum). @experimental */
+  repinBackground(
+    name: string,
+    options?: BackgroundControlOptions,
+  ): Promise<BackgroundControlResult & { replan: boolean; checksum: string }>;
+  /** Clear the coordinator lock and every lease of a stuck one. @experimental */
+  unlockBackground(name: string): Promise<{ lock: boolean; leases: number }>;
+  /**
+   * Dry-run a background migration, registered or not, with nothing written:
+   * on a sample, its transformation alone — or with `validate`, the real write
+   * path in a transaction that is always aborted. @experimental
+   */
+  dryRunBackground(name: string, options?: BackgroundDryRunOptions): Promise<BackgroundDryRun>;
+  /**
+   * The drift watch, once: one indexed probe per completed background
+   * migration for documents of its old shape that appeared since; a finding
+   * reopens it (`onDrift: 'reopen'`, the `backgroundOnDrift` default) or is
+   * only reported. No document id is returned. @experimental
+   */
+  verifyBackground(options?: {
+    onDrift?: 'reopen' | 'report';
+    collections?: string[];
+  }): Promise<BackgroundVerifyResult>;
+  /**
+   * The live drift watcher: a change stream per collection with a completed
+   * background migration — one leader per collection across every process —
+   * that upgrades each old-shape write moments after it lands, through the
+   * lanes' own write path. Resolves once started; rejects with
+   * ConfigInvalidError on a standalone server (no change streams).
+   * @experimental
+   */
+  watchBackground(options?: WatchBackgroundOptions): Promise<BackgroundWatcher>;
+  /** What the live drift watchers recorded for a collection — `null` when it has none @experimental */
+  backgroundWatchStatus(collection: string): Promise<BackgroundWatchStatus | null>;
+  /** What the live drift watchers recorded, one row per watched collection @experimental */
+  backgroundWatchStatus(): Promise<BackgroundWatchStatus[]>;
+}
+
+/** What a collection's live drift watcher is doing */
+export type BackgroundWatchState =
+  | 'following'
+  | 'catching-up'
+  | 'streaming'
+  | 'history-lost'
+  | 'overloaded'
+  | 'restarting'
+  | 'suspended'
+  | 'fallback'
+  | 'stopped';
+
+/** Options of {@link MigratorKit.watchBackground} */
+export interface WatchBackgroundOptions {
+  /** Only these collections. Default: every one with a completed background migration */
+  collections?: string[];
+  /** Stops the watcher when aborted */
+  signal?: AbortSignal;
+  /** `false`: only report old-shape writes, never upgrade them. Default `true` */
+  upgrade?: boolean;
+  /** How often the edges and the collections are read again (ms). Default 30000 */
+  refreshMs?: number;
+  /** The most often the resume token is saved (ms). Default 5000 */
+  checkpointMs?: number;
+  /** How often a follower tries to become the leader (ms, jittered). Default 10000 */
+  leaderRetryMs?: number;
+  /** Collections watched by this process at most; the rest stay with the poll. Default 16 */
+  maxCollections?: number;
+  /**
+   * A stream this far behind (ms) gives up on its backlog: the background
+   * migrations it serves are reopened, and it starts again from now. Default 60000
+   */
+  maxLagMs?: number;
+  /** Hears every failure (the watcher itself never throws) */
+  onError?(error: unknown, collection?: string): void;
+}
+
+/** A running live drift watcher */
+export interface BackgroundWatcher {
+  readonly running: boolean;
+  /** What each followed collection's watcher is doing in this process */
+  status(): {
+    collection: string;
+    state: BackgroundWatchState | 'starting';
+    /** Whether this process leads the collection */
+    leading: boolean;
+    counters: { events: number; upgraded: number; failed: number; skipped: number };
+    lastEventAt?: Date;
+  }[];
+  /** Close every stream, save its position, release its lock */
+  stop(): Promise<void>;
+}
+
+/** A collection's live drift watcher, as stored — never its resume token */
+export interface BackgroundWatchStatus {
+  collection: string;
+  state: BackgroundWatchState | 'starting';
+  /** The version a document should have at least */
+  target?: number;
+  /** The background migrations it upgrades with */
+  edges: string[];
+  leader?: { host: string; pid: number; at: Date };
+  counters: { events: number; upgraded: number; failed: number; skipped: number };
+  lastEventAt?: Date;
+  updatedAt: Date;
+}
+
+// ─── Background migration results ─────────────────────────────────────────────
+
+/** Where a background migration stands */
+export type BackgroundState =
+  | 'blocked'
+  | 'pending'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/**
+ * Who runs a coordinator step: `{ kind, ref?, round? }` — a BullMQ round lets the newest win
+ * @experimental New in 2.3
+ */
+export interface BackgroundDriver {
+  kind: 'bullmq' | 'runner' | 'cli' | 'inline' | 'local';
+  ref?: string;
+  round?: number;
+}
+
+/**
+ * One of {@link MigratorKit.runnableBackground}: what a driver needs to pick it up, or to tell it stalled
+ * @experimental New in 2.3
+ */
+export interface RunnableBackground {
+  migration: string;
+  status: BackgroundState;
+  maxParallel: number;
+  /** Leases renewed within their TTL — lanes working right now */
+  liveLeases: number;
+  registeredAt: Date;
+  startedAt?: Date;
+  lastProgressAt?: Date;
+  coordinator?: { kind: string; round?: number; at: Date };
+}
+
+/**
+ * What a coordinator step says to do next
+ * @experimental New in 2.3
+ */
+export interface BackgroundCoordinatorAnswer {
+  next: 'process' | 'wait' | 'done' | 'busy' | 'superseded';
+  /** `process`: lanes that could start now */
+  lanes?: number;
+  generation?: number;
+  /** `process`: the registration the lanes work for (it names their jobs) */
+  registration?: string;
+  /** `process`: the current plan's partitions by status */
+  counts?: BackgroundStatus['partitions'];
+  /**
+   * A `bullmq` driver's round — handed out by this step to a chain that
+   * asked without one; a chain whose round is not the latest is `superseded`
+   */
+  round?: number;
+  /** `done`: where it stands */
+  status?: BackgroundState | 'unregistered';
+  /** `wait`: why — `checksum`, `replan-draining`, `plan-race`, … */
+  reason?: string;
+  /** `done` + `failed`: why */
+  error?: string;
+  waitsFor?: string[];
+  retryAfterMs?: number;
+}
+
+/** Counters of a slice, a partition or a whole background migration */
+export interface BackgroundCounters {
+  scanned?: number;
+  migrated?: number;
+  skipped?: number;
+  conflicts?: number;
+  failed?: number;
+  retried?: number;
+  batches?: number;
+  processed?: number;
+  txnRetries?: number;
+}
+
+/** How a lane's slice ended */
+export interface BackgroundSliceResult {
+  outcome:
+    | 'yielded'
+    | 'exhausted'
+    | 'busy'
+    | 'stale'
+    | 'paused'
+    | 'cancelled'
+    | 'failed'
+    | 'stopped'
+    | 'lost';
+  counters: BackgroundCounters;
+  retryAfterMs?: number;
+  error?: BackgroundFailedError;
+}
+
+/** A background migration, as {@link MigratorKit.backgroundStatus} reports it */
+export interface BackgroundStatus {
+  migration: string;
+  status: BackgroundState;
+  phase: 'partition' | 'process' | 'replan';
+  direction: 'forward' | 'revert';
+  /** Minted at every (re-)registration — `up --force`, `redo` and `down` get a new one */
+  registration: string;
+  mode: 'declarative' | 'step';
+  collection?: string;
+  from?: number;
+  to?: number;
+  generation: number;
+  pass: number;
+  maxParallel: number;
+  transaction: boolean;
+  totals: BackgroundCounters & { slices?: number; reclaims?: number };
+  /** Distinct documents that failed (within `maxDocumentErrors`) */
+  failedDocuments: number;
+  requires: string[];
+  waitsFor: string[];
+  /** The current plan's partitions by status */
+  partitions?: {
+    total: number;
+    pending: number;
+    running: number;
+    done: number;
+    failed: number;
+    cancelled: number;
+    superseded: number;
+    leased: number;
+  };
+  /** Leases renewed within their TTL — lanes working right now */
+  liveLeases: number;
+  /**
+   * The driver of the latest coordinator step that said who it was — a queue's
+   * coordinator chain carries its `round`, and an older round bows out
+   */
+  coordinator?: { kind: string; round?: number; at: Date };
+  /**
+   * The current plan. `estimate` is the documents it expects to rewrite —
+   * with `atLeast`, a count that stopped at its limit (there are more)
+   */
+  plan?: {
+    method: string;
+    estimate: number;
+    atLeast?: boolean;
+    partitions: number;
+    degraded?: string;
+  };
+  /**
+   * On a sharded collection, how the plan used the shard key: `chunks` (a
+   * partition per run of chunks on one shard), `sampled` (the key space
+   * sampled — the chunks could not be read), or `untargeted` (partitions by
+   * `_id`: the key could not be read, or the version index does not carry it)
+   */
+  sharding?: {
+    mode: 'chunks' | 'sampled' | 'empty' | 'untargeted';
+    shardKey?: Record<string, 1 | 'hashed'>;
+    hashed?: boolean;
+    /** Shards the partitions are grouped by */
+    groups?: number;
+  };
+  registeredAt: Date;
+  startedAt?: Date;
+  completedAt?: Date;
+  lastProgressAt?: Date;
+  lastError?: string;
+  description?: string;
+  /** The registration this one replaced (`up --force`, `redo`, `down`), as it stood then */
+  previous?: {
+    registration: string;
+    status: BackgroundState;
+    direction: 'forward' | 'revert';
+    pass: number;
+    totals: BackgroundCounters & { slices?: number; reclaims?: number };
+    registeredAt: Date;
+    completedAt?: Date;
+  };
+}
+
+/** One partition of a background migration */
+export interface BackgroundPartitionInfo {
+  id: string;
+  generation: number;
+  seq: number;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'cancelled' | 'superseded';
+  scope: Record<string, unknown>;
+  estimate: number;
+  counters: BackgroundCounters;
+  group?: string;
+  lease?: { slot: number; owner: string; host: string; pid: number; renewedAt: Date };
+  throttle?: { batchSize: number; pauseMs: number };
+  claims: number;
+  reclaims: number;
+  failures: number;
+  lastError?: string;
+}
+
+/** Options every background control action takes */
+export interface BackgroundControlOptions {
+  /** Who asked — recorded in its history */
+  requestedBy?: string;
+  /** Why — recorded in its history */
+  reason?: string;
+  /** pause / cancel: resolve once no lane holds a lease any more */
+  wait?: boolean;
+  signal?: AbortSignal;
+}
+
+/** What a control action did */
+export interface BackgroundControlResult {
+  applied: 'changed' | 'unchanged';
+  status: BackgroundState;
+  /** `wait`: whether every lane stopped in time */
+  stopped?: boolean;
+}
+
+/** What {@link MigratorKit.verifyBackground} found */
+export interface BackgroundVerifyResult {
+  /** Completed background migrations probed */
+  checked: number;
+  /** Skipped: another one at work on the collection, the validator guards it, no version index */
+  skipped: number;
+  drift: { migration: string; collection: string; action: 'reopened' | 'reported' }[];
+}
+
+/** Options of {@link MigratorKit.dryRunBackground} */
+export interface BackgroundDryRunOptions {
+  /** A random sample of this many matching documents (1–1000, default 5) */
+  sample?: number;
+  /** The first n matching documents by `_id`, instead of a sample */
+  first?: number;
+  /** Through the real write path, in the always-aborted sandbox */
+  validate?: boolean;
+  /** Dry-run the way back */
+  direction?: 'forward' | 'revert';
+  /** Step migrations: how many steps (1–50, default 1) */
+  steps?: number;
+  /** Step migrations: document images kept (default 20, at most 1000) */
+  maxDocuments?: number;
+  /** Step migrations: from no checkpoint, not the pinned one */
+  fromStart?: boolean;
+  /** Stop the sandbox after this long (default 50 000 ms) — steps, or a `validate` sample */
+  deadlineMs?: number;
+}
+
+/** One document of a dry run, as relaxed EJSON */
+export interface BackgroundDryRunDocument {
+  _id: unknown;
+  before: Record<string, unknown>;
+  after?: Record<string, unknown>;
+  /** The operator update it would be written with (without `validate`) */
+  change?: Record<string, unknown>;
+  error?: string;
+  /** With `validate`: what the server made of it */
+  validation?: 'ok' | 'failed' | 'skipped';
+}
+
+/** One operation the sandbox ran — the filter as relaxed EJSON, at most 2 KiB */
+export interface BackgroundSandboxOperation {
+  seq: number;
+  step: number;
+  collection?: string;
+  method: string;
+  filter?: unknown;
+  result?: unknown;
+  durationMs?: number;
+  error?: string;
+}
+
+/** A document the sandbox saw change */
+export interface BackgroundSandboxDocument {
+  collection: string;
+  _id: unknown;
+  op: 'insert' | 'update' | 'delete' | 'unknown';
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
+}
+
+/** What {@link MigratorKit.dryRunBackground} found */
+export type BackgroundDryRun =
+  | {
+      mode: 'declarative';
+      migration: string;
+      direction: 'forward' | 'revert';
+      method: 'sample' | 'first';
+      requested: number;
+      found: number;
+      migrated: number;
+      failed: number;
+      documents: BackgroundDryRunDocument[];
+      /** With `validate` */
+      validated?: true;
+      aborted?: true;
+      ops?: BackgroundSandboxOperation[];
+      refusals?: { method: string; reason: string; collection?: string }[];
+      /** Documents of other collections the side writes touched */
+      sideEffects?: BackgroundSandboxDocument[];
+      attempts?: number;
+    }
+  | BackgroundStepDryRun;
+
+/** A step migration's dry run: up to `steps` steps in one always-aborted transaction */
+export interface BackgroundStepDryRun {
+  mode: 'step';
+  migration: string;
+  direction: 'forward' | 'revert';
+  aborted: true;
+  ok: boolean;
+  attempts: number;
+  stoppedBy?: 'deadline' | 'done' | 'steps';
+  steps: {
+    step: number;
+    checkpointIn: unknown;
+    checkpointOut?: unknown;
+    done?: boolean;
+    processed?: number;
+    migrated?: number;
+    error?: string;
+  }[];
+  ops: BackgroundSandboxOperation[];
+  documents: BackgroundSandboxDocument[];
+  refusals: { method: string; reason: string; collection?: string }[];
+  leakedCursors: number;
+  truncated: boolean;
+  abortedBy?: string;
+  error?: string;
+}
+
+/** `background:registered` */
+export interface BackgroundRegisteredEvent {
+  runId?: string;
+  migration: string;
+  status: BackgroundState | 'withdrawn';
+  direction: 'forward' | 'revert';
+  waitsFor?: string[];
+}
+
+/** Any other `background:*` event: the migration it is about, and what happened */
+export interface BackgroundEvent {
+  runId?: string;
+  migration: string;
+  [field: string]: unknown;
 }
 
 // ─── Programmatic entry points ─────────────────────────────────────────────────
@@ -1578,6 +2447,13 @@ export type OnLockHeld = 'throw' | 'wait';
 export interface RunMigrationsOptions extends MigratorKitOptions {
   /** Skip lock acquisition (dev only — never in production) */
   noLock?: boolean;
+  /**
+   * At a migration that requires an unfinished background migration: throw
+   * (`'error'`, default) or stop the run there (`'stop'`, listed in
+   * `waiting`) — `'stop'` lets an app boot while a background migration runs.
+   * @experimental New in 2.3
+   */
+  onBackgroundPending?: 'error' | 'stop';
   /**
    * How to react when another process already holds the migration lock — the
    * typical case when several app instances boot at once.
@@ -1632,6 +2508,12 @@ export interface MigrationSummary {
   attempts: number;
   /** The converge that ended the run — present only when `convergeAfterUp` converged */
   converge?: ConvergeResult;
+  /**
+   * With `onBackgroundPending: 'stop'`: the migration the run stopped at and
+   * the background migrations it waits for.
+   * @experimental New in 2.3
+   */
+  waiting?: { migration: string; waitsFor: { migration: string; status: string }[] }[];
 }
 
 /**
@@ -1667,6 +2549,56 @@ export const EXIT_CODES: Readonly<
     number
   >
 >;
+
+// ─── Background runner ────────────────────────────────────────────────────────
+
+/** Options of {@link startBackgroundRunner} */
+export interface BackgroundRunnerOptions {
+  /** The kit to drive — or `config` (and `kitOptions`) for one the runner makes and closes */
+  kit?: MigratorKit;
+  config?: Partial<MigronautConfig>;
+  kitOptions?: MigratorKitOptions;
+  /** Lane loops in this process, shared by every background migration (default 1, ≤ 64) */
+  concurrency?: number;
+  /** How often the runnable list is read again (default 5000 ms) */
+  pollIntervalMs?: number;
+  /** A slice's length (default: each background migration's `sliceMs`) */
+  sliceMs?: number;
+  /** The drift watch's period (default 600 000 ms — 10 minutes); `false`: off */
+  verifyIntervalMs?: number | false;
+  /**
+   * Host the live drift watcher in this process — `true`, or its options.
+   * Default: when `backgroundDrift` is `'stream'` or `'both'`
+   */
+  watch?: boolean | Omit<WatchBackgroundOptions, 'signal' | 'onError'>;
+  /** Stops the runner, as `stop()` does */
+  signal?: AbortSignal;
+  /** Hears every failed slice (the runner itself never throws) */
+  onError?: (error: unknown, migration?: string) => void;
+}
+
+/** A running {@link startBackgroundRunner} */
+export interface BackgroundRunner {
+  readonly kit: MigratorKit;
+  readonly running: boolean;
+  /** The live drift watcher this runner hosts, once started — or undefined */
+  readonly watcher: BackgroundWatcher | undefined;
+  /**
+   * Stop at the next batch, release every lease, and close the kit the runner
+   * made. `timeoutMs`: stop waiting for a lane stuck in its transformation
+   * (its lease expires; the work resumes from the last checkpoint)
+   */
+  stop(options?: { timeoutMs?: number }): Promise<void>;
+}
+
+/**
+ * Drive background migrations from inside the application — no queue:
+ * `concurrency` lane loops shared by every runnable background migration,
+ * round-robin, plus the drift watch every `verifyIntervalMs`. Several
+ * application instances share the work through the leases.
+ * @experimental New in 2.3
+ */
+export function startBackgroundRunner(options?: BackgroundRunnerOptions): BackgroundRunner;
 
 // ─── Logger factory ───────────────────────────────────────────────────────────
 
@@ -1880,5 +2812,74 @@ export class QueueJobFailedError extends MigronautError {
  * `context.converge` is the {@link ConvergeResult} so far.
  */
 export class ConvergeFailedError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by the optimistic-concurrency helpers of `@alexify/migronaut/versioning`
+ * when a revision-guarded write matched nothing. `context.reason` is
+ * `'conflict'` (the document is at another revision — `context.actual`),
+ * `'not-found'` (nothing matches the filter) or `'unknown'` (the follow-up read
+ * was skipped or could not tell); `context.expected` is the revision the
+ * caller held. The filter is never copied into the error. Experimental.
+ */
+export class RevisionConflictError extends MigronautError {
+  readonly context?: RevisionConflictContext;
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/** {@link RevisionConflictError}'s `context` — what a caller decides on */
+export interface RevisionConflictContext {
+  reason: 'conflict' | 'not-found' | 'unknown';
+  /** The revision the caller held */
+  expected: number;
+  /** `conflict`: the revision the document is at */
+  actual?: number;
+  /** The collection's name, when the collection object has one */
+  collection?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Thrown by an upcaster that cannot bring a document to the current shape:
+ * `context.reason` is `'newer'`, `'below-min'` or `'invalid'`, with
+ * `context.version` and `context.current`. Experimental.
+ */
+export class ShapeVersionError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown when a migration `requires` a background migration that has not
+ * completed — or whose collection still holds old-shape documents. Nothing was
+ * run; `context.waitsFor` lists what it waits for. Experimental.
+ */
+export class BackgroundPendingError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown when a background migration ended `failed`; `context.migration` names
+ * it and `context.lastError` says what happened last. Experimental.
+ */
+export class BackgroundFailedError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown when a control action does not fit the background migration's state;
+ * `context.status` is the state found and `context.action` what was asked.
+ * Experimental.
+ */
+export class BackgroundConflictError extends MigronautError {
+  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by the dry-run sandbox when a step reaches for something it cannot
+ * run inside an always-aborted transaction; `context.method` names the call
+ * and `context.reason` the rule. Experimental.
+ */
+export class SandboxRefusedError extends MigronautError {
   constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
 }

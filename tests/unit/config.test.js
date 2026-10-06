@@ -890,3 +890,89 @@ describe('envFile control', () => {
     }
   });
 });
+
+describe('background config', () => {
+  const {
+    backgroundCollectionNames,
+    validateConfig: validate,
+  } = require('../../src/core/config.js');
+  /** What ENV_KEYS makes of a set of variables */
+  const readEnvConfig = (env) => {
+    const result = {};
+    for (const spec of ENV_KEYS) {
+      if (env[spec.env] !== undefined) result[spec.path] = spec.parse(env[spec.env], spec.env);
+    }
+    return result;
+  };
+  const valid = { uri: 'mongodb://x', dbName: 'db', ...DEFAULT_CONFIG };
+
+  it('should default and validate every background key', () => {
+    assert.deepStrictEqual(validate(valid), []);
+    assert.strictEqual(DEFAULT_CONFIG.backgroundCollection, '_migronaut_background');
+    const issues = validate({
+      ...valid,
+      backgroundCollection: 'system.bg',
+      backgroundInline: 'yes',
+      backgroundOnDrift: 'ignore',
+      backgroundDrift: 'never',
+      backgroundShardAware: true,
+    });
+    assert.deepStrictEqual(issues.map((issue) => issue.path).sort(), [
+      'backgroundCollection',
+      'backgroundDrift',
+      'backgroundInline',
+      'backgroundOnDrift',
+      'backgroundShardAware',
+    ]);
+    assert.match(
+      issues.find((issue) => issue.path === 'backgroundDrift').message,
+      /'poll', 'stream', 'both'/,
+    );
+  });
+
+  it('should keep the background collections apart from every other bookkeeping one', () => {
+    assert.deepStrictEqual(backgroundCollectionNames('_bg'), {
+      state: '_bg',
+      partitions: '_bg_partitions',
+      watch: '_bg_watch',
+    });
+    const clash = validate({ ...valid, lockCollection: '_migronaut_background_partitions' });
+    assert.deepStrictEqual(clash, [
+      {
+        path: 'backgroundCollection',
+        message:
+          'partitions collection (_migronaut_background_partitions) must differ from lockCollection',
+      },
+    ]);
+    assert.deepStrictEqual(validate({ ...valid, backgroundCollection: '_migronaut_locks' }), [
+      { path: 'backgroundCollection', message: 'must differ from lockCollection' },
+    ]);
+    // A declared collection may not take one of their names either.
+    const declared = validate({
+      ...valid,
+      collections: [{ name: '_migronaut_background_watch', indexes: [] }],
+    });
+    assert.match(declared[0].message, /one of migronaut's own collections/);
+  });
+
+  it('should read the background env vars, failing closed', () => {
+    const env = readEnvConfig({
+      MIGRONAUT_BACKGROUND_COLLECTION: '_bg',
+      MIGRONAUT_BACKGROUND_INLINE: 'true',
+      MIGRONAUT_BACKGROUND_ON_DRIFT: 'report',
+      MIGRONAUT_BACKGROUND_DRIFT: 'stream',
+      MIGRONAUT_BACKGROUND_SHARD_AWARE: 'off',
+    });
+    assert.deepStrictEqual(env, {
+      backgroundCollection: '_bg',
+      backgroundInline: true,
+      backgroundOnDrift: 'report',
+      backgroundDrift: 'stream',
+      backgroundShardAware: 'off',
+    });
+    assert.throws(
+      () => readEnvConfig({ MIGRONAUT_BACKGROUND_DRIFT: 'always' }),
+      /MIGRONAUT_BACKGROUND_DRIFT/,
+    );
+  });
+});

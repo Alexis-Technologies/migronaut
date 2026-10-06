@@ -20,6 +20,14 @@ Key facts:
   validators declared as an end state in `collections` / `collectionsDir`, applied statelessly by
   `migronaut converge` (or `convergeAfterUp` after every bulk `up`) — no migration file per change;
   a search index is updated in place, never rebuilt
+- Document versioning (experimental): `versioning: { current, min }` on a collection definition —
+  the shape version `__v` and the optimistic-concurrency revision `__rev`, enforced by converge;
+  `@alexify/migronaut/versioning` has `updateWithRevision`, `defineShapes`, `upcaster` and a
+  Mongoose plugin for the repository layer
+- Background migrations (experimental): `export const background = { collection, from, to,
+  migrate }` — registered by `up`, rewritten beside the migration line in partitions and parallel
+  lanes (CLI `migronaut background run`, `startBackgroundRunner`, or BullMQ), with checkpoints,
+  controls, transactional batches, shard-aware partitioning and a drift watcher
 - License: MIT
 - Repository: https://github.com/Alexis-Technologies/migronaut
 
@@ -35,6 +43,8 @@ Key facts:
 - [Transactions](https://migronaut.vercel.app/guide/transactions): Opt-in MongoDB transactions per file or globally
 - [Lifecycle Hooks](https://migronaut.vercel.app/guide/hooks): beforeAll, afterAll, beforeEach, afterEach, onError
 - [Declared Collections](https://migronaut.vercel.app/guide/collections): Declare indexes, Atlas Search / Vector Search indexes and validators as an end state; converge compares with the live database and applies the difference
+- [Document Versioning](https://migronaut.vercel.app/guide/versioning): The shape version (__v) and optimistic-concurrency revision (__rev) as one contract — converge, the repository helpers, typed shapes, the Mongoose plugin, and the expand → background → contract release
+- [Background Migrations](https://migronaut.vercel.app/guide/background-migrations): Long data rewrites beside the migration line — partitions, lanes and maxParallel, transactions, requires, dry runs, drift, sharded clusters, and the three runtimes
 - [Programmatic API](https://migronaut.vercel.app/guide/api): The MigratorKit class, methods, and result types
 - [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq): Run migrations as BullMQ jobs — a migration service with ordering, batches, scheduling, and enqueue-and-wait
 - [OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry): Traces and metrics through an injected tracer and meter — a span per run and per migration, with the MongoDB driver's spans nested under it
@@ -56,6 +66,7 @@ Key facts:
 - [migronaut import](https://migronaut.vercel.app/commands/import): Adopt a migrate-mongo changelog (forward-only)
 - [migronaut lock](https://migronaut.vercel.app/commands/lock): Inspect the current migration lock holder
 - [migronaut unlock](https://migronaut.vercel.app/commands/unlock): Force-release a stuck concurrency lock
+- [migronaut background](https://migronaut.vercel.app/commands/background): Background migrations — status, run, controls, dry-run, verify and watch for drift
 
 ## Reference
 

@@ -7,6 +7,12 @@ const { MongoMemoryReplSet } = require('mongodb-memory-server');
 process.env.MONGOMS_VERSION ??= '7.0.14';
 
 /**
+ * Test commands on: `configureFailPoint` lets a test make one command fail
+ * or stall (`failCommand`) — how throttling and retries are proven.
+ */
+const TEST_ARGS = ['--setParameter', 'enableTestCommands=1'];
+
+/**
  * Connect to the test MongoDB replica set — the shared one booted by
  * ../helpers/global-setup.js when the run used `--test-global-setup`, a private
  * one otherwise.
@@ -30,7 +36,7 @@ async function startTestMongo(dbName = 'migronaut_test', options = {}) {
   if (sharedUri) {
     uri = sharedUri;
   } else {
-    replSet = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
+    replSet = await MongoMemoryReplSet.create({ replSet: { count: 1, args: TEST_ARGS } });
     uri = replSet.getUri();
   }
   const client = new MongoClient(uri);
@@ -51,4 +57,4 @@ async function startTestMongo(dbName = 'migronaut_test', options = {}) {
   };
 }
 
-module.exports = { startTestMongo };
+module.exports = { TEST_ARGS, startTestMongo };

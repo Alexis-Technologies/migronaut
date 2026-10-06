@@ -1,5 +1,10 @@
 import type {
   AuditReport,
+  BackgroundCounters,
+  BackgroundSliceResult,
+  BackgroundStatus,
+  BackgroundVerifyResult,
+  BackgroundWatcher,
   CollectionConvergeResult,
   ConvergeSearchSummary,
   ConvergeUnstable,
@@ -10,6 +15,7 @@ import type {
   MigronautErrorCode,
   OnLockHeld,
   StatusRow,
+  WatchBackgroundOptions,
 } from './index.js';
 
 // ─── Structural BullMQ surface ─────────────────────────────────────────────────
@@ -47,12 +53,24 @@ export interface BullMQJobLike<Data = any, Result = any> {
   log(row: string): Promise<number>;
   getState(): Promise<string>;
   waitUntilFinished(queueEvents: any, ttl?: number): Promise<Result>;
+  /** Used to put back a job a shutdown stopped before it began */
+  moveToWait?(token?: string): Promise<unknown>;
+  /** Background jobs: continue later (a lane between slices, a coordinator polling) */
+  moveToDelayed?(timestamp: number, token?: string): Promise<void>;
+  /** Background coordinators: wait for the lanes they spawned (BullMQ ≥ 5 parents) */
+  moveToWaitingChildren?(token: string, opts?: any): Promise<boolean>;
+  updateData?(data: Data): Promise<void>;
+  getIgnoredChildrenFailures?(): Promise<{ [jobKey: string]: string }>;
 }
 
 /** See {@link BullMQJobLike} for why this is structural */
 export interface BullMQQueueLike {
   name: string;
-  addBulk(jobs: (MigrationJobSpec | ConvergeJobSpec)[]): Promise<BullMQJobLike[]>;
+  /** `prefix:name` — what a child job's `parent.queue` names. Background coordinators need it */
+  readonly qualifiedName?: string;
+  addBulk(
+    jobs: (MigrationJobSpec | ConvergeJobSpec | BackgroundJobSpec | BackgroundLaneJobSpec)[],
+  ): Promise<BullMQJobLike[]>;
   getJob(id: string): Promise<BullMQJobLike | undefined>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -63,6 +81,8 @@ export interface BullMQQueueLike {
   upsertJobScheduler?(id: string, repeat: any, template?: any): Promise<unknown>;
   /** BullMQ ≥ 5.16 — needed by `unschedule()` */
   removeJobScheduler?(id: string): Promise<boolean>;
+  /** BullMQ ≥ 5.16 — whether the drift watch's schedule exists already */
+  getJobScheduler?(id: string): Promise<unknown>;
 }
 
 /** See {@link BullMQJobLike} for why this is structural */
@@ -101,13 +121,25 @@ export type BullMQQueueEventsClass<E extends BullMQQueueEventsLike = BullMQQueue
 // ─── Job contract ──────────────────────────────────────────────────────────────
 
 export type MigrationJobName = 'up' | 'down' | 'sync' | 'converge';
+/** The job names of a background queue */
+export type BackgroundJobName = 'background' | 'background-lane' | 'background-verify';
 
 /**
  * Job names: `up`/`down` carry one migration each; `sync` plans and enqueues
  * what is pending; `converge` brings the declared collections to their
- * declared state.
+ * declared state. On the background queue: `background` (a background
+ * migration's coordinator), `background-lane` (one of its lanes, a child of
+ * the coordinator) and `background-verify` (the drift watch).
  */
-export const JOB_NAMES: Readonly<{ UP: 'up'; DOWN: 'down'; SYNC: 'sync'; CONVERGE: 'converge' }>;
+export const JOB_NAMES: Readonly<{
+  UP: 'up';
+  DOWN: 'down';
+  SYNC: 'sync';
+  CONVERGE: 'converge';
+  BACKGROUND: 'background';
+  BACKGROUND_LANE: 'background-lane';
+  BACKGROUND_VERIFY: 'background-verify';
+}>;
 /**
  * Version stamped on every job's data as `v`. A worker accepts every version
  * from {@link MIN_JOB_DATA_VERSION} up to its own and refuses a newer one —
@@ -120,6 +152,16 @@ export const DEFAULT_QUEUE_NAME: 'migronaut';
 export const DEFAULT_SCHEDULER_ID: 'migronaut-sync';
 /** Default id of a `schedule({ job: 'converge' })` schedule */
 export const DEFAULT_CONVERGE_SCHEDULER_ID: 'migronaut-converge';
+/**
+ * Id of the drift watch's schedule on the background queue
+ * @experimental New in 2.3
+ */
+export const DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID: 'migronaut-background-verify';
+/**
+ * The background queue that serves a migration queue: `<queueName>-background`
+ * @experimental New in 2.3
+ */
+export function backgroundQueueName(queueName: string): string;
 
 /**
  * Data of an `up` or `down` job. Stored in Redis — re-validated by the worker as untrusted input
@@ -188,6 +230,106 @@ export interface ConvergeJobData {
 }
 
 /**
+ * Data of a `background` job — the coordinator of one background migration.
+ * Deduplicated on the migration: every heal collapses into the chain alive.
+ * @experimental New in 2.3
+ */
+export interface BackgroundJobData {
+  v: 1;
+  kind: 'background';
+  migration: string;
+  /** The chain's round, minted on its first run — an older round bows out */
+  round?: number;
+  /** How many times this chain spawned lanes — part of their ids */
+  spawn?: number;
+  /** A takeover of a coordinator nothing has heard from for `stallMs` */
+  takeover?: true;
+  requestedBy?: string;
+  reason?: string;
+}
+
+/**
+ * Data of a `background-lane` job — one lane of a background migration
+ * @experimental New in 2.3
+ */
+export interface BackgroundLaneJobData {
+  v: 1;
+  kind: 'background-lane';
+  migration: string;
+  registration: string;
+  generation: number;
+  round: number;
+  spawn: number;
+  /** 0 to 63 */
+  lane: number;
+  /** Failed slices in a row — the lane backs off, and gives up after `maxLaneRetries` */
+  retry?: number;
+}
+
+/**
+ * Data of a `background-verify` job — a drift-watch tick
+ * @experimental New in 2.3
+ */
+export interface BackgroundVerifyJobData {
+  v: 1;
+  kind: 'background-verify';
+}
+
+/**
+ * What a completed `background` job returns: the coordinator chain ended
+ * @experimental New in 2.3
+ */
+export interface BackgroundJobResult {
+  kind: 'background';
+  migration: string;
+  /**
+   * The background migration's status — or `superseded` (a newer round took
+   * over), `unregistered`. Run outside a Worker (no token to move the job
+   * with), the coordinator's next step instead: `wait`, `busy` or `process`,
+   * with `retryAfterMs`. Absent when a shutdown came first.
+   */
+  status?:
+    | BackgroundStatus['status']
+    | 'blocked'
+    | 'superseded'
+    | 'unregistered'
+    | 'wait'
+    | 'busy'
+    | 'process';
+  round?: number;
+  /** Outside a Worker: when to run the job again */
+  retryAfterMs?: number;
+}
+
+/**
+ * What a completed `background-lane` job returns: nothing left for it to claim
+ * (`exhausted`), the background migration stopped (`paused`, `cancelled`,
+ * `failed`), no plan yet (`stale`) — or `gave-up` after `maxLaneRetries`
+ * failed slices in a row (each counted on its partition, in MongoDB)
+ * @experimental New in 2.3
+ */
+export interface BackgroundLaneJobResult {
+  kind: 'background-lane';
+  migration: string;
+  /** Outside a Worker also `retry` (a failed slice, to try again after `retryAfterMs`) */
+  outcome: BackgroundSliceResult['outcome'] | 'gave-up' | 'retry';
+  counters?: BackgroundCounters;
+  code?: MigronautErrorCode;
+  /** Outside a Worker (no token to move the job with): when to run it again */
+  retryAfterMs?: number;
+}
+
+/**
+ * What a completed `background-verify` job returns
+ * @experimental New in 2.3
+ */
+export interface BackgroundVerifyJobResult extends BackgroundVerifyResult {
+  kind: 'background-verify';
+  /** Coordinators this tick added (or found alive) — the heal */
+  enqueued: number;
+}
+
+/**
  * What a completed `up`/`down` job returns
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
@@ -203,6 +345,8 @@ export interface MigrationJobResult {
   reason?: string;
   /** Time (ms) spent waiting for the MongoDB migration lock */
   lockWaitMs: number;
+  /** The coordinators enqueued for what the job registered — on a queue with a background side */
+  background?: { migration: string; jobId: string }[];
 }
 
 /**
@@ -224,7 +368,19 @@ export interface SyncJobResult {
    * and its file has not changed since — a schedule's circuit breaker. A fix
    * (a changed file) or an explicit `enqueueUp(name)` resumes the line.
    */
-  held?: { migration: string; reason: string; failedAt?: Date };
+  held?: {
+    migration: string;
+    reason: string;
+    failedAt?: Date;
+  };
+  /**
+   * Present when the next migration waits for background migrations that
+   * have not completed (`requires`): the tick enqueued what comes before it,
+   * and the line goes on once they complete. Not a failure — `held` is that.
+   */
+  waiting?: { migration: string; waitsFor: string[] };
+  /** The heal of the background side: coordinators added, or found alive */
+  background?: { enqueued: number };
 }
 
 /**
@@ -322,6 +478,39 @@ export interface ConvergeJobSpec {
   opts: { attempts: 1; deduplication: { id: string }; [option: string]: unknown };
 }
 
+/**
+ * Per-job options passed through to every background job — retention and
+ * logging. Besides what a migration job refuses, the four options of a
+ * parent's child-failure policy are refused: the adapter owns them.
+ * @experimental New in 2.3
+ */
+export interface BackgroundJobOptions extends MigrationJobOptions {
+  failParentOnFailure?: never;
+  continueParentOnFailure?: never;
+  ignoreDependencyOnFailure?: never;
+  removeDependencyOnFailure?: never;
+}
+
+/**
+ * A coordinator job as handed to `queue.addBulk`
+ * @experimental New in 2.3
+ */
+export interface BackgroundJobSpec {
+  name: 'background';
+  data: BackgroundJobData;
+  opts: { attempts: number; deduplication: { id: string }; [option: string]: unknown };
+}
+
+/**
+ * A lane job as handed to `queue.addBulk`
+ * @experimental New in 2.3
+ */
+export interface BackgroundLaneJobSpec {
+  name: 'background-lane';
+  data: BackgroundLaneJobData;
+  opts: { attempts: 1; [option: string]: unknown };
+}
+
 /** A planned, not yet enqueued, group */
 export interface MigrationPlan {
   /** Id of this enqueue call, in the kit's `generateId` format (a UUID by default) */
@@ -334,6 +523,11 @@ export interface MigrationPlan {
   jobs: MigrationJobSpec[];
   /** The converge job that ends an `up` group — see `EnqueueUpOptions.converge` */
   converge?: ConvergeJobSpec;
+  /**
+   * The first pending file that requires a background migration not
+   * completed yet: the plan ends before it (and has no converge job)
+   */
+  waiting?: { migration: string; waitsFor: string[] };
 }
 
 /** {@link parseJobData}'s normalized result */
@@ -357,6 +551,40 @@ export type ParsedJobData =
  * Throws `QueueJobInvalidError` for anything outside the contract.
  */
 export function parseJobData(job: { id?: string; name: string; data: unknown }): ParsedJobData;
+
+/** {@link parseBackgroundJobData}'s normalized result */
+export type ParsedBackgroundJobData =
+  | {
+      kind: 'background';
+      migration: string;
+      round?: number;
+      spawn?: number;
+      takeover?: true;
+      requestedBy?: string;
+      reason?: string;
+    }
+  | {
+      kind: 'background-lane';
+      migration: string;
+      registration: string;
+      generation: number;
+      round: number;
+      spawn: number;
+      lane: number;
+      retry: number;
+    }
+  | { kind: 'background-verify' };
+
+/**
+ * Validate a job read back from a background queue and return a normalized
+ * copy. Throws `QueueJobInvalidError` for anything outside the contract.
+ * @experimental New in 2.3
+ */
+export function parseBackgroundJobData(job: {
+  id?: string;
+  name: string;
+  data: unknown;
+}): ParsedBackgroundJobData;
 
 /** The deduplication id a migration's job carries — never contains `:` */
 export function dedupId(direction: 'up' | 'down', migration: string): string;
@@ -479,6 +707,8 @@ export interface MigrationGroup {
   deduplicated: string[];
   /** The converge job ending the group, or null. `deduplicated`: a peer's identical job */
   converge: { id: string; deduplicated: boolean } | null;
+  /** See {@link MigrationPlan.waiting} — the group stops before this file */
+  waiting?: { migration: string; waitsFor: string[] };
   /**
    * Resolve when every job has finished — the converge job last; reject with
    * `QueueJobFailedError` at the first one that fails or outlives `timeoutMs`.
@@ -523,6 +753,17 @@ export type ScheduleOptions = (
         id?: string;
         to?: never;
       }
+    | {
+        /**
+         * Each tick runs the drift watch on the background queue (and heals
+         * it) — overrides the schedule `startBackgroundWorker()` registers.
+         * Needs the `background` option. @experimental
+         */
+        job: 'background-verify';
+        /** Scheduler id. Default `'migronaut-background-verify'` */
+        id?: string;
+        to?: never;
+      }
   );
 
 /** Options for {@link MigrationQueue.startWorker} — passed to the Worker constructor */
@@ -551,7 +792,13 @@ export interface MigrationJobView {
   state: string;
   /** As stored — see {@link MigrationJobProgress} for what the adapter writes */
   progress: MigrationJobProgress | number;
-  returnvalue?: MigrationJobResult | SyncJobResult | ConvergeJobResult;
+  returnvalue?:
+    | MigrationJobResult
+    | SyncJobResult
+    | ConvergeJobResult
+    | BackgroundJobResult
+    | BackgroundLaneJobResult
+    | BackgroundVerifyJobResult;
   failedReason?: string;
   attemptsMade: number;
   timestamp?: number;
@@ -593,6 +840,16 @@ export interface CreateMigrationProcessorOptions {
   jobOptions?: MigrationJobOptions;
   /** What a job may ask for beyond the ordinary — see {@link MigrationJobPermissions} */
   allow?: MigrationJobPermissions;
+  /**
+   * The background queue: what an `up` (or `down`) job registers gets its
+   * coordinator there at once, and every `sync` tick heals it. @experimental
+   */
+  background?: {
+    queue: BullMQQueueLike;
+    jobOptions?: BackgroundJobOptions;
+    /** See {@link EnqueueBackgroundOptions.stallMs} */
+    stallMs?: number;
+  };
 }
 
 /**
@@ -631,6 +888,62 @@ export interface MigrationProcessor {
 export function createMigrationProcessor(
   options?: CreateMigrationProcessorOptions,
 ): MigrationProcessor;
+
+/** Options for {@link createBackgroundProcessor} */
+export interface CreateBackgroundProcessorOptions {
+  config?: Partial<MigronautConfig>;
+  kitOptions?: MigratorKitOptions;
+  kit?: MigratorKit;
+  /** The background queue — the coordinators add their lanes to it. Required */
+  queue: BullMQQueueLike;
+  jobOptions?: BackgroundJobOptions;
+  /** A lane's slice (ms). Default: each background migration's own `sliceMs` */
+  sliceMs?: number;
+  /**
+   * `'auto'` (default): lanes are children of their coordinator, which waits
+   * for them (`moveToWaitingChildren`) when the queue and its jobs support
+   * it. `false`: lanes on their own, and the coordinator polls MongoDB.
+   */
+  children?: 'auto' | false;
+  /** How often a coordinator without children looks again (ms). Default 5000 */
+  pollIntervalMs?: number;
+  /** See {@link EnqueueBackgroundOptions.stallMs} */
+  stallMs?: number;
+  /** Failed slices in a row before a lane gives up (0–100). Default 8 */
+  maxLaneRetries?: number;
+}
+
+/**
+ * The function a Worker on the background queue runs. Jobs run side by side.
+ * @experimental New in 2.3
+ */
+export interface BackgroundProcessor {
+  (
+    job: BullMQJobLike<BackgroundJobData | BackgroundLaneJobData | BackgroundVerifyJobData>,
+    token?: string,
+    signal?: AbortSignal,
+  ): Promise<BackgroundJobResult | BackgroundLaneJobResult | BackgroundVerifyJobResult>;
+  readonly kit: MigratorKit;
+  /**
+   * Stop: a lane stops at its next batch, checkpoints, releases its lease and
+   * goes back to the queue (moved to delayed); a coordinator bows out and
+   * comes back. Irreversible.
+   */
+  shutdown(reason?: string): void;
+  /** `shutdown()`, let the jobs in flight settle, disconnect a kit the processor created */
+  close(): Promise<void>;
+  /** A coordinator for every background migration with work to do — what a worker does at start */
+  heal(): Promise<BackgroundEnqueueResult>;
+}
+
+/**
+ * Build the processor for a Worker on the background queue you construct
+ * yourself.
+ * @experimental New in 2.3
+ */
+export function createBackgroundProcessor(
+  options: CreateBackgroundProcessorOptions,
+): BackgroundProcessor;
 
 // ─── Producer building blocks ──────────────────────────────────────────────────
 
@@ -679,6 +992,39 @@ export function enqueueConverge(
     queueEvents?: BullMQQueueEventsLike;
   },
 ): Promise<ConvergeHandle>;
+
+/** Options for `enqueueBackground` */
+export interface EnqueueBackgroundOptions {
+  /**
+   * A running background migration nothing has moved for this long (ms) — no
+   * live lease, no checkpoint, no coordinator step — also gets a takeover
+   * coordinator, whose newer round retires the stuck one. Default 900000
+   * (15 minutes); at least 1000.
+   */
+  stallMs?: number;
+  requestedBy?: string;
+  reason?: string;
+}
+
+/**
+ * What `enqueueBackground` resolves with
+ * @experimental New in 2.3
+ */
+export interface BackgroundEnqueueResult {
+  /** One per coordinator added — or absorbed by the one already alive (same id) */
+  jobs: { migration: string; id: string; takeover?: true }[];
+}
+
+/**
+ * Enqueue the coordinator of one background migration (`migration`) — or of
+ * every one with work to do — on a background queue you own. Idempotent.
+ * @experimental New in 2.3
+ */
+export function enqueueBackground(
+  queue: BullMQQueueLike,
+  kit: MigratorKit,
+  options?: EnqueueBackgroundOptions & { migration?: string; jobOptions?: BackgroundJobOptions },
+): Promise<BackgroundEnqueueResult>;
 
 /** Wait for a group's jobs — what `MigrationGroup.wait()` calls */
 export function waitForGroup(options: {
@@ -762,6 +1108,48 @@ export interface CreateMigrationQueueOptions<
    * refuse fails at the call. Give every producer and worker the same policy.
    */
   allow?: MigrationJobPermissions;
+  /**
+   * Background migrations on a queue of their own (`<queueName>-background`):
+   * a coordinator job each, with lanes as its children. `true` takes every
+   * default. @experimental New in 2.3
+   */
+  background?: boolean | BackgroundQueueOptions;
+}
+
+/**
+ * The `background` option of {@link createMigrationQueue}
+ * @experimental New in 2.3
+ */
+export interface BackgroundQueueOptions {
+  /** Default `<queueName>-background` (or the injected queue's name) */
+  queueName?: string;
+  /** A background Queue instance you own — never closed by `close()` */
+  queue?: BullMQQueueLike;
+  jobOptions?: BackgroundJobOptions;
+  /** Defaults for `startBackgroundWorker()` — concurrency 2 unless given */
+  workerOptions?: { concurrency?: number; [option: string]: unknown };
+  /** See {@link CreateBackgroundProcessorOptions} */
+  sliceMs?: number;
+  children?: 'auto' | false;
+  pollIntervalMs?: number;
+  /** See {@link EnqueueBackgroundOptions.stallMs} */
+  stallMs?: number;
+  /**
+   * The drift watch's schedule, registered by `startBackgroundWorker()` (ms,
+   * ≥ 1000). Default 600000 (10 minutes) — registered only when no schedule
+   * exists yet, so one set with `schedule({ job: 'background-verify' })`
+   * stays; given explicitly, it is re-registered at every start. `false`
+   * registers none.
+   */
+  verifyIntervalMs?: number | false;
+  /** See {@link CreateBackgroundProcessorOptions.maxLaneRetries} */
+  maxLaneRetries?: number;
+  /**
+   * Host the live drift watcher in the background worker's process — `true`,
+   * or its options. Default: when the kit's `backgroundDrift` is `'stream'`
+   * or `'both'`. Closed first by `close()`.
+   */
+  watch?: boolean | Omit<WatchBackgroundOptions, 'signal' | 'onError'>;
 }
 
 /**
@@ -787,6 +1175,26 @@ export class MigrationQueue<
   readonly queueName: string;
   /** The processor, for attaching to a Worker you construct yourself */
   readonly processor: MigrationProcessor;
+  /**
+   * The background queue (`background` option), if any
+   * @experimental New in 2.3
+   */
+  readonly backgroundQueue: BullMQQueueLike | undefined;
+  /**
+   * The worker started by {@link startBackgroundWorker}, if any
+   * @experimental New in 2.3
+   */
+  readonly backgroundWorker: W | undefined;
+  /**
+   * The background processor, for a Worker you construct yourself
+   * @experimental New in 2.3
+   */
+  readonly backgroundProcessor: BackgroundProcessor | undefined;
+  /**
+   * The live drift watcher `startBackgroundWorker()` started, if any
+   * @experimental New in 2.3
+   */
+  readonly backgroundWatcher: BackgroundWatcher | undefined;
 
   /**
    * Enqueue pending migrations — all, up to `options.to`, or the one
@@ -806,6 +1214,33 @@ export class MigrationQueue<
    */
   enqueueConverge(options?: EnqueueConvergeOptions): Promise<ConvergeHandle>;
 
+  /**
+   * Enqueue the coordinator of one background migration — or of every one
+   * with work to do. Idempotent. Needs the `background` option. @experimental
+   */
+  enqueueBackground(
+    name?: string,
+    options?: EnqueueBackgroundOptions,
+  ): Promise<BackgroundEnqueueResult>;
+  /**
+   * A background migration's status, read from MongoDB — `null` when not registered
+   * @experimental New in 2.3
+   */
+  backgroundStatus(name: string): Promise<BackgroundStatus | null>;
+  /**
+   * Every background migration's status
+   * @experimental New in 2.3
+   */
+  backgroundStatus(): Promise<BackgroundStatus[]>;
+  /**
+   * The drift watch, now — and, with the `background` option, a coordinator
+   * for whatever it reopened. @experimental
+   */
+  verifyBackground(options?: {
+    onDrift?: 'reopen' | 'report';
+    collections?: string[];
+  }): Promise<BackgroundVerifyResult>;
+
   /** Full migration status, read from MongoDB */
   status(): Promise<StatusRow[]>;
   /** Migrations not applied yet */
@@ -821,6 +1256,13 @@ export class MigrationQueue<
    * that failed, tries again.
    */
   startWorker(options?: StartWorkerOptions): Promise<W>;
+  /**
+   * Start the background worker (concurrency 2 by default): coordinators and
+   * lanes side by side. Registers the drift watch's schedule and heals — a
+   * coordinator for every background migration with work to do. Needs the
+   * `background` option. @experimental
+   */
+  startBackgroundWorker(options?: { concurrency?: number; [option: string]: unknown }): Promise<W>;
   /** Stop workers from picking up new jobs; the job in flight finishes */
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -835,7 +1277,8 @@ export class MigrationQueue<
   schedule(options: ScheduleOptions): Promise<void>;
   /**
    * Remove a schedule — the sync one by default; pass
-   * {@link DEFAULT_CONVERGE_SCHEDULER_ID} (or your own id) for another.
+   * {@link DEFAULT_CONVERGE_SCHEDULER_ID} (or your own id) for another. The
+   * background queue's schedules (the drift watch's) are looked for too.
    * Resolves whether one existed.
    */
   unschedule(id?: string): Promise<boolean>;

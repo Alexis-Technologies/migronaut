@@ -11,9 +11,13 @@ import { pino } from 'pino';
 import { expectAssignable, expectError, expectNotAssignable, expectType } from 'tsd';
 import {
   type AuditReport,
+  BackgroundConflictError,
+  BackgroundFailedError,
+  BackgroundPendingError,
   type BaselineSummary,
   type CollectionDefinition,
   type CollectionDefinitionFile,
+  type CollectionVersioning,
   type ConvergeActionKind,
   ConvergeFailedError,
   type ConvergeResult,
@@ -27,6 +31,7 @@ import {
   LockLostError,
   MigrationBlockedError,
   type MigrationEvent,
+  type MigrationModule,
   MigratorKit,
   MigronautError,
   type MigronautConfig,
@@ -43,19 +48,24 @@ import {
   type ProgressReporter,
   QueueJobFailedError,
   QueueJobInvalidError,
+  RevisionConflictError,
   RunAbortedError,
   type RunEndEvent,
   type RunResult,
   type RunStartEvent,
+  SandboxRefusedError,
   type SearchIndexBuild,
   type SearchIndexDefinition,
   type SearchIndexStatus,
   type SearchIndexType,
+  ShapeVersionError,
   type StatusRow,
   TransactionsUnsupportedError,
   createLogger,
   pendingMigrations,
   runMigrations,
+  startBackgroundRunner,
+  type BackgroundRunner,
 } from '../../index.js';
 
 // MigratorKit is constructible with a partial config and returns typed results
@@ -74,6 +84,7 @@ expectType<
     waitedMs: number;
     attempts: number;
     converge?: ConvergeResult;
+    waiting?: { migration: string; waitsFor: { migration: string; status: string }[] }[];
   }>
 >(runMigrations({ uri: 'mongodb://localhost:27017', dbName: 'test' }));
 expectType<Promise<StatusRow[]>>(
@@ -224,6 +235,7 @@ expectType<
     waitedMs: number;
     attempts: number;
     converge?: ConvergeResult;
+    waiting?: { migration: string; waitsFor: { migration: string; status: string }[] }[];
   }>
 >(runMigrations({}, { onLockHeld: 'wait', lockWaitTimeoutMs: 90_000, lockPollIntervalMs: 250 }));
 expectError(runMigrations({}, { onLockHeld: 'retry' }));
@@ -518,3 +530,101 @@ expectAssignable<MigronautErrorCode>('CONVERGE_FAILED');
 expectType<MigronautError>(new ConvergeFailedError('refused', { phase: 'plan' }));
 expectType<number>(EXIT_CODES.CONVERGE_FAILED);
 expectType<number>(EXIT_CODES.COLLECTIONS_DRIFT);
+
+// ─── Document versioning and background migration errors ─────────────────────
+for (const code of [
+  'REVISION_CONFLICT',
+  'SHAPE_VERSION_UNSUPPORTED',
+  'BACKGROUND_PENDING',
+  'BACKGROUND_FAILED',
+  'BACKGROUND_CONFLICT',
+  'SANDBOX_REFUSED',
+] as const) {
+  expectAssignable<MigronautErrorCode>(code);
+  expectType<number>(EXIT_CODES[code]);
+}
+expectAssignable<MigronautError>(new RevisionConflictError('conflict', { reason: 'conflict' }));
+expectType<'conflict' | 'not-found' | 'unknown' | undefined>(
+  new RevisionConflictError('conflict').context?.reason,
+);
+expectType<MigronautError>(new ShapeVersionError('newer', { reason: 'newer' }));
+expectType<MigronautError>(new BackgroundPendingError('pending', { waitsFor: [] }));
+expectType<MigronautError>(new BackgroundFailedError('failed'));
+expectType<MigronautError>(new BackgroundConflictError('conflict', { action: 'pause' }));
+expectType<MigronautError>(new SandboxRefusedError('refused', { method: 'createIndex' }));
+
+// ─── Collection versioning ───────────────────────────────────────────────────
+expectAssignable<CollectionDefinition>({ name: 'orders', versioning: { current: 2 } });
+expectAssignable<CollectionDefinitionFile>({
+  versioning: { current: 3, min: 0, field: 'schemaVersion', revision: false, index: false },
+});
+expectAssignable<CollectionVersioning>({ current: 1, revisionField: 'rev' });
+expectError<CollectionVersioning>({ min: 1 });
+expectNotAssignable<CollectionVersioning>({ current: 1, maximum: 3 });
+
+// ─── Background config ────────────────────────────────────────────────────────
+expectAssignable<Partial<MigronautConfig>>({
+  backgroundCollection: '_bg',
+  backgroundInline: true,
+  backgroundOnDrift: 'report',
+  backgroundDrift: 'both',
+  backgroundShardAware: 'off',
+});
+expectNotAssignable<Partial<MigronautConfig>>({ backgroundDrift: 'never' });
+
+// ─── requires and onBackgroundPending ─────────────────────────────────────────
+expectAssignable<MigrationModule>({
+  up: async () => undefined,
+  down: async () => undefined,
+  requires: ['0001-orders.js'],
+});
+expectType<Promise<RunResult[]>>(kit.up(undefined, { onBackgroundPending: 'stop' }));
+expectError(kit.up(undefined, { onBackgroundPending: 'wait' }));
+
+// ─── Background runner ────────────────────────────────────────────────────────
+const runner = startBackgroundRunner({
+  config: { uri: 'mongodb://x', dbName: 'db' },
+  concurrency: 2,
+});
+expectType<BackgroundRunner>(runner);
+expectType<Promise<void>>(runner.stop());
+expectType<boolean>(runner.running);
+startBackgroundRunner({
+  kit: new MigratorKit(),
+  verifyIntervalMs: false,
+  onError: () => undefined,
+});
+expectError(startBackgroundRunner({ verifyIntervalMs: true }));
+
+// ─── The live drift watcher ──────────────────────────────────────────────────
+
+const watcher = await kit.watchBackground({
+  collections: ['orders'],
+  upgrade: false,
+  maxLagMs: 30_000,
+  onError: (error, collection) => {
+    expectType<unknown>(error);
+    expectType<string | undefined>(collection);
+  },
+});
+expectType<boolean>(watcher.running);
+expectType<Promise<void>>(watcher.stop());
+const [watchRow] = watcher.status();
+expectType<boolean>(watchRow.leading);
+expectType<number>(watchRow.counters.upgraded);
+expectAssignable<string>(watchRow.state);
+expectError(kit.watchBackground({ maxLagMs: '1m' }));
+const stored = await kit.backgroundWatchStatus('orders');
+expectType<string[] | undefined>(stored?.edges);
+expectType<number | undefined>(stored?.target);
+expectType<number>((await kit.backgroundWatchStatus())[0].counters.events);
+kit.on('background:watch', (event) => {
+  expectType<string>(event.collection);
+  expectAssignable<'streaming' | 'following' | 'history-lost'>(
+    event.state as 'streaming' | 'following' | 'history-lost',
+  );
+});
+expectType<Promise<'poll' | 'stream' | 'both'>>(kit.driftMode());
+const backgroundState = await kit.backgroundStatus('0001-orders.js');
+expectType<string | undefined>(backgroundState?.previous?.registration);
+expectType<number | undefined>(backgroundState?.previous?.totals.migrated);

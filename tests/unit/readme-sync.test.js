@@ -23,8 +23,8 @@ function registeredCommandNames() {
 describe('README / docs stay in sync with the registered CLI commands', () => {
   const names = registeredCommandNames();
 
-  it('should find every registered command (sanity: 14 commands)', () => {
-    assert.strictEqual(names.length, 14);
+  it('should find every registered command (sanity: 15 commands)', () => {
+    assert.strictEqual(names.length, 15);
   });
 
   it('should mention every command in the README Commands table', () => {

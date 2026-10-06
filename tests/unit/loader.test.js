@@ -6,7 +6,9 @@ const {
   MigrationInvalidExportError,
 } = require('../../src/errors/index.js');
 const {
+  importMigrationModule,
   loadMigrationFile,
+  resolveMigrationExports,
   tsLoadErrorOrNull,
   tsLoadMessageOrNull,
 } = require('../../src/utils/loader.js');
@@ -126,5 +128,41 @@ describe('tsLoadMessageOrNull', () => {
       null,
     );
     assert.strictEqual(tsLoadMessageOrNull('/c/x.ts', new Error('boom'), 'x'), null);
+  });
+});
+
+describe('loadMigrationFile — background migrations and requires', () => {
+  it('should load a background file, told apart by its kind', async () => {
+    const file = path.join(fixtures, '0100-background-orders.cjs');
+    const loaded = await loadMigrationFile(file);
+    assert.strictEqual(loaded.kind, 'background');
+    assert.strictEqual(loaded.background.collection, 'orders');
+    assert.strictEqual(loaded.description, 'Move address into shipping');
+    assert.deepStrictEqual(loaded.requires, ['0001-earlier.cjs']);
+  });
+
+  it('should refuse a background file that also exports up or down', async () => {
+    await assert.rejects(
+      loadMigrationFile(path.join(fixtures, '0101-background-with-up.cjs'), {}),
+      /exports no up\(\) or down\(\)/,
+    );
+  });
+
+  it('should read requires, refusing one that points forward', async () => {
+    const ok = await loadMigrationFile(path.join(fixtures, '0103-requires-ok.cjs'));
+    assert.deepStrictEqual(ok.requires, ['0100-background-orders.cjs']);
+    await assert.rejects(
+      loadMigrationFile(path.join(fixtures, '0102-requires-later.cjs')),
+      (error) =>
+        error.code === 'MIGRATION_INVALID_EXPORT' &&
+        /must name an earlier migration/.test(error.message),
+    );
+  });
+
+  it('should split import and export resolution', async () => {
+    const resolved = await importMigrationModule(path.join(fixtures, 'valid-cjs.cjs'));
+    const migration = resolveMigrationExports(resolved, 'valid-cjs.cjs');
+    assert.strictEqual(typeof migration.up, 'function');
+    assert.strictEqual(migration.kind, undefined);
   });
 });

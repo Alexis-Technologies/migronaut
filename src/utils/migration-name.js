@@ -29,4 +29,36 @@ function assertMigrationName(name, context = {}) {
   }
 }
 
-module.exports = { assertMigrationName, isBareFilename };
+/**
+ * Why a file's `requires` export is not valid: an array of bare migration
+ * file names, no duplicates, each sorting strictly before the file itself
+ * (`name`). Files run in name order, so an edge that only ever points
+ * backwards can never close a cycle — the whole "is it a DAG?" question,
+ * answered by the name. Returns `{ path, message }` issues.
+ */
+function requiresIssues(requires, name) {
+  if (requires === undefined) return [];
+  if (!Array.isArray(requires)) {
+    return [{ path: 'requires', message: 'must be an array of migration file names' }];
+  }
+  const issues = [];
+  const seen = new Set();
+  for (const [position, required] of requires.entries()) {
+    const path = `requires[${position}]`;
+    if (!isBareFilename(required)) {
+      issues.push({ path, message: 'must be a bare migration file name' });
+    } else if (seen.has(required)) {
+      issues.push({ path, message: `names "${required}" twice` });
+    } else if (name !== undefined && required >= name) {
+      issues.push({
+        path,
+        message: `must name an earlier migration ("${required}" does not sort before "${name}")`,
+      });
+    } else {
+      seen.add(required);
+    }
+  }
+  return issues;
+}
+
+module.exports = { assertMigrationName, isBareFilename, requiresIssues };

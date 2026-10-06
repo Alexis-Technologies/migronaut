@@ -842,3 +842,135 @@ describe('isDestructive', () => {
     assert.ok(!isDestructive({ target: 'validator', action: 'drop' }));
   });
 });
+
+describe('planCollection — versioning', () => {
+  it('should manage only the version index when versioning declares it alone', () => {
+    const plan = planCollection(
+      definition({ versioning: { current: 1 } }),
+      existing([{ key: { a: 1 }, name: 'a_1' }]),
+      { prune: true },
+    );
+    assert.deepStrictEqual(rows(plan), ['validator:c:create', 'index:__v_1__id_1:create']);
+    assert.deepStrictEqual(steps(plan), ['collMod validator', 'create __v_1__id_1']);
+  });
+
+  it('should accept the version index under another name, and refuse a colliding one', () => {
+    const same = planCollection(
+      definition({ versioning: { current: 1 } }),
+      existing([{ key: { __v: 1, _id: 1 }, name: 'by_version' }]),
+    );
+    assert.ok(rows(same).includes('index:__v_1__id_1:unchanged:exists as "by_version"@by_version'));
+    const different = planCollection(
+      definition({ versioning: { current: 1 } }),
+      existing([{ key: { __v: 1, _id: 1 }, name: 'by_version', sparse: true }]),
+      { prune: true },
+    );
+    assert.match(
+      rows(different).find((line) => line.startsWith('index:')),
+      /conflict/,
+    );
+  });
+
+  it('should still prune undeclared indexes when indexes are declared too', () => {
+    const plan = planCollection(
+      definition({ versioning: { current: 1 }, indexes: [] }),
+      existing([{ key: { a: 1 }, name: 'a_1' }]),
+      { prune: true },
+    );
+    assert.ok(rows(plan).includes('index:a_1:drop:not declared'));
+  });
+
+  it('should refuse raising the floor over documents below it, or when that is unknown', () => {
+    const live = existing([{ key: { __v: 1, _id: 1 }, name: '__v_1__id_1' }]);
+    const refused = planCollection(definition({ versioning: { current: 1 } }), {
+      ...live,
+      versionFloor: { min: 1, below: true },
+    });
+    assert.deepStrictEqual(steps(refused), []);
+    assert.match(rows(refused)[0], /^validator:c:conflict:documents below version 1 remain/);
+    const unknown = planCollection(definition({ versioning: { current: 1 } }), {
+      ...live,
+      versionFloor: { min: 1, below: 'unknown', error: 'timeout' },
+    });
+    assert.match(rows(unknown)[0], /could not check for documents below version 1 \(timeout\)/);
+    const clean = planCollection(definition({ versioning: { current: 1 } }), {
+      ...live,
+      versionFloor: { min: 1, below: false },
+    });
+    assert.deepStrictEqual(rows(clean), ['validator:c:create', 'index:__v_1__id_1:unchanged']);
+  });
+
+  it('should create a missing collection with the versioning validator and index', () => {
+    const plan = planCollection(definition({ versioning: { current: 2 } }), MISSING);
+    assert.deepStrictEqual(steps(plan), ['createCollection', 'create __v_1__id_1']);
+    assert.strictEqual(plan.steps[0].options.validationLevel, 'moderate');
+  });
+
+  it('should put the shard key between the version and _id on a sharded collection', () => {
+    const sharded = (indexes, shardKey) => ({ ...existing(indexes), shardKey });
+    const ranged = planCollection(
+      definition({ versioning: { current: 1 } }),
+      sharded([{ key: { region: 1 }, name: 'region_1' }], { region: 1 }),
+    );
+    assert.deepStrictEqual(rows(ranged), [
+      'validator:c:create',
+      'index:__v_1_region_1__id_1:create',
+    ]);
+    assert.deepStrictEqual(
+      [...ranged.steps[1].specs[0].key],
+      [
+        ['__v', 1],
+        ['region', 1],
+        ['_id', 1],
+      ],
+    );
+    const hashed = planCollection(
+      definition({ versioning: { current: 1, field: 'shape' } }),
+      sharded([], { tenant: 1, uid: 'hashed' }),
+    );
+    assert.ok(rows(hashed).includes('index:shape_1_tenant_1_uid_hashed__id_1:create'));
+    const onId = planCollection(
+      definition({ versioning: { current: 1 } }),
+      sharded([], { _id: 'hashed' }),
+    );
+    assert.ok(rows(onId).includes('index:__v_1__id_hashed:create'), 'no second _id');
+    // A collection sharded on _id needs nothing new.
+    const plain = planCollection(
+      definition({ versioning: { current: 1 } }),
+      sharded([{ key: { __v: 1, _id: 1 }, name: '__v_1__id_1' }], { _id: 1 }),
+    );
+    assert.deepStrictEqual(rows(plain), ['validator:c:create', 'index:__v_1__id_1:unchanged']);
+  });
+
+  it('should keep the ordinary version index a sharded one replaces, and say why', () => {
+    const live = {
+      ...existing([
+        { key: { __v: 1, _id: 1 }, name: '__v_1__id_1' },
+        { key: { region: 1 }, name: 'region_1' },
+      ]),
+      shardKey: { region: 1 },
+    };
+    const partial = planCollection(definition({ versioning: { current: 1 } }), live, {
+      prune: true,
+    });
+    assert.deepStrictEqual(rows(partial), [
+      'validator:c:create',
+      'index:__v_1_region_1__id_1:create',
+      `index:__v_1__id_1:keep:${'replaced by the shard-key-prefixed version index — drop it once nothing hints it (prune does, when the indexes are declared)'}`,
+    ]);
+    const declared = definition({ versioning: { current: 1 }, indexes: [{ key: { region: 1 } }] });
+    const kept = planCollection(declared, live);
+    assert.ok(rows(kept).some((line) => line.startsWith('index:__v_1__id_1:keep:replaced')));
+    const pruned = planCollection(declared, live, { prune: true });
+    assert.ok(rows(pruned).includes('index:__v_1__id_1:drop:not declared'));
+    assert.ok(rows(pruned).includes('index:region_1:unchanged'), 'the shard key index stays');
+    const settled = planCollection(declared, {
+      ...existing([
+        { key: { __v: 1, region: 1, _id: 1 }, name: '__v_1_region_1__id_1' },
+        { key: { region: 1 }, name: 'region_1' },
+      ]),
+      shardKey: { region: 1 },
+    });
+    assert.deepStrictEqual(steps(settled), ['collMod validator'], 'a fixed point for its indexes');
+  });
+});

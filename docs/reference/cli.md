@@ -74,6 +74,21 @@ Combined short flags are not supported: write `-f -y`, not `-fy`.
 | `migronaut converge --rebuild-unique` | Allow rebuilding a unique index (a `conflict` otherwise) |
 | `migronaut converge --no-lock` | Skip the lock (dev only) |
 
+## Background migrations
+
+| Command | Description |
+|---|---|
+| [`migronaut background status [name]`](/commands/background) | Background migrations and their progress (`--partitions`, `--check`: exit 32 failed / 31 not completed) |
+| `migronaut background run <name>` / `--all` | Drive it from this process (`--concurrency N`, `--once`); Ctrl-C stops the lanes at their next batch (exit 11) |
+| `migronaut background pause\|resume\|cancel <name>` | Control it (`--wait` for the lanes on pause and cancel, `--reason`); cancel asks first |
+| `migronaut background retry <name>` | Retry a failed or cancelled one (`--from-start` asks first, `--repin`), reopen a completed one |
+| `migronaut background repin <name>` | Pin the file on disk (asks first) |
+| `migronaut background dry-run <name>` | On a sample (`--sample`, `--first`, `--validate`, `--revert`) or by steps (`--steps`, `--from-start`, `--max-docs`, `--deadline-ms`) — nothing written; exit 34 on a sandbox refusal |
+| `migronaut background unlock <name>` | Clear a stuck coordinator lock and every lease (asks first) |
+| `migronaut background verify` | The drift watch, once (`--report`: never reopen; exit 31 on drift) |
+| `migronaut background watch [collection]` | The live drift watcher in the foreground (`--report`: never upgrade); Ctrl-C stops it cleanly (exit 0) |
+| `migronaut background … --yes` | Do not ask (required with `--json` for cancel, repin, unlock, retry `--from-start`) |
+
 ## Inspecting
 
 | Command | Description |
@@ -98,6 +113,7 @@ Combined short flags are not supported: write `-f -y`, not `-fy`.
 | `migronaut create <name> --ts` | Create a `.ts` migration |
 | `migronaut create <name> --js` | Create a `.js` migration |
 | `migronaut create <name> --template <path>` | Use a custom template |
+| `migronaut create <name> --background` | Create a [background migration](/guide/background-migrations) (`export const background`) — not with `--template` |
 | [`migronaut init`](/commands/create#migronaut-init) | Generate `migronaut.config.js` |
 | `migronaut init --format <js\|ts\|json>` | Config file format (`--ts`/`--js` are shorthands) |
 | `migronaut init --secret-provider` | Generate a secret-manager config |
@@ -160,4 +176,10 @@ working unchanged. The full map is also exported from the package root as
 | `26` | `QUEUE_JOB_FAILED` — a queue group's `wait()` saw a job fail or time out |
 | `27` | `CONVERGE_FAILED` — [`converge`](/commands/converge) refused a conflicting plan, a step failed, or `--wait-search` gave up |
 | `28` | `COLLECTIONS_DRIFT` — `converge --check` found the database out of step with the declarations, or a search index that failed to build |
+| `29` | `REVISION_CONFLICT` — a revision-guarded write lost a race (library only) |
+| `30` | `SHAPE_VERSION_UNSUPPORTED` — an upcaster met a document it cannot read (library only) |
+| `31` | `BACKGROUND_PENDING` — a migration waits for a [background migration](/commands/background), or `background status --check` / `background verify` found work |
+| `32` | `BACKGROUND_FAILED` — a background migration failed |
+| `33` | `BACKGROUND_CONFLICT` — a background control action did not fit its state |
+| `34` | `SANDBOX_REFUSED` — a background dry run reached for something the sandbox refuses |
 | `130` / `143` | Killed by a second SIGINT / SIGTERM |

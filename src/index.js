@@ -1,8 +1,12 @@
 const { EXIT_CODES } = require('./cli/exit-codes.js');
+const { startBackgroundRunner } = require('./core/background-runner.js');
 const { MigratorKit } = require('./core/migrator.js');
 const { pendingMigrations, runMigrations } = require('./core/run.js');
 const { createLogger } = require('./utils/logger.js');
 const {
+  BackgroundConflictError,
+  BackgroundFailedError,
+  BackgroundPendingError,
   ChecksumMismatchError,
   ConfigFileExistsError,
   ConfigInvalidError,
@@ -27,7 +31,10 @@ const {
   OutOfOrderMigrationError,
   QueueJobFailedError,
   QueueJobInvalidError,
+  RevisionConflictError,
   RunAbortedError,
+  SandboxRefusedError,
+  ShapeVersionError,
 } = require('./errors/index.js');
 
 module.exports = {
@@ -46,7 +53,13 @@ module.exports = {
   // The CLI's exit-code map, for wrappers that mirror its semantics
   EXIT_CODES,
 
+  // Background migrations driven from inside the application (experimental)
+  startBackgroundRunner,
+
   // Error classes
+  BackgroundConflictError,
+  BackgroundFailedError,
+  BackgroundPendingError,
   ChecksumMismatchError,
   ConfigFileExistsError,
   ConfigInvalidError,
@@ -71,5 +84,8 @@ module.exports = {
   OutOfOrderMigrationError,
   QueueJobFailedError,
   QueueJobInvalidError,
+  RevisionConflictError,
   RunAbortedError,
+  SandboxRefusedError,
+  ShapeVersionError,
 };

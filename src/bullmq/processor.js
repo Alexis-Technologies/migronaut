@@ -11,14 +11,14 @@ const {
 const { pickActor } = require('../utils/actor.js');
 const { errorText } = require('../utils/error.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
+const { JOB_NAMES, assertAllowed, isObjectLike, parseJobData, resolveAllow } = require('./jobs.js');
 const {
-  JOB_NAMES,
-  assertAllowed,
-  isPlainObject,
-  parseJobData,
-  resolveAllow,
-} = require('./jobs.js');
-const { assertJobOptions, enqueueConverge, enqueueUp } = require('./producer.js');
+  assertBackgroundJobOptions,
+  assertJobOptions,
+  enqueueBackground,
+  enqueueConverge,
+  enqueueUp,
+} = require('./producer.js');
 
 /**
  * Failures a later attempt can get past without anything being fixed: the lock
@@ -136,10 +136,10 @@ function prepareErrorForQueue(error) {
  * opens any connection of its own.
  */
 function resolveProcessorOptions(options) {
-  if (!isPlainObject(options)) {
+  if (!isObjectLike(options)) {
     throw new ConfigInvalidError('createMigrationProcessor options must be an object');
   }
-  const { kit, config, lockWait = {}, jobOptions, ordered = true, allow } = options;
+  const { kit, config, lockWait = {}, jobOptions, ordered = true, allow, background } = options;
   if (kit !== undefined && config !== undefined) {
     throw new ConfigInvalidError('Pass either `kit` or `config`, not both');
   }
@@ -149,7 +149,7 @@ function resolveProcessorOptions(options) {
   if (typeof ordered !== 'boolean') {
     throw new ConfigInvalidError('ordered must be a boolean', { ordered });
   }
-  if (!isPlainObject(lockWait)) {
+  if (!isObjectLike(lockWait)) {
     throw new ConfigInvalidError('lockWait must be an object', { lockWait: typeof lockWait });
   }
   // Unlike runMigrations, waiting is the default: nothing is blocked on this
@@ -157,7 +157,24 @@ function resolveProcessorOptions(options) {
   const waitOptions = { onLockHeld: 'wait', ...lockWait };
   assertLockWaitOptions(waitOptions);
   assertJobOptions(jobOptions);
+  if (background !== undefined) assertBackgroundLink(background);
   return { waitOptions, defaultOrdered: ordered, allow: resolveAllow(allow) };
+}
+
+/**
+ * The background queue a migration processor hands what it registers to:
+ * `{ queue, jobOptions?, stallMs? }`.
+ */
+function assertBackgroundLink(background) {
+  if (!isObjectLike(background) || typeof background.queue?.addBulk !== 'function') {
+    throw new ConfigInvalidError('background must be { queue } — the background queue');
+  }
+  for (const key of Object.keys(background)) {
+    if (key !== 'queue' && key !== 'jobOptions' && key !== 'stallMs') {
+      throw new ConfigInvalidError(`background.${key} is not an option here`, { key });
+    }
+  }
+  assertBackgroundJobOptions(background.jobOptions);
 }
 
 /**
@@ -173,7 +190,7 @@ function resolveProcessorOptions(options) {
  */
 function createMigrationProcessor(options = {}) {
   const { waitOptions, defaultOrdered, allow } = resolveProcessorOptions(options);
-  const { kit: injectedKit, config, kitOptions, queue, jobOptions } = options;
+  const { kit: injectedKit, config, kitOptions, queue, jobOptions, background } = options;
 
   const ownsKit = injectedKit === undefined;
   const kit = injectedKit ?? new MigratorKit(config ?? {}, kitOptions);
@@ -246,6 +263,9 @@ function createMigrationProcessor(options = {}) {
     'migration:skipped': (event) => {
       if (current) log(current, `⏭ Skipped ${event.migration} (${event.reason ?? 'skipped'})`);
     },
+    'background:registered': (event) => {
+      if (current) current.registered.push(event.migration);
+    },
     'converge:start': () => {
       if (!current) return;
       current.started = true;
@@ -288,6 +308,53 @@ function createMigrationProcessor(options = {}) {
   };
   for (const [event, listener] of Object.entries(listeners)) kit.on(event, listener);
 
+  /** The background queue options every enqueue from here shares */
+  const backgroundOptions = () => ({
+    ...(background.jobOptions !== undefined ? { jobOptions: background.jobOptions } : {}),
+    ...(background.stallMs !== undefined ? { stallMs: background.stallMs } : {}),
+  });
+
+  /**
+   * Hand what this job registered to the background queue. Never fails the
+   * job — it is applied; a coordinator that could not be added now is added
+   * by the next heal (a sync tick, a verify tick, a worker's start).
+   */
+  async function startBackground(ctx) {
+    if (background === undefined || ctx.registered.length === 0) return undefined;
+    const started = [];
+    for (const migration of ctx.registered) {
+      try {
+        const { jobs } = await enqueueBackground(background.queue, kit, {
+          migration,
+          ...backgroundOptions(),
+        });
+        for (const job of jobs) started.push({ migration, jobId: job.id });
+      } catch (error) {
+        kit.logger.warn(
+          `⚠ Could not enqueue background migration ${migration}: ${errorText(error)} — ` +
+            'the next heal will',
+          { ...jobIds(ctx), migration, error: errorText(error) },
+        );
+      }
+    }
+    for (const entry of started) log(ctx, `⧗ Background coordinator ${entry.jobId} enqueued`);
+    return started;
+  }
+
+  /** Every background migration with work to do gets its coordinator — a sync tick's heal */
+  async function healBackground() {
+    if (background === undefined) return undefined;
+    try {
+      const { jobs } = await enqueueBackground(background.queue, kit, backgroundOptions());
+      return jobs.length;
+    } catch (error) {
+      kit.logger.warn(`⚠ Background heal failed: ${errorText(error)}`, {
+        error: errorText(error),
+      });
+      return 0;
+    }
+  }
+
   function resultOf(ctx, rows, waitedMs) {
     const { data } = ctx;
     const row = rows[0];
@@ -319,7 +386,8 @@ function createMigrationProcessor(options = {}) {
 
     try {
       const { result, waitedMs } = await waitForLock(ctx, attempt, signal);
-      return resultOf(ctx, result, waitedMs);
+      const started = await startBackground(ctx);
+      return { ...resultOf(ctx, result, waitedMs), ...(started ? { background: started } : {}) };
     } catch (error) {
       // A duplicate rollback job: the first one already reverted it. Same
       // outcome as a duplicate `up` job, which the kit reports as skipped.
@@ -415,6 +483,9 @@ function createMigrationProcessor(options = {}) {
     };
   }
 
+  /** What the last sync tick found the line waiting for — `{ migration, waitsFor }` */
+  let lastWaiting;
+
   async function runSyncJob(ctx) {
     if (!queue) {
       throw new ConfigInvalidError(
@@ -422,6 +493,9 @@ function createMigrationProcessor(options = {}) {
       );
     }
     const { to } = ctx.data;
+    // Background migrations first: whatever this tick enqueues may wait for one.
+    const healed = await healBackground();
+    const backgroundField = healed !== undefined ? { background: { enqueued: healed } } : {};
     // The cheap probe first: a scheduler ticks far more often than there is
     // anything to do, and planning proper re-reads the whole directory.
     const pending = await kit.list('pending');
@@ -433,6 +507,7 @@ function createMigrationProcessor(options = {}) {
         enqueued: 0,
         upToDate: true,
         migrations: [],
+        ...backgroundField,
       };
       // With `convergeAfterUp`, a tick that finds no migration still checks
       // the declared collections — a deploy that only changed a definition
@@ -464,17 +539,34 @@ function createMigrationProcessor(options = {}) {
         upToDate: false,
         migrations: [],
         held,
+        ...backgroundField,
+      };
+    }
+    // Still waiting where the last tick found it waiting, for what is still
+    // not done: said again without planning — a background migration takes
+    // hours, and planning re-reads the whole directory on every tick.
+    if (lastWaiting?.migration === pending[0].file && (await stillWaiting(lastWaiting))) {
+      return {
+        kind: 'sync',
+        groupId: null,
+        batch: null,
+        enqueued: 0,
+        upToDate: false,
+        migrations: [],
+        waiting: lastWaiting,
+        ...backgroundField,
       };
     }
     const group = await enqueueUp(queue, kit, {
       ...(to !== undefined ? { to } : {}),
       ...(jobOptions ? { jobOptions } : {}),
     });
+    lastWaiting = group.waiting;
     const migrations = [];
     for (const job of group.jobs) migrations.push(job.migration);
     return {
       kind: 'sync',
-      groupId: group.upToDate ? null : group.groupId,
+      groupId: group.jobs.length === 0 ? null : group.groupId,
       batch: group.batch,
       enqueued: group.jobs.length,
       upToDate: group.upToDate,
@@ -482,7 +574,20 @@ function createMigrationProcessor(options = {}) {
       ...(group.converge
         ? { converge: { jobId: group.converge.id, deduplicated: group.converge.deduplicated } }
         : {}),
+      // Waiting is not held: `held` stays the circuit breaker on a failure.
+      ...(group.waiting ? { waiting: group.waiting } : {}),
+      ...backgroundField,
     };
+  }
+
+  /** Whether a background migration `waiting` waits for is still not done */
+  async function stillWaiting(waiting) {
+    if (typeof kit.backgroundStatus !== 'function') return false;
+    for (const name of waiting.waitsFor) {
+      const status = await kit.backgroundStatus(name);
+      if (status?.status !== 'completed' || status.direction === 'revert') return true;
+    }
+    return false;
   }
 
   /**
@@ -524,7 +629,14 @@ function createMigrationProcessor(options = {}) {
   }
 
   async function handle(job, token, signal) {
-    const ctx = { job, data: undefined, runId: undefined, started: false, writes: new Set() };
+    const ctx = {
+      job,
+      data: undefined,
+      runId: undefined,
+      started: false,
+      writes: new Set(),
+      registered: [],
+    };
     const startedAt = Date.now();
     const signals = [shutdownController.signal];
     if (signal) signals.push(signal);
@@ -624,9 +736,11 @@ function createMigrationProcessor(options = {}) {
 
 module.exports = {
   RETRYABLE_CODES,
+  UNRECOVERABLE_ERROR_NAME,
   WAITING_ERROR_NAME,
   createMigrationProcessor,
   isTransientForJob,
   isRetryableError,
+  prepareErrorForQueue,
   resolveProcessorOptions,
 };

@@ -260,6 +260,88 @@ class ConvergeFailedError extends MigronautError {
   }
 }
 
+/**
+ * Thrown by the optimistic-concurrency helpers (`@alexify/migronaut/versioning`)
+ * when a revision-guarded write matched nothing. `context.reason` says why:
+ * `'conflict'` (the document exists at another revision — `context.actual`),
+ * `'not-found'` (no document matches the filter at all) or `'unknown'` (the
+ * follow-up read was skipped or could not tell). `context.expected` is the
+ * revision the caller held. The filter is never copied in — it may carry PII.
+ */
+class RevisionConflictError extends MigronautError {
+  constructor(message, context, options) {
+    super('REVISION_CONFLICT', message, context, options);
+    this.name = 'RevisionConflictError';
+  }
+}
+
+/**
+ * Thrown by an upcaster that cannot bring a document to the current shape:
+ * `context.reason` is `'newer'` (written by a newer release), `'below-min'`
+ * (older than the oldest shape still supported) or `'invalid'` (the version
+ * field is not a non-negative integer, or a step returned something that is
+ * not a document).
+ */
+class ShapeVersionError extends MigronautError {
+  constructor(message, context, options) {
+    super('SHAPE_VERSION_UNSUPPORTED', message, context, options);
+    this.name = 'ShapeVersionError';
+  }
+}
+
+/**
+ * Thrown when a migration `requires` a background migration that has not
+ * completed yet — or whose collection still holds documents of the old shape.
+ * Nothing was run: `context.waitsFor` names the background migrations it
+ * waits for, with their status.
+ */
+class BackgroundPendingError extends MigronautError {
+  constructor(message, context, options) {
+    super('BACKGROUND_PENDING', message, context, options);
+    this.name = 'BackgroundPendingError';
+  }
+}
+
+/**
+ * Thrown when a background migration ended `failed` — a partition used up its
+ * slice failures, the document error budget ran out, or old-shape documents
+ * kept appearing for `maxPasses` passes. `context.migration` names it and
+ * `context.lastError` says what happened last.
+ */
+class BackgroundFailedError extends MigronautError {
+  constructor(message, context, options) {
+    super('BACKGROUND_FAILED', message, context, options);
+    this.name = 'BackgroundFailedError';
+  }
+}
+
+/**
+ * Thrown when a control action does not fit the background migration's state
+ * — pausing a completed one, resuming one that is not paused, retrying one
+ * that is still running. `context.status` is the state it found and
+ * `context.action` what was asked.
+ */
+class BackgroundConflictError extends MigronautError {
+  constructor(message, context, options) {
+    super('BACKGROUND_CONFLICT', message, context, options);
+    this.name = 'BackgroundConflictError';
+  }
+}
+
+/**
+ * Thrown by the dry-run sandbox when a step reaches for something it cannot
+ * run inside an always-aborted transaction — DDL, an admin command, another
+ * session, `$out`/`$merge`, a migronaut-internal collection. `context.method`
+ * names the call and `context.reason` the rule it broke. A dry run reports
+ * every refusal even when the step caught the error itself.
+ */
+class SandboxRefusedError extends MigronautError {
+  constructor(message, context, options) {
+    super('SANDBOX_REFUSED', message, context, options);
+    this.name = 'SandboxRefusedError';
+  }
+}
+
 module.exports = {
   MigronautError,
   LockAlreadyHeldError,
@@ -286,4 +368,10 @@ module.exports = {
   QueueJobInvalidError,
   QueueJobFailedError,
   ConvergeFailedError,
+  RevisionConflictError,
+  ShapeVersionError,
+  BackgroundPendingError,
+  BackgroundFailedError,
+  BackgroundConflictError,
+  SandboxRefusedError,
 };

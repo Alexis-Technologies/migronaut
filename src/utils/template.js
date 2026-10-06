@@ -145,6 +145,51 @@ module.exports = { description, up, down };
 `;
 }
 
+/**
+ * The built-in background migration template (`create --background`): the
+ * declarative form, with the knobs most worth knowing about spelled out.
+ */
+function defaultBackgroundTemplate(js, esm = false) {
+  const typed = js
+    ? "/** @type {import('@alexify/migronaut').DeclarativeBackgroundMigration} */\n"
+    : '';
+  const typeImport = js
+    ? ''
+    : "import type { DeclarativeBackgroundMigration } from '@alexify/migronaut';\n\n";
+  const annotation = js ? '' : ': DeclarativeBackgroundMigration';
+  const body = `{
+  // The collection to rewrite (\`up\` refuses this placeholder).
+  collection: 'TODO',
+  // Documents at version \`from\` (0: no version field yet) become version \`to\`.
+  from: 1,
+  to: 2,
+  // The new document for one old one — return it reshaped; migronaut sets the
+  // version, bumps the revision and writes only the fields that changed.
+  migrate: (doc) => {
+    // TODO: reshape doc, and return it
+    throw new Error('migrate is not written yet');
+  },
+  // The way back, for \`down\`. Without one, \`down\` refuses once documents
+  // were rewritten. Never \`(doc) => doc\`: that would stamp the old version
+  // on documents still in the new shape.
+  // revert: ({ shipping, ...doc }) => ({ ...doc, address: shipping.address }),
+  // Partitions worked at once, across every process (default 1).
+  // maxParallel: 4,
+}`;
+  if (esm) {
+    return `${typeImport}export const description = '';
+
+${typed}export const background${annotation} = ${body};
+`;
+  }
+  return `${typeImport}const description = '';
+
+${typed}const background${annotation} = ${body};
+
+module.exports = { description, background };
+`;
+}
+
 /** Extensions a custom `--template` file may have — anything else is refused */
 const TEMPLATE_EXTENSIONS = ['.ts', '.js', '.cjs', '.mjs'];
 
@@ -152,7 +197,8 @@ const TEMPLATE_EXTENSIONS = ['.ts', '.js', '.cjs', '.mjs'];
 const MAX_TEMPLATE_BYTES = 1024 * 1024;
 
 /** Resolve template file contents — a custom template if provided, else the built-in */
-async function resolveTemplateContent(templatePath, js, esm = false) {
+async function resolveTemplateContent(templatePath, js, esm = false, background = false) {
+  if (background) return defaultBackgroundTemplate(js, esm);
   if (templatePath) {
     const ext = path.extname(templatePath);
     if (!TEMPLATE_EXTENSIONS.includes(ext)) {
@@ -198,6 +244,7 @@ async function createMigrationFile(options) {
     // Match the project's module system, so a generated migration never makes
     // Node reparse it and warn.
     await isEsmProject(options.dir),
+    options.background === true,
   );
   try {
     // 'wx' fails if the path exists — creating a migration must never silently
@@ -365,6 +412,20 @@ function configBody(values, createExtension) {
   // most searchIndexWaitTimeoutMs (10 minutes by default).
   // waitForSearchIndexes: false,
   // searchIndexWaitTimeoutMs: 600000,
+
+  // ── Background migrations (experimental) ────────────────────
+  // A migration file with \`export const background = {…}\` is registered by
+  // \`up\` and runs in partitions (BullMQ, \`migronaut background run\`, or an
+  // in-process runner) without holding the migration lock.
+  // backgroundCollection: '_migronaut_background',
+  // Run it to the end inside the \`up\` that registers it instead.
+  // backgroundInline: false,
+  // Old-shape documents after it completed: reopen it ('reopen') or report.
+  // backgroundOnDrift: 'reopen',
+  // How drift is watched: 'poll' (every 10 minutes), 'stream', or 'both'.
+  // backgroundDrift: 'poll',
+  // Partition a sharded collection by its shard key ('auto') or not ('off').
+  // backgroundShardAware: 'auto',
 
   // ── Lifecycle hooks (code only — not available in JSON config) ──
   // hooks: {

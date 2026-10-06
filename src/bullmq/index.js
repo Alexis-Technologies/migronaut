@@ -1,15 +1,20 @@
+const { createBackgroundProcessor } = require('./background-processor.js');
 const {
+  DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
   DEFAULT_CONVERGE_SCHEDULER_ID,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
   JOB_DATA_VERSION,
   JOB_NAMES,
   MIN_JOB_DATA_VERSION,
+  backgroundQueueName,
   dedupId,
+  parseBackgroundJobData,
   parseJobData,
 } = require('./jobs.js');
 const { RETRYABLE_CODES, createMigrationProcessor, isRetryableError } = require('./processor.js');
 const {
+  enqueueBackground,
   enqueueConverge,
   enqueueDown,
   enqueueUp,
@@ -41,6 +46,11 @@ module.exports = {
   planDownJobs,
   waitForGroup,
 
+  // Background migrations on a queue of their own (experimental)
+  createBackgroundProcessor,
+  enqueueBackground,
+  backgroundQueueName,
+
   // The job contract
   JOB_NAMES,
   JOB_DATA_VERSION,
@@ -48,8 +58,10 @@ module.exports = {
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
   DEFAULT_CONVERGE_SCHEDULER_ID,
+  DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
   RETRYABLE_CODES,
   dedupId,
   isRetryableError,
+  parseBackgroundJobData,
   parseJobData,
 };

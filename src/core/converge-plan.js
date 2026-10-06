@@ -1,5 +1,12 @@
 const { deepEqual } = require('../utils/canonical.js');
-const { compareIndex, normalizeLiveIndex, restoreSpec, sameSignature } = require('./index-spec.js');
+const { shardedVersionIndexKey, versionFloorConflict } = require('./versioning-spec.js');
+const {
+  compareIndex,
+  normalizeDeclaredIndex,
+  normalizeLiveIndex,
+  restoreSpec,
+  sameSignature,
+} = require('./index-spec.js');
 const {
   compareSearchIndex,
   isBeingRemoved,
@@ -179,7 +186,50 @@ function joinReasons(first, second) {
   return first ? `${first}; ${second}` : second;
 }
 
-function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities }, row, steps) {
+/** Why the ordinary version index stays on a sharded collection whose version index replaced it */
+const DISPLACED_REASON =
+  'replaced by the shard-key-prefixed version index — drop it once nothing hints it ' +
+  '(prune does, when the indexes are declared)';
+
+/**
+ * The declared indexes as they apply to this live collection: on a sharded
+ * one, the version index takes the shard key between the version field and
+ * `_id` (versioning-spec.js). `displaced` names the ordinary version index it
+ * replaces, when the two differ.
+ */
+function indexesFor(definition, live) {
+  const indexes = definition.indexes;
+  if (indexes === undefined || !definition.versioning || !live.shardKey) return { indexes };
+  const sharded = normalizeDeclaredIndex({
+    key: shardedVersionIndexKey(definition.versioning, live.shardKey),
+  });
+  const result = [];
+  let displaced;
+  for (const index of indexes) {
+    if (index.versionIndex === true && index.name !== sharded.name) {
+      displaced = index.name;
+      result.push({ ...sharded, versionIndex: true });
+    } else {
+      result.push(index);
+    }
+  }
+  return { indexes: result, displaced };
+}
+
+/**
+ * Plan the declared indexes of one collection against its live ones. With
+ * `partial` (only the version index of `versioning` is declared, not the
+ * collection's own list) the other live indexes are not managed at all: never
+ * listed, never dropped — prune does not reach them.
+ */
+function planIndexes(
+  declaredIndexes,
+  live,
+  { prune: pruneOption, rebuildUnique, capabilities, partial = false, displaced },
+  row,
+  steps,
+) {
+  const prune = pruneOption && !partial;
   const defaultCollation = live.options?.collation;
   const liveIndexes = [];
   for (const raw of live.indexes) {
@@ -360,7 +410,22 @@ function planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities
   }
   if (group.actions.length > 0) steps.push(group);
 
+  // The ordinary version index a sharded one replaced: kept, and said so —
+  // a background migration may still be hinting it.
+  const old = displaced !== undefined ? byName.get(displaced) : undefined;
+  if (old !== undefined && !declaredNames.has(displaced) && !prune) {
+    consumed.add(displaced);
+    row({
+      target: 'index',
+      name: displaced,
+      action: 'keep',
+      reason: DISPLACED_REASON,
+      from: indexValue(old.raw),
+    });
+  }
+
   // Last, so an index is only ever removed once everything declared exists.
+  if (partial) return;
   for (const index of liveIndexes) {
     if (consumed.has(index.name) || declaredNames.has(index.name)) continue;
     if (prune && backsShardKey(index, live.shardKey)) {
@@ -554,8 +619,8 @@ function planSearchIndexes(declaredList, live, { prune, search }, row, submit, d
 /**
  * Plan one collection. `definition` is a normalized definition (see
  * collections.js); `live` is `{ exists, type?, options?, indexes,
- * searchIndexes? }` as converge.js reads it. Returns `{ name, actions, steps }`:
- * `actions` are the result rows (status `'planned'`), `steps` the operations
+ * searchIndexes?, shardKey?, versionFloor? }` as converge.js reads it.
+ * Returns `{ name, actions, steps }`: `actions` are the result rows (status `'planned'`), `steps` the operations
  * that carry them out, in execution order, each pointing at the rows it
  * settles. `search` is `{ available, onUnavailable }` — whether the server has
  * Atlas Search, and what a declared search index becomes when it does not.
@@ -615,7 +680,7 @@ function planCollectionSteps(
   }
 
   const desired = desiredValidator(definition);
-  const declaredIndexes = definition.indexes;
+  const { indexes: declaredIndexes, displaced } = indexesFor(definition, live);
   const declaredSearch = definition.searchIndexes;
   const indexSteps = [];
   const searchSubmit = [];
@@ -655,10 +720,24 @@ function planCollectionSteps(
   }
 
   if (desired !== undefined) {
-    planValidator(name, desired, liveValidator(live.options), row, steps);
+    // Raising versioning.min over documents still below it: refused, so the
+    // whole run stops before its first write (see versionFloorToCheck).
+    const refused = versionFloorConflict(live.versionFloor);
+    if (refused) {
+      row({ target: 'validator', name, action: 'conflict', reason: refused, to: desired });
+    } else {
+      planValidator(name, desired, liveValidator(live.options), row, steps);
+    }
   }
   if (declaredIndexes !== undefined) {
-    planIndexes(declaredIndexes, live, { prune, rebuildUnique, capabilities }, row, indexSteps);
+    const partial = definition.indexesPartial === true;
+    planIndexes(
+      declaredIndexes,
+      live,
+      { prune, rebuildUnique, capabilities, partial, displaced },
+      row,
+      indexSteps,
+    );
   }
   if (declaredSearch !== undefined) {
     planSearchIndexes(declaredSearch, live, { prune, search }, row, searchSubmit, searchDrops);

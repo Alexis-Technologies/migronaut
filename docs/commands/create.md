@@ -15,6 +15,7 @@ migronaut create add-users-index            # → 20260605143021-add-users-index
 migronaut create add-users-index --ts       # force a .ts file
 migronaut create add-users-index --js       # force a .js file
 migronaut create add-users-index --template ./my-template.ts
+migronaut create orders-v2 --background      # a background migration (export const background)
 ```
 
 ### File type resolution
@@ -28,6 +29,7 @@ built-in default (`js`).
 | `--ts` | Generate a `.ts` migration (overrides config). |
 | `--js` | Generate a `.js` migration (overrides config). |
 | `--template <path>` | Use a custom template file instead of the built-in stub. |
+| `--background` | Generate a [background migration](/guide/background-migrations) (`export const background = { … }`) instead of `up`/`down`. Not with `--template`. |
 | `--json` | Emit the created file path as JSON. |
 
 ::: tip

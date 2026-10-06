@@ -3,6 +3,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { MigrationFileNotFoundError, MigrationInvalidExportError } = require('../errors/index.js');
 const { errorText } = require('./error.js');
+const { requiresIssues } = require('./migration-name.js');
 
 /** TypeScript source extensions that require a TS-capable runtime to import */
 const TS_EXTENSIONS = new Set(['.ts', '.mts', '.cts']);
@@ -96,16 +97,13 @@ function importUserFile(filepath, options = {}) {
 }
 
 /**
- * Dynamically load a migration file and validate its exports.
- *
- * Handles all three supported formats:
- * - TypeScript / JavaScript ESM named exports (`export async function up/down`)
- * - CommonJS default export (`module.exports = { up, down }`)
+ * Import a migration file: its module, resolved — the default export of a
+ * CommonJS file, the namespace of an ES module with named exports.
  *
  * @throws {MigrationFileNotFoundError} when the file does not exist
- * @throws {MigrationInvalidExportError} when up/down are not both functions
+ * @throws {MigrationInvalidExportError} when TypeScript cannot be loaded
  */
-async function loadMigrationFile(filepath, options = {}) {
+async function importMigrationModule(filepath, options = {}) {
   try {
     await fs.access(filepath);
   } catch {
@@ -123,7 +121,48 @@ async function loadMigrationFile(filepath, options = {}) {
     throw error;
   }
   // `mod.default ?? mod` handles the CommonJS default-export case
-  const resolved = imported.default ?? imported;
+  return imported.default ?? imported;
+}
+
+/** The `requires` export, validated against the file's own name */
+function readRequires(resolved, filepath) {
+  if (resolved.requires === undefined) return {};
+  const issues = requiresIssues(resolved.requires, path.basename(filepath));
+  if (issues.length > 0) {
+    throw new MigrationInvalidExportError(`Invalid ${issues[0].path}: ${issues[0].message}`, {
+      filepath,
+      issues,
+    });
+  }
+  return { requires: [...resolved.requires] };
+}
+
+/**
+ * What a migration module exports, validated: a regular migration
+ * (`{ up, down, useTransaction?, timeoutMs?, description?, requires? }`) or a
+ * background one (`{ kind: 'background', background, description?,
+ * requires? }` — its spec is validated where the collection's versioning is
+ * known). A file with both `background` and `up`/`down` is refused: the
+ * expand steps belong in a migration of their own.
+ *
+ * @throws {MigrationInvalidExportError}
+ */
+function resolveMigrationExports(resolved, filepath) {
+  if (resolved.background !== undefined) {
+    if (resolved.up !== undefined || resolved.down !== undefined) {
+      throw new MigrationInvalidExportError(
+        'A background migration exports no up() or down() — put the expand steps in a ' +
+          'migration of their own',
+        { filepath },
+      );
+    }
+    return {
+      kind: 'background',
+      background: resolved.background,
+      ...(typeof resolved.description === 'string' ? { description: resolved.description } : {}),
+      ...readRequires(resolved, filepath),
+    };
+  }
 
   if (!isFunction(resolved.up) || !isFunction(resolved.down)) {
     throw new MigrationInvalidExportError('Migration must export async up() and down() functions', {
@@ -142,8 +181,37 @@ async function loadMigrationFile(filepath, options = {}) {
   if (typeof resolved.description === 'string') {
     migration.description = resolved.description;
   }
+  Object.assign(migration, readRequires(resolved, filepath));
 
   return migration;
 }
 
-module.exports = { importUserFile, loadMigrationFile, tsLoadErrorOrNull, tsLoadMessageOrNull };
+/**
+ * Dynamically load a migration file and validate its exports.
+ *
+ * Handles all three supported formats:
+ * - TypeScript / JavaScript ESM named exports (`export async function up/down`)
+ * - CommonJS default export (`module.exports = { up, down }`)
+ *
+ * A background migration (`kind: 'background'`) is returned like any other:
+ * the caller tells it apart by its kind.
+ *
+ * @throws {MigrationFileNotFoundError} when the file does not exist
+ * @throws {MigrationInvalidExportError} when up/down are not both functions
+ */
+async function loadMigrationFile(filepath, options = {}) {
+  const migration = resolveMigrationExports(
+    await importMigrationModule(filepath, options),
+    filepath,
+  );
+  return migration;
+}
+
+module.exports = {
+  importMigrationModule,
+  importUserFile,
+  loadMigrationFile,
+  resolveMigrationExports,
+  tsLoadErrorOrNull,
+  tsLoadMessageOrNull,
+};

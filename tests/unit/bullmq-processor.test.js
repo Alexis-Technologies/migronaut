@@ -1129,3 +1129,132 @@ describe('isRetryableError', () => {
     assert.strictEqual(isRetryableError(undefined), true);
   });
 });
+
+describe('createMigrationProcessor background link', () => {
+  const NAME = '0001-orders.js';
+  function linked(overrides = {}, queueOverrides = {}) {
+    const added = [];
+    const queue = {
+      addBulk: mock.fn(async (specs) => {
+        added.push(...specs);
+        return specs.map((_, index) => ({ id: `bg-${added.length + index}` }));
+      }),
+      ...queueOverrides,
+    };
+    const kit = stubKit({
+      backgroundStatus: mock.fn(async (name) => ({ migration: name, status: 'pending' })),
+      runnableBackground: mock.fn(async () => [
+        { migration: NAME, status: 'pending', maxParallel: 1 },
+      ]),
+      ...overrides,
+    });
+    // What the kit emits when an up registers a background migration.
+    const up = kit.up;
+    kit.up = mock.fn(async (name, options) => {
+      kit.emit('background:registered', { migration: name, status: 'pending' });
+      return up(name, options);
+    });
+    return { kit, queue, added };
+  }
+
+  for (const [what, background, pattern] of [
+    ['a non-object', 1, /background must be \{ queue \}/],
+    ['no queue', {}, /background must be \{ queue \}/],
+    ['an unknown key', { queue: { addBulk() {} }, sliceMs: 5 }, /background\.sliceMs/],
+    ['a forbidden job option', { queue: { addBulk() {} }, jobOptions: { parent: {} } }, /parent/],
+  ]) {
+    it(`should refuse ${what}`, () => {
+      assert.throws(
+        () => createMigrationProcessor({ kit: stubKit(), background }),
+        ConfigInvalidError,
+      );
+      assert.throws(() => createMigrationProcessor({ kit: stubKit(), background }), pattern);
+    });
+  }
+
+  it('should enqueue the coordinator of what an up job registered', async () => {
+    const { kit, queue, added } = linked();
+    const processor = createMigrationProcessor({
+      kit,
+      background: { queue, jobOptions: { keepLogs: 2 }, stallMs: 5000 },
+    });
+    const job = upJob({ migration: NAME });
+    const result = await processor(job, 'token');
+    assert.deepStrictEqual(result.background, [{ migration: NAME, jobId: 'bg-1' }]);
+    assert.strictEqual(added[0].name, 'background');
+    assert.strictEqual(added[0].opts.keepLogs, 2);
+    assert.ok(job.logs.some((row) => /Background coordinator bg-1 enqueued/.test(row)));
+  });
+
+  it('should still apply when the coordinator cannot be enqueued — the next heal will', async () => {
+    const { kit, queue } = linked(
+      {},
+      {
+        addBulk: mock.fn(async () => {
+          throw new Error('redis down');
+        }),
+      },
+    );
+    const warnings = [];
+    kit.logger = { ...kit.logger, warn: (message) => warnings.push(message) };
+    const processor = createMigrationProcessor({ kit, background: { queue } });
+    const result = await processor(upJob({ migration: NAME }), 'token');
+    assert.strictEqual(result.status, 'applied');
+    assert.deepStrictEqual(result.background, []);
+    assert.match(warnings[0], /Could not enqueue background migration .*redis down/);
+  });
+
+  it('should heal on every sync tick, and report a line waiting for a background migration', async () => {
+    let completed = false;
+    const { kit, queue, added } = linked({
+      list: mock.fn(async () => [{ file: '0002-contract.js', status: 'pending' }]),
+      dryRun: mock.fn(async () => [
+        { file: '0002-contract.js', status: 'pending', ...(completed ? {} : { waitsFor: [NAME] }) },
+      ]),
+      backgroundStatus: mock.fn(async () => ({
+        migration: NAME,
+        status: completed ? 'completed' : 'running',
+        direction: 'forward',
+      })),
+    });
+    const processor = createMigrationProcessor({
+      kit,
+      queue: { addBulk: mock.fn(async (specs) => specs.map((_, i) => ({ id: `j${i}` }))) },
+      background: { queue },
+    });
+    const result = await processor(fakeJob('sync', { kind: 'sync' }), 'token');
+    // Waiting is not a failure: `held` stays the circuit breaker's.
+    assert.strictEqual(result.held, undefined);
+    assert.deepStrictEqual(result.waiting, { migration: '0002-contract.js', waitsFor: [NAME] });
+    assert.deepStrictEqual(result.background, { enqueued: 1 });
+    assert.strictEqual(result.upToDate, false);
+    assert.strictEqual(result.groupId, null);
+    assert.strictEqual(added[0].data.migration, NAME);
+    const plans = kit.dryRun.mock.callCount();
+    // The next tick, still waiting: said again without planning.
+    const again = await processor(fakeJob('sync', { kind: 'sync' }), 'token');
+    assert.deepStrictEqual(again.waiting, { migration: '0002-contract.js', waitsFor: [NAME] });
+    assert.strictEqual(kit.dryRun.mock.callCount(), plans, 'no plan while still waiting');
+    // Once it completed, the tick plans — and the line goes on.
+    completed = true;
+    const resumed = await processor(fakeJob('sync', { kind: 'sync' }), 'token');
+    assert.strictEqual(resumed.waiting, undefined);
+    assert.ok(kit.dryRun.mock.callCount() > plans);
+  });
+
+  it('should count a heal that fails as nothing enqueued', async () => {
+    const { kit, queue } = linked({
+      runnableBackground: mock.fn(async () => {
+        throw new Error('mongo blip');
+      }),
+    });
+    const processor = createMigrationProcessor({
+      kit,
+      queue: { addBulk: mock.fn() },
+      background: { queue },
+    });
+    const result = await processor(fakeJob('sync', { kind: 'sync' }), 'token');
+    assert.deepStrictEqual(result.background, { enqueued: 0 });
+    assert.strictEqual(result.upToDate, true);
+  });
+});

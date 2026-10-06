@@ -197,4 +197,4 @@ async function runMigration(params) {
   }
 }
 
-module.exports = { runMigration };
+module.exports = { isTransactionsUnsupported, runMigration };

@@ -37,7 +37,10 @@ describe('definitionIssues', () => {
   it('should refuse a definition that manages nothing', () => {
     const [issue] = issuesOf({ name: 'users' });
     assert.strictEqual(issue.path, 'collections[0]');
-    assert.match(issue.message, /no indexes, searchIndexes or validator — nothing to manage/);
+    assert.match(
+      issue.message,
+      /no indexes, searchIndexes, validator or versioning — nothing to manage/,
+    );
   });
 
   it('should accept a definition that only declares search indexes', () => {
@@ -445,5 +448,142 @@ describe('collection definition files', () => {
       ['collections[0]'],
     );
     assert.deepStrictEqual(await resolveDefinitions({}), []);
+  });
+});
+
+describe('versioning in a collection definition', () => {
+  it('should accept versioning alone, and with validationLevel', () => {
+    assert.deepStrictEqual(issuesOf({ name: 'orders', versioning: { current: 2 } }), []);
+    assert.deepStrictEqual(
+      issuesOf({ name: 'orders', versioning: { current: 1 }, validationLevel: 'strict' }),
+      [],
+    );
+  });
+
+  it('should report invalid versioning keys under the definition path', () => {
+    const issues = issuesOf({ name: 'orders', versioning: { current: 0, extra: 1 } });
+    assert.deepStrictEqual(issues.map((issue) => issue.path).sort(), [
+      'collections[0].versioning.current',
+      'collections[0].versioning.extra',
+    ]);
+    assert.deepStrictEqual(
+      pathsOf(
+        { versioning: { current: 1, min: 2 } },
+        { path: 'orders.ts:', fallbackName: 'orders' },
+      ),
+      ['orders.ts: versioning.min'],
+    );
+  });
+
+  it('should refuse a validator that constrains a managed field, or null', () => {
+    const messages = (validator, versioning = { current: 2 }) =>
+      issuesOf({ name: 'orders', versioning, validator }).map(
+        (issue) => `${issue.path} ${issue.message}`,
+      );
+    assert.match(messages(null)[0], /validator is null/);
+    assert.match(messages({ __v: { $gte: 1 } })[0], /constrains "__v"/);
+    assert.match(messages({ $jsonSchema: { properties: { __rev: {} } } })[0], /constrains "__rev"/);
+    assert.match(messages({ $jsonSchema: { required: ['__v'] } })[0], /constrains "__v"/);
+    assert.match(messages({ $jsonSchema: 'x' })[0], /\$jsonSchema must be an object/);
+    assert.match(messages({ $jsonSchema: { required: 'x' } })[0], /required must be an array/);
+    // With revisions off, the revision field is the application's own.
+    assert.deepStrictEqual(messages({ __rev: { $gte: 0 } }, { current: 1, revision: false }), []);
+  });
+
+  it('should refuse declaring the version index by hand', () => {
+    const [issue] = issuesOf({
+      name: 'orders',
+      versioning: { current: 1 },
+      indexes: [{ key: { a: 1 } }, { key: { __v: 1, _id: 1 } }],
+    });
+    assert.strictEqual(issue.path, 'collections[0].indexes[1]');
+    assert.match(issue.message, /version index/);
+    assert.deepStrictEqual(
+      issuesOf({
+        name: 'orders',
+        versioning: { current: 1, index: false },
+        indexes: [{ key: { __v: 1, _id: 1 } }],
+      }),
+      [],
+    );
+    assert.deepStrictEqual(
+      issuesOf({
+        name: 'orders',
+        versioning: { current: 1 },
+        indexes: [{ key: { __v: -1, _id: 1 } }, { key: { _id: 1, __v: 1 } }, { key: { __v: 1 } }],
+      }),
+      [],
+    );
+  });
+
+  it('should fold versioning into a synthesized validator, level moderate, and a partial index', () => {
+    const normalized = normalizeDefinition({ name: 'orders', versioning: { current: 2 } });
+    assert.deepStrictEqual(normalized.validator, {
+      $jsonSchema: {
+        required: ['__v', '__rev'],
+        properties: {
+          __v: { bsonType: 'int', minimum: 1 },
+          __rev: { bsonType: ['int', 'long'], minimum: 0 },
+        },
+      },
+    });
+    assert.strictEqual(normalized.validationLevel, 'moderate');
+    assert.strictEqual(normalized.indexesPartial, true);
+    assert.deepStrictEqual(
+      normalized.indexes.map((index) => index.name),
+      ['__v_1__id_1'],
+    );
+    assert.strictEqual(normalized.versioning.current, 2);
+  });
+
+  it('should merge into a declared $jsonSchema and keep its level', () => {
+    const normalized = normalizeDefinition({
+      name: 'orders',
+      versioning: { current: 3, min: 2, field: 'v', revision: false },
+      validator: { $jsonSchema: { required: ['a'], properties: { a: { bsonType: 'string' } } } },
+      indexes: [{ key: { a: 1 } }],
+    });
+    assert.deepStrictEqual(normalized.validator, {
+      $jsonSchema: {
+        required: ['a', 'v'],
+        properties: { a: { bsonType: 'string' }, v: { bsonType: 'int', minimum: 2 } },
+      },
+    });
+    assert.strictEqual(normalized.validationLevel, undefined);
+    assert.strictEqual(normalized.indexesPartial, undefined);
+    assert.deepStrictEqual(
+      normalized.indexes.map((index) => index.name),
+      ['a_1', 'v_1__id_1'],
+    );
+  });
+
+  it('should add a top-level $jsonSchema next to query operators, without required for min 0', () => {
+    const normalized = normalizeDefinition({
+      name: 'orders',
+      versioning: { current: 1, min: 0, index: false },
+      validator: { status: { $in: ['open', 'closed'] } },
+      validationLevel: 'strict',
+    });
+    assert.deepStrictEqual(normalized.validator, {
+      status: { $in: ['open', 'closed'] },
+      $jsonSchema: {
+        properties: {
+          __v: { bsonType: 'int', minimum: 0 },
+          __rev: { bsonType: ['int', 'long'], minimum: 0 },
+        },
+      },
+    });
+    assert.strictEqual(normalized.validationLevel, 'strict');
+    assert.strictEqual(normalized.indexes, undefined);
+  });
+
+  it('should treat an empty validator like none', () => {
+    const normalized = normalizeDefinition({
+      name: 'orders',
+      versioning: { current: 1 },
+      validator: {},
+    });
+    assert.strictEqual(normalized.validationLevel, 'moderate');
+    assert.deepStrictEqual(Object.keys(normalized.validator), ['$jsonSchema']);
   });
 });

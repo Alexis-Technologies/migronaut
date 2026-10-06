@@ -104,7 +104,7 @@ export default defineConfig({
       { text: 'Reference', link: '/reference/cli', activeMatch: '/reference/' },
       {
         // Hand-synced with package.json "version" — part of the release checklist.
-        text: 'v2.2.0',
+        text: 'v2.3.0',
         items: [
           { text: 'Changelog', link: `${repo}/blob/main/CHANGELOG.md` },
           { text: 'npm', link: 'https://www.npmjs.com/package/@alexify/migronaut' },
@@ -137,6 +137,8 @@ export default defineConfig({
             { text: 'Using Mongoose', link: '/guide/mongoose' },
             { text: 'Seeding Data', link: '/guide/seeding' },
             { text: 'Declared Collections', link: '/guide/collections' },
+            { text: 'Document Versioning', link: '/guide/versioning' },
+            { text: 'Background Migrations', link: '/guide/background-migrations' },
           ],
         },
         {
@@ -187,6 +189,7 @@ export default defineConfig({
             { text: 'migronaut baseline', link: '/commands/baseline' },
             { text: 'migronaut lock', link: '/commands/lock' },
             { text: 'migronaut unlock', link: '/commands/unlock' },
+            { text: 'migronaut background', link: '/commands/background' },
           ],
         },
       ],

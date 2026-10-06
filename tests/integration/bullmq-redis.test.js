@@ -2,6 +2,8 @@ const { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
 const { after, before, describe, it } = require('node:test');
 const { createMigrationProcessor, createMigrationQueue } = require('../../bullmq.js');
+const { defineBullMQBackgroundScenarios } = require('../helpers/bullmq-background-scenarios.js');
+const { defineBullMQFidelityScenarios } = require('../helpers/bullmq-fidelity.js');
 const { defineBullMQScenarios } = require('../helpers/bullmq-scenarios.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeProject } = require('../helpers/project.js');
@@ -62,6 +64,8 @@ describe(
     };
 
     defineBullMQScenarios(harness);
+    defineBullMQFidelityScenarios(harness);
+    defineBullMQBackgroundScenarios(harness);
 
     // ─── What only the real library can confirm ──────────────────────────────
 

@@ -1,6 +1,6 @@
 {
   "name": "@alexify/migronaut",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Elegant, fast, fully-typed, zero-dependency MongoDB migrations for Node.js — adopts an existing migrate-mongo changelog in one command",
   "license": "MIT",
   "author": "Alex Dolid <dolid.sasha@gmail.com>",
@@ -29,6 +29,10 @@
     "./bullmq": {
       "types": "./bullmq.d.ts",
       "default": "./bullmq.js"
+    },
+    "./versioning": {
+      "types": "./versioning.d.ts",
+      "default": "./versioning.js"
     }
   },
   "directories": {
@@ -39,6 +43,8 @@
     "index.d.ts",
     "bullmq.js",
     "bullmq.d.ts",
+    "versioning.js",
+    "versioning.d.ts",
     "migronaut.schema.json",
     "bin",
     "src",
@@ -54,7 +60,7 @@
     "test:integration": "node scripts/node-test.js --test-concurrency=1 \"tests/integration/**/*.test.js\"",
     "test:coverage": "c8 --all --include 'src/**' --check-coverage --lines 90 --branches 90 --functions 90 --reporter text --reporter lcov node scripts/node-test.js --test-concurrency=1 \"tests/unit/**/*.test.js\" \"tests/integration/**/*.test.js\"",
     "test:types": "tsd",
-    "check:dts": "tsc --noEmit --strict --skipLibCheck false index.d.ts bullmq.d.ts",
+    "check:dts": "tsc --noEmit --strict --skipLibCheck false index.d.ts bullmq.d.ts versioning.d.ts",
     "lint": "oxlint src bin scripts tests bench examples",
     "format": "oxfmt src bin scripts tests bench examples",
     "format:check": "oxfmt --check src bin scripts tests bench examples",

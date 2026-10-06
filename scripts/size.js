@@ -31,6 +31,9 @@ const ENTRIES = [
   { label: 'CLI (bin/migronaut)', entry: 'bin/migronaut.js' },
   // Includes the core it builds on — what a subpath-only consumer loads.
   { label: 'BullMQ adapter (@alexify/migronaut/bullmq)', entry: 'bullmq.js' },
+  // Standalone: a tripwire for the subpath ever pulling the engine in — its
+  // number would jump to the library entry's.
+  { label: 'versioning runtime (@alexify/migronaut/versioning)', entry: 'versioning.js' },
 ];
 
 async function bundle(entry, minify) {
