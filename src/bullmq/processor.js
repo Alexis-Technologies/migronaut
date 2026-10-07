@@ -10,6 +10,7 @@ const {
 } = require('../errors/index.js');
 const { pickActor } = require('../utils/actor.js');
 const { errorText } = require('../utils/error.js');
+const { jobRefIssue } = require('../utils/job-ref.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
 const { JOB_NAMES, assertAllowed, isObjectLike, parseJobData, resolveAllow } = require('./jobs.js');
 const {
@@ -77,6 +78,48 @@ function jobIds(ctx) {
     ...(ctx.data?.groupId !== undefined ? { groupId: ctx.data.groupId } : {}),
     ...(ctx.runId ? { runId: ctx.runId } : {}),
   };
+}
+
+/**
+ * The job a run works for, as the kit's `job` option — `{ id, groupId? }`, or
+ * undefined when the job has no id the kit would take (it then logs nothing
+ * of the job; the run itself is unaffected).
+ */
+function jobRefOf(job, groupId) {
+  if (job?.id === undefined || job.id === null) return undefined;
+  const id = String(job.id);
+  const ref = groupId !== undefined ? { id, groupId } : { id };
+  if (jobRefIssue(ref) === null) return ref;
+  return jobRefIssue({ id }) === null ? { id } : undefined;
+}
+
+/** The longest row a `migration:log` event becomes in a job's log */
+const USERLAND_ROW_MAX = 1024;
+
+/** BigInts have no JSON form of their own; a log row shows their digits */
+const jsonValue = (_key, value) => (typeof value === 'bigint' ? value.toString() : value);
+
+/**
+ * A `migration:log` event as a row of the job's log, next to the processor's
+ * own lifecycle rows: `✎ <level: ><msg> <data as JSON>`, the attempt when a
+ * transaction was retried, the partition of a background lane. Cut at
+ * {@link USERLAND_ROW_MAX}; redacted on its way out like every row.
+ */
+function userlandRow(event) {
+  const level = event.level === 'info' ? '' : `${event.level}: `;
+  let data = '';
+  if (event.data !== null && typeof event.data === 'object' && Object.keys(event.data).length > 0) {
+    try {
+      data = ` ${JSON.stringify(event.data, jsonValue)}`;
+    } catch {
+      data = ' [data not serializable]';
+    }
+  }
+  const attempt = event.attempt > 1 ? ` (attempt ${event.attempt})` : '';
+  const partition =
+    event.kind === 'background' && event.partition ? ` [partition ${event.partition}]` : '';
+  const row = `✎ ${level}${event.msg}${data}${attempt}${partition}`;
+  return row.length > USERLAND_ROW_MAX ? `${row.slice(0, USERLAND_ROW_MAX - 1)}…` : row;
 }
 
 /** A job in a few words, for log lines: `up 20260101-x.js (1/3)`, `converge`, `sync` */
@@ -305,6 +348,16 @@ function createMigrationProcessor(options = {}) {
     'converge:end': (event) => {
       if (current && event.success) log(current, `✔ Converged ${event.changed} change(s)`);
     },
+    // What the migration itself logged for its users. Matched by job, not by
+    // `current` alone: a body that outlived its timeout may still log while
+    // the next job runs, and its lines must not land in that job's log.
+    'migration:log': (event) => {
+      if (!current || current.sealed || event.kind !== 'migration') return;
+      const ours = current.jobRef
+        ? event.jobId === current.jobRef.id
+        : current.runId !== undefined && event.runId === current.runId;
+      if (ours) log(current, userlandRow(event));
+    },
   };
   for (const [event, listener] of Object.entries(listeners)) kit.on(event, listener);
 
@@ -373,6 +426,15 @@ function createMigrationProcessor(options = {}) {
   async function runMigrationJob(ctx, signal) {
     const { data } = ctx;
     const ordered = data.ordered ?? defaultOrdered;
+    // The run's correlation names this job, so what the migration logs can be
+    // joined to it (and its userland lines routed into its log).
+    ctx.jobRef = jobRefOf(ctx.job, data.groupId);
+    if (ctx.jobRef === undefined) {
+      kit.logger.debug(`Job ${ctx.job?.id} has no id the run can carry — its lines name no job`, {
+        ...jobIds(ctx),
+      });
+    }
+    const jobField = ctx.jobRef ? { job: ctx.jobRef } : {};
     const attempt = () =>
       data.direction === JOB_NAMES.UP
         ? kit.up(data.migration, {
@@ -381,8 +443,13 @@ function createMigrationProcessor(options = {}) {
             ...(data.force ? { force: true } : {}),
             ...(data.checksum ? { checksum: data.checksum } : {}),
             ...pickActor(data),
+            ...jobField,
           })
-        : kit.down(data.migration, { ...(ordered ? { ordered: true } : {}), ...pickActor(data) });
+        : kit.down(data.migration, {
+            ...(ordered ? { ordered: true } : {}),
+            ...pickActor(data),
+            ...jobField,
+          });
 
     try {
       const { result, waitedMs } = await waitForLock(ctx, attempt, signal);
@@ -665,6 +732,9 @@ function createMigrationProcessor(options = {}) {
       if (ctx.data.kind === 'sync') result = await runSyncJob(ctx);
       else if (ctx.data.kind === 'converge') result = await runConvergeJob(ctx, abort);
       else result = await runMigrationJob(ctx, abort);
+      // Nothing more is written for the migration once the job settles: a row
+      // after BullMQ removed the job would leave its log behind in Redis.
+      ctx.sealed = true;
       progress(ctx, 'completed', ctx.runId ? { runId: ctx.runId } : {});
       await flush(ctx);
       kit.logger.debug(`✔ Job ${job?.id} done`, {
@@ -674,6 +744,7 @@ function createMigrationProcessor(options = {}) {
       });
       return result;
     } catch (error) {
+      ctx.sealed = true;
       const requeued = await requeueOnShutdown(ctx, error, token);
       if (requeued) throw requeued;
       // BullMQ only retries when the job was given more than one attempt — the
@@ -741,6 +812,8 @@ module.exports = {
   createMigrationProcessor,
   isTransientForJob,
   isRetryableError,
+  jobRefOf,
   prepareErrorForQueue,
   resolveProcessorOptions,
+  userlandRow,
 };

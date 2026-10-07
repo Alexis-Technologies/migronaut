@@ -857,6 +857,11 @@ export interface CreateMigrationProcessorOptions {
  * declares exactly three parameters, which is what makes BullMQ hand it the
  * cancellation signal. Jobs are processed one at a time even when the Worker
  * is configured for more.
+ *
+ * Each run is told which job it works for (the kit's `job` option), so a
+ * migration's `ctx.run` and every `migration:log` event carry `jobId` and
+ * `groupId`, and the migration's `userland: true` lines are written into the
+ * job's log next to the processor's own rows (`✎ …`).
  */
 export interface MigrationProcessor {
   (
@@ -864,7 +869,10 @@ export interface MigrationProcessor {
     token?: string,
     signal?: AbortSignal,
   ): Promise<MigrationJobResult | SyncJobResult | ConvergeJobResult>;
-  /** The kit running the jobs — subscribe to its events for metrics */
+  /**
+   * The kit running the jobs — subscribe to its events for metrics, and to
+   * `migration:log` for what the migrations log for your users
+   */
   readonly kit: MigratorKit;
   /**
    * Stop taking the lock. Irreversible. A job that has not started its
@@ -1164,7 +1172,11 @@ export class MigrationQueue<
 > {
   constructor(options: CreateMigrationQueueOptions<Q, W, E>);
 
-  /** The kit behind the queue — `kit.on('migration:success', …)` for metrics */
+  /**
+   * The kit behind the queue — `kit.on('migration:success', …)` for metrics,
+   * `kit.on('migration:log', …)` (in the worker's process) to keep what the
+   * migrations log for your users
+   */
   readonly kit: MigratorKit;
   /** Your Queue, with its own type */
   readonly queue: Q;
