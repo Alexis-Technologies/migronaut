@@ -9,11 +9,36 @@
 const TTL_DAYS = 90;
 /** The most lines one request returns */
 const MAX_LINES = 5000;
+/** Lines written together — one `insertMany` instead of a round trip per line */
+const BATCH_SIZE = 100;
+/** The longest a line waits for its batch to fill */
+const FLUSH_MS = 250;
+/** Lines held while MongoDB is slow or down — past it, new ones are counted and dropped */
+const MAX_BUFFERED = 10_000;
 
 function createLogStore({ client, dbName, collection = 'migration_logs' }) {
   const logs = client.db(dbName).collection(collection);
-  /** Inserts still in flight — drained on shutdown, after the worker stopped */
-  const pending = new Set();
+  /** Lines not written yet, the batches in flight, and what was lost */
+  let buffer = [];
+  const writing = new Set();
+  let dropped = 0;
+  let timer;
+
+  /** Write what is buffered: one batch, never awaited by a migration */
+  function flush() {
+    clearTimeout(timer);
+    timer = undefined;
+    if (buffer.length === 0) return;
+    const batch = buffer;
+    buffer = [];
+    const write = logs
+      .insertMany(batch, { ordered: false })
+      .catch((error) => {
+        console.error(`${batch.length} migration log line(s) lost: ${error.message}`);
+      })
+      .finally(() => writing.delete(write));
+    writing.add(write);
+  }
 
   return {
     ensureIndexes: () =>
@@ -27,17 +52,22 @@ function createLogStore({ client, dbName, collection = 'migration_logs' }) {
 
     /**
      * Keep every event the kit emits. The listener runs inside the migration — inside its
-     * transaction, for a transactional one — so it only starts the insert: the migration never
-     * waits for its logs, and a failed insert never fails it. A copy is inserted, because
-     * `insertOne` adds an `_id` to the object it is given and the event is shared.
+     * transaction, for a transactional one — so it only buffers the line: the migration never
+     * waits for its logs, and a failed write never fails it. A copy is buffered, because
+     * `insertMany` adds an `_id` to the objects it is given and the event is shared.
      */
     attach(kit) {
       const keep = (event) => {
-        const write = logs.insertOne({ ...event }).catch((error) => {
-          console.error(`migration log lost (run ${event.runId}): ${error.message}`);
-        });
-        pending.add(write);
-        write.finally(() => pending.delete(write));
+        if (buffer.length >= MAX_BUFFERED) {
+          dropped += 1;
+          if (dropped === 1 || dropped % 1000 === 0) {
+            console.error(`migration log buffer full: ${dropped} line(s) dropped so far`);
+          }
+          return;
+        }
+        buffer.push({ ...event });
+        if (buffer.length >= BATCH_SIZE) flush();
+        else timer ??= setTimeout(flush, FLUSH_MS);
       };
       kit.on('migration:log', keep);
       return () => kit.off('migration:log', keep);
@@ -59,7 +89,11 @@ function createLogStore({ client, dbName, collection = 'migration_logs' }) {
         .limit(Math.min(limit, MAX_LINES))
         .toArray(),
 
-    drain: () => Promise.allSettled([...pending]),
+    /** Write what is buffered and wait for every write — on shutdown, after the worker stopped */
+    drain: async () => {
+      flush();
+      await Promise.allSettled([...writing]);
+    },
   };
 }
 

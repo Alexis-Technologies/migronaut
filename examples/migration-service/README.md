@@ -81,8 +81,9 @@ A migration says what it did with `logger.info(…, { userland: true })` — the
 how many plans it inserted. Migronaut binds the run, the migration, the transaction attempt and the
 queue job to the line, writes it into the job's own log (`✎ plans seeded {…}`, visible in Bull
 Board), and emits it as `migration:log` in the worker's process. Storing it is the service's job:
-[`logs.js`](logs.js) inserts every event into `migration_logs` (indexed by run, job and migration,
-expired after 90 days), and the API serves them:
+[`logs.js`](logs.js) writes every event into `migration_logs` (in batches, from a bounded buffer —
+the migration never waits for its logs; indexed by run, job and migration, expired after 90 days),
+and the API serves them:
 
 ```json
 GET /migrations/runs/<runId>/logs
@@ -101,6 +102,10 @@ GET /migrations/runs/<runId>/logs
 
 The lines survive a rollback of the migration that logged them, and a transaction the driver
 retried logs once per `attempt`. See [Migration Logs](https://migronaut.vercel.app/guide/migration-logs).
+
+Like every route of this example, the log routes have no authentication — put your own in front of
+the API before it serves anyone. What a migration logs for users can hold their data: migronaut
+masks credentials in URIs and the values a server error quotes, and nothing else.
 
 ## Running it as separate roles
 

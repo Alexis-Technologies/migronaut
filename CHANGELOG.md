@@ -58,8 +58,11 @@ experimental — its shape may still change in a minor release (named here).
 
 ### Changed
 
-- `ctx.background` of a background migration is now frozen, and typed as `BackgroundRunInfo` —
-  its `generation` optional, as it always was for the live drift watcher.
+- `ctx.background` of a background migration is now frozen, and typed as `BackgroundRunInfo`.
+  **A type change on an experimental API:** its `generation` is now `number | undefined` (as it
+  always was at runtime for the live drift watcher), so strict TypeScript that reads it as a
+  `number` needs a check; `ctx.logger` is typed `MigrationLogger`, which every `MigronautLogger`
+  still fits.
 - The kit's log lines of a run that names a `job` carry `jobId` / `groupId`.
 
 ### Fixed

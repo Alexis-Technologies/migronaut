@@ -89,7 +89,7 @@ A collection of your own, and one listener:
 const logs = client.db('app').collection('migration_logs');
 await logs.createIndexes([
   { key: { runId: 1, seq: 1 } }, // a run's lines, in order
-  { key: { jobId: 1, seq: 1 } }, // a queue job's
+  { key: { jobId: 1, at: 1, seq: 1 } }, // a queue job's — a lane job's slices are runs of their own
   { key: { migration: 1, at: -1 } }, // a migration's history
   { key: { at: 1 }, expireAfterSeconds: 90 * 24 * 60 * 60 }, // and gone after 90 days
 ]);
@@ -108,7 +108,13 @@ kit.on('migration:log', (event) => {
   event is shared with every other listener.
 - An `async` listener whose promise rejects is contained like one that throws — logged at debug
   level — but catching it yourself is the only way to hear about it.
-- Read a run back with `logs.find({ runId }).sort({ seq: 1 })`.
+- Read a run back with `logs.find({ runId }).sort({ seq: 1 })`, and a queue job with
+  `logs.find({ jobId }).sort({ at: 1, seq: 1 })`: `seq` counts within one `runId`, and a background
+  lane job (or an `up` that drives background migrations inline) logs from several runs.
+- **Logging a lot?** One insert per event is a round trip each. Buffer them and write with
+  `insertMany(…, { ordered: false })` every few hundred milliseconds, as the
+  [example service](https://github.com/Alexis-Technologies/migronaut/tree/main/examples/migration-service/logs.js)
+  does — and bound the buffer, so a database that is down cannot take the worker's memory with it.
 
 **Where to subscribe** — in the process that runs the migrations, which is not always the one that
 asked for them:
@@ -118,7 +124,7 @@ asked for them:
 | Your code (`MigratorKit`) | `kit.on('migration:log', …)` before `up()` |
 | `runMigrations` | `onKit: (kit) => kit.on('migration:log', …)` |
 | A [BullMQ](/guide/bullmq) worker | `mq.kit.on(…)` in the worker process — or `processor.kit` with your own `Worker` |
-| The CLI | Nowhere — the lines go to the CLI's log output; run migrations from code or a worker to keep them |
+| The CLI | Nowhere — the lines go to the CLI's log output; run migrations from code or a worker to keep them. The CLI's own terminal logger prints the message only, not the fields: configure a [`logger`](/guide/configuration) (pino, say) to see `data` there |
 
 The [example service](https://github.com/Alexis-Technologies/migronaut/tree/main/examples/migration-service)
 does exactly this: its worker stores the events, and its API serves a run's lines at
