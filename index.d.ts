@@ -1625,6 +1625,12 @@ export interface MigrationEvent extends MigronautEventBase {
   batch?: number;
   durationMs?: number;
   /**
+   * How many times the body ran, when the driver retried its transaction (on
+   * `migration:success` and `migration:error`; absent when it ran once)
+   * @experimental New in 2.4
+   */
+  attempts?: number;
+  /**
    * Human-readable failure message (on `migration:error` only), with URI
    * credentials already redacted — safe to ship to metrics/alerting as-is.
    */

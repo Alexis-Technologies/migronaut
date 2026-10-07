@@ -269,10 +269,14 @@ export async function down() {}
       },
     });
     try {
-      const kit = migrator({ client, uri: undefined });
+      const { lines, logger } = recordingLogger();
+      const kit = migrator({ client, uri: undefined, logger });
       const { events } = listen(kit);
       const results = await kit.up();
       assert.strictEqual(results[0].status, 'applied');
+      // The kit's own line says the body ran twice.
+      const applied = lines.find((line) => line.msg.startsWith('✔ Applied'));
+      assert.strictEqual(applied.fields.attempts, 2);
       assert.deepStrictEqual(
         events.map((event) => [event.attempt, event.data.attempt, event.seq]),
         [

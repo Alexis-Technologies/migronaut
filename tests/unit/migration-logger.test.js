@@ -6,6 +6,7 @@ const {
   correlationOf,
   createMigrationLogger,
   migrationRunInfo,
+  notices,
   runInfo,
   sequence,
 } = require('../../src/core/migration-logger.js');
@@ -272,8 +273,41 @@ describe('createMigrationLogger', () => {
       nextSeq: sequence(),
     });
     assert.doesNotThrow(() => throwingSink.info('y'));
-    assert.strictEqual(lines.length, 0);
     assert.strictEqual(events.length, 0);
+    // Dropped, but not invisibly: one debug line, with the correlation.
+    assert.strictEqual(lines.length, 1);
+    assert.strictEqual(lines[0].level, 'debug');
+    assert.strictEqual(lines[0].msg, 'A ctx.logger call was dropped: getter');
+    assert.strictEqual(lines[0].fields.runId, 'run-1');
+  });
+
+  it('should say once per run that calls were dropped or cut, whichever logger made them', () => {
+    const parts = harness();
+    const noticed = notices();
+    const make = (attempt) =>
+      createMigrationLogger({
+        sink: parts.sink,
+        kind: 'migration',
+        info: { ...FULL_RUN, attempt },
+        emitter: parts.emitter,
+        nextSeq: sequence(),
+        noticed,
+      });
+    const hostile = {
+      get boom() {
+        throw new Error('getter');
+      },
+    };
+    const long = 'm'.repeat(MAX_MESSAGE_LENGTH + 1);
+    for (const logger of [make(1), make(2)]) {
+      logger.info('x', hostile);
+      logger.info(long, { userland: true });
+    }
+    const debug = parts.lines.filter((line) => line.level === 'debug').map((line) => line.msg);
+    assert.strictEqual(debug.length, 2);
+    assert.strictEqual(debug[0], 'A ctx.logger call was dropped: getter');
+    assert.match(debug[1], /^A ctx\.logger call was cut to the bounds of its migration:log event/);
+    assert.strictEqual(parts.events.length, 2, 'the cut calls are still emitted');
   });
 
   it('should emit nothing without an emitter', () => {

@@ -42,10 +42,17 @@ experimental — its shape may still change in a minor release (named here).
   `groupId` — its lines land in that migration job's log) and the transaction `attempt`; a
   `userland: true` call emits `migration:log` with `kind: 'background'`. A dry run marks its lines
   `dryRun: true` and emits nothing.
+- **Retried transactions, visible** — when the driver retried a migration's transaction and its
+  body ran again, `migration:success` / `migration:error` and the kit's `✔ Applied` / `✖ Error`
+  lines carry `attempts`, a failure's context too, and the `migronaut.migration` span always has
+  `migronaut.migration.attempts`. A run that names a `job` puts `migronaut.job.id` /
+  `migronaut.job.group_id` on its `migronaut.run` span.
+- **A `ctx.logger` call that is dropped** (a field whose getter throws) **or cut to the event's
+  bounds** leaves one debug line per run — never one per call.
 - **Types** — `MigrationRunInfo`, `JobRef`, `MigrationLogEvent` (`OrdinaryMigrationLogEvent |
   BackgroundMigrationLogEvent`), `MigrationLogEventBase`, `MigrationLogLevel`,
   `BackgroundRunInfo`; `logger?` and `run?` on `MigrationContext` (optional, so a context built by
-  hand still type-checks).
+  hand still type-checks); `attempts?` on `MigrationEvent`.
 
 ### Changed
 

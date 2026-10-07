@@ -82,6 +82,7 @@ const {
   MIGRATION_LOG_EVENT,
   createMigrationLogger,
   migrationRunInfo,
+  notices,
   runInfo,
   sequence,
 } = require('./migration-logger.js');
@@ -530,6 +531,7 @@ class MigratorKit extends EventEmitter {
       base: { id: this.#runId, ...job, ...pickActor(options) },
       job,
       nextSeq: sequence(),
+      noticed: notices(),
     };
     // A second controller layered over the lock's own signal, so stop() and a
     // lost lock abort through the same path the run loops already watch.
@@ -548,6 +550,7 @@ class MigratorKit extends EventEmitter {
     const recorder = new RunRecorder({
       info,
       runId: this.#runId,
+      job,
       telemetry: this.#telemetry,
       emit: (event, payload) => this.#emit(event, payload),
       logger: this.#logger,
@@ -619,6 +622,7 @@ class MigratorKit extends EventEmitter {
       info: run,
       emitter: this.#logEmitter(),
       nextSeq: this.#runLog?.nextSeq ?? sequence(),
+      noticed: this.#runLog?.noticed ?? notices(),
     });
   }
 
@@ -998,11 +1002,15 @@ class MigratorKit extends EventEmitter {
         ...(config.hooks ? { hooks: config.hooks } : {}),
       });
       this.#progress?.onStop('success');
+      span.set({ [ATTRIBUTES.MIGRATION_ATTEMPTS]: attempts });
+      // A transaction the driver retried ran the body again: say how often.
+      const retried = attempts > 1 ? { attempts } : {};
       this.#emit('migration:success', {
         migration: name,
         direction,
         ...batchField,
         durationMs: duration,
+        ...retried,
       });
       const label =
         migration.kind === 'background'
@@ -1014,7 +1022,13 @@ class MigratorKit extends EventEmitter {
             : '↩ Reverted';
       logger.info(
         `${label} ${name}   [${duration}ms]`,
-        this.#fields({ migration: name, direction, ...batchField, durationMs: duration }),
+        this.#fields({
+          migration: name,
+          direction,
+          ...batchField,
+          durationMs: duration,
+          ...retried,
+        }),
       );
       if (migration.registered) {
         this.#emit('background:registered', { migration: name, ...migration.registered });
@@ -1043,6 +1057,13 @@ class MigratorKit extends EventEmitter {
           ? error.context.durationMs
           : undefined;
       const durationField = durationMs !== undefined ? { durationMs } : {};
+      // And how many times the body ran, when it did.
+      const attempts =
+        error instanceof MigronautError && typeof error.context?.attempts === 'number'
+          ? error.context.attempts
+          : undefined;
+      if (attempts !== undefined) span.set({ [ATTRIBUTES.MIGRATION_ATTEMPTS]: attempts });
+      const retried = attempts > 1 ? { attempts } : {};
       // errorText, not the raw Error: a driver message can echo the
       // credentialed URI, and event subscribers (Sentry, JSON logs) would
       // ship it — the same redaction the log line below already gets.
@@ -1051,6 +1072,7 @@ class MigratorKit extends EventEmitter {
         direction,
         ...batchField,
         ...durationField,
+        ...retried,
         error: errorText(error),
       });
       logger.error(
@@ -1060,6 +1082,7 @@ class MigratorKit extends EventEmitter {
           direction,
           ...batchField,
           ...durationField,
+          ...retried,
           error: errorText(error),
         }),
       );
@@ -2390,6 +2413,7 @@ class MigratorKit extends EventEmitter {
     const lineStamp = job ? { ...stamp, ...jobFields(job) } : stamp;
     // One counter per lane slice (or watcher): orders its migration:log events.
     const nextSeq = sequence();
+    const noticed = notices();
     return {
       db,
       client: this.#client,
@@ -2406,6 +2430,7 @@ class MigratorKit extends EventEmitter {
           direction,
           emitter: this.#logEmitter(),
           nextSeq,
+          noticed,
         }),
       ...(job ? { job } : {}),
       fields: (extra) => ({ ...lineStamp, ...extra }),

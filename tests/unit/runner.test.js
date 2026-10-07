@@ -377,6 +377,7 @@ describe('runMigration — failure timing', () => {
       (error) => {
         assert.strictEqual(typeof error.context.durationMs, 'number');
         assert.ok(error.context.durationMs >= 0);
+        assert.strictEqual(error.context.attempts, 1);
         return true;
       },
     );
@@ -468,7 +469,12 @@ describe('runMigration — a context per attempt', () => {
           },
         },
       }),
-      MigrationExecutionFailedError,
+      (error) => {
+        assert.ok(error instanceof MigrationExecutionFailedError);
+        // How often the body ran travels with the failure.
+        assert.strictEqual(error.context.attempts, 2);
+        return true;
+      },
     );
     assert.strictEqual(failedWith.run.attempt, 2);
   });

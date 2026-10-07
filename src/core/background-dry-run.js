@@ -13,7 +13,7 @@ const {
 const { idRangePartitioner } = require('./background-partition.js');
 const { runSandbox } = require('./background-sandbox.js');
 const { toRelaxedEjson } = require('./bson-peer.js');
-const { createMigrationLogger, sequence } = require('./migration-logger.js');
+const { createMigrationLogger, notices, sequence } = require('./migration-logger.js');
 const { READ_OPTIONS } = require('./server-info.js');
 
 /**
@@ -59,6 +59,7 @@ function sampleSize({ sample, first }) {
  */
 function dryLogs(logger) {
   const nextSeq = sequence();
+  const noticed = notices();
   return (info, direction) =>
     createMigrationLogger({
       sink: logger,
@@ -66,6 +67,7 @@ function dryLogs(logger) {
       info,
       direction,
       nextSeq,
+      noticed,
       dryRun: true,
     });
 }

@@ -109,9 +109,9 @@ await kit.up();
 | `run:start` | `{ runId, command, direction? }` |
 | `run:end` | `{ runId, command, direction?, success, durationMs, applied?, reverted?, total?, error? }` |
 | `migration:start` | `{ runId, migration, direction, batch? }` |
-| `migration:success` | `{ runId, migration, direction, batch?, durationMs }` |
+| `migration:success` | `{ runId, migration, direction, batch?, durationMs, attempts? }` — `attempts` when the driver retried the transaction and the body ran again |
 | `migration:skipped` | `{ runId, migration, direction, reason }` |
-| `migration:error` | `{ runId, migration, direction, batch?, durationMs?, error }` |
+| `migration:error` | `{ runId, migration, direction, batch?, durationMs?, attempts?, error }` |
 | `migration:log` | `{ kind, runId, migration?, direction, batch?, attempt?, jobId?, groupId?, requestedBy?, reason?, level, msg, data, at, seq, truncated? }` — a `ctx.logger` call marked `userland: true` ([Migration Logs](/guide/migration-logs)); `kind: 'background'` from a background migration |
 | `lock:acquired` | `{ runId, owner, ttlMs, acquireMs }` — or `{ runId, owner, skipped: true }` under `--no-lock` |
 | `lock:released` | `{ runId, owner, early? }` — `early: true` when a converge gave the lock up to wait for search index builds; the run goes on |

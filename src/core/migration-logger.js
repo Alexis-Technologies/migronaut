@@ -1,6 +1,6 @@
 const { isPlainObject } = require('../utils/canonical.js');
 const { errorText } = require('../utils/error.js');
-const { redactBounded, redactOutbound } = require('../utils/redact.js');
+const { BOUNDS, redactBounded, redactOutbound } = require('../utils/redact.js');
 
 /**
  * The logger a migration gets as `ctx.logger`, and the `migration:log` event.
@@ -101,6 +101,15 @@ function messageText(msg) {
 }
 
 /**
+ * What a run's loggers have already said about themselves — one debug line
+ * each for a call dropped and a call cut to the event's bounds, per run (or
+ * lane slice), not per call: `{ dropped, truncated }`.
+ */
+function notices() {
+  return { dropped: false, truncated: false };
+}
+
+/**
  * A logger bound to one context's correlation.
  *
  * - `sink` — the kit's resolved logger (already guarded, `null` config → silent);
@@ -108,13 +117,30 @@ function messageText(msg) {
  *   `ctx.run` / `ctx.background` (`direction` given separately for background);
  * - `emitter` — `{ wanted(), emit(payload) }`, absent where nothing may be
  *   emitted (a dry run); `nextSeq` — the run's counter;
+ * - `noticed` — the run's {@link notices}: a dropped or a cut call leaves one
+ *   debug line, since an invisible one is undebuggable;
  * - `dryRun` — marks every line, and emits nothing.
  *
  * Pino's own argument order — `(fields, msg)` — is accepted too.
  */
-function createMigrationLogger({ sink, kind, info, direction, emitter, nextSeq, dryRun = false }) {
+function createMigrationLogger({
+  sink,
+  kind,
+  info,
+  direction,
+  emitter,
+  nextSeq,
+  noticed = notices(),
+  dryRun = false,
+}) {
   const { event, line } = correlationOf(kind, info, direction);
   if (dryRun) line.dryRun = true;
+  /** The one debug line for `what` (a key of `noticed`) — the call that caused it goes on */
+  const notice = (what, text) => {
+    if (noticed[what]) return;
+    noticed[what] = true;
+    sink.debug(text, { ...line });
+  };
   const write = (level) => (first, second) => {
     // Logging must never break a migration: a getter that throws, a message
     // that cannot be stringified — the call is dropped, the run goes on.
@@ -137,6 +163,7 @@ function createMigrationLogger({ sink, kind, info, direction, emitter, nextSeq, 
       // The log line keeps them — it is what a developer debugs with.
       const message = redactOutbound(text);
       const clipped = message.length > MAX_MESSAGE_LENGTH;
+      const truncated = data.truncated || clipped;
       emitter.emit({
         ...event,
         level,
@@ -144,10 +171,23 @@ function createMigrationLogger({ sink, kind, info, direction, emitter, nextSeq, 
         data: data.value,
         at: new Date(),
         seq: nextSeq(),
-        ...(data.truncated || clipped ? { truncated: true } : {}),
+        ...(truncated ? { truncated: true } : {}),
       });
-    } catch {
-      // See above: dropped.
+      if (truncated) {
+        notice(
+          'truncated',
+          'A ctx.logger call was cut to the bounds of its migration:log event ' +
+            `(message ${MAX_MESSAGE_LENGTH} characters; data ${BOUNDS.depth} levels, ` +
+            `${BOUNDS.entries} entries, ${BOUNDS.string}-character strings)`,
+        );
+      }
+    } catch (error) {
+      // See above: dropped — but said once, at debug level.
+      try {
+        notice('dropped', `A ctx.logger call was dropped: ${errorText(error)}`);
+      } catch {
+        // Not even that: the thrown value cannot be described.
+      }
     }
   };
   return { debug: write('debug'), info: write('info'), warn: write('warn'), error: write('error') };
@@ -160,6 +200,7 @@ module.exports = {
   correlationOf,
   createMigrationLogger,
   migrationRunInfo,
+  notices,
   runInfo,
   sequence,
 };

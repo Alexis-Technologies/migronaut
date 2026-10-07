@@ -88,7 +88,7 @@ async function withTimeout(promise, timeoutMs, name, direction, onTimeout) {
  * `attemptContext(attempt)` returns what the caller adds to the context of
  * each attempt (`ctx.run`, `ctx.logger`): a retried transaction runs the body
  * again, and that run gets a context of its own. Resolves to
- * `{ duration, attempts }`.
+ * `{ duration, attempts }`; a failure carries `attempts` in its context.
  */
 async function runMigration(params) {
   const { name, migration, direction, context, useTransaction, hooks, onSuccess, logger } = params;
@@ -190,8 +190,11 @@ async function runMigration(params) {
       }
     }
 
+    // How many times the body ran (the driver retries a transient
+    // transaction error by running it again) — absent if it never started.
+    const attemptsField = attempts > 0 ? { attempts } : {};
     if (err instanceof MigrationTimeoutError) {
-      err.context = { durationMs: elapsed, ...err.context };
+      err.context = { durationMs: elapsed, ...attemptsField, ...err.context };
       throw err;
     }
     // A standalone deployment refusing the transaction is a topology problem,
@@ -200,7 +203,7 @@ async function runMigration(params) {
       throw new TransactionsUnsupportedError(
         `Cannot run ${name} in a transaction — this deployment is standalone. ` +
           'Set useTransaction: false, or run against a replica set / mongos.',
-        { name, direction, durationMs: elapsed, cause: err.message },
+        { name, direction, durationMs: elapsed, ...attemptsField, cause: err.message },
         { cause: err },
       );
     }
@@ -208,7 +211,7 @@ async function runMigration(params) {
       `Migration ${direction} failed: ${name}`,
       // The message is duplicated into context because that is what survives
       // JSON serialization; `cause` keeps the real Error (and its stack).
-      { name, direction, durationMs: elapsed, cause: err.message },
+      { name, direction, durationMs: elapsed, ...attemptsField, cause: err.message },
       { cause: err },
     );
   } finally {

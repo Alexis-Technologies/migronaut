@@ -17,6 +17,8 @@ const { ATTRIBUTES } = require('../utils/telemetry.js');
 class RunRecorder {
   #info;
   #runId;
+  /** The queue job the run works for — `{ jobId?, groupId? }` — for its span */
+  #job;
   #telemetry;
   #emit;
   #logger;
@@ -29,9 +31,10 @@ class RunRecorder {
   /** Set once the lock is held and the run span is open */
   #span;
 
-  constructor({ info, runId, telemetry, emit, logger, fields }) {
+  constructor({ info, runId, job = {}, telemetry, emit, logger, fields }) {
     this.#info = info;
     this.#runId = runId;
+    this.#job = job;
     this.#telemetry = telemetry;
     this.#emit = emit;
     this.#logger = logger;
@@ -69,6 +72,8 @@ class RunRecorder {
       [ATTRIBUTES.RUN_ID]: this.#runId,
       [ATTRIBUTES.RUN_COMMAND]: this.#info.command,
       [ATTRIBUTES.RUN_DIRECTION]: this.#info.direction,
+      [ATTRIBUTES.JOB_ID]: this.#job.jobId,
+      [ATTRIBUTES.JOB_GROUP_ID]: this.#job.groupId,
       [ATTRIBUTES.LOCK_ACQUIRE_MS]: this.#acquired?.acquireMs,
       [ATTRIBUTES.LOCK_SKIPPED]: this.#acquired?.skipped,
     };
