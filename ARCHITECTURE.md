@@ -7,7 +7,7 @@
 > exists, how data flows through it, and every non-obvious nuance you need to make a safe change.
 >
 
-**Snapshot at time of writing:** v2.1.0 · Node ≥ 22.18 (engines; native TS type stripping is
+**Snapshot at time of writing:** v2.4.0 (unreleased) · Node ≥ 22.18 (engines; native TS type stripping is
 always available) · runtime deps: **none** — `package.json` has no `dependencies` key; `.env`
 loading, ANSI colors, the spinner, the arg parser, the table renderer and config validation are
 all hand-rolled in `src/` · peer deps: `mongodb`, optional `mongoose` · BullMQ (the optional queue
@@ -53,13 +53,45 @@ Since 2.3 the engine also runs **background migrations** ([§6.8](#68-background
 long data rewrites that `up` only registers, and that partitions, leases and a coordinator then
 carry out beside the migration line — never holding the migration lock.
 
-```
-            ┌────────────────────────────────────────────────┐
-   migronaut CLI ─┤                                                  │
-            │              MigratorKit (orchestrator)          ├─ MongoDB
-  your code ┤                                                  │
-            └───┬──────┬───────┬────────┬────────┬────────┬───┘
-              config  lock  changelog  loader  runner  context
+```mermaid
+flowchart TB
+  accTitle: migronaut's entry points, engine and state
+  CLI["migronaut CLI<br/>bin/ → src/cli/"]
+  CODE["your code<br/>MigratorKit · runMigrations"]
+  Q["queue adapter — ./bullmq<br/>src/bullmq/ · BullMQ injected"]
+  APP["your repository layer"]
+
+  KIT["MigratorKit<br/>src/core/migrator.js"]
+  V["versioning runtime — ./versioning<br/>src/versioning/ · no engine"]
+
+  subgraph MECH ["mechanism — one job each"]
+    direction TB
+    M1["config · options · sequence"]
+    M2["lock · lock-wait · changelog"]
+    M3["loader · runner · context · migration-logger"]
+  end
+  subgraph FLOWS ["flows — deps built by migrator.js"]
+    direction TB
+    F1["converge.js<br/>+ planner, search"]
+    F2["background.js<br/>+ store, engine, throttle"]
+    F3["background-watch.js"]
+  end
+
+  subgraph DB ["MongoDB — all of the state"]
+    direction TB
+    S1[("_migronaut_migrations · _migronaut_locks<br/>_migronaut_converge · _migronaut_background*")]
+    S2[("the application's collections")]
+  end
+
+  CLI --> KIT
+  CODE --> KIT
+  Q -- "public API only" --> KIT
+  KIT --> MECH
+  KIT --> FLOWS
+  MECH --> DB
+  FLOWS --> DB
+  KIT -. "requires" .-> V
+  APP --> V --> S2
 ```
 
 Three ideas explain almost everything:
@@ -200,6 +232,38 @@ There are three layers. Keep logic in the lowest layer it belongs to.
 | **Mechanism** | `core/{lock,changelog,runner,context,import,config,options,sequence}.js`, `utils/` | One job each, pure-ish, unit-testable | Know about the CLI; call `console.*` |
 | **Integration adapter** | `bullmq.js`, `src/bullmq/` | Drive the kit's *public* API from queue jobs; own the Queue/Worker lifecycle | Require a mechanism module (`lock`, `changelog`, `runner`, any `background-*`) or touch the DB; `require('bullmq')`; call `console.*` |
 | **Versioning runtime** | `versioning.js`, `src/versioning/` | Pure helpers and thin driver calls for an application's repository layer | Require anything outside `src/versioning/` and `src/errors/` — no core, no `mongodb`, no `mongoose` (pinned by a test) |
+
+What each layer requires, at a glance — an arrow means "requires". Nothing points back up, the
+adapter reaches the core only through the kit (and `lock-wait.js`), and the versioning runtime
+requires nothing of the core; several of these rules are pinned by unit tests that grep `src/`.
+
+```mermaid
+flowchart TB
+  accTitle: The layers and what each requires
+  PRES["presentation<br/>bin/ · src/cli/"]
+  ADAPT["integration adapter<br/>src/bullmq/"]
+  ORCH["orchestration<br/>migrator.js · run-recorder.js · run.js · background-runner.js"]
+  FLOW["flows — deps built by migrator.js<br/>converge.js · background.js · background-watch.js"]
+  MECH["mechanism<br/>lock · changelog · runner · context · config · collections · background-store …"]
+  PURE["pure<br/>options · sequence · converge-plan · index-spec · background-spec …"]
+  VERS["versioning runtime<br/>src/versioning/"]
+  BASE["utils/ · errors/"]
+
+  PRES --> ORCH
+  PRES -- "display helpers" --> PURE
+  ADAPT -- "kit + lock-wait.js only" --> ORCH
+  ORCH --> FLOW
+  ORCH --> MECH
+  ORCH --> PURE
+  FLOW --> MECH
+  FLOW --> PURE
+  MECH --> PURE
+  FLOW --> VERS
+  MECH --> VERS
+  PURE --> VERS
+  ORCH & FLOW & MECH & PURE & PRES & ADAPT --> BASE
+  VERS -- "errors/ only" --> BASE
+```
 
 The background modules split the same way: `background-spec.js`, `background-watch-plan.js` and
 the planning halves of the partitioners are pure; `background-store.js`,
@@ -1036,6 +1100,28 @@ queue, `<queueName>-background`, with its own Worker (concurrency 2 by default) 
 a migration job never waits behind a background one. Here flows *are* used — differently from the
 line above, and for a reason that does not apply there: the ordering truth stays in MongoDB.
 
+```mermaid
+flowchart LR
+  accTitle: The two queues of the adapter
+  subgraph MQ ["&lt;queueName&gt; — the migration line"]
+    direction TB
+    J1["up / down / converge / sync jobs<br/>one at a time, attempts: 1"]
+  end
+  subgraph BQ ["&lt;queueName&gt;-background"]
+    direction TB
+    C["background — a coordinator per migration<br/>deduplicated on its name"]
+    L["background-lane — children of it<br/>one slice each, moveToDelayed between"]
+    VF["background-verify — the drift watch tick"]
+    C --> L
+  end
+  KIT["one MigratorKit<br/>shared by both processors"]
+  DB[("MongoDB<br/>changelog · lock · background state")]
+  J1 -- "background:registered<br/>enqueues its coordinator" --> C
+  MQ --> KIT
+  BQ --> KIT
+  KIT --> DB
+```
+
 - A **coordinator** job per background migration (`background`, deduplicated on its name, a few
   attempts with a long backoff as the outer safety net) asks the kit for one coordinator step.
   When lanes have work it adds them as **children** (`parent` + `moveToWaitingChildren`) and
@@ -1211,6 +1297,35 @@ background migration (status, phase, plan, generation, pass, totals, requires/wa
 `<backgroundCollection>_partitions` one document per range of the current plan (cursor, counters,
 lease), `<backgroundCollection>_watch` the live drift watchers' positions. Processes and Redis are
 only executors; anything they lose is recovered from these.
+
+```mermaid
+flowchart TB
+  accTitle: Background migrations — who writes what
+  UP["kit.up() — registration<br/>changelog record + state document"]
+  subgraph RT ["runtimes — any mix, any number"]
+    direction TB
+    R1["background run (CLI)"]
+    R2["startBackgroundRunner()"]
+    R3["background-processor.js (queue)"]
+  end
+  COORD["coordinator step<br/>under the background:‹name› lock"]
+  LANE["lane slice<br/>lease = partition + slot"]
+  WATCH["live drift watcher<br/>one leader per collection"]
+  ST[("&lt;backgroundCollection&gt;<br/>status · plan · pass · totals")]
+  PA[("…_partitions<br/>range · cursor · counters · lease")]
+  WA[("…_watch<br/>resume tokens")]
+  DOCS[("the collection<br/>stampedDiff under the OCC filter")]
+  UP --> ST
+  RT --> COORD
+  RT --> LANE
+  RT --> WATCH
+  COORD --> ST
+  COORD --> PA
+  LANE --> PA
+  LANE --> DOCS
+  WATCH --> WA
+  WATCH --> DOCS
+```
 
 **Leases are slots.** A lane claims a partition and a slot `0..maxParallel-1` in one atomic write;
 a unique partial index on `{ background, lease.slot }` makes "at most `maxParallel` at once" an
