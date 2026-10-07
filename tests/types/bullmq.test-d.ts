@@ -350,7 +350,12 @@ const backgroundProcessor = createBackgroundProcessor({
   config,
   queue: realQueue,
   maxLaneRetries: 4,
+  userlandLogRows: 50,
 });
+expectError(createBackgroundProcessor({ config, queue: realQueue, userlandLogRows: '50' }));
+createMigrationProcessor({ config, userlandLogRows: 0 });
+expectError(createMigrationProcessor({ config, userlandLogRows: true }));
+createMigrationQueue({ bullmq: { Queue }, connection, config, userlandLogRows: 200 });
 expectType<BackgroundProcessor>(backgroundProcessor);
 expectAssignable<
   Processor<

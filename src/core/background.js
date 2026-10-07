@@ -182,6 +182,12 @@ async function jobFor(deps, name, state, { direction } = {}) {
     match,
     ...(await partitionerFor(deps, spec, dir)),
     logger: deps.logger,
+    // For ctx.background and ctx.logger: the lane working it and its queue job
+    // (with its group when a run drives it inline).
+    ...(deps.logs ? { logs: deps.logs } : {}),
+    ...(deps.runId !== undefined ? { runId: deps.runId } : {}),
+    ...(deps.job?.id !== undefined ? { jobId: deps.job.id } : {}),
+    ...(deps.job?.groupId !== undefined ? { groupId: deps.job.groupId } : {}),
   };
 }
 

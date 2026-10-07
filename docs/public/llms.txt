@@ -36,6 +36,7 @@ Key facts:
 - [Why migronaut?](https://migronaut.vercel.app/guide/why): Reasons to choose it and how it compares to migrate-mongo
 - [vs. mongo-migrate-kit](https://migronaut.vercel.app/guide/vs-mongo-migrate-kit): What changed since the mmk fork, and why
 - [Core Concepts](https://migronaut.vercel.app/guide/concepts): Migrations, batches, the changelog, ordering, locking, and checksums
+- [How It Works](https://migronaut.vercel.app/guide/how-it-works): Architecture diagrams — the engine and its entry points, the life of a run, the lock, where the state lives, background migrations, and what a run reports
 - [Getting Started](https://migronaut.vercel.app/guide/getting-started): Install, configure, create, and run your first migration
 - [Tutorial](https://migronaut.vercel.app/guide/tutorial): End-to-end worked example from init to rollback
 - [Configuration](https://migronaut.vercel.app/guide/configuration): Config file, env vars, precedence, and all options
@@ -47,6 +48,7 @@ Key facts:
 - [Background Migrations](https://migronaut.vercel.app/guide/background-migrations): Long data rewrites beside the migration line — partitions, lanes and maxParallel, transactions, requires, dry runs, drift, sharded clusters, and the three runtimes
 - [Programmatic API](https://migronaut.vercel.app/guide/api): The MigratorKit class, methods, and result types
 - [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq): Run migrations as BullMQ jobs — a migration service with ordering, batches, scheduling, and enqueue-and-wait
+- [Migration Logs](https://migronaut.vercel.app/guide/migration-logs): ctx.logger bound to the run, ctx.run, and the migration:log event for lines marked userland: true — stored and shown by your application
 - [OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry): Traces and metrics through an injected tracer and meter — a span per run and per migration, with the MongoDB driver's spans nested under it
 - [CI/CD & Deployment](https://migronaut.vercel.app/guide/ci-cd): GitHub Actions, Docker, deploy gates, and JSON output
 - [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting): Common errors and how to fix them

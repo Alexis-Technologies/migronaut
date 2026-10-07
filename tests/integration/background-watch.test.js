@@ -231,6 +231,40 @@ describe('live drift watcher (integration)', () => {
     assert.strictEqual(await mongo.db.collection('audit').countDocuments({ order: insertedId }), 1);
   });
 
+  it('should log what it upgrades as the watcher, with no partition and no generation', async () => {
+    const kit = kitWith();
+    await orders().insertOne({ __v: 1, __rev: 0 });
+    project.write(
+      NAME,
+      spec({
+        extra: `migrate: (doc, { logger }) => {
+    logger.info('upgraded', { userland: true, late: doc.late === true });
+    return { ...doc, v2: true };
+  },`,
+      }).replace("  migrate: (doc) => ({ ...doc, ['v2']: true }),\n", ''),
+    );
+    await kit.up();
+    await kit.runBackground(NAME);
+    const events = [];
+    kit.on('migration:log', (event) => events.push(event));
+    const drift = [];
+    kit.on('background:drift', (event) => drift.push(event));
+    const states = [];
+    kit.on('background:watch', (event) => states.push(event.state));
+    watchers.push(await kit.watchBackground(FAST));
+    await until('the stream', () => states.includes('streaming'));
+    await orders().insertOne({ __v: 1, __rev: 0, late: true });
+    await until('the drift event', () => drift.length > 0);
+    const [event] = events.filter((entry) => entry.data.late);
+    assert.strictEqual(event.kind, 'background');
+    assert.strictEqual(event.migration, NAME);
+    assert.strictEqual(event.partition, '');
+    assert.ok(!('generation' in event));
+    assert.strictEqual(event.attempt, 1);
+    // The watcher's own run id — the one its drift events carry.
+    assert.strictEqual(event.runId, drift.at(-1).runId);
+  });
+
   it('should reopen its background migrations when it falls behind', async () => {
     const { kit, states } = await watched({}, { maxLagMs: 1 });
     await until('the shedding', async () => {

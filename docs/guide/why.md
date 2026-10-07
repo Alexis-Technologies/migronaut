@@ -24,9 +24,19 @@ your database half-migrated when something fails.
 - **Lifecycle hooks** — `beforeAll`, `afterAll`, `beforeEach`, `afterEach`, `onError`.
 - **Opt-in transactions** — wrap a migration so it fully commits or fully aborts.
 - **Indexes and validators as an end state** — declare them, and `migronaut converge` brings the
-  database to match; no migration file per index change.
+  database to match; no migration file per index change. Atlas Search and Vector Search indexes
+  too, updated in place.
+- **Document versioning** — a shape version and an optimistic-concurrency revision on every
+  document, enforced by a validator, with helpers for your repository layer.
+- **Background migrations** — rewrite huge collections beside the deploy, in parallel lanes with a
+  checkpoint per batch, without holding the migration lock.
+- **Migrations as a queue** — an optional BullMQ adapter: one migration per job, in order.
+- **Observable** — OpenTelemetry spans and metrics through your own tracer and meter, and
+  migration logs your application can show its users.
 - **TypeScript, ESM & CommonJS** — all run with no `ts-node` plumbing.
 - **Zero config files required** — drive everything from env vars if you prefer.
+
+[How It Works](/guide/how-it-works) shows how these parts fit together.
 
 ## vs. migrate-mongo
 

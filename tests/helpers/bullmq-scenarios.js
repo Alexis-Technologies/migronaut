@@ -663,6 +663,64 @@ function defineBullMQScenarios(harness) {
     await assert.rejects(mq.enqueueUp(undefined, { reason: '' }), /reason/);
   });
 
+  it('should name the job in what a migration logs, and keep its userland lines in the job log', async () => {
+    write(
+      '0001-a.js',
+      `export async function up({ db, logger, run }) {
+  logger.debug('operational only');
+  logger.info('seeded', { userland: true, count: 2, jobId: run.jobId });
+  await db.collection('things').insertOne({ marker: 'a' });
+}
+export async function down() {}
+`,
+    );
+    const mq = createQueue();
+    const events = [];
+    mq.kit.on('migration:log', (event) => events.push(event));
+    await mq.startWorker();
+    const group = await mq.enqueueUp(undefined, { requestedBy: 'alice' });
+    await group.wait({ timeoutMs: 10_000 });
+    const jobId = String(group.jobs[0].id);
+
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].jobId, jobId);
+    assert.strictEqual(events[0].groupId, group.groupId);
+    assert.strictEqual(events[0].requestedBy, 'alice');
+    assert.deepStrictEqual(events[0].data, { count: 2, jobId });
+    const view = await mq.getJob(jobId);
+    assert.strictEqual(events[0].runId, view.returnvalue.runId);
+    const logs = await harness.logsOf(mq.queue, jobId);
+    assert.ok(logs.includes(`✎ seeded {"count":2,"jobId":"${jobId}"}`), logs.join(' | '));
+    assert.ok(!logs.some((row) => row.includes('operational only')));
+  });
+
+  it('should mirror only userlandLogRows lines into the job log, counting the rest', async () => {
+    write(
+      '0001-a.js',
+      `export async function up({ db, logger }) {
+  for (let n = 1; n <= 3; n++) logger.info('step', { userland: true, n });
+  await db.collection('things').insertOne({ marker: 'a' });
+}
+export async function down() {}
+`,
+    );
+    const mq = createQueue({ userlandLogRows: 2 });
+    const events = [];
+    mq.kit.on('migration:log', (event) => events.push(event));
+    await mq.startWorker();
+    const group = await mq.enqueueUp();
+    await group.wait({ timeoutMs: 10_000 });
+    const jobId = String(group.jobs[0].id);
+
+    assert.strictEqual(events.length, 3, 'the event still carries every line');
+    const rows = (await harness.logsOf(mq.queue, jobId)).filter((row) => row.startsWith('✎'));
+    assert.deepStrictEqual(rows, [
+      '✎ step {"n":1}',
+      '✎ step {"n":2}',
+      '✎ … 1 more line(s) past the limit of 2 not mirrored here — see migration:log',
+    ]);
+  });
+
   it('should refuse a forced or unordered job its worker does not allow', async () => {
     write('0001-a.js', insertMigration('things', 'a'));
     const mq = createQueue();

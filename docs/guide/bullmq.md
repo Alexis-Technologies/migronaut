@@ -48,10 +48,19 @@ the processor's cancellation signal (5.64) — but 5.x is not part of migronaut'
 
 ## How it fits together
 
-```
-enqueueUp() ──► Redis (BullMQ queue) ──► worker ──► MongoDB
-  plan            what was asked           one job      lock + changelog:
-  + batch                                  at a time    what is true
+```mermaid
+flowchart TB
+  accTitle: How the queue adapter fits together
+  subgraph ASK ["who asks"]
+    direction TB
+    H(["an HTTP handler"]):::ext
+    D(["a deploy hook"]):::ext
+    S(["a schedule tick"]):::ext
+  end
+  ASK -- "enqueueUp()" --> PLAN["plan what is pending<br/>one batch number for all"]
+  PLAN --> Q[("Redis · BullMQ queue<br/>one job per migration")]:::ext
+  Q --> W["worker<br/>one job at a time"]:::core
+  W -- "kit.up(name,<br/>{ batch, ordered })" --> DB[("MongoDB<br/>lock + changelog")]:::store
 ```
 
 Three rules explain every behaviour on this page:
@@ -82,6 +91,7 @@ Three rules explain every behaviour on this page:
 | `allow` | | `{ down: true, force: false, unordered: false }` — what a job may ask for beyond applying what is pending in order. See [Security](#security) |
 | `lockWait` | | `{ onLockHeld: 'wait' \| 'throw', lockWaitTimeoutMs, lockPollIntervalMs: 500 }` — how a job behaves when the MongoDB lock is held. The timeout defaults to 90 s or 1.5× the holder's lock TTL, whichever is longer; polls back off up to 5 s |
 | `background` | | `true` or `{ … }`: a second queue for [background migrations](#background-migrations-on-the-queue) |
+| `userlandLogRows` | `1000` | How many of a migration's `userland: true` lines one job's log takes (a lane: one slice); the rest are counted in one closing row, and `0` mirrors none. [`migration:log`](/guide/migration-logs) still carries every line |
 
 | Method | Returns | |
 |---|---|---|
@@ -139,6 +149,26 @@ fails the job. A block by a migration that did fail stops the line at once, as a
 
 Nothing is left half-ordered. Fix the migration, deploy, and call `enqueueUp()` again: it plans what
 is still pending (`0002`, `0003`) as a new group.
+
+Each job decides from the changelog, at the moment it runs — not from what the queue remembers:
+
+```mermaid
+sequenceDiagram
+  accTitle: A failed migration stops the line
+  participant Q as queue
+  participant W as worker
+  participant DB as MongoDB
+  Q->>W: job 0001
+  W->>DB: up 0001, ordered
+  DB-->>W: ✔ applied
+  Q->>W: job 0002
+  W->>DB: up 0002, ordered
+  DB-->>W: ✖ it throws — a 'failed' trace
+  Q->>W: job 0003
+  W->>DB: up 0003, ordered
+  DB-->>W: 0002 is still pending, and it failed
+  Note over W: 0003 fails as MIGRATION_BLOCKED,<br/>without running
+```
 
 **Duplicates are harmless.** Two instances enqueuing at boot produce one set of jobs: the second
 call is deduplicated (`group.deduplicated` lists the files, and its `jobs` point at the first
@@ -287,6 +317,29 @@ The background queue carries three kinds of job:
 | `background` | The **coordinator** of one background migration: plans its partitions, starts its lanes, closes each pass |
 | `background-lane` | One **lane**: claims a partition and works it a slice at a time. A child job of its coordinator |
 | `background-verify` | A tick of the [drift watch](/guide/background-migrations#the-poll-verifybackground) |
+
+```mermaid
+sequenceDiagram
+  accTitle: A background migration on the queue
+  participant UP as up job
+  participant C as coordinator
+  participant L as lanes
+  participant DB as MongoDB
+  UP->>DB: register it
+  UP->>C: enqueue
+  C->>DB: a coordinator step
+  DB-->>C: 3 lanes have work
+  C->>L: 3 lanes, as children
+  Note over C: waits for children
+  loop until nothing is left to claim
+    L->>DB: claim, work a slice
+    Note over L: moveToDelayed
+  end
+  L-->>C: the last one completes
+  C->>DB: a coordinator step
+  DB-->>C: next pass — or done
+  Note over C,DB: done: what waited for it<br/>gets its coordinator
+```
 
 1. **The coordinator plans.** It takes one coordinator step. When partitions have work, it adds
    that many lanes as its **children** and waits for them (`moveToWaitingChildren`).
@@ -440,7 +493,8 @@ await backgroundProcessor.heal(); // what startBackgroundWorker() does at start
 
 `createBackgroundProcessor` takes `config` or `kit` (and `kitOptions`), `queue` (required: the
 coordinators add their lanes to it), `jobOptions`, `sliceMs`, `children`, `pollIntervalMs`,
-`stallMs`, and `maxLaneRetries` (failed slices in a row before a lane gives up, default 8). The
+`stallMs`, `maxLaneRetries` (failed slices in a row before a lane gives up, default 8) and
+`userlandLogRows` (default 1000, counted per slice). The
 processor has `shutdown()`, `close()` and `heal()`. `createMigrationProcessor`'s `background` takes
 `{ queue, jobOptions?, stallMs? }`. On the producer side,
 `enqueueBackground(queue, kit, { migration?, stallMs?, jobOptions?, requestedBy?, reason? })`
@@ -477,7 +531,8 @@ try {
 const { Worker } = require('bullmq');
 const { createMigrationProcessor } = require('@alexify/migronaut/bullmq');
 
-const processor = createMigrationProcessor({ config, queue }); // `queue` only for sync jobs
+// `queue` only for sync jobs; `userlandLogRows`, `lockWait`, `allow`, … as on the facade
+const processor = createMigrationProcessor({ config, queue });
 const worker = new Worker('migronaut', processor, { connection, concurrency: 1 });
 
 // on shutdown — stop fetching first, then stop the processor, together:
@@ -517,8 +572,8 @@ on the lock. One is the honest setting.
 ## Observing
 
 - **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'search-wait' | 'completed' | 'failed', migration, direction, groupId, index, total, code?, runId? }` — `code` is the typed error code of a failed job (`'UNKNOWN'` for one that is not migronaut's), and `runId` the run's correlation id: the join key to the changelog record and the kit's log lines. A failed job has no return value, so its `runId` is found here and on the error's `context`. A `sync` or `converge` job reports `{ phase, kind }` instead of the migration fields — and, while it waits for search index builds, `{ phase: 'search-wait', kind, searchIndexes, waitedMs }` (updated every 30 s, with a job log line).
-- **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step (as it starts, and as it ends), and the failure line with its run id.
-- **Kit events**: `mq.kit.on('migration:success', …)` — the same [lifecycle events](/guide/api) as everywhere else.
+- **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step (as it starts, and as it ends), the failure line with its run id — and the migration's own `userland: true` lines, as `✎ …` rows (a background lane's in the lane job's log), up to `userlandLogRows` per job; the rest are counted in one closing row. Every row is one line. BullMQ keeps a job's logs as long as the job — `jobOptions: { keepLogs }` caps them further. Each run is told its job, so a migration's `ctx.run` and its [`migration:log`](/guide/migration-logs) events carry `jobId` and `groupId`.
+- **Kit events**: `mq.kit.on('migration:success', …)` — the same [lifecycle events](/guide/api) as everywhere else. `mq.kit.on('migration:log', …)` in the worker's process is where to [keep what migrations log](/guide/migration-logs#keeping-them) for your users.
 - **Worker events**: `mq.worker.on('failed', …)`.
 - **Traces**: pass `bullmq.telemetry` and the kit's `telemetry` option, and one trace runs from the
   request that enqueued, through Redis, to the MongoDB commands the migration issued — see

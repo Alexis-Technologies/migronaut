@@ -9,8 +9,11 @@ const {
   RunAbortedError,
 } = require('../errors/index.js');
 const { pickActor } = require('../utils/actor.js');
+const { isPlainObject } = require('../utils/canonical.js');
 const { errorText } = require('../utils/error.js');
+const { jobRefIssue } = require('../utils/job-ref.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
+const { sanitize } = require('../utils/sanitize.js');
 const { JOB_NAMES, assertAllowed, isObjectLike, parseJobData, resolveAllow } = require('./jobs.js');
 const {
   assertBackgroundJobOptions,
@@ -79,14 +82,162 @@ function jobIds(ctx) {
   };
 }
 
+/**
+ * The job a run works for, as the kit's `job` option — `{ id, groupId? }` (a
+ * lane's slice: `{ id }`), or undefined when the job has no id the kit would
+ * take (it then logs nothing of the job; the run itself is unaffected). A
+ * group the kit would refuse is left out rather than the whole reference.
+ */
+function jobRefOf(job, groupId) {
+  if (job?.id === undefined || job.id === null) return undefined;
+  const id = String(job.id);
+  const ref = groupId !== undefined ? { id, groupId } : { id };
+  if (jobRefIssue(ref) === null) return ref;
+  return jobRefIssue({ id }) === null ? { id } : undefined;
+}
+
+/** The longest row a `migration:log` event becomes in a job's log */
+const USERLAND_ROW_MAX = 1024;
+
+/**
+ * How many `migration:log` rows one job's log takes by default (a lane: one
+ * slice) — the rest are counted in one closing row. A migration that logs in
+ * a loop must not write tens of thousands of entries into Redis per job.
+ */
+const DEFAULT_USERLAND_LOG_ROWS = 1000;
+
+/** Line breaks: a row is one line of the job's log, so they are shown, never acted on */
+const ROW_BREAKS = /\r\n|[\r\n\u2028\u2029]/g;
+
+/** Text as part of one row: line breaks shown as ⏎, control characters dropped */
+const oneLine = (text) => sanitize(String(text).replace(ROW_BREAKS, '⏎'));
+
+/** BigInts have no JSON form of their own; a log row shows their digits */
+const jsonValue = (_key, value) => (typeof value === 'bigint' ? value.toString() : value);
+
+/** Stops {@link boundedJson} once the row has what it can show */
+const ROW_FULL = Symbol('row full');
+
+/**
+ * `data` as JSON, written only until `max` characters — never the whole of
+ * it: an event's data may hold a thousand entries of 4 KB each, and the row
+ * shows a kilobyte. The JSON of what `JSON.stringify` would write, cut short.
+ */
+function boundedJson(data, max) {
+  let out = '';
+  const push = (text) => {
+    if (out.length + text.length > max) {
+      out += text.slice(0, max - out.length + 1);
+      throw ROW_FULL;
+    }
+    out += text;
+  };
+  const write = (value) => {
+    if (typeof value === 'bigint') return push(`"${value}"`);
+    // Arrays and plain objects are walked here; anything else is a leaf.
+    if (!Array.isArray(value) && !isPlainObject(value)) {
+      return push(JSON.stringify(value, jsonValue) ?? 'null');
+    }
+    if (Array.isArray(value)) {
+      push('[');
+      for (let index = 0; index < value.length; index++) {
+        if (index > 0) push(',');
+        write(value[index]);
+      }
+      return push(']');
+    }
+    push('{');
+    let first = true;
+    for (const key of Object.keys(value)) {
+      const item = value[key];
+      if (item === undefined || typeof item === 'function' || typeof item === 'symbol') continue;
+      push(`${first ? '' : ','}${JSON.stringify(key)}:`);
+      first = false;
+      write(item);
+    }
+    return push('}');
+  };
+  try {
+    write(data);
+  } catch (error) {
+    if (error !== ROW_FULL) throw error;
+  }
+  return out;
+}
+
+/** Whether `data` has a key to show — without listing them all */
+function hasEntries(data) {
+  if (data === null || typeof data !== 'object') return false;
+  for (const _key in data) return true;
+  return false;
+}
+
+/**
+ * A `migration:log` event as a row of the job's log, next to the processor's
+ * own lifecycle rows: `✎ <level: ><msg> <data as JSON>`, the attempt when a
+ * transaction was retried, the partition of a background lane. One line —
+ * a line break in the message cannot forge a row of its own — cut at
+ * {@link USERLAND_ROW_MAX}; redacted on its way out like every row.
+ */
+function userlandRow(event) {
+  const level = event.level === 'info' ? '' : `${event.level}: `;
+  const attempt = event.attempt > 1 ? ` (attempt ${event.attempt})` : '';
+  const partition =
+    event.kind === 'background' && event.partition ? ` [partition ${event.partition}]` : '';
+  const head = `✎ ${level}${event.msg}`;
+  let data = '';
+  if (hasEntries(event.data) && head.length < USERLAND_ROW_MAX) {
+    try {
+      data = ` ${boundedJson(event.data, USERLAND_ROW_MAX - head.length)}`;
+    } catch {
+      data = ' [data not serializable]';
+    }
+  }
+  const row = oneLine(`${head}${data}${attempt}${partition}`);
+  return row.length > USERLAND_ROW_MAX ? `${row.slice(0, USERLAND_ROW_MAX - 1)}…` : row;
+}
+
+/** The closing row of a job whose userland lines went past the limit */
+function userlandOverflowRow(dropped, limit) {
+  return `✎ … ${dropped} more line(s) past the limit of ${limit} not mirrored here — see migration:log`;
+}
+
+/** `userlandLogRows`: how many userland rows one job's log takes */
+function assertUserlandLogRows(value) {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+    throw new ConfigInvalidError('userlandLogRows must be an integer of at least 0', {
+      userlandLogRows: value,
+    });
+  }
+}
+
+/**
+ * Whether a `migration:log` event is the job's own. Matched by run and job,
+ * not by the job in flight alone: a body that outlived its timeout may still
+ * log while the next job runs — the same job again, if it was put back in the
+ * queue — and its lines must not land in that run's log. A background
+ * migration the run drives inline logs from lanes of its own (their own run
+ * ids), named by the job and its group: a background queue's lanes have no
+ * group, and their ids may well repeat a migration job's.
+ */
+function ownLine(ctx, event) {
+  const ref = ctx.jobRef;
+  if (event.kind === 'background') {
+    return ref?.groupId !== undefined && event.jobId === ref.id && event.groupId === ref.groupId;
+  }
+  if (event.kind !== 'migration') return false;
+  if (ctx.runId === undefined || event.runId !== ctx.runId) return false;
+  return ref === undefined || event.jobId === ref.id;
+}
+
 /** A job in a few words, for log lines: `up 20260101-x.js (1/3)`, `converge`, `sync` */
 function describeJob(data) {
   if (data.kind !== 'migration') return data.kind;
   return `${data.direction} ${data.migration} (${data.index + 1}/${data.total})`;
 }
 
-/** The structured fields of a job's log lines */
-function jobFields(data) {
+/** The structured fields of a job's log lines: what the job is about */
+function jobSummary(data) {
   if (data.kind !== 'migration') return { kind: data.kind };
   return {
     migration: data.migration,
@@ -139,7 +290,16 @@ function resolveProcessorOptions(options) {
   if (!isObjectLike(options)) {
     throw new ConfigInvalidError('createMigrationProcessor options must be an object');
   }
-  const { kit, config, lockWait = {}, jobOptions, ordered = true, allow, background } = options;
+  const {
+    kit,
+    config,
+    lockWait = {},
+    jobOptions,
+    ordered = true,
+    allow,
+    background,
+    userlandLogRows = DEFAULT_USERLAND_LOG_ROWS,
+  } = options;
   if (kit !== undefined && config !== undefined) {
     throw new ConfigInvalidError('Pass either `kit` or `config`, not both');
   }
@@ -158,7 +318,8 @@ function resolveProcessorOptions(options) {
   assertLockWaitOptions(waitOptions);
   assertJobOptions(jobOptions);
   if (background !== undefined) assertBackgroundLink(background);
-  return { waitOptions, defaultOrdered: ordered, allow: resolveAllow(allow) };
+  assertUserlandLogRows(userlandLogRows);
+  return { waitOptions, defaultOrdered: ordered, allow: resolveAllow(allow), userlandLogRows };
 }
 
 /**
@@ -189,7 +350,7 @@ function assertBackgroundLink(background) {
  * signal only to processors whose `length` is at least 3.
  */
 function createMigrationProcessor(options = {}) {
-  const { waitOptions, defaultOrdered, allow } = resolveProcessorOptions(options);
+  const { waitOptions, defaultOrdered, allow, userlandLogRows } = resolveProcessorOptions(options);
   const { kit: injectedKit, config, kitOptions, queue, jobOptions, background } = options;
 
   const ownsKit = injectedKit === undefined;
@@ -234,6 +395,29 @@ function createMigrationProcessor(options = {}) {
       }),
     );
   const flush = (ctx) => Promise.allSettled([...ctx.writes]);
+
+  /** A userland line into the job's log — up to `userlandLogRows`, then only counted */
+  const mirror = (ctx, event) => {
+    if (ctx.userlandRows < userlandLogRows) {
+      ctx.userlandRows += 1;
+      log(ctx, userlandRow(event));
+    } else {
+      ctx.userlandDropped += 1;
+    }
+  };
+
+  /**
+   * Nothing more is written for the migration once the job settles: a row
+   * after BullMQ removed the job would leave its log behind in Redis. What
+   * went past the limit is said in one last row first.
+   */
+  const seal = (ctx) => {
+    if (ctx.sealed) return;
+    if (ctx.userlandDropped > 0) {
+      log(ctx, userlandOverflowRow(ctx.userlandDropped, userlandLogRows));
+    }
+    ctx.sealed = true;
+  };
 
   // Subscribed once, for the processor's lifetime: the kit emits per run, and
   // `current` says which job that run belongs to.
@@ -305,6 +489,10 @@ function createMigrationProcessor(options = {}) {
     'converge:end': (event) => {
       if (current && event.success) log(current, `✔ Converged ${event.changed} change(s)`);
     },
+    // What the migration itself logged for its users — see ownLine.
+    'migration:log': (event) => {
+      if (current && !current.sealed && ownLine(current, event)) mirror(current, event);
+    },
   };
   for (const [event, listener] of Object.entries(listeners)) kit.on(event, listener);
 
@@ -373,6 +561,15 @@ function createMigrationProcessor(options = {}) {
   async function runMigrationJob(ctx, signal) {
     const { data } = ctx;
     const ordered = data.ordered ?? defaultOrdered;
+    // The run's correlation names this job, so what the migration logs can be
+    // joined to it (and its userland lines routed into its log).
+    ctx.jobRef = jobRefOf(ctx.job, data.groupId);
+    if (ctx.jobRef === undefined) {
+      kit.logger.debug(`Job ${ctx.job?.id} has no id the run can carry — its lines name no job`, {
+        ...jobIds(ctx),
+      });
+    }
+    const jobField = ctx.jobRef ? { job: ctx.jobRef } : {};
     const attempt = () =>
       data.direction === JOB_NAMES.UP
         ? kit.up(data.migration, {
@@ -381,8 +578,13 @@ function createMigrationProcessor(options = {}) {
             ...(data.force ? { force: true } : {}),
             ...(data.checksum ? { checksum: data.checksum } : {}),
             ...pickActor(data),
+            ...jobField,
           })
-        : kit.down(data.migration, { ...(ordered ? { ordered: true } : {}), ...pickActor(data) });
+        : kit.down(data.migration, {
+            ...(ordered ? { ordered: true } : {}),
+            ...pickActor(data),
+            ...jobField,
+          });
 
     try {
       const { result, waitedMs } = await waitForLock(ctx, attempt, signal);
@@ -636,6 +838,9 @@ function createMigrationProcessor(options = {}) {
       started: false,
       writes: new Set(),
       registered: [],
+      userlandRows: 0,
+      userlandDropped: 0,
+      sealed: false,
     };
     const startedAt = Date.now();
     const signals = [shutdownController.signal];
@@ -658,22 +863,24 @@ function createMigrationProcessor(options = {}) {
       abort.addEventListener('abort', onAbort, { once: true });
       kit.logger.debug(`▶ Job ${job?.id} (${describeJob(ctx.data)})`, {
         ...jobIds(ctx),
-        ...jobFields(ctx.data),
+        ...jobSummary(ctx.data),
       });
       await kit.connect();
       let result;
       if (ctx.data.kind === 'sync') result = await runSyncJob(ctx);
       else if (ctx.data.kind === 'converge') result = await runConvergeJob(ctx, abort);
       else result = await runMigrationJob(ctx, abort);
+      seal(ctx);
       progress(ctx, 'completed', ctx.runId ? { runId: ctx.runId } : {});
       await flush(ctx);
       kit.logger.debug(`✔ Job ${job?.id} done`, {
         ...jobIds(ctx),
-        ...jobFields(ctx.data),
+        ...jobSummary(ctx.data),
         durationMs: Date.now() - startedAt,
       });
       return result;
     } catch (error) {
+      seal(ctx);
       const requeued = await requeueOnShutdown(ctx, error, token);
       if (requeued) throw requeued;
       // BullMQ only retries when the job was given more than one attempt — the
@@ -738,9 +945,15 @@ module.exports = {
   RETRYABLE_CODES,
   UNRECOVERABLE_ERROR_NAME,
   WAITING_ERROR_NAME,
+  DEFAULT_USERLAND_LOG_ROWS,
+  assertUserlandLogRows,
   createMigrationProcessor,
   isTransientForJob,
   isRetryableError,
+  jobRefOf,
+  ownLine,
   prepareErrorForQueue,
   resolveProcessorOptions,
+  userlandOverflowRow,
+  userlandRow,
 };

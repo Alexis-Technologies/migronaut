@@ -298,3 +298,82 @@ describe('MigratorKit config resolution', () => {
     }
   });
 });
+
+describe('MigratorKit event listeners', () => {
+  /** A logger that keeps its debug lines */
+  function recorder() {
+    const lines = [];
+    const noop = () => {};
+    return {
+      lines,
+      logger: {
+        debug: (msg, fields) => lines.push({ msg, fields }),
+        info: noop,
+        warn: noop,
+        error: noop,
+      },
+    };
+  }
+
+  it('should contain an async listener that rejects instead of leaving an unhandled rejection', async () => {
+    const { lines, logger } = recorder();
+    const kit = new MigratorKit({}, { fallbackLogger: logger });
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      kit.on('migration:success', async () => {
+        throw new Error('insert failed');
+      });
+      kit.emit('migration:success', { migration: 'a', direction: 'up' });
+      // The rejection is reported from a later tick.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    assert.deepStrictEqual(unhandled, []);
+    assert.strictEqual(lines.length, 1);
+    assert.match(lines[0].msg, /Event listener for 'migration:success' rejected: insert failed/);
+    assert.deepStrictEqual(lines[0].fields, { event: 'migration:success', error: 'insert failed' });
+  });
+
+  it('should survive a logger that throws while reporting a rejection', async () => {
+    const throwing = () => {
+      throw new Error('logger down');
+    };
+    const kit = new MigratorKit(
+      {},
+      { fallbackLogger: { debug: throwing, info: throwing, warn: throwing, error: throwing } },
+    );
+    kit.on('run:end', () => Promise.reject(new Error('nope')));
+    kit.emit('run:end', {});
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+});
+
+describe('MigratorKit job reference guards', () => {
+  const invalid = [
+    ['a string', '17'],
+    ['no id', { groupId: 'g' }],
+    ['a numeric id', { id: 17 }],
+    ['an unknown key', { id: '17', queue: 'q' }],
+  ];
+  for (const [label, job] of invalid) {
+    it(`should refuse ${label} as up's job before connecting`, async () => {
+      await assert.rejects(guardedKit().up('a.js', { job }), ConfigInvalidError);
+    });
+    it(`should refuse ${label} as down's and redo's job before connecting`, async () => {
+      await assert.rejects(guardedKit().down('a.js', { job }), ConfigInvalidError);
+      await assert.rejects(guardedKit().redo('a.js', { job }), ConfigInvalidError);
+    });
+  }
+
+  it('should name the given keys, not their values, in the error', async () => {
+    await assert.rejects(guardedKit().up('a.js', { job: { id: 1, secret: 'x' } }), (error) => {
+      assert.strictEqual(error.context.job, 'id, secret');
+      return true;
+    });
+  });
+});

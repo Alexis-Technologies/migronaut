@@ -25,57 +25,110 @@ hero:
 features:
   - icon: 📭
     title: Zero dependencies
-    details: No runtime dependencies at all — only the mongodb driver as a peer. Nothing extra in your lockfile, and no third-party code in the process that writes to your database.
+    details: "No runtime dependencies — only the mongodb driver as a peer. Your logger, BullMQ and OpenTelemetry are injected by you, never installed by migronaut."
     link: /guide/vs-mongo-migrate-kit
     linkText: How it got there
   - icon: 🎯
-    title: Run a single file
-    details: migronaut up <file> and migronaut down <file> — not just "all pending" or "the last batch". Full control over exactly what runs.
-    link: /commands/up
-    linkText: migronaut up
-  - icon: ↩️
-    title: Real rollbacks
-    details: Revert any batch (--batch 3), the last N migrations (--steps 2), a single file, or redo in one step — history is never deleted.
+    title: Precise runs, real rollbacks
+    details: "Apply one file, migrate --to a point, or everything pending. Roll back a batch, the last N, one file, or redo — history is never deleted."
     link: /commands/down
     linkText: migronaut down
-  - icon: 👀
-    title: Dry-run previews
-    details: migronaut dry-run up shows precisely what would run before anything touches the database. No surprises in production.
-    link: /commands/dry-run
-    linkText: migronaut dry-run
   - icon: 🔒
     title: Safe by default
-    details: An atomic MongoDB lock with a renewal heartbeat stops two deploys racing, and SHA-256 checksums catch edited migrations before they re-run.
-    link: /commands/unlock
-    linkText: Locking & unlock
-  - icon: 🔐
-    title: Opt-in transactions
-    details: Wrap a migration in a MongoDB transaction with export const useTransaction = true — automatic commit on success, abort on error.
-    link: /guide/transactions
-    linkText: Transactions
-  - icon: 🪝
-    title: Lifecycle hooks
-    details: beforeAll, afterAll, beforeEach, afterEach, and onError — plug in logging, metrics, or notifications around every run.
-    link: /guide/hooks
-    linkText: Lifecycle hooks
-  - icon: 🧾
-    title: Audit-ready history
-    details: Every run records duration, checksum, environment, user, and batch in an append-only changelog. A rollback updates the record, never removes it.
-    link: /commands/status
-    linkText: migronaut status
+    details: "An atomic MongoDB lock with a heartbeat stops two deploys racing; checksums catch edited migrations, and a file merged late is flagged."
+    link: /guide/how-it-works#the-lock
+    linkText: How the lock works
+  - icon: 👀
+    title: Preview everything
+    details: "dry-run shows what up or down would run, converge --dry-run what would change, and a background dry run rewrites a sample in an aborted transaction."
+    link: /commands/dry-run
+    linkText: migronaut dry-run
+  - icon: 🧭
+    title: Declared collections
+    details: "Declare indexes and validators as an end state. converge applies the difference, refuses a conflict before any write, and never drops what you did not declare."
+    link: /guide/collections
+    linkText: Declared collections
+  - icon: 🔎
+    title: Atlas Search & Vector Search
+    details: "Atlas Search and Vector Search indexes in the same declarations — updated in place, never dropped and rebuilt, and waited for without holding the lock."
+    link: /guide/collections#search-indexes
+    linkText: Search indexes
+  - icon: 🧬
+    title: Document versioning
+    details: "A shape version and an optimistic-concurrency revision on every document — enforced by a validator, typed per version, written by your repository's helpers."
+    link: /guide/versioning
+    linkText: Document versioning
+  - icon: 🌊
+    title: Background migrations
+    details: "Rewrite huge collections beside the deploy: parallel lanes in any process, a checkpoint per batch, throttling, pause and resume, and a drift watch."
+    link: /guide/background-migrations
+    linkText: Background migrations
   - icon: 📬
     title: Migrations as a queue
-    details: Optional BullMQ adapter — one migration per job, applied in order by a worker. A migration service you trigger over HTTP, on a schedule, or from a deploy hook. BullMQ is injected, never a dependency.
+    details: "Optional BullMQ adapter — one migration per job, in an order MongoDB enforces, with schedules, enqueue-and-wait, and a queue for background migrations."
     link: /guide/bullmq
-    linkText: Migrations as a Queue
-  - icon: 📘
-    title: TypeScript & JavaScript
-    details: .ts (native on Node 22.18+, or via a loader like tsx), ESM, and CommonJS all just work, with a fully-typed context and config.
-    link: /guide/writing-migrations
-    linkText: Writing migrations
+    linkText: Migrations as a queue
+  - icon: 🔭
+    title: OpenTelemetry
+    details: "Hand it your tracer and meter: a span per run and per migration, the driver's spans nested inside, and metrics for durations, locks and background work."
+    link: /guide/opentelemetry
+    linkText: OpenTelemetry
+  - icon: 📝
+    title: Migration logs
+    details: "ctx.logger binds the run, migration, attempt and queue job to every line — and lines marked userland become events your app can store and show its users."
+    link: /guide/migration-logs
+    linkText: Migration logs
   - icon: 📦
-    title: Adopt migrate-mongo
-    details: migronaut import brings an existing migrate-mongo changelog forward as-is — no re-running, no data loss, no rewriting files.
+    title: Bring your history
+    details: "migronaut import adopts a migrate-mongo changelog as-is; baseline marks an existing database's migrations applied — no re-running, no rewriting files."
     link: /guide/migrate-mongo
     linkText: Migrate from migrate-mongo
 ---
+
+<div class="home-section">
+
+## How it fits together
+
+One engine runs everything — from a terminal, inside your application at startup, or as a queue
+worker — and keeps all of its state in MongoDB, next to your data. It changes a database in three
+ways, each with its own guarantees.
+
+```mermaid
+flowchart TB
+  accTitle: How migronaut fits together
+  subgraph RUN ["Run it from"]
+    direction TB
+    CLI(["the migronaut CLI"]):::ext
+    API(["your app at startup<br/>runMigrations()"]):::ext
+    Q(["a BullMQ worker<br/>a migration service"]):::ext
+  end
+  KIT["MigratorKit — one engine<br/>events · logs · OpenTelemetry"]:::core
+  subgraph WAYS ["Three ways to change a database"]
+    direction TB
+    M["migrations<br/>ordered · locked · reversible"]
+    C["declared collections<br/>indexes · search · validators"]
+    B["background migrations<br/>huge rewrites, beside the line"]
+  end
+  DB[("MongoDB<br/>your data + all of the state")]:::store
+  APP(["your repository layer<br/>@alexify/migronaut/versioning"]):::ext
+  RUN --> KIT --> WAYS --> DB
+  DB ~~~ APP
+  APP -- "__v · __rev" --> DB
+```
+
+[How it works, step by step →](/guide/how-it-works)
+{.home-section-link}
+
+## Also in the box
+
+- [Opt-in transactions](/guide/transactions) — a migration and its changelog record commit together
+- [Lifecycle hooks & events](/guide/hooks) — `beforeAll` … `onError`, and `kit.on(…)` for metrics
+- [TypeScript, ESM & CommonJS](/guide/writing-migrations) — `.ts` natively on Node 22.18+
+- [Mongoose](/guide/mongoose) — inject your instance, use your models in migrations
+- [Seeding](/guide/seeding) — seeds with a history of their own, per environment
+- [CI gates & JSON output](/guide/ci-cd) — `status --check`, `converge --check`, `--json`
+- [`migronaut audit`](/commands/audit) — a read-only health check of the whole setup
+- [Your own id format](/guide/configuration#custom-id-format) — ULID, CUID, UUIDv7 for every id it mints
+- [Secrets at runtime](/guide/configuration#async-factory-config-secret-managers) — an async config factory
+
+</div>

@@ -18,6 +18,16 @@ it, and the line goes on. The documents are rewritten beside the line, as long a
 
 None of that holds the migration lock.
 
+```mermaid
+flowchart TB
+  accTitle: A background migration beside the migration line
+  subgraph LINE ["the migration line — under the migration lock"]
+    M1["…-add-shipping-index.js"] --> M2["…-orders-shipping.js<br/>registers, and moves on"]:::core --> M3["the next migrations"]
+  end
+  M2 -. "registers" .-> BG["the rewrite, beside the line<br/>partitions · lanes · checkpoints"]:::core
+  BG -- "v1 → v2, batch by batch" --> DOCS[("orders")]:::store
+```
+
 ::: warning Experimental
 New in 2.3. The file format, the kit methods, the result shapes and the queue job contract may
 still change in a minor release.
@@ -80,8 +90,11 @@ What the engine does with it:
   migration is one-way (see [`down`](#up-down-redo)).
 
 `ctx` holds `signal` (aborted when the slice stops), `logger`, `direction` (`'forward'` or
-`'revert'`), and `background: { name, generation, partition }`. In a dry run it also has
-`dryRun: true`. It holds `session`, `db` and `client` only in [transactional
+`'revert'`), and `background: { name, generation, partition, runId?, jobId?, attempt }` — frozen;
+`runId` is the lane's, `attempt` counts the transactions a transactional batch went through.
+`logger` binds it to every line, and a `userland: true` line emits
+[`migration:log`](/guide/migration-logs#background-migrations) — log per batch, not per document.
+In a dry run it also has `dryRun: true`, and its lines emit nothing. It holds `session`, `db` and `client` only in [transactional
 mode](#transactions-and-writes-to-other-collections). Outside it, `migrate` should be a pure
 function of the document.
 
@@ -211,6 +224,26 @@ A registered background migration moves through these statuses:
 | `failed` | A partition failed, the document error budget ran out, or `maxPasses` passes did not drain it |
 | `cancelled` | Stopped by `cancel` |
 
+```mermaid
+flowchart TB
+  accTitle: The statuses of a background migration
+  UP(["up registers it"]):::ext -- "requires one not<br/>completed yet" --> BLK(["blocked"])
+  UP --> PEND
+  BLK -- unblocked --> PEND(["pending"])
+  PEND -- "a pass planned" --> RUN(["running"])
+  RUN --> FAIL(["failed"]):::warn
+  RUN -- "nothing old left" --> DONE(["completed"]):::core
+  RUN -- pause --> PAUSE(["paused"])
+  RUN -- cancel --> CANC(["cancelled"])
+  DONE -. drift .-> RUN
+  PAUSE -. resume .-> PEND
+  FAIL -. retry .-> PEND
+```
+
+`pause` and `cancel` work on a `blocked` or `pending` one too, and a paused one can be cancelled.
+A cancelled one can be retried like a failed one, and drift reopens a completed one
+([below](#drift-after-completion)).
+
 A control that does not fit the status fails with `BackgroundConflictError` (exit 33), for example
 pausing a completed one. A control whose result is already in place is not an error: it answers
 `applied: 'unchanged'`, so a repeated click or a redelivered job is harmless.
@@ -299,6 +332,12 @@ to finish (this run *is* the deploy): pin the new version with `migronaut backgr
 Inline mode holds the line for as long as the rewrite takes, which is the very thing background
 migrations exist to avoid. Keep it for data you know is small.
 
+The lanes it runs are lanes of their own — each with its own `runId` — but they work for the run:
+when that run names a queue job (the [BullMQ adapter](/guide/bullmq) always does, or the `job`
+option), `ctx.background.jobId` and `groupId` name it, and so do the lanes' log lines and
+[`migration:log`](/guide/migration-logs#background-migrations) events, which land in that job's
+log.
+
 ### The kit methods
 
 The runtimes are built on public kit methods, which you can drive yourself:
@@ -330,6 +369,25 @@ Several parts work together, and they keep everything that matters in MongoDB:
   checkpoint that is fenced by the lease. A crash between the write and the checkpoint replays the
   batch, which the version filter turns into a no-op.
 
+```mermaid
+sequenceDiagram
+  accTitle: One lane working one partition
+  participant L as lane, slot 1
+  participant P as its partition
+  participant C as orders
+  L->>P: claim it with a free slot — a lease
+  loop each batch, until the slice ends
+    L->>C: read the next batch<br/>through { __v: 1, _id: 1 }
+    L->>L: migrate() each copy,<br/>diff it against what was read
+    L->>C: bulkWrite, each one guarded by<br/>{ _id, __v: 1, __rev: as read }
+    opt a write matched nothing
+      L->>C: read it again: still v1? transform<br/>it again — gone or v2? skip it
+    end
+    L->>P: checkpoint the cursor,<br/>fenced by the lease
+  end
+  L->>P: release the lease
+```
+
 **How the collection is split.** With `maxParallel: 1` there is one partition (one per `_id` type,
 when the collection mixes them). Otherwise the plan aims for `overPartition × maxParallel`
 partitions, capped at `maxPartitions` and never smaller than `minPartitionDocs`. The boundaries come
@@ -352,6 +410,17 @@ and `filter`.
   next pass, a new **generation**, covers just those documents.
 - Still some left after `maxPasses` passes: it fails with "old-shape documents keep appearing … is
   an old version of the application still writing them?".
+
+```mermaid
+flowchart TB
+  accTitle: Passes until nothing is left
+  PLAN["plan a pass<br/>sample the _ids → partitions"]:::core --> WORK["lanes work the partitions"]
+  WORK --> CLOSE["close the pass<br/>add up the counters"]
+  CLOSE --> COUNT{"documents still<br/>matching from + filter?"}
+  COUNT -- none --> DONE(["completed"]):::core
+  COUNT -- "some, fewer than<br/>maxPasses passes" --> PLAN
+  COUNT -- "some, after<br/>maxPasses passes" --> FAIL(["failed — an old release<br/>is still writing them?"]):::warn
+```
 
 Completion is decided by that count alone. Partitions only spread the work, so a gap between them
 is found by the count and an overlap is kept apart by the guarded writes.
@@ -586,6 +655,17 @@ shape again. So can a forgotten worker or another service. There are three lines
 3. **The drift watch**, for the window between `completed` and the contract release, or for
    projects that never raise `min`. It runs in one of two forms: a periodic **poll**, and a **live
    watcher** that follows change streams.
+
+```mermaid
+flowchart TB
+  accTitle: The three lines of defence against drift
+  OLD(["a pod of the old release<br/>writes a v1 document"]):::ext --> MIN{"versioning.min<br/>raised to 2?"}
+  MIN -- yes --> REFUSED["the validator<br/>refuses the write"]:::warn
+  MIN -- no --> DOC[("orders")]:::store
+  DOC -- "change stream<br/>backgroundDrift: 'stream'" --> LIVE["live watcher<br/>upgrades it in moments"]:::core
+  DOC -- "every 10 minutes<br/>the default" --> POLL["poll: verifyBackground<br/>reopens or reports"]:::core
+  REQ["a migration that requires it"] -. "probes the data,<br/>not the status" .-> DOC
+```
 
 ### The poll: `verifyBackground`
 

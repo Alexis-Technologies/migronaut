@@ -222,6 +222,7 @@ class MigrationQueue {
       lockWait,
       allow,
       background,
+      userlandLogRows,
     } = options;
 
     if (!isObjectLike(bullmq)) {
@@ -307,6 +308,7 @@ class MigrationQueue {
       ...(config !== undefined ? { config } : {}),
       ...(lockWait !== undefined ? { lockWait } : {}),
       ...(allow !== undefined ? { allow } : {}),
+      ...(userlandLogRows !== undefined ? { userlandLogRows } : {}),
     });
     this.#allow = resolveAllow(allow);
     const backgroundSettings = resolveBackground(background, {
@@ -367,6 +369,7 @@ class MigrationQueue {
         kit: this.#kit,
         queue: this.#backgroundQueue,
         ...MigrationQueue.#backgroundProcessorOptions(backgroundSettings),
+        ...(userlandLogRows !== undefined ? { userlandLogRows } : {}),
       });
     }
     this.#processor = createMigrationProcessor({
@@ -377,6 +380,7 @@ class MigrationQueue {
       ...(lockWait !== undefined ? { lockWait } : {}),
       ...(jobOptions !== undefined ? { jobOptions } : {}),
       ...(allow !== undefined ? { allow } : {}),
+      ...(userlandLogRows !== undefined ? { userlandLogRows } : {}),
       // What an `up` registers starts on the background queue at once.
       ...(this.#backgroundQueue !== undefined
         ? {

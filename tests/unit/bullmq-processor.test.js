@@ -6,6 +6,9 @@ const {
   createMigrationProcessor,
   isRetryableError,
   isTransientForJob,
+  jobRefOf,
+  ownLine,
+  userlandRow,
 } = require('../../src/bullmq/processor.js');
 const { MigratorKit } = require('../../src/core/migrator.js');
 const {
@@ -106,9 +109,10 @@ describe('createMigrationProcessor', () => {
       const kit = stubKit();
       const processor = createMigrationProcessor({ kit });
       const result = await processor(upJob());
+      // The job's ids travel with the run: its lines and migration:log name the job.
       assert.deepStrictEqual(kit.up.mock.calls[0].arguments, [
         '0001-a.js',
-        { batch: 4, ordered: true },
+        { batch: 4, ordered: true, job: { id: '11', groupId: 'g' } },
       ]);
       assert.deepStrictEqual(result, {
         migration: '0001-a.js',
@@ -126,7 +130,11 @@ describe('createMigrationProcessor', () => {
       const kit = stubKit();
       const processor = createMigrationProcessor({ kit, allow: { force: true, unordered: true } });
       await processor(upJob({ force: true, ordered: false }));
-      assert.deepStrictEqual(kit.up.mock.calls[0].arguments[1], { batch: 4, force: true });
+      assert.deepStrictEqual(kit.up.mock.calls[0].arguments[1], {
+        batch: 4,
+        force: true,
+        job: { id: '11', groupId: 'g' },
+      });
     });
 
     it('should refuse what a payload may not ask for by default — force, ordered: false', async () => {
@@ -171,17 +179,29 @@ describe('createMigrationProcessor', () => {
       const processor = createMigrationProcessor({ kit, ordered: false });
       await processor(upJob());
       await processor(upJob({ ordered: true }));
-      assert.deepStrictEqual(kit.up.mock.calls[0].arguments[1], { batch: 4 });
-      assert.deepStrictEqual(kit.up.mock.calls[1].arguments[1], { batch: 4, ordered: true });
+      assert.deepStrictEqual(kit.up.mock.calls[0].arguments[1], {
+        batch: 4,
+        job: { id: '11', groupId: 'g' },
+      });
+      assert.deepStrictEqual(kit.up.mock.calls[1].arguments[1], {
+        batch: 4,
+        ordered: true,
+        job: { id: '11', groupId: 'g' },
+      });
       await processor(downJob());
-      assert.deepStrictEqual(kit.down.mock.calls[0].arguments[1], {});
+      assert.deepStrictEqual(kit.down.mock.calls[0].arguments[1], {
+        job: { id: '11', groupId: 'g' },
+      });
     });
 
     it('should revert one migration, guarded', async () => {
       const kit = stubKit();
       const processor = createMigrationProcessor({ kit });
       const result = await processor(downJob());
-      assert.deepStrictEqual(kit.down.mock.calls[0].arguments, ['0001-a.js', { ordered: true }]);
+      assert.deepStrictEqual(kit.down.mock.calls[0].arguments, [
+        '0001-a.js',
+        { ordered: true, job: { id: '11', groupId: 'g' } },
+      ]);
       assert.strictEqual(result.status, 'reverted');
       assert.strictEqual(result.direction, 'down');
     });
@@ -367,7 +387,11 @@ describe('createMigrationProcessor', () => {
       );
       assert.strictEqual(kit.up.mock.callCount(), 0);
       await createMigrationProcessor({ kit })(upJob());
-      assert.deepStrictEqual(Object.keys(kit.up.mock.calls[0].arguments[1]), ['batch', 'ordered']);
+      assert.deepStrictEqual(Object.keys(kit.up.mock.calls[0].arguments[1]), [
+        'batch',
+        'ordered',
+        'job',
+      ]);
     });
   });
 
@@ -1256,5 +1280,286 @@ describe('createMigrationProcessor background link', () => {
     const result = await processor(fakeJob('sync', { kind: 'sync' }), 'token');
     assert.deepStrictEqual(result.background, { enqueued: 0 });
     assert.strictEqual(result.upToDate, true);
+  });
+});
+
+describe('userland lines in the job log', () => {
+  /** A migration:log event as the kit makes it for job `jobId` */
+  const userland = (jobId, extra = {}) => ({
+    kind: 'migration',
+    runId: 'run-1',
+    direction: 'up',
+    migration: '0001-a.js',
+    attempt: 1,
+    level: 'info',
+    msg: 'batch done',
+    data: { processed: 1000 },
+    at: new Date(0),
+    seq: 1,
+    ...(jobId !== undefined ? { jobId } : {}),
+    ...extra,
+  });
+
+  it("should write the job's own userland events into its log, and only those", async () => {
+    const kit = stubKit({
+      up: mock.fn(async (name, options) => {
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        kit.emit('migration:log', userland(options.job.id));
+        // Another job's late line, and a background lane's: neither is this job's.
+        kit.emit('migration:log', userland('99', { msg: 'stale' }));
+        kit.emit('migration:log', { ...userland(options.job.id), kind: 'background' });
+        return [{ file: name, status: 'applied', duration: 1 }];
+      }),
+    });
+    const job = upJob();
+    await createMigrationProcessor({ kit })(job);
+    const rows = job.logs.filter((row) => row.startsWith('✎'));
+    assert.deepStrictEqual(rows, ['✎ batch done {"processed":1000}']);
+  });
+
+  it('should match by run id when the job has no id', async () => {
+    const kit = stubKit({
+      up: mock.fn(async (name, options) => {
+        assert.strictEqual(options.job, undefined, 'no job to name');
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        kit.emit('migration:log', userland(undefined));
+        kit.emit('migration:log', userland(undefined, { runId: 'run-0', msg: 'stale' }));
+        return [{ file: name, status: 'applied', duration: 1 }];
+      }),
+    });
+    const job = upJob();
+    delete job.id;
+    await createMigrationProcessor({ kit })(job);
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      ['✎ batch done {"processed":1000}'],
+    );
+  });
+
+  it('should write nothing once the job settled, nor between jobs', async () => {
+    let late;
+    const kit = stubKit({
+      up: mock.fn(async (name, options) => {
+        late = () => kit.emit('migration:log', userland(options.job.id, { msg: 'late' }));
+        return [{ file: name, status: 'applied', duration: 1 }];
+      }),
+    });
+    const processor = createMigrationProcessor({ kit });
+    const job = upJob();
+    await processor(job);
+    late();
+    assert.ok(!job.logs.some((row) => row.includes('late')));
+  });
+
+  it('should take the lines of the lanes its run drives inline, by job and group', async () => {
+    const kit = stubKit({
+      up: mock.fn(async (name, options) => {
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        const lane = { kind: 'background', runId: 'lane-1', partition: '2', msg: 'batch' };
+        kit.emit('migration:log', userland(options.job.id, { ...lane, groupId: 'g' }));
+        // A background queue's lane with the same id: no group, not this job's.
+        kit.emit('migration:log', userland(options.job.id, { ...lane, msg: 'other queue' }));
+        return [{ file: name, status: 'applied', duration: 1 }];
+      }),
+    });
+    const job = upJob();
+    await createMigrationProcessor({ kit })(job);
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      ['✎ batch {"processed":1000} [partition 2]'],
+    );
+  });
+
+  it('should not take a line of another run of the same job', async () => {
+    const kit = stubKit({
+      up: mock.fn(async (name, options) => {
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        // A body of an earlier run of this job — put back in the queue — still logging.
+        kit.emit('migration:log', userland(options.job.id, { runId: 'run-0', msg: 'stale' }));
+        kit.emit('migration:log', userland(options.job.id));
+        return [{ file: name, status: 'applied', duration: 1 }];
+      }),
+    });
+    const job = upJob();
+    await createMigrationProcessor({ kit })(job);
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      ['✎ batch done {"processed":1000}'],
+    );
+  });
+
+  it('should mirror up to userlandLogRows lines, then count the rest in one row', async () => {
+    const kit = stubKit({
+      up: mock.fn(async (name, options) => {
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        for (let seq = 1; seq <= 5; seq++) {
+          kit.emit('migration:log', userland(options.job.id, { seq, msg: `line ${seq}` }));
+        }
+        return [{ file: name, status: 'applied', duration: 1 }];
+      }),
+    });
+    const job = upJob();
+    await createMigrationProcessor({ kit, userlandLogRows: 2 })(job);
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      [
+        '✎ line 1 {"processed":1000}',
+        '✎ line 2 {"processed":1000}',
+        '✎ … 3 more line(s) past the limit of 2 not mirrored here — see migration:log',
+      ],
+    );
+  });
+
+  it('should mirror none with userlandLogRows: 0, on the failing path too', async () => {
+    const kit = stubKit({
+      up: mock.fn(async (_name, options) => {
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        kit.emit('migration:log', userland(options.job.id));
+        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {});
+      }),
+    });
+    const job = upJob();
+    await assert.rejects(
+      createMigrationProcessor({ kit, userlandLogRows: 0 })(job),
+      MigrationExecutionFailedError,
+    );
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      ['✎ … 1 more line(s) past the limit of 0 not mirrored here — see migration:log'],
+    );
+  });
+
+  it('should refuse a userlandLogRows that is not a count', () => {
+    for (const userlandLogRows of [-1, 1.5, '2', Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => createMigrationProcessor({ kit: stubKit(), userlandLogRows }),
+        ConfigInvalidError,
+      );
+    }
+  });
+
+  it('should carry the failing path too, before the failure row', async () => {
+    const kit = stubKit({
+      up: mock.fn(async (_name, options) => {
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        kit.emit('migration:log', userland(options.job.id, { level: 'error', msg: 'gave up' }));
+        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {});
+      }),
+    });
+    const job = upJob();
+    await assert.rejects(createMigrationProcessor({ kit })(job), MigrationExecutionFailedError);
+    const userlandAt = job.logs.findIndex((row) => row.startsWith('✎ error: gave up'));
+    const failedAt = job.logs.findIndex((row) => row.startsWith('✖'));
+    assert.ok(userlandAt !== -1 && userlandAt < failedAt);
+  });
+});
+
+describe('ownLine', () => {
+  const ctx = { runId: 'run-1', jobRef: { id: '7', groupId: 'g' } };
+  const line = (extra) => ({
+    kind: 'migration',
+    runId: 'run-1',
+    jobId: '7',
+    groupId: 'g',
+    ...extra,
+  });
+
+  it("should take the job's own run, and nothing of another run or job", () => {
+    assert.strictEqual(ownLine(ctx, line()), true);
+    assert.strictEqual(ownLine(ctx, line({ runId: 'run-0' })), false);
+    assert.strictEqual(ownLine(ctx, line({ jobId: '8' })), false);
+    assert.strictEqual(ownLine({ jobRef: ctx.jobRef }, line()), false, 'no run yet');
+    assert.strictEqual(ownLine({ runId: 'run-1' }, line({ jobId: undefined })), true);
+    assert.strictEqual(ownLine(ctx, line({ kind: 'other' })), false);
+  });
+
+  it("should take an inline lane's line only by the job and its group", () => {
+    const lane = (extra) => line({ kind: 'background', runId: 'lane-1', ...extra });
+    assert.strictEqual(ownLine(ctx, lane()), true);
+    assert.strictEqual(ownLine(ctx, lane({ groupId: undefined })), false);
+    assert.strictEqual(ownLine(ctx, lane({ groupId: 'h' })), false);
+    assert.strictEqual(ownLine(ctx, lane({ jobId: '8' })), false);
+    assert.strictEqual(ownLine({ runId: 'run-1', jobRef: { id: '7' } }, lane()), false);
+    assert.strictEqual(ownLine({ runId: 'run-1' }, lane()), false);
+  });
+});
+
+describe('jobRefOf', () => {
+  it("should name the job by its id and group, as the kit's job option", () => {
+    assert.deepStrictEqual(jobRefOf({ id: 11 }, 'g'), { id: '11', groupId: 'g' });
+    assert.deepStrictEqual(jobRefOf({ id: '11' }), { id: '11' });
+  });
+
+  it('should drop what the kit would refuse', () => {
+    assert.strictEqual(jobRefOf({}), undefined);
+    assert.strictEqual(jobRefOf({ id: null }), undefined);
+    assert.strictEqual(jobRefOf({ id: 'x'.repeat(1025) }), undefined);
+    assert.deepStrictEqual(jobRefOf({ id: '11' }, 'g'.repeat(200)), { id: '11' });
+  });
+});
+
+describe('userlandRow', () => {
+  const base = { kind: 'migration', level: 'info', msg: 'done', data: {}, attempt: 1 };
+
+  it('should show the level only when it is not info, and the data as JSON', () => {
+    assert.strictEqual(userlandRow(base), '✎ done');
+    assert.strictEqual(
+      userlandRow({ ...base, level: 'warn', data: { n: 1, big: 2n } }),
+      '✎ warn: done {"n":1,"big":"2"}',
+    );
+  });
+
+  it('should name a retried attempt and a background partition', () => {
+    assert.strictEqual(userlandRow({ ...base, attempt: 2 }), '✎ done (attempt 2)');
+    assert.strictEqual(
+      userlandRow({ ...base, kind: 'background', partition: '3' }),
+      '✎ done [partition 3]',
+    );
+  });
+
+  it('should survive data that does not serialize, and cut a long row', () => {
+    class Broken {
+      toJSON() {
+        throw new Error('no');
+      }
+    }
+    assert.strictEqual(
+      userlandRow({ ...base, data: { broken: new Broken() } }),
+      '✎ done [data not serializable]',
+    );
+    const row = userlandRow({ ...base, msg: 'x'.repeat(2000) });
+    assert.strictEqual(row.length, 1024);
+    assert.ok(row.endsWith('…'));
+  });
+
+  it('should write data only as far as the row shows it', () => {
+    const data = {};
+    for (let index = 0; index < 1000; index++) data[`k${index}`] = 'v'.repeat(4096);
+    const row = userlandRow({ ...base, data });
+    assert.strictEqual(row.length, 1024);
+    assert.ok(row.startsWith('✎ done {"k0":"vvv'));
+    assert.ok(row.endsWith('…'));
+    // A cycle (never from the kit, whose copies are acyclic) ends at the bound too.
+    const cyclic = {};
+    cyclic.self = cyclic;
+    assert.strictEqual(userlandRow({ ...base, data: cyclic }).length, 1024);
+  });
+
+  it('should keep a row on one line, with no control characters', () => {
+    assert.strictEqual(
+      userlandRow({ ...base, msg: 'done\n✔ Applied 0002-x.js\r\nnext\u2028\u001b[2J' }),
+      '✎ done⏎✔ Applied 0002-x.js⏎next⏎[2J',
+    );
+    assert.strictEqual(userlandRow({ ...base, data: { note: 'a\nb' } }), '✎ done {"note":"a\\nb"}');
+  });
+
+  it('should show dates and ids by their JSON, and skip what JSON skips', () => {
+    assert.strictEqual(
+      userlandRow({
+        ...base,
+        data: { at: new Date(0), none: undefined, fn: () => 1, list: [undefined, 1n] },
+      }),
+      '✎ done {"at":"1970-01-01T00:00:00.000Z","list":[null,"1"]}',
+    );
   });
 });

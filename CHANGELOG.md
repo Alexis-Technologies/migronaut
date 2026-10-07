@@ -3,6 +3,89 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
+## v2.4.0 — 2026-10-07
+
+Migration logs for the application's users. Additive: a migration that never touches the new
+context fields, and a kit with no `migration:log` listener, behave as before. Everything new is
+experimental — its shape may still change in a minor release (named here).
+
+### Added
+
+- **`ctx.logger` in every migration** — the kit's logger with the run's correlation bound into the
+  fields of every line: `runId`, `migration`, `direction`, `batch`, `attempt`, and `jobId` /
+  `groupId` when a queue job runs it. Pino's `(fields, msg)` order is accepted too.
+- **`ctx.run`** — that correlation as a frozen object: `{ id, direction, migration?, batch?,
+  attempt?, jobId?, groupId?, requestedBy?, reason? }`. `attempt` is 2 or more when the driver
+  retried the transaction and the body runs again (each attempt gets a context of its own).
+- **The `migration:log` event** — a `ctx.logger` call whose fields hold `userland: true` is also
+  emitted, for the application to store and show its users; calls without the marker emit
+  nothing. The payload is `{ kind, runId, …correlation, level, msg, data, at, seq, truncated? }`:
+  `data` a bounded, redacted copy of the fields (8 levels, 1000 entries, 4096-character strings;
+  an `Error` as `{ name, message, code?, codeName? }` with the values a server error quotes masked,
+  as in `msg`; BSON values and binary data up to 4096 bytes kept as they are),
+  `seq` increasing within a run, `at` a `Date` (TTL-ready). It fires whatever the logger's level,
+  and with `logger: null`. Migronaut stores none of it — the
+  [Migration Logs](https://migronaut.vercel.app/guide/migration-logs) guide has the recipe.
+- **Hooks get it too** — `beforeAll`/`afterAll` the run's logger and `ctx.run` (no migration, no
+  attempt), `beforeEach`/`afterEach`/`onError` the migration's.
+- **`job: { id, groupId? }` on `up`, `down` and `redo`** — the queue job a run works for, bound into
+  `ctx.run`, its lines (the kit's own included) and its events; and `job: { id }` on
+  `runBackgroundSlice`.
+- **Queue adapter** — the processor passes each job's id and group to its run, and writes the
+  migration's `userland: true` lines into the job's log as one-line `✎ …` rows (matched by job and
+  run id, so a timed-out body never writes into the next job's log — nor into a later run of the
+  same job). A background lane does the same for its slice, into the lane job's log. The new
+  `userlandLogRows` option (`createMigrationQueue`, both processors; default 1000) caps the rows one
+  job's log takes — the rest are counted in one closing row.
+- **Background migrations** — `ctx.logger` is bound to `ctx.background`, which gains the lane's
+  `runId`, its `jobId` (and, for a lane an `up` drives with `backgroundInline`, the run's job and
+  `groupId` — its lines land in that migration job's log) and the transaction `attempt`; a
+  `userland: true` call emits `migration:log` with `kind: 'background'`. A dry run marks its lines
+  `dryRun: true` and emits nothing.
+- **Retried transactions, visible** — when the driver retried a migration's transaction and its
+  body ran again, `migration:success` / `migration:error` and the kit's `✔ Applied` / `✖ Error`
+  lines carry `attempts`, a failure's context too, and the `migronaut.migration` span always has
+  `migronaut.migration.attempts`. A run that names a `job` puts `migronaut.job.id` /
+  `migronaut.job.group_id` on its `migronaut.run` span.
+- **A `ctx.logger` call that is dropped** (a field whose getter throws) **or cut to the event's
+  bounds** leaves one debug line per run — never one per call.
+- **Types** — `MigrationRunInfo`, `JobRef`, `MigrationLogEvent` (`OrdinaryMigrationLogEvent |
+  BackgroundMigrationLogEvent`), `MigrationLogEventBase`, `MigrationLogLevel`,
+  `BackgroundRunInfo`, `MigrationLogger` (`ctx.logger`: `(msg, fields?)`, pino's `(fields, msg?)`
+  and an `Error` as the message — any `MigronautLogger` or pino instance is one); `logger?` and
+  `run?` on `MigrationContext` (optional, so a context built by hand still type-checks);
+  `attempts?` on `MigrationEvent`.
+
+### Changed
+
+- `ctx.background` of a background migration is now frozen, and typed as `BackgroundRunInfo`.
+  **A type change on an experimental API:** its `generation` is now `number | undefined` (as it
+  always was at runtime for the live drift watcher), so strict TypeScript that reads it as a
+  `number` needs a check; `ctx.logger` is typed `MigrationLogger`, which every `MigronautLogger`
+  still fits.
+- The kit's log lines of a run that names a `job` carry `jobId` / `groupId`.
+
+### Fixed
+
+- **An `async` event listener that rejects no longer crashes the process.** The kit is an
+  `EventEmitter` with `captureRejections`: a listener's rejected promise is logged at debug level,
+  like a listener that throws, instead of surfacing as an `unhandledRejection`.
+
+### Documentation
+
+- **How It Works** — a new guide page with architecture diagrams: the engine and its entry points,
+  the life of a run, the lock, where the state lives, which tool fits which change, background
+  migrations and what a run reports.
+- **Diagrams across the guides** — Core Concepts (a migration's states, batches, a run), Transactions,
+  Declared Collections (a converge run), Document Versioning (the contract, optimistic concurrency,
+  the revision invariant, expand → background → contract), Background Migrations (statuses, one
+  lane's batches, passes, drift), the queue adapter (the line, a failure, background jobs) and
+  Migration Logs. They are Mermaid, drawn in the browser by a small theme component; `mermaid` is a
+  docs-only devDependency, loaded only by a page that has a diagram.
+- **The home page** shows what 2.1 – 2.4 added — declared collections, Atlas Search, document
+  versioning, background migrations, OpenTelemetry, migration logs — with a diagram of how the parts
+  fit together.
+
 ## v2.3.0 — 2026-10-06
 
 Document versioning and background migrations. Additive: nothing changes for a project that

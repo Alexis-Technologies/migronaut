@@ -841,6 +841,13 @@ export interface CreateMigrationProcessorOptions {
   /** What a job may ask for beyond the ordinary — see {@link MigrationJobPermissions} */
   allow?: MigrationJobPermissions;
   /**
+   * How many of a migration's `userland: true` lines one job's log takes (a
+   * lane: one slice) — the rest are counted in one closing row. `0` mirrors
+   * none; `migration:log` still carries every line. Default 1000
+   * @experimental New in 2.4
+   */
+  userlandLogRows?: number;
+  /**
    * The background queue: what an `up` (or `down`) job registers gets its
    * coordinator there at once, and every `sync` tick heals it. @experimental
    */
@@ -857,6 +864,11 @@ export interface CreateMigrationProcessorOptions {
  * declares exactly three parameters, which is what makes BullMQ hand it the
  * cancellation signal. Jobs are processed one at a time even when the Worker
  * is configured for more.
+ *
+ * Each run is told which job it works for (the kit's `job` option), so a
+ * migration's `ctx.run` and every `migration:log` event carry `jobId` and
+ * `groupId`, and the migration's `userland: true` lines are written into the
+ * job's log next to the processor's own rows (`✎ …`).
  */
 export interface MigrationProcessor {
   (
@@ -864,7 +876,10 @@ export interface MigrationProcessor {
     token?: string,
     signal?: AbortSignal,
   ): Promise<MigrationJobResult | SyncJobResult | ConvergeJobResult>;
-  /** The kit running the jobs — subscribe to its events for metrics */
+  /**
+   * The kit running the jobs — subscribe to its events for metrics, and to
+   * `migration:log` for what the migrations log for your users
+   */
   readonly kit: MigratorKit;
   /**
    * Stop taking the lock. Irreversible. A job that has not started its
@@ -911,10 +926,18 @@ export interface CreateBackgroundProcessorOptions {
   stallMs?: number;
   /** Failed slices in a row before a lane gives up (0–100). Default 8 */
   maxLaneRetries?: number;
+  /**
+   * See {@link CreateMigrationProcessorOptions.userlandLogRows} — counted per slice
+   * @experimental New in 2.4
+   */
+  userlandLogRows?: number;
 }
 
 /**
  * The function a Worker on the background queue runs. Jobs run side by side.
+ * A lane's slice is told its job (`runBackgroundSlice`'s `job`), so its
+ * `migration:log` events carry `jobId` and its `userland: true` lines are
+ * written into the lane job's log (`✎ …`).
  * @experimental New in 2.3
  */
 export interface BackgroundProcessor {
@@ -1109,6 +1132,12 @@ export interface CreateMigrationQueueOptions<
    */
   allow?: MigrationJobPermissions;
   /**
+   * See {@link CreateMigrationProcessorOptions.userlandLogRows} — for the
+   * migration jobs and, with `background`, the lanes
+   * @experimental New in 2.4
+   */
+  userlandLogRows?: number;
+  /**
    * Background migrations on a queue of their own (`<queueName>-background`):
    * a coordinator job each, with lanes as its children. `true` takes every
    * default. @experimental New in 2.3
@@ -1164,7 +1193,11 @@ export class MigrationQueue<
 > {
   constructor(options: CreateMigrationQueueOptions<Q, W, E>);
 
-  /** The kit behind the queue — `kit.on('migration:success', …)` for metrics */
+  /**
+   * The kit behind the queue — `kit.on('migration:success', …)` for metrics,
+   * `kit.on('migration:log', …)` (in the worker's process) to keep what the
+   * migrations log for your users
+   */
   readonly kit: MigratorKit;
   /** Your Queue, with its own type */
   readonly queue: Q;

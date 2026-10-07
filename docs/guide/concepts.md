@@ -46,6 +46,23 @@ At any moment, every migration file is in one of two states:
 
 `migronaut up` applies pending migrations; `migronaut status` shows you the full picture.
 
+The changelog keeps a little more detail than that — a record is never deleted, so its status says
+how a migration got where it is:
+
+```mermaid
+flowchart LR
+  accTitle: A migration's life in the changelog
+  NEW(["a new file"]):::ext --> P(["pending"])
+  P -- up --> A(["applied"]):::core
+  P -- "up throws" --> F(["failed"]):::warn
+  F -- "fixed, up" --> A
+  A -- down --> R(["reverted"])
+  R -- up --> A
+```
+
+A **reverted** migration is pending again, and so is a **failed** one: its record is only a trace
+that says the attempt happened, and the next `up` runs it.
+
 ## Ordering
 
 Migrations run in **ascending filename order**. That's why files are prefixed with a timestamp
@@ -64,6 +81,23 @@ number**. Batches are how rollbacks know what "the last thing I did" was:
 
 Think of a batch as "one deploy's worth of migrations."
 
+```mermaid
+flowchart LR
+  accTitle: Two deploys, two batches
+  subgraph B1 ["batch 1 — Monday's deploy"]
+    direction LR
+    a["0001-add-users-index"]
+    b["0002-backfill-status"]
+  end
+  subgraph B2 ["batch 2 — Tuesday's deploy"]
+    direction LR
+    c["0003-add-orders"]
+    d["0004-orders-index"]
+  end
+  B1 --> B2
+  DOWN(["migronaut down"]):::ext -. "reverts the whole<br/>last batch" .-> B2
+```
+
 ## Safety mechanisms
 
 Two things protect you from common production mistakes:
@@ -79,15 +113,17 @@ Two things protect you from common production mistakes:
 
 A typical run looks like this:
 
+```mermaid
+flowchart TB
+  accTitle: What migronaut up does
+  UP(["migronaut up"]):::ext --> LOCK["acquire the lock"]
+  LOCK --> READ["read the changelog<br/>→ the pending files, in name order"]
+  READ --> NEXT{"another<br/>pending file?"}
+  NEXT -- yes --> SUM["verify its checksum"] --> RUN["run its up()"] --> REC["record it in the changelog<br/>with this run's batch number"]:::core --> NEXT
+  NEXT -- no --> FREE["release the lock"]
 ```
-migronaut up
-  ├─ acquire lock
-  ├─ read changelog → find pending files
-  ├─ for each pending file (in order):
-  │    ├─ verify checksum
-  │    ├─ run up()
-  │    └─ record it in the changelog (batch N)
-  └─ release lock
-```
+
+[How It Works](/guide/how-it-works) shows the same run in full — the heartbeat, the hooks, where a
+stop is honoured — and how the other parts of migronaut fit around it.
 
 Ready to do it for real? → [Tutorial](/guide/tutorial)

@@ -51,7 +51,10 @@ export default {
 | `onError` | `(name, error, ctx) => Promise<void>` | When a migration throws, before it propagates |
 
 `ctx` is the same [`MigrationContext`](/guide/writing-migrations#the-migration-context) passed to
-your migrations, so hooks have full database access. `info` is
+your migrations, so hooks have full database access. Its `run` and `logger` are the run's in
+`beforeAll`/`afterAll` (no migration, no attempt), and the migration's in `beforeEach`,
+`afterEach` and `onError` — a `userland: true` line from a hook emits
+[`migration:log`](/guide/migration-logs) like one from the migration. `info` is
 `{ direction, index, total }`, so a hook can tell an apply from a revert and see
 its position in the run. `summary` is `{ success, applied, direction }`.
 
@@ -86,8 +89,9 @@ tell the two cases apart.
 
 Hooks are configured up front and run inside the migration's flow. For metrics
 and alerting, subscribe to events instead: several listeners may attach from
-outside the config, and a listener that throws is contained rather than failing
-the run.
+outside the config, and a listener that throws — or an `async` one whose promise
+rejects — is contained rather than failing the run (or the process): the failure
+is logged at debug level.
 
 ```js
 const kit = new MigratorKit(config);
@@ -105,9 +109,10 @@ await kit.up();
 | `run:start` | `{ runId, command, direction? }` |
 | `run:end` | `{ runId, command, direction?, success, durationMs, applied?, reverted?, total?, error? }` |
 | `migration:start` | `{ runId, migration, direction, batch? }` |
-| `migration:success` | `{ runId, migration, direction, batch?, durationMs }` |
+| `migration:success` | `{ runId, migration, direction, batch?, durationMs, attempts? }` — `attempts` when the driver retried the transaction and the body ran again |
 | `migration:skipped` | `{ runId, migration, direction, reason }` |
-| `migration:error` | `{ runId, migration, direction, batch?, durationMs?, error }` |
+| `migration:error` | `{ runId, migration, direction, batch?, durationMs?, attempts?, error }` |
+| `migration:log` | `{ kind, runId, migration?, direction, batch?, attempt?, jobId?, groupId?, requestedBy?, reason?, level, msg, data, at, seq, truncated? }` — a `ctx.logger` call marked `userland: true` ([Migration Logs](/guide/migration-logs)); `kind: 'background'` from a background migration |
 | `lock:acquired` | `{ runId, owner, ttlMs, acquireMs }` — or `{ runId, owner, skipped: true }` under `--no-lock` |
 | `lock:released` | `{ runId, owner, early? }` — `early: true` when a converge gave the lock up to wait for search index builds; the run goes on |
 | `lock:lost` | `{ runId, owner, reason }` |

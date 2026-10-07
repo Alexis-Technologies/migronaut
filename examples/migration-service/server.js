@@ -2,7 +2,8 @@
 const { shutdownTracing } = require('./tracing.js');
 const http = require('node:http');
 const { MigronautError } = require('@alexify/migronaut');
-const { connection, mq } = require('./mq.js');
+const { MAX_LINES } = require('./logs.js');
+const { client, connection, logStore, mq } = require('./mq.js');
 
 const ROLE = process.env.ROLE ?? 'all';
 const PORT = Number(process.env.PORT ?? 3000);
@@ -171,18 +172,47 @@ const routes = {
     send(res, 200, await mq.verifyBackground()),
 };
 
+/** A path segment, decoded — a malformed one is the client's mistake */
+function segment(raw, what) {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    throw new HttpError(400, `Malformed ${what}`);
+  }
+}
+
+/** `?limit=` for the log routes: 1 to MAX_LINES, MAX_LINES by default */
+function lineLimit(searchParams) {
+  const raw = searchParams.get('limit');
+  if (raw === null) return MAX_LINES;
+  const limit = Number(raw);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_LINES) {
+    throw new HttpError(400, `limit must be an integer from 1 to ${MAX_LINES}`);
+  }
+  return limit;
+}
+
 async function handle(req, res) {
-  const { pathname } = new URL(req.url, 'http://localhost');
-  const jobMatch = req.method === 'GET' && /^\/migrations\/jobs\/([^/]+)$/.exec(pathname);
-  if (jobMatch) {
-    let id;
-    try {
-      id = decodeURIComponent(jobMatch[1]);
-    } catch {
-      throw new HttpError(400, 'Malformed job id');
+  const { pathname, searchParams } = new URL(req.url, 'http://localhost');
+  if (req.method === 'GET') {
+    // What a run's migrations logged for this service's users, in order — the run id is on
+    // the job's return value (GET /migrations/jobs/:id → returnvalue.runId).
+    const runLogs = /^\/migrations\/runs\/([^/]+)\/logs$/.exec(pathname);
+    if (runLogs) {
+      const runId = segment(runLogs[1], 'run id');
+      return send(res, 200, { runId, logs: await logStore.byRun(runId, lineLimit(searchParams)) });
     }
-    const job = await mq.getJob(id);
-    return job ? send(res, 200, job) : send(res, 404, { error: { message: 'No such job' } });
+    // The same, by queue job — a background lane's job collects every slice it ran.
+    const jobLogs = /^\/migrations\/jobs\/([^/]+)\/logs$/.exec(pathname);
+    if (jobLogs) {
+      const jobId = segment(jobLogs[1], 'job id');
+      return send(res, 200, { jobId, logs: await logStore.byJob(jobId, lineLimit(searchParams)) });
+    }
+    const jobMatch = /^\/migrations\/jobs\/([^/]+)$/.exec(pathname);
+    if (jobMatch) {
+      const job = await mq.getJob(segment(jobMatch[1], 'job id'));
+      return job ? send(res, 200, job) : send(res, 404, { error: { message: 'No such job' } });
+    }
   }
   const route = routes[`${req.method} ${pathname}`];
   if (!route) return send(res, 404, { error: { message: 'Not found' } });
@@ -209,7 +239,11 @@ const server = http.createServer((req, res) => {
 });
 
 async function main() {
+  await logStore.ensureIndexes();
   if (ROLE === 'worker' || ROLE === 'all') {
+    // The events are emitted where the migrations run — here, in the worker. Subscribed before
+    // the worker starts, so the first job's lines are kept too.
+    logStore.attach(mq.kit);
     // Connects to MongoDB first: a worker that cannot reach it fails here.
     await mq.startWorker();
     console.log(`worker started on queue "${mq.queueName}"`);
@@ -241,9 +275,12 @@ async function shutdown(signal) {
     ]);
   } finally {
     clearTimeout(grace);
-    // Whatever closing the queue did, release the rest — and last the spans of
+    // Whatever closing the queue did, release the rest: the log lines still being written
+    // (the workers have stopped, so no more come), the clients — and last the spans of
     // the migration that just finished, still in the exporter's batch, which
     // process.exit() below would drop.
+    await logStore.drain();
+    await client.close().catch(() => undefined);
     await connection.quit().catch(() => undefined);
     await shutdownTracing();
   }

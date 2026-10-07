@@ -1,6 +1,8 @@
 const { ConfigInvalidError, MigrationInvalidNameError } = require('../errors/index.js');
 const { actorIssue } = require('../utils/actor.js');
+const { isPlainObject } = require('../utils/canonical.js');
 const { isCollectionName } = require('../utils/collection-name.js');
+const { jobRefIssue } = require('../utils/job-ref.js');
 
 /**
  * Validation of the options the kit's run methods take. Pure — no config, no
@@ -102,6 +104,20 @@ function assertActorValid(options) {
 }
 
 /**
+ * Validate `job`: the queue job a run works for, `{ id, groupId? }` — bound
+ * into the run's correlation, so it must be small and exactly that shape.
+ */
+function assertJobValid(job, options) {
+  const issue = jobRefIssue(job, options);
+  if (issue) {
+    // For the error's context: the keys of what was given, not its values.
+    throw new ConfigInvalidError(issue, {
+      job: isPlainObject(job) ? Object.keys(job).join(', ') : typeof job,
+    });
+  }
+}
+
+/**
  * Validate `checksum`: the SHA-256 the caller expects the named file to have
  * — how a queue job says which version of the file it was planned with.
  */
@@ -183,6 +199,7 @@ function assertUpOptions(filename, options) {
   assertChecksumValid(options.checksum, filename);
   assertBackgroundPendingValid(options.onBackgroundPending);
   assertActorValid(options);
+  assertJobValid(options.job);
 }
 
 /** `down(filename, options)` */
@@ -193,12 +210,14 @@ function assertDownOptions(filename, options) {
   assertToValid(options.to, filename, options);
   assertOrderedValid(options.ordered, filename);
   assertActorValid(options);
+  assertJobValid(options.job);
 }
 
 /** `redo(filename, options)` */
 function assertRedoOptions(filename, options) {
   assertFilename(filename);
   assertActorValid(options);
+  assertJobValid(options.job);
 }
 
 /** `dryRun(direction, filename, options)` */
@@ -270,6 +289,7 @@ function assertImportOptions(options) {
 
 module.exports = {
   assertActorValid,
+  assertJobValid,
   assertConvergeOptions,
   assertDownOptions,
   assertDryRunOptions,

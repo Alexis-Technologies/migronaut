@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
 const { trace } = require('@opentelemetry/api');
+const { MongoClient } = require('mongodb');
 const { LOCK_ID, MigrationLock } = require('../../src/core/lock.js');
 const { runMigrations } = require('../../src/core/run.js');
 const {
@@ -127,6 +128,7 @@ describe('telemetry — spans (integration)', () => {
       'migronaut.migration.index': 0,
       'migronaut.migration.total': 2,
       'migronaut.migration.transaction': false,
+      'migronaut.migration.attempts': 1,
       'migronaut.run.id': runIds[0],
     });
     assert.strictEqual(migrations[1].attributes['migronaut.migration.name'], '0002-b.ts');
@@ -134,6 +136,49 @@ describe('telemetry — spans (integration)', () => {
     // UNSET: a success is the application's to call OK, not a library's.
     assert.strictEqual(run.status.code, 0);
     assert.strictEqual(migrations[0].status.code, 0);
+  });
+
+  it('should name the queue job on the run span, and a retried body on its migration', async () => {
+    project.write(
+      '0001-a.js',
+      `export const useTransaction = true;
+export async function up({ db, session }) {
+  await db.collection('things').insertOne({ marker: 'a' }, { session });
+}
+export async function down() {}
+`,
+    );
+    // A client of its own, so the fail point hits this kit's insert and nothing else.
+    const client = new MongoClient(mongo.uri, { appName: 'telemetry-retry' });
+    await client.connect();
+    await mongo.client.db('admin').command({
+      configureFailPoint: 'failCommand',
+      mode: { times: 1 },
+      data: {
+        failCommands: ['insert'],
+        errorCode: 112,
+        errorLabels: ['TransientTransactionError'],
+        appName: 'telemetry-retry',
+        namespace: `${DB}.things`,
+      },
+    });
+    try {
+      const kit = migrator({ client, uri: undefined });
+      const successes = [];
+      kit.on('migration:success', (event) => successes.push(event));
+      await kit.up(undefined, { job: { id: '17', groupId: 'g-1' } });
+      await kit.disconnect();
+
+      const [run] = runSpans();
+      assert.strictEqual(run.attributes['migronaut.job.id'], '17');
+      assert.strictEqual(run.attributes['migronaut.job.group_id'], 'g-1');
+      const [migration] = migrationSpans();
+      assert.strictEqual(migration.attributes['migronaut.migration.attempts'], 2);
+      assert.strictEqual(successes[0].attempts, 2);
+    } finally {
+      await mongo.client.db('admin').command({ configureFailPoint: 'failCommand', mode: 'off' });
+      await client.close();
+    }
   });
 
   it('should stamp the run id the changelog records carry', async () => {

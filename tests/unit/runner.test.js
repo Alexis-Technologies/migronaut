@@ -377,8 +377,140 @@ describe('runMigration — failure timing', () => {
       (error) => {
         assert.strictEqual(typeof error.context.durationMs, 'number');
         assert.ok(error.context.durationMs >= 0);
+        assert.strictEqual(error.context.attempts, 1);
         return true;
       },
     );
+  });
+});
+
+describe('runMigration — onError always gets a whole context', () => {
+  it('should hand it a first attempt’s context when the session would not start', async () => {
+    let failedWith;
+    await assert.rejects(
+      runMigration({
+        name: 'a.ts',
+        migration: { up: () => Promise.resolve(), down: () => Promise.resolve() },
+        direction: 'up',
+        context: {
+          client: {
+            startSession: () => {
+              throw new Error('no sessions');
+            },
+          },
+          db: {},
+        },
+        useTransaction: true,
+        attemptContext: (attempt) => ({ run: { attempt } }),
+        hooks: {
+          onError: async (_name, _error, ctx) => {
+            failedWith = ctx;
+          },
+        },
+      }),
+      (error) => {
+        assert.ok(error instanceof MigrationExecutionFailedError);
+        assert.ok(!('attempts' in error.context), 'the body never ran');
+        return true;
+      },
+    );
+    assert.deepStrictEqual(failedWith.run, { attempt: 1 });
+    assert.ok(failedWith.signal instanceof AbortSignal);
+  });
+});
+
+describe('runMigration — a context per attempt', () => {
+  /** A session whose withTransaction runs the body twice, as the driver does after a transient error */
+  function retryingContext() {
+    const session = {
+      withTransaction: mock.fn(async (body) => {
+        try {
+          await body();
+        } catch {
+          // The driver would retry a TransientTransactionError — so does the stub, once.
+        }
+        return body();
+      }),
+      endSession: mock.fn(() => Promise.resolve(undefined)),
+    };
+    return { context: { client: { startSession: () => session }, db: {} }, session };
+  }
+
+  it('should add what attemptContext returns, and count one attempt without a transaction', async () => {
+    const { context } = makeContext();
+    const seen = [];
+    const result = await runMigration({
+      name: 'a.ts',
+      migration: {
+        up: async (ctx) => seen.push(ctx),
+        down: () => Promise.resolve(undefined),
+      },
+      direction: 'up',
+      context,
+      useTransaction: false,
+      attemptContext: (attempt) => ({ run: { attempt } }),
+    });
+    assert.strictEqual(result.attempts, 1);
+    assert.deepStrictEqual(seen[0].run, { attempt: 1 });
+    assert.strictEqual(seen[0].db, context.db);
+    assert.ok(seen[0].signal instanceof AbortSignal);
+  });
+
+  it('should give a retried transaction body a new context with the next attempt', async () => {
+    const { context } = retryingContext();
+    const seen = [];
+    let calls = 0;
+    const result = await runMigration({
+      name: 'a.ts',
+      migration: {
+        up: async (ctx) => {
+          seen.push(ctx);
+          calls += 1;
+          if (calls === 1) throw new Error('transient');
+        },
+        down: () => Promise.resolve(undefined),
+      },
+      direction: 'up',
+      context,
+      useTransaction: true,
+      attemptContext: (attempt) => ({ run: { attempt } }),
+    });
+    assert.strictEqual(result.attempts, 2);
+    assert.deepStrictEqual(
+      seen.map((ctx) => ctx.run.attempt),
+      [1, 2],
+    );
+    assert.notStrictEqual(seen[0], seen[1]);
+    assert.ok(seen[1].session, 'each attempt carries the session');
+  });
+
+  it('should hand onError the context of the attempt that failed last', async () => {
+    const { context } = retryingContext();
+    let failedWith;
+    await assert.rejects(
+      runMigration({
+        name: 'a.ts',
+        migration: {
+          up: () => Promise.reject(new Error('always')),
+          down: () => Promise.resolve(undefined),
+        },
+        direction: 'up',
+        context,
+        useTransaction: true,
+        attemptContext: (attempt) => ({ run: { attempt } }),
+        hooks: {
+          onError: async (_name, _error, ctx) => {
+            failedWith = ctx;
+          },
+        },
+      }),
+      (error) => {
+        assert.ok(error instanceof MigrationExecutionFailedError);
+        // How often the body ran travels with the failure.
+        assert.strictEqual(error.context.attempts, 2);
+        return true;
+      },
+    );
+    assert.strictEqual(failedWith.run.attempt, 2);
   });
 });

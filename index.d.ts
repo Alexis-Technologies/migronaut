@@ -35,6 +35,57 @@ export interface MigrationContext {
    * migronaut cannot interrupt a running function by itself.
    */
   signal?: AbortSignal;
+  /**
+   * The kit's logger, with this run's correlation ({@link run}) bound into the
+   * fields of every line. A call whose fields hold `userland: true` is also
+   * emitted as the `migration:log` event, for the application to store and show
+   * its users — migronaut stores none of it:
+   *
+   * ```js
+   * logger.info('batch done', { userland: true, processed: 1000 });
+   * ```
+   *
+   * Always present when migronaut runs the migration; optional so a context
+   * built by hand (in a test) still type-checks.
+   * @experimental New in 2.4
+   */
+  logger?: MigrationLogger;
+  /**
+   * Who this is: the run id, the migration, the direction, the transaction
+   * attempt and, when the caller named them, the queue job and the actor.
+   * Frozen; the same values `logger` binds and `migration:log` carries.
+   * Always present when migronaut runs the migration.
+   * @experimental New in 2.4
+   */
+  run?: MigrationRunInfo;
+}
+
+/**
+ * The correlation of a run, as `ctx.run`. `migration`, `batch` and `attempt`
+ * describe one migration and are absent in `beforeAll`/`afterAll`.
+ * @experimental New in 2.4
+ */
+export interface MigrationRunInfo {
+  /** The run id — the same on the lock, the changelog record and every event of the run */
+  readonly id: string;
+  readonly direction: 'up' | 'down';
+  /** The migration file */
+  readonly migration?: string;
+  /** The changelog batch (`up` only) */
+  readonly batch?: number;
+  /**
+   * 1 — or more when a transaction was retried and the body runs again. Not a
+   * queue retry: a migration job is never retried.
+   */
+  readonly attempt?: number;
+  /** The queue job that runs this migration (set by the BullMQ adapter, or the `job` option) */
+  readonly jobId?: string;
+  /** The queue group the job belongs to */
+  readonly groupId?: string;
+  /** Who asked for the run (`requestedBy` option) */
+  readonly requestedBy?: string;
+  /** Why (`reason` option) */
+  readonly reason?: string;
 }
 
 /** Shape of an imported migration file module */
@@ -89,14 +140,60 @@ export type Body<T, N extends ShapeFieldNames = DefaultShapeFieldNames> = T exte
 export interface BackgroundMigrationContext {
   /** Aborted when the slice is stopping (lease lost, pause, shutdown) */
   signal: AbortSignal;
-  logger: MigronautLogger;
+  /**
+   * The kit's logger with {@link background} bound into every line. Fields
+   * with `userland: true` also emit `migration:log` (`kind: 'background'`) —
+   * but `migrate` runs once per document, and again for a document a
+   * concurrent write moved: log from `migrateBatch` or a `step` rather than
+   * per document. In a dry run the lines say `dryRun: true` and nothing is
+   * emitted.
+   */
+  logger: MigrationLogger;
   direction: 'forward' | 'revert';
-  background: { name: string; generation: number; partition: string };
+  /** Where this runs — frozen */
+  background: BackgroundRunInfo;
   session?: ClientSession;
   db?: Db;
   client?: MongoClient;
   /** True in a dry run — the writes are rolled back */
   dryRun?: boolean;
+}
+
+/**
+ * `ctx.background`: which background migration, generation and partition —
+ * and the lane, its queue job and the transaction attempt, as its log lines
+ * and `migration:log` events carry them.
+ */
+export interface BackgroundRunInfo {
+  readonly name: string;
+  /** The plan generation — absent when the live drift watcher runs the transformation */
+  readonly generation?: number;
+  /** The partition (`''` for the drift watcher, `'dry-run'` in a dry run) */
+  readonly partition: string;
+  /**
+   * The lane's run id — its lease's owner, the runId of its `background:*`
+   * events. Absent in a dry run.
+   * @experimental New in 2.4
+   */
+  readonly runId?: string;
+  /**
+   * The queue job working the lane — a background queue's lane job, or the
+   * migration job whose run drives it inline (`backgroundInline`)
+   * @experimental New in 2.4
+   */
+  readonly jobId?: string;
+  /**
+   * The group of that migration job — only when a run drives it inline; a
+   * background queue's lanes have none
+   * @experimental New in 2.4
+   */
+  readonly groupId?: string;
+  /**
+   * 1 — or more when a transactional batch or step runs again in a new
+   * transaction (a transient error, a conflict, a smaller batch)
+   * @experimental New in 2.4
+   */
+  readonly attempt: number;
 }
 
 /** How a background migration splits its collection into partitions */
@@ -1086,8 +1183,40 @@ export interface MigronautLogger {
  * `{ runId, migration, direction, batch, durationMs }` — so a machine-readable
  * logger does not have to parse the human string. A plain `(msg) => …` logger
  * remains valid: the extra argument is simply ignored.
+ *
+ * On a migration's `ctx.logger`, fields with `userland: true` also emit the
+ * `migration:log` event (see {@link MigrationLogEvent}).
  */
 export type LogMethod = (msg: string, fields?: Record<string, unknown>) => void;
+
+/**
+ * `ctx.logger`: the kit's logger with the run's correlation bound into every
+ * line. Each method takes `(msg, fields?)` — or pino's own `(fields, msg?)` —
+ * and an `Error` as the message (its message, credentials masked). Fields with
+ * `userland: true` also emit the `migration:log` event.
+ *
+ * Any {@link MigronautLogger} — or a pino instance — is one, so a context built
+ * by hand in a test can pass the logger it has.
+ * @experimental New in 2.4
+ */
+export interface MigrationLogger {
+  debug(
+    msgOrFields: string | Error | Record<string, unknown>,
+    fieldsOrMsg?: Record<string, unknown> | string,
+  ): void;
+  info(
+    msgOrFields: string | Error | Record<string, unknown>,
+    fieldsOrMsg?: Record<string, unknown> | string,
+  ): void;
+  warn(
+    msgOrFields: string | Error | Record<string, unknown>,
+    fieldsOrMsg?: Record<string, unknown> | string,
+  ): void;
+  error(
+    msgOrFields: string | Error | Record<string, unknown>,
+    fieldsOrMsg?: Record<string, unknown> | string,
+  ): void;
+}
 
 // ─── Telemetry ────────────────────────────────────────────────────────────────
 
@@ -1453,6 +1582,25 @@ export interface UpOptions {
   requestedBy?: string;
   /** Why (≤ 512 characters) — a ticket, a sentence; stamped like `requestedBy` */
   reason?: string;
+  /**
+   * The queue job this run works for — bound into `ctx.run`, the run's log
+   * lines and `migration:log`. The BullMQ adapter sets it; set it yourself
+   * when you drive the kit from a queue of your own.
+   * @experimental New in 2.4
+   */
+  job?: JobRef;
+}
+
+/**
+ * The queue job a run works for. Nothing is stored: the ids only correlate
+ * what the run logs with the job a dashboard shows.
+ * @experimental New in 2.4
+ */
+export interface JobRef {
+  /** The job's id (≤ 1024 characters) */
+  id: string;
+  /** The group of jobs it was enqueued with (≤ 128 characters) */
+  groupId?: string;
 }
 
 /** Options for {@link MigratorKit.down} */
@@ -1487,6 +1635,11 @@ export interface DownOptions {
   requestedBy?: string;
   /** Why (≤ 512 characters) — a ticket, a sentence; stamped as `revertReason` */
   reason?: string;
+  /**
+   * The queue job this run works for — see {@link UpOptions.job}
+   * @experimental New in 2.4
+   */
+  job?: JobRef;
 }
 
 /** Payload common to every lifecycle event */
@@ -1500,6 +1653,12 @@ export interface MigrationEvent extends MigronautEventBase {
   direction: 'up' | 'down';
   batch?: number;
   durationMs?: number;
+  /**
+   * How many times the body ran, when the driver retried its transaction (on
+   * `migration:success` and `migration:error`; absent when it ran once)
+   * @experimental New in 2.4
+   */
+  attempts?: number;
   /**
    * Human-readable failure message (on `migration:error` only), with URI
    * credentials already redacted — safe to ship to metrics/alerting as-is.
@@ -1621,6 +1780,82 @@ export interface ConvergeEndEvent extends MigronautEventBase {
   error?: string;
 }
 
+/** The level of a `ctx.logger` call */
+export type MigrationLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/**
+ * What every `migration:log` event carries.
+ * @experimental New in 2.4
+ */
+export interface MigrationLogEventBase {
+  level: MigrationLogLevel;
+  /**
+   * The message — URI credentials and the values a server error quotes (an
+   * E11000's duplicate key) masked — at most 2048 characters
+   */
+  msg: string;
+  /**
+   * The call's fields without the `userland` marker, as a document a driver can
+   * store: a copy, its strings redacted, at most 8 levels and 1000 entries
+   * deep, strings at most 4096 characters. Dates, regular expressions and BSON
+   * values are kept as they are, binary data up to 4096 bytes too. An `Error`
+   * becomes `{ name, message, code?, codeName? }`; a `Map` an object, a `Set`
+   * an array; any other instance what `JSON.stringify` would see.
+   */
+  data: Record<string, unknown>;
+  /** When the call was made, by this process's clock — a TTL index can expire on it */
+  at: Date;
+  /** Increasing within one `runId`: orders the events of one millisecond */
+  seq: number;
+  /** Present when `msg` or `data` was cut to those bounds */
+  truncated?: true;
+}
+
+/**
+ * A `ctx.logger` call with `userland: true` in an ordinary migration or its
+ * hooks — `migration`, `batch` and `attempt` are absent in `beforeAll`/`afterAll`.
+ * @experimental New in 2.4
+ */
+export interface OrdinaryMigrationLogEvent extends MigrationLogEventBase {
+  kind: 'migration';
+  runId: string;
+  direction: 'up' | 'down';
+  migration?: string;
+  batch?: number;
+  attempt?: number;
+  jobId?: string;
+  groupId?: string;
+  requestedBy?: string;
+  reason?: string;
+}
+
+/**
+ * A `ctx.logger` call with `userland: true` in a background migration's
+ * `migrate`, `migrateBatch`, `step` (or their way back). `runId` is the lane's,
+ * the one its `background:*` events carry.
+ * @experimental New in 2.4
+ */
+export interface BackgroundMigrationLogEvent extends MigrationLogEventBase {
+  kind: 'background';
+  /** The lane's run id (a dry run, which has none, emits nothing) */
+  runId: string;
+  migration: string;
+  direction: 'forward' | 'revert';
+  generation?: number;
+  partition: string;
+  attempt: number;
+  jobId?: string;
+  /** Only when a run drives it inline — see {@link BackgroundRunInfo.groupId} */
+  groupId?: string;
+}
+
+/**
+ * The `migration:log` event — `kind` tells an ordinary migration's from a
+ * background migration's.
+ * @experimental New in 2.4
+ */
+export type MigrationLogEvent = OrdinaryMigrationLogEvent | BackgroundMigrationLogEvent;
+
 /**
  * Lifecycle events emitted by {@link MigratorKit}. Subscribe to feed metrics or
  * alerting without parsing log lines; a listener that throws is contained and
@@ -1634,6 +1869,12 @@ export interface MigronautEvents {
   'migration:success': (event: MigrationEvent) => void;
   'migration:skipped': (event: MigrationEvent) => void;
   'migration:error': (event: MigrationEvent) => void;
+  /**
+   * A `ctx.logger` call marked `userland: true` — for the application to keep.
+   * Logged lines without the marker emit nothing.
+   * @experimental New in 2.4
+   */
+  'migration:log': (event: MigrationLogEvent) => void;
   'lock:acquired': (event: LockEvent) => void;
   'lock:released': (event: LockEvent) => void;
   'lock:lost': (event: LockEvent) => void;
@@ -1716,6 +1957,11 @@ export interface RedoOptions {
   requestedBy?: string;
   /** Why — stamped like `requestedBy` */
   reason?: string;
+  /**
+   * The queue job this run works for — both halves carry it; see {@link UpOptions.job}
+   * @experimental New in 2.4
+   */
+  job?: JobRef;
 }
 
 /** Options for {@link MigratorKit.create} */
@@ -1952,7 +2198,15 @@ export class MigratorKit extends EventEmitter {
   /** One slice of one lane: claim a partition and a slot, work it, release. @experimental */
   runBackgroundSlice(
     name: string,
-    options?: { signal?: AbortSignal; sliceMs?: number },
+    options?: {
+      signal?: AbortSignal;
+      sliceMs?: number;
+      /**
+       * The queue job working the lane — on its log lines and `migration:log` events
+       * @experimental New in 2.4
+       */
+      job?: Pick<JobRef, 'id'>;
+    },
   ): Promise<BackgroundSliceResult>;
   /**
    * Drive a background migration from this process until it is done (or one

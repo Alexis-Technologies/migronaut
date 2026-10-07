@@ -94,6 +94,24 @@ export default defineConfig({
     );
   },
 
+  // ```mermaid fences become <MermaidDiagram>, rendered in the browser (theme/mermaid.ts).
+  // The source is URI-encoded so nothing in a diagram is read as Vue template syntax.
+  markdown: {
+    config(md) {
+      const fence = md.renderer.rules.fence!;
+      md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+        const token = tokens[idx];
+        if (token.info.trim().split(/\s+/)[0] === 'mermaid') {
+          return `<MermaidDiagram code="${encodeURIComponent(token.content)}" />\n`;
+        }
+        return fence(tokens, idx, options, env, self);
+      };
+    },
+  },
+
+  // Mermaid's chunks (~700 kB each, minified) are loaded lazily, only by a page that draws a diagram.
+  vite: { build: { chunkSizeWarningLimit: 750 } },
+
   themeConfig: {
     logo: '/logo-mark.svg',
 
@@ -104,7 +122,7 @@ export default defineConfig({
       { text: 'Reference', link: '/reference/cli', activeMatch: '/reference/' },
       {
         // Hand-synced with package.json "version" — part of the release checklist.
-        text: 'v2.3.0',
+        text: 'v2.4.0',
         items: [
           { text: 'Changelog', link: `${repo}/blob/main/CHANGELOG.md` },
           { text: 'npm', link: 'https://www.npmjs.com/package/@alexify/migronaut' },
@@ -123,6 +141,7 @@ export default defineConfig({
             { text: 'vs. migrate-mongo', link: '/guide/vs-migrate-mongo' },
             { text: 'vs. mongo-migrate-kit', link: '/guide/vs-mongo-migrate-kit' },
             { text: 'Core Concepts', link: '/guide/concepts' },
+            { text: 'How It Works', link: '/guide/how-it-works' },
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'Tutorial', link: '/guide/tutorial' },
             { text: 'Configuration', link: '/guide/configuration' },
@@ -146,6 +165,7 @@ export default defineConfig({
           items: [
             { text: 'Programmatic API', link: '/guide/api' },
             { text: 'Migrations as a Queue (BullMQ)', link: '/guide/bullmq' },
+            { text: 'Migration Logs', link: '/guide/migration-logs' },
             { text: 'OpenTelemetry', link: '/guide/opentelemetry' },
             { text: 'CI/CD & Deployment', link: '/guide/ci-cd' },
             { text: 'Troubleshooting', link: '/guide/troubleshooting' },

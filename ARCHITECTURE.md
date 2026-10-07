@@ -7,7 +7,7 @@
 > exists, how data flows through it, and every non-obvious nuance you need to make a safe change.
 >
 
-**Snapshot at time of writing:** v2.1.0 · Node ≥ 22.18 (engines; native TS type stripping is
+**Snapshot at time of writing:** v2.4.0 · Node ≥ 22.18 (engines; native TS type stripping is
 always available) · runtime deps: **none** — `package.json` has no `dependencies` key; `.env`
 loading, ANSI colors, the spinner, the arg parser, the table renderer and config validation are
 all hand-rolled in `src/` · peer deps: `mongodb`, optional `mongoose` · BullMQ (the optional queue
@@ -53,13 +53,45 @@ Since 2.3 the engine also runs **background migrations** ([§6.8](#68-background
 long data rewrites that `up` only registers, and that partitions, leases and a coordinator then
 carry out beside the migration line — never holding the migration lock.
 
-```
-            ┌────────────────────────────────────────────────┐
-   migronaut CLI ─┤                                                  │
-            │              MigratorKit (orchestrator)          ├─ MongoDB
-  your code ┤                                                  │
-            └───┬──────┬───────┬────────┬────────┬────────┬───┘
-              config  lock  changelog  loader  runner  context
+```mermaid
+flowchart TB
+  accTitle: migronaut's entry points, engine and state
+  CLI["migronaut CLI<br/>bin/ → src/cli/"]
+  CODE["your code<br/>MigratorKit · runMigrations"]
+  Q["queue adapter — ./bullmq<br/>src/bullmq/ · BullMQ injected"]
+  APP["your repository layer"]
+
+  KIT["MigratorKit<br/>src/core/migrator.js"]
+  V["versioning runtime — ./versioning<br/>src/versioning/ · no engine"]
+
+  subgraph MECH ["mechanism — one job each"]
+    direction TB
+    M1["config · options · sequence"]
+    M2["lock · lock-wait · changelog"]
+    M3["loader · runner · context · migration-logger"]
+  end
+  subgraph FLOWS ["flows — deps built by migrator.js"]
+    direction TB
+    F1["converge.js<br/>+ planner, search"]
+    F2["background.js<br/>+ store, engine, throttle"]
+    F3["background-watch.js"]
+  end
+
+  subgraph DB ["MongoDB — all of the state"]
+    direction TB
+    S1[("_migronaut_migrations · _migronaut_locks<br/>_migronaut_converge · _migronaut_background*")]
+    S2[("the application's collections")]
+  end
+
+  CLI --> KIT
+  CODE --> KIT
+  Q -- "public API only" --> KIT
+  KIT --> MECH
+  KIT --> FLOWS
+  MECH --> DB
+  FLOWS --> DB
+  KIT -. "requires" .-> V
+  APP --> V --> S2
 ```
 
 Three ideas explain almost everything:
@@ -107,6 +139,7 @@ src/
 │   ├── changelog.js         # Read/write the _migronaut_migrations collection
 │   ├── runner.js            # Execute ONE migration up()/down() (+ transactions)
 │   ├── context.js           # Build the MigrationContext passed to each migration
+│   ├── migration-logger.js  # ctx.run + ctx.logger correlation, the migration:log event (userland: true)
 │   ├── audit.js             # runAudit() — the read-only health-check flow
 │   ├── baseline.js          # runBaseline() — mark existing files applied without running them
 │   ├── collections.js       # Declared collections: validate, normalize, load collectionsDir
@@ -146,10 +179,11 @@ src/
 │   ├── concurrency.js       # mapLimit() — bounded fan-out for per-file reads/writes
 │   ├── env.js               # .env loader — native util.parseEnv, override:false semantics
 │   ├── checksum.js          # SHA-256 file hashing
-│   ├── redact.js            # Mask credentials (userinfo + query secrets) leaving the process
+│   ├── redact.js            # Mask credentials (userinfo + query secrets) leaving the process; redactBounded
 │   ├── sanitize.js          # Strip terminal control chars (C0 + full C1) from untrusted text
 │   ├── error.js             # errorText()/errorWithCause() — stringify caught errors, redaction built in
 │   ├── actor.js             # requestedBy/reason — limits, validation, changelog fields
+│   ├── job-ref.js           # job: { id, groupId? } — the queue job a run works for: limits, fields
 │   ├── canonical.js         # canonical()/deepEqual()/toWire() — declared vs. stored value comparison
 │   ├── collection-name.js   # isCollectionName() — the one rule for a usable collection name
 │   ├── id.js                # The one place an id is minted — randomUUID, or the user's generateId
@@ -198,6 +232,38 @@ There are three layers. Keep logic in the lowest layer it belongs to.
 | **Mechanism** | `core/{lock,changelog,runner,context,import,config,options,sequence}.js`, `utils/` | One job each, pure-ish, unit-testable | Know about the CLI; call `console.*` |
 | **Integration adapter** | `bullmq.js`, `src/bullmq/` | Drive the kit's *public* API from queue jobs; own the Queue/Worker lifecycle | Require a mechanism module (`lock`, `changelog`, `runner`, any `background-*`) or touch the DB; `require('bullmq')`; call `console.*` |
 | **Versioning runtime** | `versioning.js`, `src/versioning/` | Pure helpers and thin driver calls for an application's repository layer | Require anything outside `src/versioning/` and `src/errors/` — no core, no `mongodb`, no `mongoose` (pinned by a test) |
+
+What each layer requires, at a glance — an arrow means "requires". Nothing points back up, the
+adapter reaches the core only through the kit (and `lock-wait.js`), and the versioning runtime
+requires nothing of the core; several of these rules are pinned by unit tests that grep `src/`.
+
+```mermaid
+flowchart TB
+  accTitle: The layers and what each requires
+  PRES["presentation<br/>bin/ · src/cli/"]
+  ADAPT["integration adapter<br/>src/bullmq/"]
+  ORCH["orchestration<br/>migrator.js · run-recorder.js · run.js · background-runner.js"]
+  FLOW["flows — deps built by migrator.js<br/>converge.js · background.js · background-watch.js"]
+  MECH["mechanism<br/>lock · changelog · runner · context · config · collections · background-store …"]
+  PURE["pure<br/>options · sequence · converge-plan · index-spec · background-spec …"]
+  VERS["versioning runtime<br/>src/versioning/"]
+  BASE["utils/ · errors/"]
+
+  PRES --> ORCH
+  PRES -- "display helpers" --> PURE
+  ADAPT -- "kit + lock-wait.js only" --> ORCH
+  ORCH --> FLOW
+  ORCH --> MECH
+  ORCH --> PURE
+  FLOW --> MECH
+  FLOW --> PURE
+  MECH --> PURE
+  FLOW --> VERS
+  MECH --> VERS
+  PURE --> VERS
+  ORCH & FLOW & MECH & PURE & PRES & ADAPT --> BASE
+  VERS -- "errors/ only" --> BASE
+```
 
 The background modules split the same way: `background-spec.js`, `background-watch-plan.js` and
 the planning halves of the partitioners are pure; `background-store.js`,
@@ -377,12 +443,40 @@ Each entry: **responsibility · key exports · nuances you must know.**
   commit protocol — **so the migration body may run more than once; bodies must be idempotent**.
   `endSession()` always runs in `finally`. `onError` runs *before* the wrapped error is thrown.
   Errors are never swallowed.
+- **Attempts:** `attemptContext(attempt)` (from the migrator) returns what each attempt adds —
+  `{ run, logger }` — and every attempt gets a **fresh** context built from it, not one mutated in
+  place: a body from attempt 1 still running after a timeout keeps seeing attempt 1. `onError`
+  gets the last attempt's context. Resolves to `{ duration, attempts }`.
 
 ### `src/core/context.js` — the migration's world
 - **Responsibility:** build the `MigrationContext` (`{ client, db, mongoose?, signal? }`) handed to
   migrations.
 - **Nuance:** `mongoose` is only attached when present; `signal` (abort on stop/lock loss) is
-  attached here by the run loops. The `session` is added later by the runner, not here.
+  attached here by the run loops. The `session` is added later by the runner, not here — and so are
+  `run` and `logger`, per attempt (see below).
+
+### `src/core/migration-logger.js` — what a migration logs
+- **Responsibility:** `ctx.run` and `ctx.logger`, and the `migration:log` event. Mechanism only —
+  the sink is the kit's resolved logger, the emitter the kit's event channel.
+- **Key exports:** `runInfo(base, direction)` / `migrationRunInfo(run, { migration, batch, attempt })`
+  (frozen `ctx.run`), `correlationOf(kind, info, direction)` — **the one mapping** from `ctx.run`
+  or a background migration's `ctx.background` to what a line binds and what the event carries
+  (`id`→`runId`, `name`→`migration`; `requestedBy`/`reason` on the event only) —
+  `createMigrationLogger(...)`, `sequence()`, `notices()`; `createRunLog({ id, job, actor, sink,
+  emitter })` — an ordinary run's log side (its job as a copy and as log fields, `ctx.run` once per
+  direction, `attempt(direction, …)` → `{ run, logger }`) — and `backgroundLogs({ sink, emitter,
+  dryRun })`, the `logs(info, direction)` of a lane slice, a watcher or a dry run.
+- **Nuances:** every call is a line on the sink with the correlation merged over the user's fields;
+  only fields with `userland: true` (exactly) also emit, and only while someone listens (`wanted()`
+  spares the copy). The event's `data` is `redactBounded` — a copy, depth/entry/string-bounded,
+  which also ends a cycle; its strings are `redactOutbound`ed, like the event's `msg` (credentials
+  and the values a server error quotes); BSON values, Dates, RegExps and binary data up to 4 KB
+  pass through, an `Error` becomes `{ name, message, code?, codeName? }`, anything else what
+  `JSON.stringify` would see. The whole call is
+  try/catch-guarded, and a dropped or cut call leaves one debug line per run (`notices`). The kit
+  keeps the run's log side in `#runLog`, set and cleared with `#runId`; every logger of a run
+  shares its `seq` counter and notices, and closes over them, so a late call (a timed-out body)
+  keeps its run id and goes on counting.
 
 ### `src/core/import.js` — migrate-mongo adoption (pure)
 - **Responsibility:** **pure** transform from raw migrate-mongo changelog docs to `MigrationRecord`s.
@@ -659,7 +753,9 @@ the design.
   the supported Node range) and never overrides keys already in `process.env`.
 - **checksum.js** — `computeChecksum` (SHA-256 hex of file contents, BOM/CRLF-normalized).
 - **redact.js / error.js** — `redactUris`/`redactDeep` mask `user:password@` in any string leaving
-  the process; `errorText(error)` is the single chokepoint for stringifying caught errors, with
+  the process (`redactBounded` is `redactDeep` within bounds, for data that leaves as a document —
+  what a `migration:log` event's `data` is: an allowlist of values kept as they are, an `Error` as
+  plain data); `errorText(error)` is the single chokepoint for stringifying caught errors, with
   redaction built in. Use it instead of `error.message` everywhere. `errorWithCause(error)` adds the
   wrapped `context.cause` (which migration *and* why) — the changelog's failure trace and a failed
   span's status message.
@@ -667,6 +763,10 @@ the design.
   `pickActor`, and `actorFields` (the changelog field names, `revert`-prefixed for a rollback).
   Shared by the kit's options and the queue's job contract, so a producer cannot send what its
   worker refuses.
+- **job-ref.js** — `job: { id, groupId? }`, the queue job a run works for: `JOB_REF_LIMITS`
+  (`id` ≤ 1024 — custom BullMQ ids can be long — `groupId` ≤ `MAX_ID_LENGTH`), `jobRefIssue` (a
+  lane's `{ id }` refuses `groupId`) and `jobFields` (→ `{ jobId, groupId? }`). In `utils/` so the
+  queue adapter can check what it passes without requiring a core mechanism module.
 - **id.js** — the only module that mints an identifier. `randomId()` is the default
   (`crypto.randomUUID()`); `createIdGenerator(generateId)` wraps the user's function so that every
   call is bare (no arguments, no receiver), synchronous, and checked by `assertId` (a non-empty
@@ -1000,6 +1100,28 @@ queue, `<queueName>-background`, with its own Worker (concurrency 2 by default) 
 a migration job never waits behind a background one. Here flows *are* used — differently from the
 line above, and for a reason that does not apply there: the ordering truth stays in MongoDB.
 
+```mermaid
+flowchart LR
+  accTitle: The two queues of the adapter
+  subgraph MQ ["&lt;queueName&gt; — the migration line"]
+    direction TB
+    J1["up / down / converge / sync jobs<br/>one at a time, attempts: 1"]
+  end
+  subgraph BQ ["&lt;queueName&gt;-background"]
+    direction TB
+    C["background — a coordinator per migration<br/>deduplicated on its name"]
+    L["background-lane — children of it<br/>one slice each, moveToDelayed between"]
+    VF["background-verify — the drift watch tick"]
+    C --> L
+  end
+  KIT["one MigratorKit<br/>shared by both processors"]
+  DB[("MongoDB<br/>changelog · lock · background state")]
+  J1 -- "background:registered<br/>enqueues its coordinator" --> C
+  MQ --> KIT
+  BQ --> KIT
+  KIT --> DB
+```
+
 - A **coordinator** job per background migration (`background`, deduplicated on its name, a few
   attempts with a long backoff as the outer safety net) asks the kit for one coordinator step.
   When lanes have work it adds them as **children** (`parent` + `moveToWaitingChildren`) and
@@ -1032,6 +1154,24 @@ line above, and for a reason that does not apply there: the ordering truth stays
 - **Close order:** the drift watcher, then both workers together (both processors told to stop: a
   lane checkpoints at its batch boundary and moves itself back to delayed for the next worker),
   then both processors, QueueEvents, the queues, the kit.
+
+**What a migration logs.** Each run is told its job (`job: { id, groupId }`; a lane's slice
+`{ id }`), so `ctx.run`, the run's lines and its `migration:log` events name it. The processors
+listen to `migration:log` and write `userland: true` lines into the job's log (`✎ …`,
+`userlandRow`: one line — breaks shown as `⏎`, control characters dropped — ≤ 1024 characters,
+the data's JSON written only that far), up to `userlandLogRows` per job (a lane: per slice; default
+1000), the rest counted in one closing row. The migration processor matches by **job id and run
+id** (`ownLine`), not by `current` alone — a body that outlived its timeout may still log while the
+next job runs, or while the same job runs again after it was put back in the queue — and seals a
+job before its final flush, so no row lands after BullMQ removed it. A background migration an
+`up` drives inline (`backgroundInline`) logs from lanes of its own, which carry the run's
+`jobId` **and `groupId`**: the migration processor takes `kind: 'background'` lines by both, and
+the background processor leaves lines with a group alone — the facade shares one kit between the
+two processors, and a background queue's lane (no group; auto ids when it has no parent) may have
+the id of a migration job. The background processor runs lanes side by side: a `Map` of the lanes
+in flight, keyed by job id, routes the rows, and a lane's writes are drained before it moves on.
+Storing the events is the application's job (`mq.kit.on('migration:log', …)` in the worker's
+process) — the adapter only mirrors them.
 
 ### 6.7 Declared collections (converge)
 Files: [collections.js](src/core/collections.js), [index-spec.js](src/core/index-spec.js),
@@ -1157,6 +1297,35 @@ background migration (status, phase, plan, generation, pass, totals, requires/wa
 `<backgroundCollection>_partitions` one document per range of the current plan (cursor, counters,
 lease), `<backgroundCollection>_watch` the live drift watchers' positions. Processes and Redis are
 only executors; anything they lose is recovered from these.
+
+```mermaid
+flowchart TB
+  accTitle: Background migrations — who writes what
+  UP["kit.up() — registration<br/>changelog record + state document"]
+  subgraph RT ["runtimes — any mix, any number"]
+    direction TB
+    R1["background run (CLI)"]
+    R2["startBackgroundRunner()"]
+    R3["background-processor.js (queue)"]
+  end
+  COORD["coordinator step<br/>under the background:‹name› lock"]
+  LANE["lane slice<br/>lease = partition + slot"]
+  WATCH["live drift watcher<br/>one leader per collection"]
+  ST[("&lt;backgroundCollection&gt;<br/>status · plan · pass · totals")]
+  PA[("…_partitions<br/>range · cursor · counters · lease")]
+  WA[("…_watch<br/>resume tokens")]
+  DOCS[("the collection<br/>stampedDiff under the OCC filter")]
+  UP --> ST
+  RT --> COORD
+  RT --> LANE
+  RT --> WATCH
+  COORD --> ST
+  COORD --> PA
+  LANE --> PA
+  LANE --> DOCS
+  WATCH --> WA
+  WATCH --> DOCS
+```
 
 **Leases are slots.** A lane claims a partition and a slot `0..maxParallel-1` in one atomic write;
 a unique partial index on `{ background, lease.slot }` makes "at most `maxParallel` at once" an
@@ -1346,6 +1515,17 @@ The high-impact ones for code changes:
 - **`markApplied` upserts (not inserts)** — required for `redo`/`force`/`import` over the unique index.
 - **`markReverted` never deletes** — audit trail. Reverted ≠ gone.
 - **`MigrationContext.session`** — beyond the original type spec; how transactions actually work.
+- **Migronaut stores no migration logs.** `ctx.logger` lines go to the configured logger, and
+  only fields with `userland: true` (exactly) also become `migration:log` — for the application to
+  store. The marker stays on the line. The event fires at any level and with `logger: null`, is not
+  a session write (it survives a rollback), is emitted once per transaction attempt (`attempt`
+  tells them apart), and never in a dry run. `logger`/`run` are optional in `MigrationContext`'s
+  types on purpose: a context built by hand in a test must still type-check. The kit is an
+  `EventEmitter` with `captureRejections`, so the usual `async` storing listener whose insert
+  fails is contained (debug line) instead of crashing the process. `ctx.logger` is typed as
+  `MigrationLogger` with method syntax and union parameters, not overloads: the runtime takes
+  pino's `(fields, msg)` and an `Error`, and method bivariance keeps any `MigronautLogger`, pino
+  instance or one-argument stub assignable to a hand-built context.
 - **Spinner / prompts / JSON routing live in the CLI**, never in core. Core takes a `ProgressReporter`
   callback. Don't require `cli/spinner.js` or `cli/table.js` from `core/`.
 - **`createExtension` defaults to `'js'`** and `.ts` is opt-in — because of the shipped-binary
@@ -1522,6 +1702,15 @@ The high-impact ones for code changes:
   picks shards, and a partition ends where its run of chunks does (§6.8).
 - **The live watcher opens its stream before it probes.** The other order leaves a window where a
   write is neither probed nor streamed.
+- **`ctx.background` is frozen and carries the lane.** `runId` is the lane's (or the watcher's)
+  owner — the runId of its `background:*` events — taken from the deps' explicit `runId` (the
+  watcher's deps override `owner` with a string). `attempt` counts transactions where the engine
+  runs user code again in a new one: each turn of `transactionalBatch`, each try of a
+  transactional `step`, each `withTransaction` callback of the watcher's rewrite; it is 1 for the
+  conflict rounds of a plain batch. A dry run's logger marks lines `dryRun: true` and has no
+  emitter. Lanes an `up` drives inline (`backgroundInline`) get the run's job — `jobId` **and**
+  `groupId`, which a background queue's lanes never have — but keep a `runId` of their own: there
+  is no parent run id.
 - **A typed `current` past the highest shape errors as "not assignable to type 'never'"** when it
   is written inline — the check works through a conditional type there; from an imported
   `as const` definition the same check names the two numbers.

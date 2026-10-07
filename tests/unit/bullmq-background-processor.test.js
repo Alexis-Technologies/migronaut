@@ -121,6 +121,7 @@ describe('createBackgroundProcessor options', () => {
     ['a tiny poll interval', { queue, pollIntervalMs: 1 }, /pollIntervalMs/],
     ['a tiny stallMs', { queue, stallMs: 10 }, /stallMs/],
     ['too many lane retries', { queue, maxLaneRetries: 101 }, /maxLaneRetries/],
+    ['a negative userlandLogRows', { queue, userlandLogRows: -1 }, /userlandLogRows/],
     ['a parent in jobOptions', { queue, jobOptions: { parent: {} } }, /parent/],
     [
       'a child-failure policy in jobOptions',
@@ -438,5 +439,110 @@ describe('background verify jobs', () => {
     assert.strictEqual(result.drift[0].action, 'reopened');
     assert.strictEqual(result.enqueued, 1);
     assert.deepStrictEqual((await processor.heal()).jobs.length, 1);
+  });
+});
+
+describe('userland lines of background lanes', () => {
+  /** A migration:log event a lane's slice emits */
+  const userland = (jobId, extra = {}) => ({
+    kind: 'background',
+    runId: 'lane-1',
+    migration: NAME,
+    direction: 'forward',
+    generation: 1,
+    partition: '3',
+    attempt: 1,
+    level: 'info',
+    msg: 'batch',
+    data: { n: 10 },
+    at: new Date(0),
+    seq: 1,
+    jobId,
+    ...extra,
+  });
+
+  it("should name the lane's job to its slice and write its lines into that job's log", async () => {
+    const kit = backgroundKit({
+      runBackgroundSlice: mock.fn(async (_name, { job }) => {
+        kit.emit('migration:log', userland(job.id));
+        // Another lane's line, and an ordinary migration's: neither is this job's.
+        kit.emit('migration:log', userland('other'));
+        kit.emit('migration:log', { ...userland(job.id), kind: 'migration' });
+        // A lane a migration job drives inline: its job is on the other queue.
+        kit.emit('migration:log', userland(job.id, { groupId: 'g', msg: 'inline' }));
+        return { outcome: 'exhausted', counters: {} };
+      }),
+    });
+    const processor = createBackgroundProcessor({ kit, queue: fakeQueue() });
+    const job = laneJob();
+    await processor(job, 'token');
+    assert.deepStrictEqual(kit.runBackgroundSlice.mock.calls[0].arguments[1].job, { id: '42' });
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      ['✎ batch {"n":10} [partition 3]'],
+    );
+  });
+
+  it('should drain the rows before the lane moves on, and take none after', async () => {
+    let late;
+    const kit = backgroundKit({
+      runBackgroundSlice: mock.fn(async (_name, { job }) => {
+        kit.emit('migration:log', userland(job.id));
+        late = () => kit.emit('migration:log', userland(job.id, { msg: 'late' }));
+        return { outcome: 'yielded', counters: {} };
+      }),
+    });
+    const processor = createBackgroundProcessor({ kit, queue: fakeQueue() });
+    const job = laneJob();
+    let logsAtMove;
+    job.moveToDelayed = mock.fn(async () => {
+      logsAtMove = [...job.logs];
+    });
+    await moved(processor, job);
+    assert.ok(
+      logsAtMove.some((row) => row.startsWith('✎ batch')),
+      'written before the move',
+    );
+    late();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(!job.logs.some((row) => row.includes('late')));
+  });
+
+  it('should mirror up to userlandLogRows lines per slice, then count the rest', async () => {
+    const kit = backgroundKit({
+      runBackgroundSlice: mock.fn(async (_name, { job }) => {
+        for (let seq = 1; seq <= 4; seq++) {
+          kit.emit('migration:log', userland(job.id, { seq, msg: `batch ${seq}` }));
+        }
+        return { outcome: 'exhausted', counters: {} };
+      }),
+    });
+    const processor = createBackgroundProcessor({ kit, queue: fakeQueue(), userlandLogRows: 1 });
+    const job = laneJob();
+    await processor(job, 'token');
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      [
+        '✎ batch 1 {"n":10} [partition 3]',
+        '✎ … 3 more line(s) past the limit of 1 not mirrored here — see migration:log',
+      ],
+    );
+  });
+
+  it('should run a lane whose job has no id, naming no job', async () => {
+    const kit = backgroundKit();
+    const processor = createBackgroundProcessor({ kit, queue: fakeQueue() });
+    const job = laneJob();
+    delete job.id;
+    await processor(job, 'token');
+    assert.strictEqual(kit.runBackgroundSlice.mock.calls[0].arguments[1].job, undefined);
+  });
+
+  it('should stop listening once closed', async () => {
+    const kit = backgroundKit();
+    const processor = createBackgroundProcessor({ kit, queue: fakeQueue() });
+    assert.strictEqual(kit.listenerCount('migration:log'), 1);
+    await processor.close();
+    assert.strictEqual(kit.listenerCount('migration:log'), 0);
   });
 });

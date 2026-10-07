@@ -84,9 +84,15 @@ async function withTimeout(promise, timeoutMs, name, direction, onTimeout) {
  * body succeeded and only the (non-transactional) changelog write failed, the
  * error carries `context.phase = 'changelog-write'` and `onError` is not fired —
  * the migration itself did not fail.
+ *
+ * `attemptContext(attempt)` returns what the caller adds to the context of
+ * each attempt (`ctx.run`, `ctx.logger`): a retried transaction runs the body
+ * again, and that run gets a context of its own. Resolves to
+ * `{ duration, attempts }`; a failure carries `attempts` in its context.
  */
 async function runMigration(params) {
   const { name, migration, direction, context, useTransaction, hooks, onSuccess, logger } = params;
+  const { attemptContext } = params;
   const fn = direction === 'up' ? migration.up : migration.down;
   // A per-file `export const timeoutMs` overrides the global setting.
   const timeoutMs = migration.timeoutMs ?? params.timeoutMs;
@@ -102,7 +108,18 @@ async function runMigration(params) {
   const signal = context.signal
     ? AbortSignal.any([context.signal, timedOut.signal])
     : timedOut.signal;
-  let runtimeContext = { ...context, signal };
+  // A fresh context per attempt, not one mutated in place: a body from an
+  // earlier attempt that is still running (a timeout does not stop it) keeps
+  // the attempt it started with.
+  const contextOf = (session, attempt) => ({
+    ...context,
+    signal,
+    ...(session ? { session } : {}),
+    ...attemptContext?.(attempt),
+  });
+  let attempts = 0;
+  // The context the body last ran with — what onError gets.
+  let runtimeContext;
   const onTimeout = (timeoutError) => timedOut.abort(timeoutError);
   let duration = 0;
   // 'body' while the migration's own code runs; 'changelog' once it committed
@@ -114,25 +131,28 @@ async function runMigration(params) {
   try {
     if (useTransaction) {
       session = context.client.startSession();
-      runtimeContext = { ...runtimeContext, session };
       // withTransaction may run the body more than once when the driver retries
       // a transient failure, so duration is re-measured on each attempt. The
       // changelog write stays inside the transaction, so a failure there
       // aborts the body's writes too — 'body' phase is accurate throughout.
       await session.withTransaction(async () => {
         const attemptStart = Date.now();
+        attempts += 1;
+        runtimeContext = contextOf(session, attempts);
         await withTimeout(fn(runtimeContext), timeoutMs, name, direction, onTimeout);
         duration = Date.now() - attemptStart;
         await onSuccess?.(duration, session);
       });
     } else {
+      attempts += 1;
+      runtimeContext = contextOf(undefined, attempts);
       await withTimeout(fn(runtimeContext), timeoutMs, name, direction, onTimeout);
       duration = Date.now() - start;
       phase = 'changelog';
       await onSuccess?.(duration, undefined);
     }
 
-    return { duration };
+    return { duration, attempts };
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
     // Failures deserve timing data as much as successes — a slow-then-failing
@@ -162,15 +182,21 @@ async function runMigration(params) {
     if (hooks?.onError) {
       // A throwing onError hook must not replace the real cause.
       try {
-        await hooks.onError(name, err, runtimeContext);
+        // A transaction that failed before its body ever ran (a session that
+        // would not start) still hands onError a whole context: a first
+        // attempt's, not counted as one.
+        await hooks.onError(name, err, runtimeContext ?? contextOf(session, 1));
       } catch (hookError) {
         const message = errorText(hookError);
         logger?.warn(`⚠ onError hook failed for ${name}: ${message}`);
       }
     }
 
+    // How many times the body ran (the driver retries a transient
+    // transaction error by running it again) — absent if it never started.
+    const attemptsField = attempts > 0 ? { attempts } : {};
     if (err instanceof MigrationTimeoutError) {
-      err.context = { durationMs: elapsed, ...err.context };
+      err.context = { durationMs: elapsed, ...attemptsField, ...err.context };
       throw err;
     }
     // A standalone deployment refusing the transaction is a topology problem,
@@ -179,7 +205,7 @@ async function runMigration(params) {
       throw new TransactionsUnsupportedError(
         `Cannot run ${name} in a transaction — this deployment is standalone. ` +
           'Set useTransaction: false, or run against a replica set / mongos.',
-        { name, direction, durationMs: elapsed, cause: err.message },
+        { name, direction, durationMs: elapsed, ...attemptsField, cause: err.message },
         { cause: err },
       );
     }
@@ -187,7 +213,7 @@ async function runMigration(params) {
       `Migration ${direction} failed: ${name}`,
       // The message is duplicated into context because that is what survives
       // JSON serialization; `cause` keeps the real Error (and its stack).
-      { name, direction, durationMs: elapsed, cause: err.message },
+      { name, direction, durationMs: elapsed, ...attemptsField, cause: err.message },
       { cause: err },
     );
   } finally {
