@@ -241,7 +241,10 @@ kit.on('migration:log', (event) => {
     expectType<string>(event.partition);
     expectType<number>(event.attempt);
     expectType<number | undefined>(event.generation);
+    expectType<string | undefined>(event.groupId);
   }
+  // Both carry a group: an ordinary run's, or that of the run driving a lane inline.
+  expectType<string | undefined>(event.groupId);
 });
 // An async subscriber — the usual one, which stores the event — is accepted.
 kit.on('migration:log', async (event) => {
@@ -704,6 +707,7 @@ declare const backgroundCtx: import('../../index.js').BackgroundMigrationContext
 expectType<number>(backgroundCtx.background.attempt);
 expectType<string | undefined>(backgroundCtx.background.runId);
 expectType<string | undefined>(backgroundCtx.background.jobId);
+expectType<string | undefined>(backgroundCtx.background.groupId);
 expectType<number | undefined>(backgroundCtx.background.generation);
 expectError((backgroundCtx.background.attempt = 2));
 expectType<Promise<import('../../index.js').BackgroundSliceResult>>(

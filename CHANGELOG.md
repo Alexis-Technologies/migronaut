@@ -38,9 +38,10 @@ experimental — its shape may still change in a minor release (named here).
   `userlandLogRows` option (`createMigrationQueue`, both processors; default 1000) caps the rows one
   job's log takes — the rest are counted in one closing row.
 - **Background migrations** — `ctx.logger` is bound to `ctx.background`, which gains the lane's
-  `runId`, its `jobId` and the transaction `attempt`; a `userland: true` call emits
-  `migration:log` with `kind: 'background'`. A dry run marks its lines `dryRun: true` and emits
-  nothing.
+  `runId`, its `jobId` (and, for a lane an `up` drives with `backgroundInline`, the run's job and
+  `groupId` — its lines land in that migration job's log) and the transaction `attempt`; a
+  `userland: true` call emits `migration:log` with `kind: 'background'`. A dry run marks its lines
+  `dryRun: true` and emits nothing.
 - **Types** — `MigrationRunInfo`, `JobRef`, `MigrationLogEvent` (`OrdinaryMigrationLogEvent |
   BackgroundMigrationLogEvent`), `MigrationLogEventBase`, `MigrationLogLevel`,
   `BackgroundRunInfo`; `logger?` and `run?` on `MigrationContext` (optional, so a context built by

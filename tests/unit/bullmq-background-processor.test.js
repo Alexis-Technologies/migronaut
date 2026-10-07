@@ -468,6 +468,8 @@ describe('userland lines of background lanes', () => {
         // Another lane's line, and an ordinary migration's: neither is this job's.
         kit.emit('migration:log', userland('other'));
         kit.emit('migration:log', { ...userland(job.id), kind: 'migration' });
+        // A lane a migration job drives inline: its job is on the other queue.
+        kit.emit('migration:log', userland(job.id, { groupId: 'g', msg: 'inline' }));
         return { outcome: 'exhausted', counters: {} };
       }),
     });

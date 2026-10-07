@@ -302,6 +302,12 @@ to finish (this run *is* the deploy): pin the new version with `migronaut backgr
 Inline mode holds the line for as long as the rewrite takes, which is the very thing background
 migrations exist to avoid. Keep it for data you know is small.
 
+The lanes it runs are lanes of their own — each with its own `runId` — but they work for the run:
+when that run names a queue job (the [BullMQ adapter](/guide/bullmq) always does, or the `job`
+option), `ctx.background.jobId` and `groupId` name it, and so do the lanes' log lines and
+[`migration:log`](/guide/migration-logs#background-migrations) events, which land in that job's
+log.
+
 ### The kit methods
 
 The runtimes are built on public kit methods, which you can drive yourself:

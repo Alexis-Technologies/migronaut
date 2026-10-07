@@ -385,6 +385,39 @@ describe('userland logs of background migrations (integration)', () => {
     assert.ok(lanes.has(line.fields.runId));
   });
 
+  it('should name the run’s job and group on the lanes it drives inline', async () => {
+    project.write(
+      NAME,
+      `export const background = {
+  collection: 'orders',
+  from: 1,
+  to: 2,
+  pauseMs: 0,
+  batchSize: 10,
+  migrateBatch(docs, { logger, background }) {
+    logger.info('batch', { userland: true, job: [background.jobId, background.groupId] });
+    return docs.map(({ address, ...doc }) => ({ ...doc, shipping: { address } }));
+  },
+};
+`,
+    );
+    const { lines, logger } = recordingLogger();
+    const kit = migrator({ logger, backgroundInline: true });
+    const { events, runs } = listen(kit);
+    await kit.up(undefined, { job: { id: '17', groupId: 'g-1' } });
+
+    assert.ok(events.length >= 3, `one event per batch: ${events.length}`);
+    for (const event of events) {
+      assert.strictEqual(event.kind, 'background');
+      assert.deepStrictEqual([event.jobId, event.groupId], ['17', 'g-1']);
+      assert.deepStrictEqual(event.data.job, ['17', 'g-1']);
+      // The lane's own run, not the run that drove it.
+      assert.notStrictEqual(event.runId, runs[0]);
+    }
+    const line = lines.find((entry) => entry.msg === 'batch');
+    assert.deepStrictEqual([line.fields.jobId, line.fields.groupId], ['17', 'g-1']);
+  });
+
   it('should tell a transactional step run again apart by its attempt', async () => {
     project.write(
       NAME,

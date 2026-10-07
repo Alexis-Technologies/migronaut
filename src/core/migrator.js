@@ -2367,7 +2367,7 @@ class MigratorKit extends EventEmitter {
   #backgroundHost() {
     return {
       store: this.#backgroundStore(),
-      deps: (owner) => this.#backgroundDeps(owner),
+      deps: (owner, options) => this.#backgroundDeps(owner, options),
       newId: () => this.#newId(),
       logger: this.#logger,
       emit: (event, payload) => this.#emit(event, payload),
@@ -2378,14 +2378,16 @@ class MigratorKit extends EventEmitter {
 
   /**
    * What background.js runs with — `owner` names a lane: its lease's owner, its
-   * events' runId. `job` is the queue job working the lane, when there is one:
-   * its id goes on the lane's log lines and `migration:log` events.
+   * events' runId. `job` is the queue job working the lane, when there is one
+   * (`{ id }` for a background queue's lane, `{ id, groupId? }` for a run that
+   * drives it inline): it goes on the lane's log lines and `migration:log`
+   * events.
    */
   #backgroundDeps(owner, { job } = {}) {
     const config = this.#config;
     const db = this.#requireDb();
     const stamp = owner ? { runId: owner } : {};
-    const lineStamp = job ? { ...stamp, jobId: job.id } : stamp;
+    const lineStamp = job ? { ...stamp, ...jobFields(job) } : stamp;
     // One counter per lane slice (or watcher): orders its migration:log events.
     const nextSeq = sequence();
     return {
@@ -2682,10 +2684,16 @@ class MigratorKit extends EventEmitter {
       this.#fields({ background: name, inline: true }),
     );
     await this.#backgroundReady(name, { lanes: true });
+    // The lanes work for the run's queue job: their lines and events name it,
+    // with its group — which a background queue's own lanes never have.
+    const job = this.#runLog?.job;
     const status = await drive(this.#backgroundHost(), name, {
       signal,
       concurrency: state.spec?.maxParallel ?? 1,
       inline: true,
+      ...(job?.jobId !== undefined
+        ? { job: { id: job.jobId, ...(job.groupId !== undefined ? { groupId: job.groupId } : {}) } }
+        : {}),
     });
     if (status.status === 'blocked') {
       throw new BackgroundPendingError(

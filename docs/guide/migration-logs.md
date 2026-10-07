@@ -167,6 +167,11 @@ A [background migration](/guide/background-migrations)'s `ctx.logger` is bound t
 `userland: true` call emits `migration:log` with `kind: 'background'`. On a queue, it lands in the
 lane job's log.
 
+Run [inline](/guide/background-migrations#inline-backgroundinline) by an `up`, its lanes work for
+that run's job: `jobId` and `groupId` are the migration job's — the group is what tells them from
+a background queue's lanes, which have none — and their lines land in the migration job's log.
+Each lane still has a `runId` of its own.
+
 ::: tip Log per batch, not per document
 `migrate` runs once per document — and again for a document a concurrent write moved. Log from
 `migrateBatch`, from a `step`, or a summary, rather than from every document.

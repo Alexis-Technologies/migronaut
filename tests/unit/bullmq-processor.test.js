@@ -7,6 +7,7 @@ const {
   isRetryableError,
   isTransientForJob,
   jobRefOf,
+  ownLine,
   userlandRow,
 } = require('../../src/bullmq/processor.js');
 const { MigratorKit } = require('../../src/core/migrator.js');
@@ -1350,6 +1351,25 @@ describe('userland lines in the job log', () => {
     assert.ok(!job.logs.some((row) => row.includes('late')));
   });
 
+  it('should take the lines of the lanes its run drives inline, by job and group', async () => {
+    const kit = stubKit({
+      up: mock.fn(async (name, options) => {
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        const lane = { kind: 'background', runId: 'lane-1', partition: '2', msg: 'batch' };
+        kit.emit('migration:log', userland(options.job.id, { ...lane, groupId: 'g' }));
+        // A background queue's lane with the same id: no group, not this job's.
+        kit.emit('migration:log', userland(options.job.id, { ...lane, msg: 'other queue' }));
+        return [{ file: name, status: 'applied', duration: 1 }];
+      }),
+    });
+    const job = upJob();
+    await createMigrationProcessor({ kit })(job);
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      ['✎ batch {"processed":1000} [partition 2]'],
+    );
+  });
+
   it('should not take a line of another run of the same job', async () => {
     const kit = stubKit({
       up: mock.fn(async (name, options) => {
@@ -1431,6 +1451,36 @@ describe('userland lines in the job log', () => {
     const userlandAt = job.logs.findIndex((row) => row.startsWith('✎ error: gave up'));
     const failedAt = job.logs.findIndex((row) => row.startsWith('✖'));
     assert.ok(userlandAt !== -1 && userlandAt < failedAt);
+  });
+});
+
+describe('ownLine', () => {
+  const ctx = { runId: 'run-1', jobRef: { id: '7', groupId: 'g' } };
+  const line = (extra) => ({
+    kind: 'migration',
+    runId: 'run-1',
+    jobId: '7',
+    groupId: 'g',
+    ...extra,
+  });
+
+  it("should take the job's own run, and nothing of another run or job", () => {
+    assert.strictEqual(ownLine(ctx, line()), true);
+    assert.strictEqual(ownLine(ctx, line({ runId: 'run-0' })), false);
+    assert.strictEqual(ownLine(ctx, line({ jobId: '8' })), false);
+    assert.strictEqual(ownLine({ jobRef: ctx.jobRef }, line()), false, 'no run yet');
+    assert.strictEqual(ownLine({ runId: 'run-1' }, line({ jobId: undefined })), true);
+    assert.strictEqual(ownLine(ctx, line({ kind: 'other' })), false);
+  });
+
+  it("should take an inline lane's line only by the job and its group", () => {
+    const lane = (extra) => line({ kind: 'background', runId: 'lane-1', ...extra });
+    assert.strictEqual(ownLine(ctx, lane()), true);
+    assert.strictEqual(ownLine(ctx, lane({ groupId: undefined })), false);
+    assert.strictEqual(ownLine(ctx, lane({ groupId: 'h' })), false);
+    assert.strictEqual(ownLine(ctx, lane({ jobId: '8' })), false);
+    assert.strictEqual(ownLine({ runId: 'run-1', jobRef: { id: '7' } }, lane()), false);
+    assert.strictEqual(ownLine({ runId: 'run-1' }, lane()), false);
   });
 });
 

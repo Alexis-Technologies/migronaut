@@ -212,9 +212,14 @@ function createBackgroundProcessor(options = {}) {
     pending.finally(() => lane.writes.delete(pending));
   }
 
-  /** A lane's userland lines, into its own job's log — never allowed to fail it */
+  /**
+   * A lane's userland lines, into its own job's log — never allowed to fail
+   * it. A line with a group is a lane a migration job drives inline: its job
+   * is on the other queue, whatever its id.
+   */
   function onUserland(event) {
     if (event?.kind !== 'background' || event.jobId === undefined) return;
+    if (event.groupId !== undefined) return;
     const lane = lanes.get(event.jobId);
     if (lane === undefined) return;
     if (lane.rows < settings.userlandLogRows) {

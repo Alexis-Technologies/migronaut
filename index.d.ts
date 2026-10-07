@@ -177,10 +177,17 @@ export interface BackgroundRunInfo {
    */
   readonly runId?: string;
   /**
-   * The queue job working the lane
+   * The queue job working the lane — a background queue's lane job, or the
+   * migration job whose run drives it inline (`backgroundInline`)
    * @experimental New in 2.4
    */
   readonly jobId?: string;
+  /**
+   * The group of that migration job — only when a run drives it inline; a
+   * background queue's lanes have none
+   * @experimental New in 2.4
+   */
+  readonly groupId?: string;
   /**
    * 1 — or more when a transactional batch or step runs again in a new
    * transaction (a transient error, a conflict, a smaller batch)
@@ -1802,6 +1809,8 @@ export interface BackgroundMigrationLogEvent extends MigrationLogEventBase {
   partition: string;
   attempt: number;
   jobId?: string;
+  /** Only when a run drives it inline — see {@link BackgroundRunInfo.groupId} */
+  groupId?: string;
 }
 
 /**

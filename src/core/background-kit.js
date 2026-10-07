@@ -24,9 +24,10 @@ const { sleep } = require('./background-throttle.js');
  * and watchers. A flow like background.js: it gets what it needs from the
  * kit (`host`), built only by migrator.js:
  *
- * `{ store, deps(owner?), newId(), logger, emit(event, payload),
- *    registered(name), status(name) }` — `deps` is background.js's deps,
- * `registered` the state or NotAppliedError, `status` the public view.
+ * `{ store, deps(owner?, { job }?), newId(), logger, emit(event, payload),
+ *    registered(name), status(name) }` — `deps` is background.js's deps (`job`:
+ * the queue job a run driving it inline works for), `registered` the state or
+ * NotAppliedError, `status` the public view.
  */
 
 /**
@@ -69,10 +70,16 @@ const irreversibleBackground = (name) =>
  * it is done (`untilDone`) or for one round. `inline` (a run waiting for it
  * under the migration lock) cannot wait out a file that changed on disk
  * since it was registered — that wait is for a deploy in progress, and this
- * run is the deploy — so it fails instead.
+ * run is the deploy — so it fails instead. `job`: the queue job that run works
+ * for, named on every lane's lines and `migration:log` events.
  */
-async function drive(host, name, { signal, sliceMs, untilDone = true, concurrency = 1, inline }) {
-  const deps = host.deps(host.newId());
+async function drive(
+  host,
+  name,
+  { signal, sliceMs, untilDone = true, concurrency = 1, inline, job },
+) {
+  const jobOption = job ? { job } : {};
+  const deps = host.deps(host.newId(), jobOption);
   const stopped = () =>
     new RunAbortedError(`Stopped driving background migration ${name} — it goes on from here`, {
       migration: name,
@@ -87,7 +94,7 @@ async function drive(host, name, { signal, sliceMs, untilDone = true, concurrenc
     if (answer.next === 'process') {
       const state = await host.registered(name);
       const count = Math.max(1, Math.min(concurrency, state.spec?.maxParallel ?? 1));
-      await lanes(host, name, count, { signal, sliceMs, untilDone });
+      await lanes(host, name, count, { signal, sliceMs, untilDone, jobOption });
     } else {
       if (inline && answer.reason === 'checksum') {
         throw new ChecksumMismatchError(
@@ -112,13 +119,13 @@ async function drive(host, name, { signal, sliceMs, untilDone = true, concurrenc
 }
 
 /** `count` lanes at once: the first that fails for good stops the others, and its error is thrown */
-async function lanes(host, name, count, { signal, sliceMs, untilDone }) {
+async function lanes(host, name, count, { signal, sliceMs, untilDone, jobOption }) {
   const stop = new AbortController();
   const laneSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
   const running = [];
   for (let i = 0; i < count; i++) {
     running.push(
-      lane(host, name, { signal: laneSignal, sliceMs, untilDone }).catch((error) => {
+      lane(host, name, { signal: laneSignal, sliceMs, untilDone, jobOption }).catch((error) => {
         if (!stop.signal.aborted) stop.abort(error);
         throw error;
       }),
@@ -135,14 +142,14 @@ async function lanes(host, name, count, { signal, sliceMs, untilDone }) {
  * retry can fix — the file changed or is gone, the deployment cannot run it
  * — ends the lane, and so do `MAX_LANE_FAILURES` in a row.
  */
-async function lane(host, name, { signal, sliceMs, untilDone }) {
+async function lane(host, name, { signal, sliceMs, untilDone, jobOption = {} }) {
   let failures = 0;
   for (;;) {
     if (signal?.aborted) return;
     const owner = host.newId();
     let slice;
     try {
-      slice = await runSlice(host.deps(owner), name, { signal, sliceMs, owner });
+      slice = await runSlice(host.deps(owner, jobOption), name, { signal, sliceMs, owner });
       failures = 0;
     } catch (error) {
       if (signal?.aborted) return;

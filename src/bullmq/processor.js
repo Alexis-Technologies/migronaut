@@ -211,6 +211,25 @@ function assertUserlandLogRows(value) {
   }
 }
 
+/**
+ * Whether a `migration:log` event is the job's own. Matched by run and job,
+ * not by the job in flight alone: a body that outlived its timeout may still
+ * log while the next job runs — the same job again, if it was put back in the
+ * queue — and its lines must not land in that run's log. A background
+ * migration the run drives inline logs from lanes of its own (their own run
+ * ids), named by the job and its group: a background queue's lanes have no
+ * group, and their ids may well repeat a migration job's.
+ */
+function ownLine(ctx, event) {
+  const ref = ctx.jobRef;
+  if (event.kind === 'background') {
+    return ref?.groupId !== undefined && event.jobId === ref.id && event.groupId === ref.groupId;
+  }
+  if (event.kind !== 'migration') return false;
+  if (ctx.runId === undefined || event.runId !== ctx.runId) return false;
+  return ref === undefined || event.jobId === ref.id;
+}
+
 /** A job in a few words, for log lines: `up 20260101-x.js (1/3)`, `converge`, `sync` */
 function describeJob(data) {
   if (data.kind !== 'migration') return data.kind;
@@ -470,15 +489,9 @@ function createMigrationProcessor(options = {}) {
     'converge:end': (event) => {
       if (current && event.success) log(current, `✔ Converged ${event.changed} change(s)`);
     },
-    // What the migration itself logged for its users. Matched by run and job,
-    // not by `current` alone: a body that outlived its timeout may still log
-    // while the next job runs — the same job again, if it was put back in the
-    // queue — and its lines must not land in that run's log.
+    // What the migration itself logged for its users — see ownLine.
     'migration:log': (event) => {
-      if (!current || current.sealed || event.kind !== 'migration') return;
-      if (current.runId === undefined || event.runId !== current.runId) return;
-      if (current.jobRef && event.jobId !== current.jobRef.id) return;
-      mirror(current, event);
+      if (current && !current.sealed && ownLine(current, event)) mirror(current, event);
     },
   };
   for (const [event, listener] of Object.entries(listeners)) kit.on(event, listener);
@@ -938,6 +951,7 @@ module.exports = {
   isTransientForJob,
   isRetryableError,
   jobRefOf,
+  ownLine,
   prepareErrorForQueue,
   resolveProcessorOptions,
   userlandOverflowRow,

@@ -73,8 +73,8 @@ function excludeBadIds(match, badIds = []) {
 /**
  * `ctx.background`: which background migration, generation and partition —
  * and, for `ctx.logger` and `migration:log`, the lane (`runId`, its owner),
- * the queue job working it and the transaction attempt. Frozen, like an
- * ordinary migration's `ctx.run`.
+ * the queue job working it (and its group, when a run drives it inline) and
+ * the transaction attempt. Frozen, like an ordinary migration's `ctx.run`.
  */
 function backgroundInfo(job, attempt) {
   return Object.freeze({
@@ -83,6 +83,7 @@ function backgroundInfo(job, attempt) {
     partition: String(job.partitionId ?? ''),
     ...(job.runId !== undefined ? { runId: job.runId } : {}),
     ...(job.jobId !== undefined ? { jobId: job.jobId } : {}),
+    ...(job.groupId !== undefined ? { groupId: job.groupId } : {}),
     attempt,
   });
 }
