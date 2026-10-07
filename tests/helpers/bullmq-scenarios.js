@@ -694,6 +694,33 @@ export async function down() {}
     assert.ok(!logs.some((row) => row.includes('operational only')));
   });
 
+  it('should mirror only userlandLogRows lines into the job log, counting the rest', async () => {
+    write(
+      '0001-a.js',
+      `export async function up({ db, logger }) {
+  for (let n = 1; n <= 3; n++) logger.info('step', { userland: true, n });
+  await db.collection('things').insertOne({ marker: 'a' });
+}
+export async function down() {}
+`,
+    );
+    const mq = createQueue({ userlandLogRows: 2 });
+    const events = [];
+    mq.kit.on('migration:log', (event) => events.push(event));
+    await mq.startWorker();
+    const group = await mq.enqueueUp();
+    await group.wait({ timeoutMs: 10_000 });
+    const jobId = String(group.jobs[0].id);
+
+    assert.strictEqual(events.length, 3, 'the event still carries every line');
+    const rows = (await harness.logsOf(mq.queue, jobId)).filter((row) => row.startsWith('✎'));
+    assert.deepStrictEqual(rows, [
+      '✎ step {"n":1}',
+      '✎ step {"n":2}',
+      '✎ … 1 more line(s) past the limit of 2 not mirrored here — see migration:log',
+    ]);
+  });
+
   it('should refuse a forced or unordered job its worker does not allow', async () => {
     write('0001-a.js', insertMigration('things', 'a'));
     const mq = createQueue();

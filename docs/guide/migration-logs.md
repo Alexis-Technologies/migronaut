@@ -153,8 +153,11 @@ log**, next to the adapter's lifecycle rows — so a dashboard such as Bull Boar
 ```
 
 A row shows the level when it is not `info`, `(attempt N)` for a retried transaction, and is cut
-at 1024 characters. The job's `returnvalue.runId` (or `progress.runId` of a failed one) joins it
-to what you stored.
+at 1024 characters; a line break in the message shows as `⏎`, so a row is always one line. A job's
+log takes up to [`userlandLogRows`](/guide/bullmq#the-facade-createmigrationqueue-options) of them
+(1000 by default) — the rest are counted in one closing row, while the event still carries every
+line. The job's `returnvalue.runId` (or `progress.runId` of a failed one) joins it to what you
+stored.
 
 ## Background migrations
 

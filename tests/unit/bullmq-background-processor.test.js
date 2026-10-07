@@ -121,6 +121,7 @@ describe('createBackgroundProcessor options', () => {
     ['a tiny poll interval', { queue, pollIntervalMs: 1 }, /pollIntervalMs/],
     ['a tiny stallMs', { queue, stallMs: 10 }, /stallMs/],
     ['too many lane retries', { queue, maxLaneRetries: 101 }, /maxLaneRetries/],
+    ['a negative userlandLogRows', { queue, userlandLogRows: -1 }, /userlandLogRows/],
     ['a parent in jobOptions', { queue, jobOptions: { parent: {} } }, /parent/],
     [
       'a child-failure policy in jobOptions',
@@ -503,6 +504,27 @@ describe('userland lines of background lanes', () => {
     late();
     await new Promise((resolve) => setImmediate(resolve));
     assert.ok(!job.logs.some((row) => row.includes('late')));
+  });
+
+  it('should mirror up to userlandLogRows lines per slice, then count the rest', async () => {
+    const kit = backgroundKit({
+      runBackgroundSlice: mock.fn(async (_name, { job }) => {
+        for (let seq = 1; seq <= 4; seq++) {
+          kit.emit('migration:log', userland(job.id, { seq, msg: `batch ${seq}` }));
+        }
+        return { outcome: 'exhausted', counters: {} };
+      }),
+    });
+    const processor = createBackgroundProcessor({ kit, queue: fakeQueue(), userlandLogRows: 1 });
+    const job = laneJob();
+    await processor(job, 'token');
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      [
+        '✎ batch 1 {"n":10} [partition 3]',
+        '✎ … 3 more line(s) past the limit of 1 not mirrored here — see migration:log',
+      ],
+    );
   });
 
   it('should run a lane whose job has no id, naming no job', async () => {

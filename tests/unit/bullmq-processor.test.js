@@ -1350,6 +1350,74 @@ describe('userland lines in the job log', () => {
     assert.ok(!job.logs.some((row) => row.includes('late')));
   });
 
+  it('should not take a line of another run of the same job', async () => {
+    const kit = stubKit({
+      up: mock.fn(async (name, options) => {
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        // A body of an earlier run of this job — put back in the queue — still logging.
+        kit.emit('migration:log', userland(options.job.id, { runId: 'run-0', msg: 'stale' }));
+        kit.emit('migration:log', userland(options.job.id));
+        return [{ file: name, status: 'applied', duration: 1 }];
+      }),
+    });
+    const job = upJob();
+    await createMigrationProcessor({ kit })(job);
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      ['✎ batch done {"processed":1000}'],
+    );
+  });
+
+  it('should mirror up to userlandLogRows lines, then count the rest in one row', async () => {
+    const kit = stubKit({
+      up: mock.fn(async (name, options) => {
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        for (let seq = 1; seq <= 5; seq++) {
+          kit.emit('migration:log', userland(options.job.id, { seq, msg: `line ${seq}` }));
+        }
+        return [{ file: name, status: 'applied', duration: 1 }];
+      }),
+    });
+    const job = upJob();
+    await createMigrationProcessor({ kit, userlandLogRows: 2 })(job);
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      [
+        '✎ line 1 {"processed":1000}',
+        '✎ line 2 {"processed":1000}',
+        '✎ … 3 more line(s) past the limit of 2 not mirrored here — see migration:log',
+      ],
+    );
+  });
+
+  it('should mirror none with userlandLogRows: 0, on the failing path too', async () => {
+    const kit = stubKit({
+      up: mock.fn(async (_name, options) => {
+        kit.emit('run:start', { runId: 'run-1', command: 'up' });
+        kit.emit('migration:log', userland(options.job.id));
+        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {});
+      }),
+    });
+    const job = upJob();
+    await assert.rejects(
+      createMigrationProcessor({ kit, userlandLogRows: 0 })(job),
+      MigrationExecutionFailedError,
+    );
+    assert.deepStrictEqual(
+      job.logs.filter((row) => row.startsWith('✎')),
+      ['✎ … 1 more line(s) past the limit of 0 not mirrored here — see migration:log'],
+    );
+  });
+
+  it('should refuse a userlandLogRows that is not a count', () => {
+    for (const userlandLogRows of [-1, 1.5, '2', Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => createMigrationProcessor({ kit: stubKit(), userlandLogRows }),
+        ConfigInvalidError,
+      );
+    }
+  });
+
   it('should carry the failing path too, before the failure row', async () => {
     const kit = stubKit({
       up: mock.fn(async (_name, options) => {
@@ -1400,11 +1468,48 @@ describe('userlandRow', () => {
   });
 
   it('should survive data that does not serialize, and cut a long row', () => {
-    const cyclic = {};
-    cyclic.self = cyclic;
-    assert.strictEqual(userlandRow({ ...base, data: cyclic }), '✎ done [data not serializable]');
+    class Broken {
+      toJSON() {
+        throw new Error('no');
+      }
+    }
+    assert.strictEqual(
+      userlandRow({ ...base, data: { broken: new Broken() } }),
+      '✎ done [data not serializable]',
+    );
     const row = userlandRow({ ...base, msg: 'x'.repeat(2000) });
     assert.strictEqual(row.length, 1024);
     assert.ok(row.endsWith('…'));
+  });
+
+  it('should write data only as far as the row shows it', () => {
+    const data = {};
+    for (let index = 0; index < 1000; index++) data[`k${index}`] = 'v'.repeat(4096);
+    const row = userlandRow({ ...base, data });
+    assert.strictEqual(row.length, 1024);
+    assert.ok(row.startsWith('✎ done {"k0":"vvv'));
+    assert.ok(row.endsWith('…'));
+    // A cycle (never from the kit, whose copies are acyclic) ends at the bound too.
+    const cyclic = {};
+    cyclic.self = cyclic;
+    assert.strictEqual(userlandRow({ ...base, data: cyclic }).length, 1024);
+  });
+
+  it('should keep a row on one line, with no control characters', () => {
+    assert.strictEqual(
+      userlandRow({ ...base, msg: 'done\n✔ Applied 0002-x.js\r\nnext\u2028\u001b[2J' }),
+      '✎ done⏎✔ Applied 0002-x.js⏎next⏎[2J',
+    );
+    assert.strictEqual(userlandRow({ ...base, data: { note: 'a\nb' } }), '✎ done {"note":"a\\nb"}');
+  });
+
+  it('should show dates and ids by their JSON, and skip what JSON skips', () => {
+    assert.strictEqual(
+      userlandRow({
+        ...base,
+        data: { at: new Date(0), none: undefined, fn: () => 1, list: [undefined, 1n] },
+      }),
+      '✎ done {"at":"1970-01-01T00:00:00.000Z","list":[null,"1"]}',
+    );
   });
 });

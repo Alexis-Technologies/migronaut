@@ -841,6 +841,13 @@ export interface CreateMigrationProcessorOptions {
   /** What a job may ask for beyond the ordinary — see {@link MigrationJobPermissions} */
   allow?: MigrationJobPermissions;
   /**
+   * How many of a migration's `userland: true` lines one job's log takes (a
+   * lane: one slice) — the rest are counted in one closing row. `0` mirrors
+   * none; `migration:log` still carries every line. Default 1000
+   * @experimental New in 2.4
+   */
+  userlandLogRows?: number;
+  /**
    * The background queue: what an `up` (or `down`) job registers gets its
    * coordinator there at once, and every `sync` tick heals it. @experimental
    */
@@ -919,6 +926,11 @@ export interface CreateBackgroundProcessorOptions {
   stallMs?: number;
   /** Failed slices in a row before a lane gives up (0–100). Default 8 */
   maxLaneRetries?: number;
+  /**
+   * See {@link CreateMigrationProcessorOptions.userlandLogRows} — counted per slice
+   * @experimental New in 2.4
+   */
+  userlandLogRows?: number;
 }
 
 /**
@@ -1119,6 +1131,12 @@ export interface CreateMigrationQueueOptions<
    * refuse fails at the call. Give every producer and worker the same policy.
    */
   allow?: MigrationJobPermissions;
+  /**
+   * See {@link CreateMigrationProcessorOptions.userlandLogRows} — for the
+   * migration jobs and, with `background`, the lanes
+   * @experimental New in 2.4
+   */
+  userlandLogRows?: number;
   /**
    * Background migrations on a queue of their own (`<queueName>-background`):
    * a coordinator job each, with lanes as its children. `true` takes every

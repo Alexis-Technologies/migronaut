@@ -82,6 +82,7 @@ Three rules explain every behaviour on this page:
 | `allow` | | `{ down: true, force: false, unordered: false }` — what a job may ask for beyond applying what is pending in order. See [Security](#security) |
 | `lockWait` | | `{ onLockHeld: 'wait' \| 'throw', lockWaitTimeoutMs, lockPollIntervalMs: 500 }` — how a job behaves when the MongoDB lock is held. The timeout defaults to 90 s or 1.5× the holder's lock TTL, whichever is longer; polls back off up to 5 s |
 | `background` | | `true` or `{ … }`: a second queue for [background migrations](#background-migrations-on-the-queue) |
+| `userlandLogRows` | `1000` | How many of a migration's `userland: true` lines one job's log takes (a lane: one slice); the rest are counted in one closing row, and `0` mirrors none. [`migration:log`](/guide/migration-logs) still carries every line |
 
 | Method | Returns | |
 |---|---|---|
@@ -440,7 +441,8 @@ await backgroundProcessor.heal(); // what startBackgroundWorker() does at start
 
 `createBackgroundProcessor` takes `config` or `kit` (and `kitOptions`), `queue` (required: the
 coordinators add their lanes to it), `jobOptions`, `sliceMs`, `children`, `pollIntervalMs`,
-`stallMs`, and `maxLaneRetries` (failed slices in a row before a lane gives up, default 8). The
+`stallMs`, `maxLaneRetries` (failed slices in a row before a lane gives up, default 8) and
+`userlandLogRows` (default 1000, counted per slice). The
 processor has `shutdown()`, `close()` and `heal()`. `createMigrationProcessor`'s `background` takes
 `{ queue, jobOptions?, stallMs? }`. On the producer side,
 `enqueueBackground(queue, kit, { migration?, stallMs?, jobOptions?, requestedBy?, reason? })`
@@ -477,7 +479,8 @@ try {
 const { Worker } = require('bullmq');
 const { createMigrationProcessor } = require('@alexify/migronaut/bullmq');
 
-const processor = createMigrationProcessor({ config, queue }); // `queue` only for sync jobs
+// `queue` only for sync jobs; `userlandLogRows`, `lockWait`, `allow`, … as on the facade
+const processor = createMigrationProcessor({ config, queue });
 const worker = new Worker('migronaut', processor, { connection, concurrency: 1 });
 
 // on shutdown — stop fetching first, then stop the processor, together:
@@ -517,7 +520,7 @@ on the lock. One is the honest setting.
 ## Observing
 
 - **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'search-wait' | 'completed' | 'failed', migration, direction, groupId, index, total, code?, runId? }` — `code` is the typed error code of a failed job (`'UNKNOWN'` for one that is not migronaut's), and `runId` the run's correlation id: the join key to the changelog record and the kit's log lines. A failed job has no return value, so its `runId` is found here and on the error's `context`. A `sync` or `converge` job reports `{ phase, kind }` instead of the migration fields — and, while it waits for search index builds, `{ phase: 'search-wait', kind, searchIndexes, waitedMs }` (updated every 30 s, with a job log line).
-- **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step (as it starts, and as it ends), the failure line with its run id — and the migration's own `userland: true` lines, as `✎ …` rows (a background lane's in the lane job's log). Each run is told its job, so a migration's `ctx.run` and its [`migration:log`](/guide/migration-logs) events carry `jobId` and `groupId`.
+- **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step (as it starts, and as it ends), the failure line with its run id — and the migration's own `userland: true` lines, as `✎ …` rows (a background lane's in the lane job's log), up to `userlandLogRows` per job; the rest are counted in one closing row. Every row is one line. BullMQ keeps a job's logs as long as the job — `jobOptions: { keepLogs }` caps them further. Each run is told its job, so a migration's `ctx.run` and its [`migration:log`](/guide/migration-logs) events carry `jobId` and `groupId`.
 - **Kit events**: `mq.kit.on('migration:success', …)` — the same [lifecycle events](/guide/api) as everywhere else. `mq.kit.on('migration:log', …)` in the worker's process is where to [keep what migrations log](/guide/migration-logs#keeping-them) for your users.
 - **Worker events**: `mq.worker.on('failed', …)`.
 - **Traces**: pass `bullmq.telemetry` and the kit's `telemetry` option, and one trace runs from the

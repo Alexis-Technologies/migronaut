@@ -32,9 +32,11 @@ experimental — its shape may still change in a minor release (named here).
   `ctx.run`, its lines (the kit's own included) and its events; and `job: { id }` on
   `runBackgroundSlice`.
 - **Queue adapter** — the processor passes each job's id and group to its run, and writes the
-  migration's `userland: true` lines into the job's log as `✎ …` rows (matched by job id, so a
-  timed-out body never writes into the next job's log). A background lane does the same for its
-  slice, into the lane job's log.
+  migration's `userland: true` lines into the job's log as one-line `✎ …` rows (matched by job and
+  run id, so a timed-out body never writes into the next job's log — nor into a later run of the
+  same job). A background lane does the same for its slice, into the lane job's log. The new
+  `userlandLogRows` option (`createMigrationQueue`, both processors; default 1000) caps the rows one
+  job's log takes — the rest are counted in one closing row.
 - **Background migrations** — `ctx.logger` is bound to `ctx.background`, which gains the lane's
   `runId`, its `jobId` and the transaction `attempt`; a `userland: true` call emits
   `migration:log` with `kind: 'background'`. A dry run marks its lines `dryRun: true` and emits
