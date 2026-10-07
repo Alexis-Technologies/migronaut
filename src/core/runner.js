@@ -84,9 +84,15 @@ async function withTimeout(promise, timeoutMs, name, direction, onTimeout) {
  * body succeeded and only the (non-transactional) changelog write failed, the
  * error carries `context.phase = 'changelog-write'` and `onError` is not fired —
  * the migration itself did not fail.
+ *
+ * `attemptContext(attempt)` returns what the caller adds to the context of
+ * each attempt (`ctx.run`, `ctx.logger`): a retried transaction runs the body
+ * again, and that run gets a context of its own. Resolves to
+ * `{ duration, attempts }`.
  */
 async function runMigration(params) {
   const { name, migration, direction, context, useTransaction, hooks, onSuccess, logger } = params;
+  const { attemptContext } = params;
   const fn = direction === 'up' ? migration.up : migration.down;
   // A per-file `export const timeoutMs` overrides the global setting.
   const timeoutMs = migration.timeoutMs ?? params.timeoutMs;
@@ -103,6 +109,19 @@ async function runMigration(params) {
     ? AbortSignal.any([context.signal, timedOut.signal])
     : timedOut.signal;
   let runtimeContext = { ...context, signal };
+  let attempts = 0;
+  // A fresh context per attempt, not one mutated in place: a body from an
+  // earlier attempt that is still running (a timeout does not stop it) keeps
+  // the attempt it started with.
+  const contextOf = (session) => {
+    attempts += 1;
+    return {
+      ...context,
+      signal,
+      ...(session ? { session } : {}),
+      ...attemptContext?.(attempts),
+    };
+  };
   const onTimeout = (timeoutError) => timedOut.abort(timeoutError);
   let duration = 0;
   // 'body' while the migration's own code runs; 'changelog' once it committed
@@ -121,18 +140,20 @@ async function runMigration(params) {
       // aborts the body's writes too — 'body' phase is accurate throughout.
       await session.withTransaction(async () => {
         const attemptStart = Date.now();
+        runtimeContext = contextOf(session);
         await withTimeout(fn(runtimeContext), timeoutMs, name, direction, onTimeout);
         duration = Date.now() - attemptStart;
         await onSuccess?.(duration, session);
       });
     } else {
+      runtimeContext = contextOf();
       await withTimeout(fn(runtimeContext), timeoutMs, name, direction, onTimeout);
       duration = Date.now() - start;
       phase = 'changelog';
       await onSuccess?.(duration, undefined);
     }
 
-    return { duration };
+    return { duration, attempts };
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
     // Failures deserve timing data as much as successes — a slow-then-failing

@@ -35,6 +35,57 @@ export interface MigrationContext {
    * migronaut cannot interrupt a running function by itself.
    */
   signal?: AbortSignal;
+  /**
+   * The kit's logger, with this run's correlation ({@link run}) bound into the
+   * fields of every line. A call whose fields hold `userland: true` is also
+   * emitted as the `migration:log` event, for the application to store and show
+   * its users — migronaut stores none of it:
+   *
+   * ```js
+   * logger.info('batch done', { userland: true, processed: 1000 });
+   * ```
+   *
+   * Always present when migronaut runs the migration; optional so a context
+   * built by hand (in a test) still type-checks.
+   * @experimental New in 2.4
+   */
+  logger?: MigronautLogger;
+  /**
+   * Who this is: the run id, the migration, the direction, the transaction
+   * attempt and, when the caller named them, the queue job and the actor.
+   * Frozen; the same values `logger` binds and `migration:log` carries.
+   * Always present when migronaut runs the migration.
+   * @experimental New in 2.4
+   */
+  run?: MigrationRunInfo;
+}
+
+/**
+ * The correlation of a run, as `ctx.run`. `migration`, `batch` and `attempt`
+ * describe one migration and are absent in `beforeAll`/`afterAll`.
+ * @experimental New in 2.4
+ */
+export interface MigrationRunInfo {
+  /** The run id — the same on the lock, the changelog record and every event of the run */
+  readonly id: string;
+  readonly direction: 'up' | 'down';
+  /** The migration file */
+  readonly migration?: string;
+  /** The changelog batch (`up` only) */
+  readonly batch?: number;
+  /**
+   * 1 — or more when a transaction was retried and the body runs again. Not a
+   * queue retry: a migration job is never retried.
+   */
+  readonly attempt?: number;
+  /** The queue job that runs this migration (set by the BullMQ adapter, or the `job` option) */
+  readonly jobId?: string;
+  /** The queue group the job belongs to */
+  readonly groupId?: string;
+  /** Who asked for the run (`requestedBy` option) */
+  readonly requestedBy?: string;
+  /** Why (`reason` option) */
+  readonly reason?: string;
 }
 
 /** Shape of an imported migration file module */
@@ -1086,6 +1137,9 @@ export interface MigronautLogger {
  * `{ runId, migration, direction, batch, durationMs }` — so a machine-readable
  * logger does not have to parse the human string. A plain `(msg) => …` logger
  * remains valid: the extra argument is simply ignored.
+ *
+ * On a migration's `ctx.logger`, fields with `userland: true` also emit the
+ * `migration:log` event (see {@link MigrationLogEvent}).
  */
 export type LogMethod = (msg: string, fields?: Record<string, unknown>) => void;
 
@@ -1621,6 +1675,55 @@ export interface ConvergeEndEvent extends MigronautEventBase {
   error?: string;
 }
 
+/** The level of a `ctx.logger` call */
+export type MigrationLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/**
+ * What every `migration:log` event carries.
+ * @experimental New in 2.4
+ */
+export interface MigrationLogEventBase {
+  level: MigrationLogLevel;
+  /** The message — URI credentials masked, at most 2048 characters */
+  msg: string;
+  /**
+   * The call's fields without the `userland` marker: a copy, its strings
+   * redacted, at most 8 levels and 1000 entries deep, strings at most 4096
+   * characters. Dates, ObjectIds and other values are kept as they are.
+   */
+  data: Record<string, unknown>;
+  /** When the call was made, by this process's clock — a TTL index can expire on it */
+  at: Date;
+  /** Increasing within one `runId`: orders the events of one millisecond */
+  seq: number;
+  /** Present when `msg` or `data` was cut to those bounds */
+  truncated?: true;
+}
+
+/**
+ * A `ctx.logger` call with `userland: true` in an ordinary migration or its
+ * hooks — `migration`, `batch` and `attempt` are absent in `beforeAll`/`afterAll`.
+ * @experimental New in 2.4
+ */
+export interface OrdinaryMigrationLogEvent extends MigrationLogEventBase {
+  kind: 'migration';
+  runId: string;
+  direction: 'up' | 'down';
+  migration?: string;
+  batch?: number;
+  attempt?: number;
+  jobId?: string;
+  groupId?: string;
+  requestedBy?: string;
+  reason?: string;
+}
+
+/**
+ * The `migration:log` event.
+ * @experimental New in 2.4
+ */
+export type MigrationLogEvent = OrdinaryMigrationLogEvent;
+
 /**
  * Lifecycle events emitted by {@link MigratorKit}. Subscribe to feed metrics or
  * alerting without parsing log lines; a listener that throws is contained and
@@ -1634,6 +1737,12 @@ export interface MigronautEvents {
   'migration:success': (event: MigrationEvent) => void;
   'migration:skipped': (event: MigrationEvent) => void;
   'migration:error': (event: MigrationEvent) => void;
+  /**
+   * A `ctx.logger` call marked `userland: true` — for the application to keep.
+   * Logged lines without the marker emit nothing.
+   * @experimental New in 2.4
+   */
+  'migration:log': (event: MigrationLogEvent) => void;
   'lock:acquired': (event: LockEvent) => void;
   'lock:released': (event: LockEvent) => void;
   'lock:lost': (event: LockEvent) => void;

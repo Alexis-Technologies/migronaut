@@ -30,8 +30,11 @@ import {
   type LockInfo,
   LockLostError,
   MigrationBlockedError,
+  type MigrationContext,
   type MigrationEvent,
+  type MigrationLogEvent,
   type MigrationModule,
+  type MigrationRunInfo,
   MigratorKit,
   MigronautError,
   type MigronautConfig,
@@ -212,6 +215,54 @@ kit.on('lock:released', (event) => {
 // The event-name union is enforced — a typo'd event does not degrade to the
 // untyped EventEmitter overload.
 expectError(kit.on('migration:done', () => undefined));
+
+// ─── Userland logs: ctx.logger, ctx.run, migration:log ───────────────────────
+
+kit.on('migration:log', (event) => {
+  expectType<MigrationLogEvent>(event);
+  expectType<'migration'>(event.kind);
+  expectType<string>(event.runId);
+  expectType<'up' | 'down'>(event.direction);
+  expectType<string | undefined>(event.migration);
+  expectType<number | undefined>(event.attempt);
+  expectType<string | undefined>(event.jobId);
+  expectType<'debug' | 'info' | 'warn' | 'error'>(event.level);
+  expectType<string>(event.msg);
+  expectType<Record<string, unknown>>(event.data);
+  expectType<Date>(event.at);
+  expectType<number>(event.seq);
+  expectType<true | undefined>(event.truncated);
+});
+// An async subscriber — the usual one, which stores the event — is accepted.
+kit.on('migration:log', async (event) => {
+  await Promise.resolve(event.seq);
+});
+
+const loggingMigration: MigrationModule = {
+  async up({ logger, run }) {
+    expectType<MigronautLogger | undefined>(logger);
+    expectType<MigrationRunInfo | undefined>(run);
+    expectType<number | undefined>(run?.attempt);
+    expectType<string | undefined>(run?.id);
+    logger?.info('batch done', { userland: true, processed: 1000 });
+    if (run) {
+      // Frozen at runtime, read-only in the types.
+      expectError((run.id = 'x'));
+      expectError((run.attempt = 2));
+    }
+  },
+  async down() {},
+};
+expectAssignable<MigrationModule>(loggingMigration);
+// A context built by hand — as a unit test of a migration does — still type-checks.
+declare const db: import('mongodb').Db;
+declare const client: import('mongodb').MongoClient;
+expectAssignable<MigrationContext>({ db, client });
+expectAssignable<MigrationContext>({
+  db,
+  client,
+  run: { id: 'r', direction: 'up', migration: '0001-a.js', attempt: 1 },
+});
 
 // ─── Client injection and progress reporter ──────────────────────────────────
 

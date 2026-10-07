@@ -89,4 +89,74 @@ function redactDeep(value) {
   return value;
 }
 
-module.exports = { redactDeep, redactOutbound, redactUris };
+/**
+ * How much of a value {@link redactBounded} copies: nesting, entries in all, and
+ * the length of one string. What a migration hands to `ctx.logger` is the
+ * application's own data, of any size and shape — a cycle included — and a
+ * subscriber stores it; these keep one call's copy small and finite.
+ */
+const BOUNDS = Object.freeze({ depth: 8, entries: 1000, string: 4096 });
+
+/** Stands in for what {@link redactBounded} left out */
+const TRUNCATED = '[truncated]';
+
+/** A plain object — `{}` or `Object.create(null)` — as opposed to a class instance */
+function isPlain(value) {
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * {@link redactDeep} within {@link BOUNDS}: every string reachable through
+ * plain objects and arrays redacted and clipped, nesting past the depth (which
+ * is what ends a cycle) and entries past the budget replaced or dropped.
+ * Anything else — a Date, an ObjectId, a Buffer — is kept as is, so the copy
+ * stays a document the driver can store. `omit` names a key left out of the
+ * top level only. Returns `{ value, truncated }`; never mutates the input.
+ */
+function redactBounded(value, { omit } = {}) {
+  let entries = 0;
+  let truncated = false;
+  const copy = (item, depth) => {
+    if (typeof item === 'string') {
+      const text = redactUris(item);
+      if (text.length <= BOUNDS.string) return text;
+      truncated = true;
+      return `${text.slice(0, BOUNDS.string)}…`;
+    }
+    if (item === null || typeof item !== 'object') return item;
+    const array = Array.isArray(item);
+    if (!array && !isPlain(item)) return item;
+    if (depth >= BOUNDS.depth) {
+      truncated = true;
+      return TRUNCATED;
+    }
+    if (array) {
+      const out = [];
+      for (const element of item) {
+        if (entries >= BOUNDS.entries) {
+          truncated = true;
+          break;
+        }
+        entries += 1;
+        out.push(copy(element, depth + 1));
+      }
+      return out;
+    }
+    const out = {};
+    for (const key of Object.keys(item)) {
+      if (depth === 0 && key === omit) continue;
+      if (entries >= BOUNDS.entries) {
+        truncated = true;
+        break;
+      }
+      entries += 1;
+      out[key] = copy(item[key], depth + 1);
+    }
+    return out;
+  };
+  const result = copy(value, 0);
+  return { value: result, truncated };
+}
+
+module.exports = { BOUNDS, redactBounded, redactDeep, redactOutbound, redactUris };

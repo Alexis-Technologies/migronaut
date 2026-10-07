@@ -1,7 +1,13 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { errorText } = require('../../src/utils/error.js');
-const { redactDeep, redactOutbound, redactUris } = require('../../src/utils/redact.js');
+const {
+  BOUNDS,
+  redactBounded,
+  redactDeep,
+  redactOutbound,
+  redactUris,
+} = require('../../src/utils/redact.js');
 
 describe('redactUris', () => {
   it('should mask the password in a URI anywhere inside a message', () => {
@@ -126,5 +132,71 @@ describe('redactOutbound', () => {
   it('should keep the rest of a multi-line stack', () => {
     const stack = `MongoServerError: ${E11000}\n    at insertOne (driver.js:1:1)`;
     assert.strictEqual(redactOutbound(stack).split('\n')[1], '    at insertOne (driver.js:1:1)');
+  });
+});
+
+describe('redactBounded', () => {
+  it('should copy plain objects and arrays with every string redacted', () => {
+    const input = { uri: 'mongodb://u:secret@h/db', nested: { list: ['mongodb://a:b@h', 2] } };
+    const { value, truncated } = redactBounded(input);
+    assert.deepStrictEqual(value, {
+      uri: 'mongodb://u:****@h/db',
+      nested: { list: ['mongodb://a:****@h', 2] },
+    });
+    assert.strictEqual(truncated, false);
+    assert.notStrictEqual(value.nested, input.nested, 'a copy, not the input');
+    assert.strictEqual(input.uri, 'mongodb://u:secret@h/db', 'never mutated');
+  });
+
+  it('should keep class instances, null-prototype objects and scalars as they are', () => {
+    const at = new Date(0);
+    const id = { _bsontype: 'ObjectId' };
+    Object.setPrototypeOf(id, class ObjectId {}.prototype);
+    const bare = Object.create(null);
+    bare.k = 'mongodb://u:p@h';
+    const { value } = redactBounded({ at, id, bare, n: 1n, ok: true, none: null });
+    assert.strictEqual(value.at, at);
+    assert.strictEqual(value.id, id);
+    assert.deepStrictEqual({ ...value.bare }, { k: 'mongodb://u:****@h' });
+    assert.strictEqual(value.n, 1n);
+    assert.strictEqual(value.none, null);
+  });
+
+  it('should leave the omitted key out of the top level only', () => {
+    const { value } = redactBounded(
+      { userland: true, data: { userland: true } },
+      { omit: 'userland' },
+    );
+    assert.deepStrictEqual(value, { data: { userland: true } });
+  });
+
+  it('should clip a long string and say so', () => {
+    const { value, truncated } = redactBounded({ text: 'x'.repeat(BOUNDS.string + 10) });
+    assert.strictEqual(value.text.length, BOUNDS.string + 1);
+    assert.ok(value.text.endsWith('…'));
+    assert.strictEqual(truncated, true);
+  });
+
+  it('should end a cycle at the depth bound', () => {
+    const cyclic = { name: 'a' };
+    cyclic.self = cyclic;
+    const { value, truncated } = redactBounded(cyclic);
+    let level = value;
+    let depth = 0;
+    while (typeof level.self === 'object') {
+      level = level.self;
+      depth += 1;
+    }
+    assert.strictEqual(level.self, '[truncated]');
+    assert.strictEqual(depth, BOUNDS.depth - 1);
+    assert.strictEqual(truncated, true);
+  });
+
+  it('should stop copying entries past the budget', () => {
+    const many = Array.from({ length: BOUNDS.entries + 50 }, (_, index) => index);
+    const { value, truncated } = redactBounded({ many });
+    // The `many` key itself takes one entry from the budget.
+    assert.strictEqual(value.many.length, BOUNDS.entries - 1);
+    assert.strictEqual(truncated, true);
   });
 });
