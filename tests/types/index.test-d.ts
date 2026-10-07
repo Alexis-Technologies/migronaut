@@ -33,6 +33,7 @@ import {
   type MigrationContext,
   type MigrationEvent,
   type MigrationLogEvent,
+  type MigrationLogger,
   type MigrationModule,
   type MigrationRunInfo,
   MigratorKit,
@@ -236,6 +237,7 @@ kit.on('migration:log', (event) => {
     expectType<string | undefined>(event.groupId);
   } else {
     expectType<'background'>(event.kind);
+    expectType<string>(event.runId);
     expectType<'forward' | 'revert'>(event.direction);
     expectType<string>(event.migration);
     expectType<string>(event.partition);
@@ -253,11 +255,16 @@ kit.on('migration:log', async (event) => {
 
 const loggingMigration: MigrationModule = {
   async up({ logger, run }) {
-    expectType<MigronautLogger | undefined>(logger);
+    expectType<MigrationLogger | undefined>(logger);
     expectType<MigrationRunInfo | undefined>(run);
     expectType<number | undefined>(run?.attempt);
     expectType<string | undefined>(run?.id);
     logger?.info('batch done', { userland: true, processed: 1000 });
+    // Pino's order, and an Error as the message, as at runtime.
+    logger?.info({ userland: true, processed: 1000 }, 'batch done');
+    logger?.warn({ userland: true });
+    logger?.error(new Error('gave up'), { userland: true });
+    expectError(logger?.info(42));
     if (run) {
       // Frozen at runtime, read-only in the types.
       expectError((run.id = 'x'));
@@ -271,6 +278,20 @@ expectAssignable<MigrationModule>(loggingMigration);
 declare const db: import('mongodb').Db;
 declare const client: import('mongodb').MongoClient;
 expectAssignable<MigrationContext>({ db, client });
+// …with whatever logger it has: a MigronautLogger, pino, a one-argument stub.
+declare const ownLogger: MigronautLogger;
+expectAssignable<MigrationContext>({ db, client, logger: ownLogger });
+expectAssignable<MigrationContext>({ db, client, logger: pino() });
+expectAssignable<MigrationContext>({
+  db,
+  client,
+  logger: {
+    debug: (msg: string) => void msg,
+    info: (msg: string) => void msg,
+    warn: (msg: string) => void msg,
+    error: (msg: string) => void msg,
+  },
+});
 expectAssignable<MigrationContext>({
   db,
   client,
@@ -704,6 +725,7 @@ expectType<number | undefined>(backgroundState?.previous?.totals.migrated);
 // ─── Background migrations: ctx.background carries the lane ──────────────────
 
 declare const backgroundCtx: import('../../index.js').BackgroundMigrationContext;
+expectType<MigrationLogger>(backgroundCtx.logger);
 expectType<number>(backgroundCtx.background.attempt);
 expectType<string | undefined>(backgroundCtx.background.runId);
 expectType<string | undefined>(backgroundCtx.background.jobId);

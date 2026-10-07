@@ -49,7 +49,7 @@ export interface MigrationContext {
    * built by hand (in a test) still type-checks.
    * @experimental New in 2.4
    */
-  logger?: MigronautLogger;
+  logger?: MigrationLogger;
   /**
    * Who this is: the run id, the migration, the direction, the transaction
    * attempt and, when the caller named them, the queue job and the actor.
@@ -148,7 +148,7 @@ export interface BackgroundMigrationContext {
    * per document. In a dry run the lines say `dryRun: true` and nothing is
    * emitted.
    */
-  logger: MigronautLogger;
+  logger: MigrationLogger;
   direction: 'forward' | 'revert';
   /** Where this runs — frozen */
   background: BackgroundRunInfo;
@@ -1189,6 +1189,35 @@ export interface MigronautLogger {
  */
 export type LogMethod = (msg: string, fields?: Record<string, unknown>) => void;
 
+/**
+ * `ctx.logger`: the kit's logger with the run's correlation bound into every
+ * line. Each method takes `(msg, fields?)` — or pino's own `(fields, msg?)` —
+ * and an `Error` as the message (its message, credentials masked). Fields with
+ * `userland: true` also emit the `migration:log` event.
+ *
+ * Any {@link MigronautLogger} — or a pino instance — is one, so a context built
+ * by hand in a test can pass the logger it has.
+ * @experimental New in 2.4
+ */
+export interface MigrationLogger {
+  debug(
+    msgOrFields: string | Error | Record<string, unknown>,
+    fieldsOrMsg?: Record<string, unknown> | string,
+  ): void;
+  info(
+    msgOrFields: string | Error | Record<string, unknown>,
+    fieldsOrMsg?: Record<string, unknown> | string,
+  ): void;
+  warn(
+    msgOrFields: string | Error | Record<string, unknown>,
+    fieldsOrMsg?: Record<string, unknown> | string,
+  ): void;
+  error(
+    msgOrFields: string | Error | Record<string, unknown>,
+    fieldsOrMsg?: Record<string, unknown> | string,
+  ): void;
+}
+
 // ─── Telemetry ────────────────────────────────────────────────────────────────
 
 /** A span or metric attribute value — the scalar subset migronaut sets */
@@ -1808,7 +1837,8 @@ export interface OrdinaryMigrationLogEvent extends MigrationLogEventBase {
  */
 export interface BackgroundMigrationLogEvent extends MigrationLogEventBase {
   kind: 'background';
-  runId?: string;
+  /** The lane's run id (a dry run, which has none, emits nothing) */
+  runId: string;
   migration: string;
   direction: 'forward' | 'revert';
   generation?: number;

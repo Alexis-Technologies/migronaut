@@ -3,8 +3,10 @@ const { describe, it } = require('node:test');
 const { MongoServerError } = require('mongodb');
 const {
   MAX_MESSAGE_LENGTH,
+  backgroundLogs,
   correlationOf,
   createMigrationLogger,
+  createRunLog,
   migrationRunInfo,
   notices,
   runInfo,
@@ -321,5 +323,92 @@ describe('createMigrationLogger', () => {
     });
     logger.info('x', { userland: true });
     assert.deepStrictEqual(lines, ['x']);
+  });
+});
+
+describe('createRunLog', () => {
+  function runLog(options = {}) {
+    const parts = harness();
+    const log = createRunLog({
+      id: 'run-1',
+      sink: parts.sink,
+      emitter: parts.emitter,
+      ...options,
+    });
+    return { ...parts, log };
+  }
+
+  it('should keep a copy of the job, as a reference and as log fields', () => {
+    const job = { id: '17', groupId: 'g' };
+    const { log } = runLog({ job, actor: { requestedBy: 'alice' } });
+    assert.deepStrictEqual(log.job, { id: '17', groupId: 'g' });
+    assert.notStrictEqual(log.job, job);
+    assert.deepStrictEqual(log.fields, { jobId: '17', groupId: 'g' });
+    assert.deepStrictEqual(runLog().log.fields, {});
+    assert.strictEqual(runLog().log.job, undefined);
+  });
+
+  it("should make the run's ctx.run once per direction", () => {
+    const { log } = runLog({ job: { id: '17' }, actor: { reason: 'why' } });
+    const up = log.info('up');
+    assert.strictEqual(log.info('up'), up);
+    assert.deepStrictEqual(up, { id: 'run-1', direction: 'up', jobId: '17', reason: 'why' });
+    assert.ok(Object.isFrozen(up));
+    assert.strictEqual(log.info('down').direction, 'down');
+  });
+
+  it('should number every logger of the run in one sequence', () => {
+    const { log, events } = runLog();
+    const first = log.attempt('up', { migration: 'a.js', batch: 2, attempt: 1 });
+    const second = log.attempt('up', { migration: 'b.js', attempt: 2 });
+    assert.deepStrictEqual(first.run, {
+      id: 'run-1',
+      direction: 'up',
+      migration: 'a.js',
+      batch: 2,
+      attempt: 1,
+    });
+    log.logger(log.info('up')).info('start', { userland: true });
+    first.logger.info('a', { userland: true });
+    second.logger.info('b', { userland: true });
+    assert.deepStrictEqual(
+      events.map((event) => [event.msg, event.seq, event.migration, event.attempt]),
+      [
+        ['start', 1, undefined, undefined],
+        ['a', 2, 'a.js', 1],
+        ['b', 3, 'b.js', 2],
+      ],
+    );
+  });
+});
+
+describe('backgroundLogs', () => {
+  const info = Object.freeze({
+    name: 'bg.js',
+    generation: 1,
+    partition: '0',
+    runId: 'lane-1',
+    attempt: 1,
+  });
+
+  it("should number a slice's loggers in one sequence", () => {
+    const { events, sink, emitter } = harness();
+    const logs = backgroundLogs({ sink, emitter });
+    logs(info, 'forward').info('a', { userland: true });
+    logs({ ...info, attempt: 2 }, 'forward').info('b', { userland: true });
+    assert.deepStrictEqual(
+      events.map((event) => [event.seq, event.attempt, event.direction]),
+      [
+        [1, 1, 'forward'],
+        [2, 2, 'forward'],
+      ],
+    );
+  });
+
+  it('should emit nothing in a dry run, even given an emitter', () => {
+    const { lines, events, sink, emitter } = harness();
+    backgroundLogs({ sink, emitter, dryRun: true })(info, 'forward').info('a', { userland: true });
+    assert.strictEqual(events.length, 0);
+    assert.strictEqual(lines[0].fields.dryRun, true);
   });
 });

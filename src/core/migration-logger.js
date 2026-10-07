@@ -1,5 +1,6 @@
 const { isPlainObject } = require('../utils/canonical.js');
 const { errorText } = require('../utils/error.js');
+const { jobFields } = require('../utils/job-ref.js');
 const { BOUNDS, redactBounded, redactOutbound } = require('../utils/redact.js');
 
 /**
@@ -193,12 +194,84 @@ function createMigrationLogger({
   return { debug: write('debug'), info: write('info'), warn: write('warn'), error: write('error') };
 }
 
+/**
+ * The log side of one ordinary run, made when it takes its id — what its
+ * migrations' contexts and the kit's own lines bind:
+ *
+ * - `job` — the queue job it works for (`{ id, groupId? }`), a copy, as a run
+ *   it drives inline hands it on; `fields` — the same as log fields
+ *   (`{ jobId?, groupId? }`), on every line of the kit's for the run;
+ * - `info(direction)` — `ctx.run` of the run itself (`beforeAll`/`afterAll`),
+ *   made once per direction (`redo` has two);
+ * - `logger(info)` — `ctx.logger` bound to `info`;
+ * - `attempt(direction, { migration, batch, attempt })` — what one attempt
+ *   of one migration adds to its context: `{ run, logger }`.
+ *
+ * Every logger of the run shares its counter and its notices, so `seq` runs
+ * across the whole run and a dropped call is said once. A logger keeps them
+ * after the run ended (a timed-out body's late call is still numbered).
+ */
+function createRunLog({ id, job, actor = {}, sink, emitter }) {
+  const ref =
+    job === undefined
+      ? undefined
+      : { id: job.id, ...(job.groupId !== undefined ? { groupId: job.groupId } : {}) };
+  const fields = jobFields(ref);
+  const base = { id, ...fields, ...actor };
+  const nextSeq = sequence();
+  const noticed = notices();
+  const infos = new Map();
+  const info = (direction) => {
+    let run = infos.get(direction);
+    if (run === undefined) {
+      run = runInfo(base, direction);
+      infos.set(direction, run);
+    }
+    return run;
+  };
+  const logger = (bound) =>
+    createMigrationLogger({ sink, kind: 'migration', info: bound, emitter, nextSeq, noticed });
+  return {
+    job: ref,
+    fields,
+    info,
+    logger,
+    attempt(direction, { migration, batch, attempt }) {
+      const run = migrationRunInfo(info(direction), { migration, batch, attempt });
+      return { run, logger: logger(run) };
+    },
+  };
+}
+
+/**
+ * `logs(info, direction)` for one background lane slice, live watcher or dry
+ * run: a `ctx.logger` per `ctx.background`, all sharing one counter and one
+ * set of notices. A dry run's mark every line and emit nothing.
+ */
+function backgroundLogs({ sink, emitter, dryRun = false }) {
+  const nextSeq = sequence();
+  const noticed = notices();
+  return (info, direction) =>
+    createMigrationLogger({
+      sink,
+      kind: 'background',
+      info,
+      direction,
+      ...(dryRun ? {} : { emitter }),
+      nextSeq,
+      noticed,
+      dryRun,
+    });
+}
+
 module.exports = {
   MAX_MESSAGE_LENGTH,
   MIGRATION_LOG_EVENT,
   USERLAND,
+  backgroundLogs,
   correlationOf,
   createMigrationLogger,
+  createRunLog,
   migrationRunInfo,
   notices,
   runInfo,

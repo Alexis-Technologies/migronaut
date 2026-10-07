@@ -78,14 +78,7 @@ const { readChunks, readShardKey } = require('./shard-info.js');
 
 const { runImport } = require('./import-runner.js');
 const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
-const {
-  MIGRATION_LOG_EVENT,
-  createMigrationLogger,
-  migrationRunInfo,
-  notices,
-  runInfo,
-  sequence,
-} = require('./migration-logger.js');
+const { MIGRATION_LOG_EVENT, backgroundLogs, createRunLog } = require('./migration-logger.js');
 const {
   assertActorValid,
   assertConvergeOptions,
@@ -148,10 +141,9 @@ class MigratorKit extends EventEmitter {
   /** Correlation id for the run in flight — ties logs, lock and changelog together */
   #runId;
   /**
-   * The rest of the run's correlation, for `ctx.run`/`ctx.logger`: `base` (the
-   * id, and the job and the actor when the caller named them), `job` (the job
-   * alone, which the kit's own lines carry too) and the run's `migration:log`
-   * counter. Set and cleared with #runId; a logger keeps what it was made with.
+   * The log side of the run in flight (migration-logger's `createRunLog`): its
+   * job and actor, `ctx.run`, `ctx.logger`, the `migration:log` counter. Set
+   * and cleared with #runId; a logger keeps what it was made with.
    */
   #runLog;
   /** The `migration:log` channel handed to migration loggers — made once */
@@ -231,8 +223,13 @@ class MigratorKit extends EventEmitter {
    * failure into a second, unrelated one.
    */
   #emit(event, payload) {
+    this.#deliver(event, { ...(this.#runId ? { runId: this.#runId } : {}), ...payload });
+  }
+
+  /** {@link #emit} without the run id stamp: for a payload that carries its own */
+  #deliver(event, payload) {
     try {
-      this.emit(event, { ...(this.#runId ? { runId: this.#runId } : {}), ...payload });
+      this.emit(event, payload);
     } catch (error) {
       // A listener's failure is its own problem — but an invisible one is
       // undebuggable, so leave a trace at debug level.
@@ -368,7 +365,7 @@ class MigratorKit extends EventEmitter {
    * caller named one, its queue job (`jobId`, `groupId`).
    */
   #fields(extra) {
-    return this.#runId ? { runId: this.#runId, ...this.#runLog?.job, ...extra } : { ...extra };
+    return this.#runId ? { runId: this.#runId, ...this.#runLog?.fields, ...extra } : { ...extra };
   }
 
   /** Record a finished wait for the lock — see {@link RECORD_LOCK_WAIT} */
@@ -526,13 +523,13 @@ class MigratorKit extends EventEmitter {
     // before any other run state exists: a `generateId` that throws or returns
     // a non-id rejects here, leaving nothing to unwind and no event emitted.
     this.#runId = this.#newId();
-    const job = jobFields(options.job);
-    this.#runLog = {
-      base: { id: this.#runId, ...job, ...pickActor(options) },
-      job,
-      nextSeq: sequence(),
-      noticed: notices(),
-    };
+    this.#runLog = createRunLog({
+      id: this.#runId,
+      job: options.job,
+      actor: pickActor(options),
+      sink: this.#logger,
+      emitter: this.#logEmitter(),
+    });
     // A second controller layered over the lock's own signal, so stop() and a
     // lost lock abort through the same path the run loops already watch.
     const stopper = new AbortController();
@@ -550,7 +547,7 @@ class MigratorKit extends EventEmitter {
     const recorder = new RunRecorder({
       info,
       runId: this.#runId,
-      job,
+      job: this.#runLog.fields,
       telemetry: this.#telemetry,
       emit: (event, payload) => this.#emit(event, payload),
       logger: this.#logger,
@@ -599,31 +596,15 @@ class MigratorKit extends EventEmitter {
 
   /**
    * The kit's side of `migration:log` for migration loggers: `wanted` spares
-   * them the copy of a payload no one listens to.
+   * them the copy of a payload no one listens to. A payload names its own run
+   * (a late call's is not the run in flight), so it is delivered as it is.
    */
   #logEmitter() {
     this.#logEmitterInstance ??= {
       wanted: () => this.listenerCount(MIGRATION_LOG_EVENT) > 0,
-      emit: (payload) => this.#emit(MIGRATION_LOG_EVENT, payload),
+      emit: (payload) => this.#deliver(MIGRATION_LOG_EVENT, payload),
     };
     return this.#logEmitterInstance;
-  }
-
-  /** `ctx.run` of the run in flight, for `direction` — what `beforeAll`/`afterAll` see */
-  #runInfo(direction) {
-    return runInfo(this.#runLog?.base ?? { id: this.#runId }, direction);
-  }
-
-  /** `ctx.logger` bound to `run` — a run's, or one attempt of one migration's */
-  #migrationLogger(run) {
-    return createMigrationLogger({
-      sink: this.#logger,
-      kind: 'migration',
-      info: run,
-      emitter: this.#logEmitter(),
-      nextSeq: this.#runLog?.nextSeq ?? sequence(),
-      noticed: this.#runLog?.noticed ?? notices(),
-    });
   }
 
   /**
@@ -862,8 +843,8 @@ class MigratorKit extends EventEmitter {
     let failure;
     // The hooks around the whole run see the run's correlation, not one
     // migration's: no migration name, no attempt.
-    const run = this.#runInfo(direction);
-    const runContext = { ...context, run, logger: this.#migrationLogger(run) };
+    const run = this.#runLog.info(direction);
+    const runContext = { ...context, run, logger: this.#runLog.logger(run) };
     try {
       await this.#runHook(config.hooks?.beforeAll, 'beforeAll', [runContext]);
       for (const [index, name] of names.entries()) {
@@ -961,11 +942,9 @@ class MigratorKit extends EventEmitter {
     const batchField = batch !== undefined ? { batch } : {};
     // What each attempt adds to the context — ctx.run and ctx.logger — made
     // anew per attempt, so a retried transaction's body knows it is one.
-    const run = this.#runInfo(direction);
-    const attemptContext = (attempt) => {
-      const info = migrationRunInfo(run, { migration: name, batch, attempt });
-      return { run: info, logger: this.#migrationLogger(info) };
-    };
+    const runLog = this.#runLog;
+    const attemptContext = (attempt) =>
+      runLog.attempt(direction, { migration: name, batch, attempt });
 
     await this.#runHook(config.hooks?.beforeEach, 'beforeEach', [
       name,
@@ -2411,9 +2390,6 @@ class MigratorKit extends EventEmitter {
     const db = this.#requireDb();
     const stamp = owner ? { runId: owner } : {};
     const lineStamp = job ? { ...stamp, ...jobFields(job) } : stamp;
-    // One counter per lane slice (or watcher): orders its migration:log events.
-    const nextSeq = sequence();
-    const noticed = notices();
     return {
       db,
       client: this.#client,
@@ -2422,16 +2398,8 @@ class MigratorKit extends EventEmitter {
       // The lane's (or watcher's) run id, for ctx.background — `owner` itself
       // is a function here and a string in the watcher's deps.
       ...(owner ? { runId: owner } : {}),
-      logs: (info, direction) =>
-        createMigrationLogger({
-          sink: this.#logger,
-          kind: 'background',
-          info,
-          direction,
-          emitter: this.#logEmitter(),
-          nextSeq,
-          noticed,
-        }),
+      // One counter per lane slice (or watcher): orders its migration:log events.
+      logs: backgroundLogs({ sink: this.#logger, emitter: this.#logEmitter() }),
       ...(job ? { job } : {}),
       fields: (extra) => ({ ...lineStamp, ...extra }),
       emit: (event, payload) => this.#emit(event, { ...stamp, ...payload }),
@@ -2716,9 +2684,7 @@ class MigratorKit extends EventEmitter {
       signal,
       concurrency: state.spec?.maxParallel ?? 1,
       inline: true,
-      ...(job?.jobId !== undefined
-        ? { job: { id: job.jobId, ...(job.groupId !== undefined ? { groupId: job.groupId } : {}) } }
-        : {}),
+      ...(job ? { job } : {}),
     });
     if (status.status === 'blocked') {
       throw new BackgroundPendingError(

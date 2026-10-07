@@ -108,20 +108,18 @@ async function runMigration(params) {
   const signal = context.signal
     ? AbortSignal.any([context.signal, timedOut.signal])
     : timedOut.signal;
-  let runtimeContext = { ...context, signal };
-  let attempts = 0;
   // A fresh context per attempt, not one mutated in place: a body from an
   // earlier attempt that is still running (a timeout does not stop it) keeps
   // the attempt it started with.
-  const contextOf = (session) => {
-    attempts += 1;
-    return {
-      ...context,
-      signal,
-      ...(session ? { session } : {}),
-      ...attemptContext?.(attempts),
-    };
-  };
+  const contextOf = (session, attempt) => ({
+    ...context,
+    signal,
+    ...(session ? { session } : {}),
+    ...attemptContext?.(attempt),
+  });
+  let attempts = 0;
+  // The context the body last ran with — what onError gets.
+  let runtimeContext;
   const onTimeout = (timeoutError) => timedOut.abort(timeoutError);
   let duration = 0;
   // 'body' while the migration's own code runs; 'changelog' once it committed
@@ -133,20 +131,21 @@ async function runMigration(params) {
   try {
     if (useTransaction) {
       session = context.client.startSession();
-      runtimeContext = { ...runtimeContext, session };
       // withTransaction may run the body more than once when the driver retries
       // a transient failure, so duration is re-measured on each attempt. The
       // changelog write stays inside the transaction, so a failure there
       // aborts the body's writes too — 'body' phase is accurate throughout.
       await session.withTransaction(async () => {
         const attemptStart = Date.now();
-        runtimeContext = contextOf(session);
+        attempts += 1;
+        runtimeContext = contextOf(session, attempts);
         await withTimeout(fn(runtimeContext), timeoutMs, name, direction, onTimeout);
         duration = Date.now() - attemptStart;
         await onSuccess?.(duration, session);
       });
     } else {
-      runtimeContext = contextOf();
+      attempts += 1;
+      runtimeContext = contextOf(undefined, attempts);
       await withTimeout(fn(runtimeContext), timeoutMs, name, direction, onTimeout);
       duration = Date.now() - start;
       phase = 'changelog';
@@ -183,7 +182,10 @@ async function runMigration(params) {
     if (hooks?.onError) {
       // A throwing onError hook must not replace the real cause.
       try {
-        await hooks.onError(name, err, runtimeContext);
+        // A transaction that failed before its body ever ran (a session that
+        // would not start) still hands onError a whole context: a first
+        // attempt's, not counted as one.
+        await hooks.onError(name, err, runtimeContext ?? contextOf(session, 1));
       } catch (hookError) {
         const message = errorText(hookError);
         logger?.warn(`⚠ onError hook failed for ${name}: ${message}`);

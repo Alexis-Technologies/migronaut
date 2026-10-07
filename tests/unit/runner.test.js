@@ -384,6 +384,41 @@ describe('runMigration — failure timing', () => {
   });
 });
 
+describe('runMigration — onError always gets a whole context', () => {
+  it('should hand it a first attempt’s context when the session would not start', async () => {
+    let failedWith;
+    await assert.rejects(
+      runMigration({
+        name: 'a.ts',
+        migration: { up: () => Promise.resolve(), down: () => Promise.resolve() },
+        direction: 'up',
+        context: {
+          client: {
+            startSession: () => {
+              throw new Error('no sessions');
+            },
+          },
+          db: {},
+        },
+        useTransaction: true,
+        attemptContext: (attempt) => ({ run: { attempt } }),
+        hooks: {
+          onError: async (_name, _error, ctx) => {
+            failedWith = ctx;
+          },
+        },
+      }),
+      (error) => {
+        assert.ok(error instanceof MigrationExecutionFailedError);
+        assert.ok(!('attempts' in error.context), 'the body never ran');
+        return true;
+      },
+    );
+    assert.deepStrictEqual(failedWith.run, { attempt: 1 });
+    assert.ok(failedWith.signal instanceof AbortSignal);
+  });
+});
+
 describe('runMigration — a context per attempt', () => {
   /** A session whose withTransaction runs the body twice, as the driver does after a transient error */
   function retryingContext() {

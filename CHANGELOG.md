@@ -51,8 +51,10 @@ experimental — its shape may still change in a minor release (named here).
   bounds** leaves one debug line per run — never one per call.
 - **Types** — `MigrationRunInfo`, `JobRef`, `MigrationLogEvent` (`OrdinaryMigrationLogEvent |
   BackgroundMigrationLogEvent`), `MigrationLogEventBase`, `MigrationLogLevel`,
-  `BackgroundRunInfo`; `logger?` and `run?` on `MigrationContext` (optional, so a context built by
-  hand still type-checks); `attempts?` on `MigrationEvent`.
+  `BackgroundRunInfo`, `MigrationLogger` (`ctx.logger`: `(msg, fields?)`, pino's `(fields, msg?)`
+  and an `Error` as the message — any `MigronautLogger` or pino instance is one); `logger?` and
+  `run?` on `MigrationContext` (optional, so a context built by hand still type-checks);
+  `attempts?` on `MigrationEvent`.
 
 ### Changed
 
