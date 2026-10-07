@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
-## v2.4.0 — unreleased
+## v2.4.0 — 2026-10-07
 
 Migration logs for the application's users. Additive: a migration that never touches the new
 context fields, and a kit with no `migration:log` listener, behave as before. Everything new is
