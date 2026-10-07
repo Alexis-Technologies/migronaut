@@ -226,6 +226,16 @@ describe('redactBounded', () => {
     assert.ok(!JSON.stringify(value).includes('a@b.c'));
   });
 
+  it('should mask the values a server error quotes in a string copied into a field', () => {
+    const { value } = redactBounded({
+      error: 'E11000 duplicate key error index: email_1 dup key: { email: "a@b.c" }',
+    });
+    assert.strictEqual(
+      value.error,
+      'E11000 duplicate key error index: email_1 dup key: { <redacted> }',
+    );
+  });
+
   it('should keep binary data within its bound by reference, and cut what is past it', () => {
     const small = Buffer.from('ok');
     const binary = new Binary(Buffer.alloc(8));

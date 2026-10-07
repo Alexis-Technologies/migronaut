@@ -148,7 +148,8 @@ function errorData(error) {
 
 /**
  * {@link redactDeep} within {@link BOUNDS}, for data that leaves the process
- * as a document: every string reachable redacted and clipped, nesting past
+ * as a document: every string reachable redacted ({@link redactOutbound}: the
+ * values a server error quotes too) and clipped, nesting past
  * the depth (which is what ends a cycle) and entries past the budget replaced
  * or dropped. What the driver stores as a value of its own is kept as is — a
  * Date, a RegExp, an ObjectId or another BSON value, and binary data within
@@ -172,7 +173,9 @@ function redactBounded(value, { omit } = {}) {
   };
   const copy = (item, depth) => {
     if (typeof item === 'string') {
-      const text = redactUris(item);
+      // Outbound, like the event's message: an error's text copied into a
+      // field (`{ error: err.message }`) loses the values it quotes too.
+      const text = redactOutbound(item);
       if (text.length <= BOUNDS.string) return text;
       truncated = true;
       return `${text.slice(0, BOUNDS.string)}…`;

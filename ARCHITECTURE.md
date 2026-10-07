@@ -405,9 +405,10 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **Nuances:** every call is a line on the sink with the correlation merged over the user's fields;
   only fields with `userland: true` (exactly) also emit, and only while someone listens (`wanted()`
   spares the copy). The event's `data` is `redactBounded` — a copy, depth/entry/string-bounded,
-  which also ends a cycle; BSON values, Dates, RegExps and binary data up to 4 KB pass through, an
-  `Error` becomes `{ name, message, code?, codeName? }` (its message `redactOutbound`ed, like the
-  event's `msg`), anything else what `JSON.stringify` would see. The whole call is
+  which also ends a cycle; its strings are `redactOutbound`ed, like the event's `msg` (credentials
+  and the values a server error quotes); BSON values, Dates, RegExps and binary data up to 4 KB
+  pass through, an `Error` becomes `{ name, message, code?, codeName? }`, anything else what
+  `JSON.stringify` would see. The whole call is
   try/catch-guarded, and a dropped or cut call leaves one debug line per run (`notices`). The kit
   keeps the run's log side in `#runLog`, set and cleared with `#runId`; every logger of a run
   shares its `seq` counter and notices, and closes over them, so a late call (a timed-out body)
