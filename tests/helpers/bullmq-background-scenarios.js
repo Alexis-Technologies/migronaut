@@ -177,6 +177,44 @@ function defineBullMQBackgroundScenarios(harness) {
     assert.strictEqual(status.coordinator.kind, 'bullmq');
   });
 
+  it("[background] should write a lane's userland lines into that lane job's log", async () => {
+    await seed(100);
+    project.write(
+      NAME,
+      spec({ extra: '' })
+        .replace(
+          'return docs.map((doc) => ({ ...doc, done: true }));',
+          "ctx.logger.info('batch', { userland: true, n: docs.length });\n" +
+            '    return docs.map((doc) => ({ ...doc, done: true }));',
+        )
+        .replace('migrateBatch: async (docs) => {', 'migrateBatch: async (docs, ctx) => {'),
+    );
+    const mq = createQueue();
+    const events = [];
+    mq.kit.on('migration:log', (event) => events.push(event));
+    await mq.startWorker();
+    await mq.startBackgroundWorker();
+    const group = await mq.enqueueUp();
+    await group.wait({ timeoutMs: 20_000 });
+    await reached(mq, 'completed');
+    await drained(mq);
+
+    let documents = 0;
+    const byLane = new Map();
+    for (const event of events) {
+      assert.strictEqual(event.kind, 'background');
+      assert.ok(event.jobId, 'every line names the lane job');
+      documents += event.data.n;
+      byLane.set(event.jobId, (byLane.get(event.jobId) ?? 0) + 1);
+    }
+    assert.strictEqual(documents, 100);
+    for (const [jobId, count] of byLane) {
+      const logs = await harness.logsOf(mq.backgroundQueue, jobId);
+      const rows = logs.filter((row) => row.startsWith('✎ batch'));
+      assert.strictEqual(rows.length, count, `${jobId}: ${logs.join(' | ')}`);
+    }
+  });
+
   it('[background] should finalize as failed when a partition fails', async () => {
     await seed(60);
     project.write(

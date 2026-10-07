@@ -923,6 +923,9 @@ export interface CreateBackgroundProcessorOptions {
 
 /**
  * The function a Worker on the background queue runs. Jobs run side by side.
+ * A lane's slice is told its job (`runBackgroundSlice`'s `job`), so its
+ * `migration:log` events carry `jobId` and its `userland: true` lines are
+ * written into the lane job's log (`✎ …`).
  * @experimental New in 2.3
  */
 export interface BackgroundProcessor {

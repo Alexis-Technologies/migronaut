@@ -1,12 +1,14 @@
 const { MigratorKit } = require('../core/migrator.js');
 const { ConfigInvalidError, MigronautError, RunAbortedError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
+const { jobRefIssue } = require('../utils/job-ref.js');
 const { redactOutbound } = require('../utils/redact.js');
 const { JOB_NAMES, buildLaneJob, isObjectLike, parseBackgroundJobData } = require('./jobs.js');
 const {
   UNRECOVERABLE_ERROR_NAME,
   isRetryableError,
   prepareErrorForQueue,
+  userlandRow,
 } = require('./processor.js');
 const {
   DEFAULT_STALL_MS,
@@ -147,6 +149,12 @@ function createBackgroundProcessor(options = {}) {
   const shutdownController = new AbortController();
   const inFlight = new Set();
   let warnedUnmovable = false;
+  /**
+   * The lanes working a slice in this process, by job id — lanes run side by
+   * side, so a `migration:log` event's `jobId` is what says whose log it goes
+   * to. `writes` are its rows still in flight, drained when the slice ends.
+   */
+  const lanes = new Map();
 
   /** A log row on the job — never allowed to fail it */
   async function log(job, row) {
@@ -188,6 +196,41 @@ function createBackgroundProcessor(options = {}) {
     if (data !== undefined) await job.updateData(data);
     await job.moveToDelayed(Date.now() + Math.max(0, delayMs), token);
     throw moved(DELAYED_ERROR_NAME);
+  }
+
+  /** A lane's userland lines, into its own job's log — never allowed to fail it */
+  function onUserland(event) {
+    if (event?.kind !== 'background' || event.jobId === undefined) return;
+    const lane = lanes.get(event.jobId);
+    if (lane === undefined) return;
+    const pending = log(lane.job, userlandRow(event));
+    lane.writes.add(pending);
+    pending.finally(() => lane.writes.delete(pending));
+  }
+  if (typeof kit.on === 'function') kit.on('migration:log', onUserland);
+
+  /**
+   * Run one slice as `job`'s: the slice gets `{ id }` for its lines and
+   * events, and its userland lines reach the job's log until the slice ends —
+   * drained before the job moves on, so none lands after it.
+   */
+  async function asLane(job, fn) {
+    const id = job?.id === undefined || job.id === null ? undefined : String(job.id);
+    if (id === undefined || jobRefIssue({ id }, { groupId: false }) !== null) {
+      kit.logger.debug(
+        `Lane job ${job?.id} has no id a slice can carry — its lines name no job`,
+        {},
+      );
+      return fn(undefined);
+    }
+    const lane = { job, writes: new Set() };
+    lanes.set(id, lane);
+    try {
+      return await fn({ id });
+    } finally {
+      if (lanes.get(id) === lane) lanes.delete(id);
+      await Promise.allSettled([...lane.writes]);
+    }
   }
 
   /** Heal from MongoDB: a coordinator for every background migration with work to do */
@@ -327,10 +370,13 @@ function createBackgroundProcessor(options = {}) {
     if (shutdownController.signal.aborted) return later(ctx, 0, { ...base, outcome: 'stopped' });
     let slice;
     try {
-      slice = await kit.runBackgroundSlice(name, {
-        signal: ctx.abort,
-        ...(settings.sliceMs !== undefined ? { sliceMs: settings.sliceMs } : {}),
-      });
+      slice = await asLane(job, (ref) =>
+        kit.runBackgroundSlice(name, {
+          signal: ctx.abort,
+          ...(settings.sliceMs !== undefined ? { sliceMs: settings.sliceMs } : {}),
+          ...(ref ? { job: ref } : {}),
+        }),
+      );
     } catch (error) {
       if (shutdownController.signal.aborted) {
         return later(ctx, 0, { ...base, outcome: 'stopped' });
@@ -451,6 +497,7 @@ function createBackgroundProcessor(options = {}) {
   processor.close = async () => {
     processor.shutdown();
     await Promise.allSettled([...inFlight]);
+    if (typeof kit.off === 'function') kit.off('migration:log', onUserland);
     if (ownsKit) await kit.disconnect();
   };
 
