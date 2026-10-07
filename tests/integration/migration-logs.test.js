@@ -255,4 +255,31 @@ export async function down() {}
       await client.close();
     }
   });
+
+  it('should carry the job a run works for — on ctx.run, the event and the kit’s own lines', async () => {
+    project.write(
+      '0001-a.js',
+      `export async function up({ db, logger, run }) {
+  logger.info('for the job', { userland: true, jobId: run.jobId, groupId: run.groupId });
+  await db.collection('things').insertOne({ marker: 'a' });
+}
+export async function down() {}
+`,
+    );
+    const { lines, logger } = recordingLogger();
+    const kit = migrator({ logger });
+    const { events } = listen(kit);
+    await kit.up('0001-a.js', { job: { id: '17', groupId: 'g-1' } });
+
+    assert.strictEqual(events[0].jobId, '17');
+    assert.strictEqual(events[0].groupId, 'g-1');
+    assert.deepStrictEqual(events[0].data, { jobId: '17', groupId: 'g-1' });
+    const applied = lines.find((line) => line.msg.startsWith('✔ Applied'));
+    assert.strictEqual(applied.fields.jobId, '17');
+    assert.strictEqual(applied.fields.groupId, 'g-1');
+    // A later run without a job carries none.
+    await kit.down('0001-a.js');
+    const reverted = lines.find((line) => line.msg.startsWith('↩ Reverted'));
+    assert.ok(!('jobId' in reverted.fields));
+  });
 });

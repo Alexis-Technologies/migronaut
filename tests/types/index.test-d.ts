@@ -264,6 +264,14 @@ expectAssignable<MigrationContext>({
   run: { id: 'r', direction: 'up', migration: '0001-a.js', attempt: 1 },
 });
 
+// The queue job a run works for
+expectType<Promise<RunResult[]>>(kit.up('0001-a.js', { job: { id: '17', groupId: 'g' } }));
+expectType<Promise<RunResult[]>>(kit.down('0001-a.js', { job: { id: '17' } }));
+expectType<Promise<RunResult[]>>(kit.redo(undefined, { job: { id: '17' } }));
+expectError(kit.up('0001-a.js', { job: { id: 17 } }));
+expectError(kit.up('0001-a.js', { job: { groupId: 'g' } }));
+expectError(kit.up('0001-a.js', { job: { id: '17', queue: 'q' } }));
+
 // ─── Client injection and progress reporter ──────────────────────────────────
 
 expectAssignable<Partial<MigronautConfig>>({

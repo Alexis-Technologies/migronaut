@@ -352,3 +352,28 @@ describe('MigratorKit event listeners', () => {
     await new Promise((resolve) => setImmediate(resolve));
   });
 });
+
+describe('MigratorKit job reference guards', () => {
+  const invalid = [
+    ['a string', '17'],
+    ['no id', { groupId: 'g' }],
+    ['a numeric id', { id: 17 }],
+    ['an unknown key', { id: '17', queue: 'q' }],
+  ];
+  for (const [label, job] of invalid) {
+    it(`should refuse ${label} as up's job before connecting`, async () => {
+      await assert.rejects(guardedKit().up('a.js', { job }), ConfigInvalidError);
+    });
+    it(`should refuse ${label} as down's and redo's job before connecting`, async () => {
+      await assert.rejects(guardedKit().down('a.js', { job }), ConfigInvalidError);
+      await assert.rejects(guardedKit().redo('a.js', { job }), ConfigInvalidError);
+    });
+  }
+
+  it('should name the given keys, not their values, in the error', async () => {
+    await assert.rejects(guardedKit().up('a.js', { job: { id: 1, secret: 'x' } }), (error) => {
+      assert.strictEqual(error.context.job, 'id, secret');
+      return true;
+    });
+  });
+});

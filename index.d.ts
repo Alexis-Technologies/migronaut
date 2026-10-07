@@ -1507,6 +1507,25 @@ export interface UpOptions {
   requestedBy?: string;
   /** Why (≤ 512 characters) — a ticket, a sentence; stamped like `requestedBy` */
   reason?: string;
+  /**
+   * The queue job this run works for — bound into `ctx.run`, the run's log
+   * lines and `migration:log`. The BullMQ adapter sets it; set it yourself
+   * when you drive the kit from a queue of your own.
+   * @experimental New in 2.4
+   */
+  job?: JobRef;
+}
+
+/**
+ * The queue job a run works for. Nothing is stored: the ids only correlate
+ * what the run logs with the job a dashboard shows.
+ * @experimental New in 2.4
+ */
+export interface JobRef {
+  /** The job's id (≤ 1024 characters) */
+  id: string;
+  /** The group of jobs it was enqueued with (≤ 128 characters) */
+  groupId?: string;
 }
 
 /** Options for {@link MigratorKit.down} */
@@ -1541,6 +1560,11 @@ export interface DownOptions {
   requestedBy?: string;
   /** Why (≤ 512 characters) — a ticket, a sentence; stamped as `revertReason` */
   reason?: string;
+  /**
+   * The queue job this run works for — see {@link UpOptions.job}
+   * @experimental New in 2.4
+   */
+  job?: JobRef;
 }
 
 /** Payload common to every lifecycle event */
@@ -1825,6 +1849,11 @@ export interface RedoOptions {
   requestedBy?: string;
   /** Why — stamped like `requestedBy` */
   reason?: string;
+  /**
+   * The queue job this run works for — both halves carry it; see {@link UpOptions.job}
+   * @experimental New in 2.4
+   */
+  job?: JobRef;
 }
 
 /** Options for {@link MigratorKit.create} */

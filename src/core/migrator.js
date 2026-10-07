@@ -26,6 +26,7 @@ const { computeChecksum } = require('../utils/checksum.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { errorText, errorWithCause } = require('../utils/error.js');
 const { createIdGenerator } = require('../utils/id.js');
+const { jobFields } = require('../utils/job-ref.js');
 const { loadMigrationFile } = require('../utils/loader.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { assertMigrationName } = require('../utils/migration-name.js');
@@ -146,7 +147,8 @@ class MigratorKit extends EventEmitter {
   #runId;
   /**
    * The rest of the run's correlation, for `ctx.run`/`ctx.logger`: `base` (the
-   * id, and the actor when the caller named one) and the run's `migration:log`
+   * id, and the job and the actor when the caller named them), `job` (the job
+   * alone, which the kit's own lines carry too) and the run's `migration:log`
    * counter. Set and cleared with #runId; a logger keeps what it was made with.
    */
   #runLog;
@@ -360,10 +362,11 @@ class MigratorKit extends EventEmitter {
    * Structured fields for a log line. Passed as the logger's second argument
    * (first, for pino-style loggers) so a machine-readable sink gets
    * `{migration, direction, durationMs, …}` instead of having to parse the
-   * emoji-prefixed human string.
+   * emoji-prefixed human string. A run's lines carry its id and, when the
+   * caller named one, its queue job (`jobId`, `groupId`).
    */
   #fields(extra) {
-    return this.#runId ? { runId: this.#runId, ...extra } : { ...extra };
+    return this.#runId ? { runId: this.#runId, ...this.#runLog?.job, ...extra } : { ...extra };
   }
 
   /** Record a finished wait for the lock — see {@link RECORD_LOCK_WAIT} */
@@ -521,7 +524,12 @@ class MigratorKit extends EventEmitter {
     // before any other run state exists: a `generateId` that throws or returns
     // a non-id rejects here, leaving nothing to unwind and no event emitted.
     this.#runId = this.#newId();
-    this.#runLog = { base: { id: this.#runId, ...pickActor(options) }, nextSeq: sequence() };
+    const job = jobFields(options.job);
+    this.#runLog = {
+      base: { id: this.#runId, ...job, ...pickActor(options) },
+      job,
+      nextSeq: sequence(),
+    };
     // A second controller layered over the lock's own signal, so stop() and a
     // lost lock abort through the same path the run loops already watch.
     const stopper = new AbortController();
