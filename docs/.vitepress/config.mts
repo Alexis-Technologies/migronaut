@@ -141,6 +141,7 @@ export default defineConfig({
             { text: 'vs. migrate-mongo', link: '/guide/vs-migrate-mongo' },
             { text: 'vs. mongo-migrate-kit', link: '/guide/vs-mongo-migrate-kit' },
             { text: 'Core Concepts', link: '/guide/concepts' },
+            { text: 'How It Works', link: '/guide/how-it-works' },
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'Tutorial', link: '/guide/tutorial' },
             { text: 'Configuration', link: '/guide/configuration' },

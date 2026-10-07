@@ -162,6 +162,26 @@ everything declared exists. The first failure stops the run with
 [`CONVERGE_FAILED`](/reference/error-codes); a rebuild whose new index fails to build (a unique
 index over duplicate values, typically) puts the old one back first.
 
+A whole run, end to end:
+
+```mermaid
+flowchart TB
+  accTitle: A converge run
+  START(["migronaut converge"]):::ext --> LOCK["take the migration lock"]
+  LOCK --> READ["read what is live<br/>collections · indexes · search indexes"]
+  READ --> PLAN["plan every collection<br/>declared vs live — nothing written"]
+  PLAN --> CONFLICT{"any conflict?"}
+  CONFLICT -- yes --> REFUSE(["refused before any write<br/>CONVERGE_FAILED · plan"]):::warn
+  CONFLICT -- no --> APPLY["per collection: plan again,<br/>then its steps, in order"]:::core
+  APPLY --> CHECK["read it once more:<br/>still different → unstable"]
+  CHECK --> WAIT{"wait for search<br/>index builds?"}
+  WAIT -- no --> END(["converge:end<br/>+ history, if it changed something"])
+  WAIT -- yes --> EARLY["release the lock,<br/>poll until they serve"] --> END
+```
+
+Nothing is remembered between runs: the next one reads the database again, so a change made by hand,
+by another tool or by a failed run is simply part of what it plans against.
+
 ## Undeclared indexes and `prune`
 
 By default converge never drops an index you did not declare. It lists it as `keep`, and that

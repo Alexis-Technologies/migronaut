@@ -34,6 +34,18 @@ three rules:
 3. **The version is set, never incremented.** Two releases that write the same shape agree on its
    number.
 
+```mermaid
+flowchart TB
+  accTitle: One contract, declared once, kept by three parties
+  DEF["collections/orders.js<br/>current: 2 · min: 1"]:::core
+  APP(["your repository<br/>stamp · updateWithRevision"]):::ext
+  BG["a background migration<br/>v1 → v2"]:::core
+  DEF -- converge --> RULES["validator + version index<br/>__v ≥ min · __rev int or long"]
+  RULES -- guards --> DOCS[("orders")]:::store
+  APP -- "writes v2,<br/>bumps __rev" --> DOCS
+  BG -- "rewrites v1,<br/>bumps __rev" --> DOCS
+```
+
 ## Declaring versioning
 
 ```ts
@@ -154,6 +166,21 @@ expected revision is a non-negative integer — a number, or the `Int32`, `Long`
 hands back with `promoteValues: false` or `useBigInt64`. Pass `order.__rev ?? 0` for a document
 without one: expected revision 0 also matches a missing or `null` `__rev`.
 
+```mermaid
+sequenceDiagram
+  accTitle: Two writers, one revision
+  participant A as request A
+  participant O as orders
+  participant B as request B
+  A->>O: read — __rev 4
+  B->>O: read — __rev 4
+  A->>O: update, expecting 4
+  O-->>A: ✔ now __rev 5
+  B->>O: update, expecting 4
+  O-->>B: ✖ RevisionConflictError<br/>'conflict', actual 5
+  Note over B: retryOnConflict:<br/>read, decide, write again
+```
+
 **The filter must name one document.** A revision guards one write to one document: `_id` given as
 an operator (`{ $ne: null }` from a request body, say) is refused — a plain `$eq` aside — and a
 filter on other fields must be unique (`{ tenantId, slug }` with its unique index). Every legacy
@@ -238,6 +265,25 @@ In a collection with revisions, **every write must bump `__rev`** — not only t
 background migration rewrites each document under the same kind of filter — the `_id`, version and
 revision it read — so a write that leaves the revision alone is invisible to it: when both changed
 the same field, the application's write is lost without a trace.
+
+```mermaid
+sequenceDiagram
+  accTitle: Why every write bumps the revision
+  participant Lane as background lane
+  participant O as orders
+  participant App as your app
+  Lane->>O: read _id 7: v1, __rev 4
+  App->>O: $set status, $inc __rev
+  O-->>App: ✔ __rev 5
+  Lane->>O: write v2 where<br/>{ _id 7, __v 1, __rev 4 }
+  O-->>Lane: matched nothing
+  Lane->>O: read _id 7 again: __rev 5
+  Lane->>O: write v2 where<br/>{ _id 7, __v 1, __rev 5 }
+  O-->>Lane: ✔ v2, __rev 6 —<br/>the app's status kept
+```
+
+Had the application's write left `__rev` at 4, the lane's guarded write would have matched and put
+back the status it read.
 
 The helpers and the Mongoose plugin bump for you. For a write that needs no guard, `bumpRevision`
 adds the bump to the update you already have:
@@ -418,6 +464,24 @@ own. A Mongoose document is typed from its schema, not from the map: read with
 
 Orders move the address into `shipping.address`: version 1 becomes version 2. Three steps — expand,
 background migration, contract — and at no point a release that breaks the one before it.
+
+```mermaid
+flowchart TB
+  accTitle: Expand, background migration, contract
+  subgraph EXPAND ["1 · Expand — release N"]
+    direction TB
+    E1["reads v1 and v2,<br/>writes v2"]
+    E2["current: 2<br/>min: 1"]
+    E3["registers the<br/>background migration"]
+  end
+  REWRITE["2 · Background migration<br/>v1 → v2 beside the line — old pods' v1 writes too"]:::core
+  subgraph CONTRACT ["3 · Contract — release N+1"]
+    direction TB
+    C1["a migration that<br/>requires it"]
+    C2["min: 2 — the validator<br/>refuses v1 from now on"]
+  end
+  EXPAND --> REWRITE -- completed --> CONTRACT
+```
 
 ### 1. Expand
 

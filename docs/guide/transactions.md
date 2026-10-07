@@ -69,6 +69,24 @@ When a transactional migration runs:
 4. The transaction commits — your writes and the changelog record together, in one commit.
 5. On any thrown error → the transaction aborts, the `onError` hook fires, and the batch stops.
 
+```mermaid
+sequenceDiagram
+  accTitle: A migration in a transaction
+  participant Kit as MigratorKit
+  participant M as your up(ctx)
+  participant DB as MongoDB
+  Kit->>DB: a session, withTransaction
+  Kit->>M: up(ctx), with ctx.session
+  M->>DB: your writes
+  alt up() returned
+    Kit->>DB: the changelog record
+    Kit->>DB: commit — both together
+  else up() threw
+    Kit->>DB: abort — none of it
+    Note over Kit: onError, the batch stops
+  end
+```
+
 This means a failed transactional migration leaves the database in its original state — no partial
 writes.
 

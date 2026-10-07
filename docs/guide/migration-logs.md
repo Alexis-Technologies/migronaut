@@ -41,6 +41,16 @@ export async function up({ db, logger, signal }) {
 - The [hooks](/guide/hooks) get a logger as well: `beforeAll`/`afterAll` the run's, the others
   the migration's.
 
+```mermaid
+flowchart TB
+  accTitle: Where a migration's log line goes
+  CALL["logger.info('emails normalized',<br/>{ userland: true, processed })"]:::core
+  CALL --> LINE["a line in your logger<br/>+ runId · migration · batch · attempt · jobId"]
+  CALL -- "userland: true" --> EV["the migration:log event<br/>a bounded, redacted copy"]
+  EV --> LISTEN(["kit.on('migration:log', …)"]):::ext --> COL[("your collection")]:::store --> UI(["your users"]):::ext
+  EV -. "on a queue" .-> JOB["the job's own log<br/>one ✎ row per line"]
+```
+
 In TypeScript, `logger` and `run` are optional on `MigrationContext` (a context built by hand in a
 unit test still type-checks); migronaut always passes both.
 
