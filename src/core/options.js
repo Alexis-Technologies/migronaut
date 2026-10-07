@@ -1,5 +1,6 @@
 const { ConfigInvalidError, MigrationInvalidNameError } = require('../errors/index.js');
 const { actorIssue } = require('../utils/actor.js');
+const { isPlainObject } = require('../utils/canonical.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { jobRefIssue } = require('../utils/job-ref.js');
 
@@ -109,15 +110,12 @@ function assertActorValid(options) {
 function assertJobValid(job, options) {
   const issue = jobRefIssue(job, options);
   if (issue) {
+    // For the error's context: the keys of what was given, not its values.
     throw new ConfigInvalidError(issue, {
-      job: isPlainObjectLike(job) ? Object.keys(job).join(', ') : typeof job,
+      job: isPlainObject(job) ? Object.keys(job).join(', ') : typeof job,
     });
   }
 }
-
-/** For an error's context: the keys of what was given, not its values */
-const isPlainObjectLike = (value) =>
-  value !== null && typeof value === 'object' && !Array.isArray(value);
 
 /**
  * Validate `checksum`: the SHA-256 the caller expects the named file to have

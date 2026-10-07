@@ -22,8 +22,11 @@ function jobRefIssue(job, { groupId = true } = {}) {
   if (job === undefined) return null;
   if (!isPlainObject(job)) return 'job must be an object: { id, groupId? }';
   for (const key of Object.keys(job)) {
+    // Own keys only: `constructor` or `toString` must not pass for a limit.
+    if (!Object.hasOwn(JOB_REF_LIMITS, key) || (key === 'groupId' && !groupId)) {
+      return `job.${key} is not an option`;
+    }
     const max = JOB_REF_LIMITS[key];
-    if (max === undefined || (key === 'groupId' && !groupId)) return `job.${key} is not an option`;
     const value = job[key];
     if (typeof value !== 'string' || value.length === 0 || value.length > max) {
       return `job.${key} must be a non-empty string of at most ${max} characters`;

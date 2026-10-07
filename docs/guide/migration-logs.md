@@ -75,8 +75,8 @@ kit.on('migration:log', (event) => {
 | `kind` | `'migration'` — or `'background'` for a [background migration](#background-migrations) |
 | `runId`, `migration`, `direction`, `batch`, `attempt`, `jobId`, `groupId`, `requestedBy`, `reason` | As on `ctx.run` |
 | `level` | `'debug'`, `'info'`, `'warn'` or `'error'` — the method you called |
-| `msg` | The message, URI credentials masked, at most 2048 characters |
-| `data` | The fields without the marker: a copy, its strings redacted — at most 8 levels and 1000 entries deep, strings at most 4096 characters. Dates, ObjectIds and other values are kept as they are |
+| `msg` | The message — URI credentials and the values a server error quotes (an E11000's duplicate key) masked — at most 2048 characters |
+| `data` | The fields without the marker, as a document your driver can store: a copy, its strings redacted — at most 8 levels and 1000 entries deep, strings at most 4096 characters. Dates, regular expressions, ObjectIds and other BSON values are kept as they are, and so is binary data up to 4096 bytes. An `Error` becomes `{ name, message, code?, codeName? }` (its message masked like `msg`, no stack); a `Map` an object, a `Set` an array; any other instance what `JSON.stringify` would see — its `toJSON()`, or its own fields |
 | `at` | When the call was made (a `Date`, by this process's clock) |
 | `seq` | Increasing within one `runId` — orders the events of one millisecond |
 | `truncated` | `true` when `msg` or `data` was cut to those bounds |
@@ -135,8 +135,9 @@ does exactly this: its worker stores the events, and its API serves a run's line
 - **A timed-out body is not stopped.** If it logs after the run ended, the event still carries its
   own run's id, and its `seq` goes on — but it no longer reaches the queue job's log.
 - **A dry run emits nothing.** Its lines say `dryRun: true`.
-- **What you put in `data` is yours to store.** Migronaut masks credentials in URIs and nothing
-  else: personal data in a log line lands in your collection as it is.
+- **What you put in `data` is yours to store.** Migronaut masks credentials in URIs and the values
+  a server error quotes, and nothing else: personal data in a log line lands in your collection as
+  it is. The local log line is not masked — it is what a developer debugs with.
 
 ## On a queue
 

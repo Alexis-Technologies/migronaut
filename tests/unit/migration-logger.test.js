@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
+const { MongoServerError } = require('mongodb');
 const {
   MAX_MESSAGE_LENGTH,
   correlationOf,
@@ -219,6 +220,28 @@ describe('createMigrationLogger', () => {
     assert.strictEqual(lines[0].msg, 'connect mongodb://u:****@h failed');
     assert.strictEqual(events[0].msg, 'connect mongodb://u:****@h failed');
     assert.strictEqual(events[0].data.uri, 'mongodb://u:****@h');
+  });
+
+  it('should mask the values a server error quotes in the event, not on the line', () => {
+    const { lines, events, logger } = ordinary();
+    const error = new MongoServerError({
+      ok: 0,
+      code: 11000,
+      errmsg: 'E11000 duplicate key error index: email_1 dup key: { email: "a@b.c" }',
+      keyValue: { email: 'a@b.c' },
+    });
+    logger.error(error, { userland: true, err: error });
+    assert.match(lines[0].msg, /a@b\.c/);
+    assert.strictEqual(lines[0].fields.err, error);
+    assert.strictEqual(
+      events[0].msg,
+      'E11000 duplicate key error index: email_1 dup key: { <redacted> }',
+    );
+    assert.deepStrictEqual(events[0].data.err, {
+      name: 'MongoServerError',
+      message: 'E11000 duplicate key error index: email_1 dup key: { <redacted> }',
+      code: 11000,
+    });
   });
 
   it('should clip a long message in the event only, and mark it truncated', () => {

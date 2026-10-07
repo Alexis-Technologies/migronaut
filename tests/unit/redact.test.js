@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
+const { Binary, Long, MongoServerError, ObjectId } = require('mongodb');
 const { errorText } = require('../../src/utils/error.js');
 const {
   BOUNDS,
@@ -62,6 +63,17 @@ describe('redactDeep', () => {
   it('should leave class instances alone', () => {
     const date = new Date();
     assert.strictEqual(redactDeep(date), date);
+  });
+
+  it('should redact null-prototype objects and keep an own __proto__ key as a key', () => {
+    const bare = Object.assign(Object.create(null), { uri: 'mongodb://u:hunter2@h' });
+    assert.deepStrictEqual({ ...redactDeep(bare) }, { uri: 'mongodb://u:****@h' });
+    const parsed = redactDeep(JSON.parse('{"__proto__": {"x": "mongodb://u:p@h"}, "a": 1}'));
+    assert.strictEqual(Object.getPrototypeOf(parsed), Object.prototype);
+    assert.deepStrictEqual(Object.keys(parsed), ['__proto__', 'a']);
+    assert.deepStrictEqual(Object.getOwnPropertyDescriptor(parsed, '__proto__').value, {
+      x: 'mongodb://u:****@h',
+    });
   });
 });
 
@@ -148,7 +160,7 @@ describe('redactBounded', () => {
     assert.strictEqual(input.uri, 'mongodb://u:secret@h/db', 'never mutated');
   });
 
-  it('should keep class instances, null-prototype objects and scalars as they are', () => {
+  it('should keep BSON values and scalars, and copy null-prototype objects', () => {
     const at = new Date(0);
     const id = { _bsontype: 'ObjectId' };
     Object.setPrototypeOf(id, class ObjectId {}.prototype);
@@ -189,6 +201,111 @@ describe('redactBounded', () => {
     }
     assert.strictEqual(level.self, '[truncated]');
     assert.strictEqual(depth, BOUNDS.depth - 1);
+    assert.strictEqual(truncated, true);
+  });
+
+  it('should copy an Error as its name, masked message and code — not its raw response', () => {
+    const error = new MongoServerError({
+      ok: 0,
+      code: 11000,
+      codeName: 'DuplicateKey',
+      errmsg:
+        'E11000 duplicate key error collection: app.users index: email_1 dup key: { email: "a@b.c" }',
+      keyPattern: { email: 1 },
+      keyValue: { email: 'a@b.c' },
+    });
+    const { value } = redactBounded({ err: error, plain: new TypeError('bad mongodb://u:p@h') });
+    assert.deepStrictEqual(value.err, {
+      name: 'MongoServerError',
+      message:
+        'E11000 duplicate key error collection: app.users index: email_1 dup key: { <redacted> }',
+      code: 11000,
+      codeName: 'DuplicateKey',
+    });
+    assert.deepStrictEqual(value.plain, { name: 'TypeError', message: 'bad mongodb://u:****@h' });
+    assert.ok(!JSON.stringify(value).includes('a@b.c'));
+  });
+
+  it('should keep binary data within its bound by reference, and cut what is past it', () => {
+    const small = Buffer.from('ok');
+    const binary = new Binary(Buffer.alloc(8));
+    const { value, truncated } = redactBounded({ small, binary });
+    assert.strictEqual(value.small, small);
+    assert.strictEqual(value.binary, binary);
+    assert.strictEqual(truncated, false);
+    const big = redactBounded({
+      buffer: Buffer.alloc(BOUNDS.bytes + 1),
+      binary: new Binary(Buffer.alloc(BOUNDS.bytes + 1)),
+    });
+    assert.deepStrictEqual(big.value, { buffer: '[truncated]', binary: '[truncated]' });
+    assert.strictEqual(big.truncated, true);
+  });
+
+  it('should keep BSON values, dates and regular expressions as they are', () => {
+    const id = new ObjectId();
+    const pattern = /x/i;
+    const { value } = redactBounded({ id, pattern, long: Long.fromNumber(5) });
+    assert.strictEqual(value.id, id);
+    assert.strictEqual(value.pattern, pattern);
+    assert.ok(Long.isLong(value.long));
+  });
+
+  it('should copy a Map as an object and a Set as an array, both redacted', () => {
+    const { value } = redactBounded({
+      map: new Map([
+        ['uri', 'mongodb://u:p@h'],
+        [7, 'seven'],
+      ]),
+      set: new Set(['mongodb://u:p@h', 2]),
+    });
+    assert.deepStrictEqual(value, {
+      map: { uri: 'mongodb://u:****@h', 7: 'seven' },
+      set: ['mongodb://u:****@h', 2],
+    });
+  });
+
+  it('should see any other instance the way JSON.stringify would, within the bounds', () => {
+    class Summary {
+      constructor() {
+        this.processed = 3;
+        this.source = 'mongodb://u:p@h';
+      }
+    }
+    class Wrapped {
+      toJSON() {
+        return { inner: 'mongodb://u:p@h' };
+      }
+    }
+    class Endless {
+      toJSON() {
+        return new Endless();
+      }
+    }
+    const { value, truncated } = redactBounded({
+      summary: new Summary(),
+      wrapped: new Wrapped(),
+      url: new URL('mongodb://u:p@h/db'),
+      endless: new Endless(),
+    });
+    assert.deepStrictEqual(value.summary, { processed: 3, source: 'mongodb://u:****@h' });
+    assert.strictEqual(Object.getPrototypeOf(value.summary), Object.prototype);
+    assert.deepStrictEqual(value.wrapped, { inner: 'mongodb://u:****@h' });
+    assert.strictEqual(value.url, 'mongodb://u:****@h/db');
+    assert.strictEqual(value.endless, '[truncated]');
+    assert.strictEqual(truncated, true);
+  });
+
+  it('should keep an own __proto__ key as data, never as the copy’s prototype', () => {
+    const { value } = redactBounded(JSON.parse('{"__proto__": {"polluted": true}, "a": 2}'));
+    assert.strictEqual(Object.getPrototypeOf(value), Object.prototype);
+    assert.deepStrictEqual(Object.keys(value), ['__proto__', 'a']);
+    assert.strictEqual(value.polluted, undefined);
+  });
+
+  it('should stop copying a Set or a Map past the budget', () => {
+    const set = new Set(Array.from({ length: BOUNDS.entries + 5 }, (_, index) => index));
+    const { value, truncated } = redactBounded([set]);
+    assert.strictEqual(value[0].length, BOUNDS.entries - 1);
     assert.strictEqual(truncated, true);
   });
 

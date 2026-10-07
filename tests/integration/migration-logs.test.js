@@ -138,6 +138,37 @@ export async function down() {}
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
   });
 
+  it('should hand a server error to the event as data, without the values it quotes', async () => {
+    project.write(
+      '0001-a.js',
+      `export async function up({ db, logger }) {
+  const users = db.collection('users');
+  await users.createIndex({ email: 1 }, { unique: true });
+  await users.insertOne({ email: 'a@b.c' });
+  try {
+    await users.insertOne({ email: 'a@b.c' });
+  } catch (err) {
+    logger.error('duplicate skipped', { userland: true, err });
+  }
+}
+export async function down() {}
+`,
+    );
+    const kit = migrator({ logger: null });
+    const { events } = listen(kit);
+    await kit.up();
+    assert.strictEqual(events.length, 1);
+    const { err } = events[0].data;
+    assert.strictEqual(err.name, 'MongoServerError');
+    assert.strictEqual(err.code, 11000);
+    assert.match(err.message, /dup key: \{ <redacted> \}/);
+    assert.ok(!JSON.stringify(events[0]).includes('a@b.c'));
+    // What a subscriber stores is the same document.
+    await mongo.db.collection('migration_logs').insertOne({ ...events[0] });
+    const stored = await mongo.db.collection('migration_logs').findOne();
+    assert.deepStrictEqual(stored.data.err, err);
+  });
+
   it('should keep correlating a call a timed-out body makes after the run ended', async () => {
     project.write(
       '0001-slow.js',

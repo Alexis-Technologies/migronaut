@@ -20,7 +20,9 @@ experimental — its shape may still change in a minor release (named here).
 - **The `migration:log` event** — a `ctx.logger` call whose fields hold `userland: true` is also
   emitted, for the application to store and show its users; calls without the marker emit
   nothing. The payload is `{ kind, runId, …correlation, level, msg, data, at, seq, truncated? }`:
-  `data` a bounded, redacted copy of the fields (8 levels, 1000 entries, 4096-character strings),
+  `data` a bounded, redacted copy of the fields (8 levels, 1000 entries, 4096-character strings;
+  an `Error` as `{ name, message, code?, codeName? }` with the values a server error quotes masked,
+  as in `msg`; BSON values and binary data up to 4096 bytes kept as they are),
   `seq` increasing within a run, `at` a `Date` (TTL-ready). It fires whatever the logger's level,
   and with `logger: null`. Migronaut stores none of it — the
   [Migration Logs](https://migronaut.vercel.app/guide/migration-logs) guide has the recipe.

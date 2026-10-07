@@ -1747,12 +1747,18 @@ export type MigrationLogLevel = 'debug' | 'info' | 'warn' | 'error';
  */
 export interface MigrationLogEventBase {
   level: MigrationLogLevel;
-  /** The message — URI credentials masked, at most 2048 characters */
+  /**
+   * The message — URI credentials and the values a server error quotes (an
+   * E11000's duplicate key) masked — at most 2048 characters
+   */
   msg: string;
   /**
-   * The call's fields without the `userland` marker: a copy, its strings
-   * redacted, at most 8 levels and 1000 entries deep, strings at most 4096
-   * characters. Dates, ObjectIds and other values are kept as they are.
+   * The call's fields without the `userland` marker, as a document a driver can
+   * store: a copy, its strings redacted, at most 8 levels and 1000 entries
+   * deep, strings at most 4096 characters. Dates, regular expressions and BSON
+   * values are kept as they are, binary data up to 4096 bytes too. An `Error`
+   * becomes `{ name, message, code?, codeName? }`; a `Map` an object, a `Set`
+   * an array; any other instance what `JSON.stringify` would see.
    */
   data: Record<string, unknown>;
   /** When the call was made, by this process's clock — a TTL index can expire on it */

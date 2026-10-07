@@ -22,6 +22,18 @@ describe('jobRefIssue', () => {
     assert.strictEqual(jobRefIssue({ id: '1', queue: 'q' }), 'job.queue is not an option');
   });
 
+  it('should refuse keys the limits only inherit', () => {
+    assert.strictEqual(
+      jobRefIssue({ id: '1', constructor: 'x' }),
+      'job.constructor is not an option',
+    );
+    assert.strictEqual(jobRefIssue({ id: '1', toString: 5 }), 'job.toString is not an option');
+    assert.strictEqual(
+      jobRefIssue(JSON.parse('{"id": "1", "__proto__": "x"}')),
+      'job.__proto__ is not an option',
+    );
+  });
+
   it('should refuse a group where none is allowed', () => {
     assert.strictEqual(
       jobRefIssue({ id: '1', groupId: 'g' }, { groupId: false }),

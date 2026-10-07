@@ -1,3 +1,5 @@
+const { isPlainObject } = require('./canonical.js');
+
 /**
  * Credential redaction for anything that leaves the process — error messages,
  * stacks, `--json` payloads, log lines. The MongoDB driver echoes the raw
@@ -70,6 +72,24 @@ function redactOutbound(text) {
 }
 
 /**
+ * Set `key` on a copy as an own property. A plain assignment of `__proto__` —
+ * a key `JSON.parse` happily makes — would replace the copy's prototype and
+ * lose the key instead.
+ */
+function put(target, key, value) {
+  if (key === '__proto__') {
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  } else {
+    target[key] = value;
+  }
+}
+
+/**
  * Redact every string reachable from `value` (plain objects and arrays only —
  * class instances are left alone rather than cloned into broken shapes).
  * Returns a copy; never mutates the input.
@@ -81,42 +101,75 @@ function redactDeep(value) {
     for (let index = 0; index < value.length; index++) copy[index] = redactDeep(value[index]);
     return copy;
   }
-  if (value !== null && typeof value === 'object' && value.constructor === Object) {
+  if (isPlainObject(value)) {
     const copy = {};
-    for (const key of Object.keys(value)) copy[key] = redactDeep(value[key]);
+    for (const key of Object.keys(value)) put(copy, key, redactDeep(value[key]));
     return copy;
   }
   return value;
 }
 
 /**
- * How much of a value {@link redactBounded} copies: nesting, entries in all, and
- * the length of one string. What a migration hands to `ctx.logger` is the
- * application's own data, of any size and shape — a cycle included — and a
- * subscriber stores it; these keep one call's copy small and finite.
+ * How much of a value {@link redactBounded} copies: nesting, entries in all,
+ * the length of one string and of one piece of binary data. What a migration
+ * hands to `ctx.logger` is the application's own data, of any size and shape —
+ * a cycle included — and a subscriber stores it; these keep one call's copy
+ * small and finite.
  */
-const BOUNDS = Object.freeze({ depth: 8, entries: 1000, string: 4096 });
+const BOUNDS = Object.freeze({ depth: 8, entries: 1000, string: 4096, bytes: 4096 });
 
 /** Stands in for what {@link redactBounded} left out */
 const TRUNCATED = '[truncated]';
 
-/** A plain object — `{}` or `Object.create(null)` — as opposed to a class instance */
-function isPlain(value) {
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
+/** The size of binary data — a Buffer or another Uint8Array, a BSON Binary — or undefined */
+function byteLength(item) {
+  if (item instanceof Uint8Array) return item.byteLength;
+  if (item._bsontype === 'Binary') return item.position;
+  return undefined;
 }
 
 /**
- * {@link redactDeep} within {@link BOUNDS}: every string reachable through
- * plain objects and arrays redacted and clipped, nesting past the depth (which
- * is what ends a cycle) and entries past the budget replaced or dropped.
- * Anything else — a Date, an ObjectId, a Buffer — is kept as is, so the copy
- * stays a document the driver can store. `omit` names a key left out of the
- * top level only. Returns `{ value, truncated }`; never mutates the input.
+ * An Error as data: its name, its message — credentials and the values a
+ * server error quotes masked, as for anything that leaves the process — and
+ * its code. Not the stack, and not what else it carries: a driver error's raw
+ * server response repeats the offending document's values (`keyValue`,
+ * `errmsg`), and its `message` is not even enumerable, so the error itself
+ * would be stored as an empty document.
+ */
+function errorData(error) {
+  const data = {
+    name: String(error.name),
+    message: redactOutbound(typeof error.message === 'string' ? error.message : ''),
+  };
+  if (typeof error.code === 'number' || typeof error.code === 'string') data.code = error.code;
+  if (typeof error.codeName === 'string') data.codeName = error.codeName;
+  return data;
+}
+
+/**
+ * {@link redactDeep} within {@link BOUNDS}, for data that leaves the process
+ * as a document: every string reachable redacted and clipped, nesting past
+ * the depth (which is what ends a cycle) and entries past the budget replaced
+ * or dropped. What the driver stores as a value of its own is kept as is — a
+ * Date, a RegExp, an ObjectId or another BSON value, and binary data within
+ * its bound. An Error becomes `{ name, message, code?, codeName? }`; a Map is
+ * copied as an object and a Set as an array; any other instance goes by its
+ * `toJSON()`, or its own fields, the way `JSON.stringify` would see it.
+ * `omit` names a key left out of the top level only. Returns
+ * `{ value, truncated }`; never mutates the input.
  */
 function redactBounded(value, { omit } = {}) {
   let entries = 0;
   let truncated = false;
+  /** One more entry, or false once the budget is spent */
+  const take = () => {
+    if (entries >= BOUNDS.entries) {
+      truncated = true;
+      return false;
+    }
+    entries += 1;
+    return true;
+  };
   const copy = (item, depth) => {
     if (typeof item === 'string') {
       const text = redactUris(item);
@@ -125,33 +178,44 @@ function redactBounded(value, { omit } = {}) {
       return `${text.slice(0, BOUNDS.string)}…`;
     }
     if (item === null || typeof item !== 'object') return item;
-    const array = Array.isArray(item);
-    if (!array && !isPlain(item)) return item;
+    if (item instanceof Date || item instanceof RegExp) return item;
+    const bytes = byteLength(item);
+    if (bytes !== undefined) {
+      if (bytes <= BOUNDS.bytes) return item;
+      truncated = true;
+      return TRUNCATED;
+    }
+    if (typeof item._bsontype === 'string') return item;
+    if (item instanceof Error) return copy(errorData(item), depth);
     if (depth >= BOUNDS.depth) {
       truncated = true;
       return TRUNCATED;
     }
-    if (array) {
+    if (Array.isArray(item) || item instanceof Set) {
       const out = [];
       for (const element of item) {
-        if (entries >= BOUNDS.entries) {
-          truncated = true;
-          break;
-        }
-        entries += 1;
+        if (!take()) break;
         out.push(copy(element, depth + 1));
       }
       return out;
     }
     const out = {};
+    if (item instanceof Map) {
+      for (const [key, element] of item) {
+        if (!take()) break;
+        put(out, String(key), copy(element, depth + 1));
+      }
+      return out;
+    }
+    // What JSON.stringify would see: a toJSON() result one level down (so a
+    // chain of them ends at the depth bound), else the instance's own fields.
+    if (!isPlainObject(item) && typeof item.toJSON === 'function') {
+      return copy(item.toJSON(), depth + 1);
+    }
     for (const key of Object.keys(item)) {
       if (depth === 0 && key === omit) continue;
-      if (entries >= BOUNDS.entries) {
-        truncated = true;
-        break;
-      }
-      entries += 1;
-      out[key] = copy(item[key], depth + 1);
+      if (!take()) break;
+      put(out, key, copy(item[key], depth + 1));
     }
     return out;
   };
