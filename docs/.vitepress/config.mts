@@ -94,6 +94,24 @@ export default defineConfig({
     );
   },
 
+  // ```mermaid fences become <MermaidDiagram>, rendered in the browser (theme/mermaid.ts).
+  // The source is URI-encoded so nothing in a diagram is read as Vue template syntax.
+  markdown: {
+    config(md) {
+      const fence = md.renderer.rules.fence!;
+      md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+        const token = tokens[idx];
+        if (token.info.trim().split(/\s+/)[0] === 'mermaid') {
+          return `<MermaidDiagram code="${encodeURIComponent(token.content)}" />\n`;
+        }
+        return fence(tokens, idx, options, env, self);
+      };
+    },
+  },
+
+  // Mermaid's chunks (~700 kB each, minified) are loaded lazily, only by a page that draws a diagram.
+  vite: { build: { chunkSizeWarningLimit: 750 } },
+
   themeConfig: {
     logo: '/logo-mark.svg',
 

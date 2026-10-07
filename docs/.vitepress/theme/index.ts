@@ -3,6 +3,7 @@ import type { EnhanceAppContext, Theme } from 'vitepress';
 import { inBrowser } from 'vitepress';
 import { inject as injectAnalytics } from '@vercel/analytics';
 import { injectSpeedInsights } from '@vercel/speed-insights';
+import MermaidDiagram from './MermaidDiagram.vue';
 import './custom.css';
 
 // Extends the default VitePress theme with our brand styling (see custom.css).
@@ -11,9 +12,12 @@ import './custom.css';
 export default {
   extends: DefaultTheme,
 
-  // Vercel Web Analytics + Speed Insights. Docs-only: these are devDependencies,
-  // bundled into the VitePress site, never into the published npm package.
-  enhanceApp({ router }: EnhanceAppContext) {
+  enhanceApp({ app, router }: EnhanceAppContext) {
+    // ```mermaid fences render through this component (see markdown.config).
+    app.component('MermaidDiagram', MermaidDiagram);
+
+    // Vercel Web Analytics + Speed Insights. Docs-only: these are devDependencies,
+    // bundled into the VitePress site, never into the published npm package.
     // enhanceApp also runs during the static SSR render — both scripts are
     // browser-only (they append a <script> to document.head).
     if (!inBrowser) return;

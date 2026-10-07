@@ -108,7 +108,8 @@ passes straight through `resolveLogger` (which binds `child({component: 'migrona
 guards every call — logging must never break a run). devDependencies are fine (`pino` is a devDep
 because the logger-adapter tests exercise the real thing; `@vercel/analytics` and
 `@vercel/speed-insights` are devDeps consumed only by the VitePress theme in
-`docs/.vitepress/theme/index.ts`, which never ships to npm).
+`docs/.vitepress/theme/index.ts`, and `mermaid` only by `docs/.vitepress/theme/mermaid.ts`, which
+draws the docs' `mermaid` code fences in the browser — none of it ships to npm).
 
 **BullMQ is injected too — it is not even a peer.** The queue adapter takes the caller's classes
 (`createMigrationQueue({ bullmq: { Queue, Worker, QueueEvents } })`); nothing under `src/` may
