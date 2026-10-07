@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
+## v2.4.0 — unreleased
+
+### Fixed
+
+- **An `async` event listener that rejects no longer crashes the process.** The kit is an
+  `EventEmitter` with `captureRejections`: a listener's rejected promise is logged at debug level,
+  like a listener that throws, instead of surfacing as an `unhandledRejection`.
+
 ## v2.3.0 — 2026-10-06
 
 Document versioning and background migrations. Additive: nothing changes for a project that

@@ -268,6 +268,27 @@ describe('lifecycle events (integration)', () => {
     await kit.disconnect();
     assert.strictEqual(results[0].status, 'applied');
   });
+
+  it('should contain an async listener that rejects rather than crashing the process', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const kit = migrator();
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      // The usual shape of a subscriber that stores what it hears.
+      kit.on('migration:success', async () => {
+        throw new Error('insert failed');
+      });
+      const results = await kit.up();
+      await kit.disconnect();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.strictEqual(results[0].status, 'applied');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    assert.deepStrictEqual(unhandled, []);
+  });
 });
 
 describe('per-migration timeout (integration)', () => {

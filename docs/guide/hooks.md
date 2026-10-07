@@ -86,8 +86,9 @@ tell the two cases apart.
 
 Hooks are configured up front and run inside the migration's flow. For metrics
 and alerting, subscribe to events instead: several listeners may attach from
-outside the config, and a listener that throws is contained rather than failing
-the run.
+outside the config, and a listener that throws — or an `async` one whose promise
+rejects — is contained rather than failing the run (or the process): the failure
+is logged at debug level.
 
 ```js
 const kit = new MigratorKit(config);

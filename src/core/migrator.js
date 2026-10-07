@@ -191,7 +191,11 @@ class MigratorKit extends EventEmitter {
   #moduleCache = new Map();
 
   constructor(config = {}, options = {}) {
-    super();
+    // An async listener whose promise rejects (a subscriber's insert that
+    // failed) would otherwise surface as an unhandledRejection, which ends the
+    // process — captureRejections routes it to the method below instead, so it
+    // is contained the way #emit contains a listener that throws.
+    super({ captureRejections: true });
     this.#partialConfig = config;
     this.#configPath = options.configPath;
     this.#progress = options.progress;
@@ -217,6 +221,23 @@ class MigratorKit extends EventEmitter {
         `Event listener for '${event}' threw: ${errorText(error)}`,
         this.#fields({ event, error: errorText(error) }),
       );
+    }
+  }
+
+  /**
+   * Where a listener's rejected promise lands (see the constructor): left at
+   * debug level like a listener that throws, never re-emitted as `error` —
+   * with no `error` listener that would throw, from a tick no one awaits.
+   */
+  [EventEmitter.captureRejectionSymbol](error, event) {
+    try {
+      const name = String(event);
+      this.#logger.debug(
+        `Event listener for '${name}' rejected: ${errorText(error)}`,
+        this.#fields({ event: name, error: errorText(error) }),
+      );
+    } catch {
+      // Reporting a listener's failure must not become a failure of its own.
     }
   }
 
