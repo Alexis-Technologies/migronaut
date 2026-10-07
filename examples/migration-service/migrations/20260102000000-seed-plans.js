@@ -9,16 +9,27 @@ const PLANS = [
 module.exports = {
   description: 'Seed the pricing plans',
 
-  async up({ db, signal }) {
+  async up({ db, signal, logger }) {
+    let inserted = 0;
     for (const plan of PLANS) {
       // Long migrations should watch the signal: it fires when the worker is
       // shutting down or the job was cancelled.
       signal?.throwIfAborted();
-      await db.collection('plans').updateOne({ _id: plan._id }, { $set: plan }, { upsert: true });
+      const { upsertedCount } = await db
+        .collection('plans')
+        .updateOne({ _id: plan._id }, { $set: plan }, { upsert: true });
+      inserted += upsertedCount;
     }
+    // For the service's users: a log line, and — marked `userland` — a
+    // migration:log event the worker keeps (logs.js), served by
+    // GET /migrations/runs/:runId/logs. It carries the run and the job already.
+    logger.info('plans seeded', { userland: true, plans: PLANS.length, inserted });
   },
 
-  async down({ db }) {
-    await db.collection('plans').deleteMany({ _id: { $in: PLANS.map((plan) => plan._id) } });
+  async down({ db, logger }) {
+    const { deletedCount } = await db
+      .collection('plans')
+      .deleteMany({ _id: { $in: PLANS.map((plan) => plan._id) } });
+    logger.info('plans removed', { userland: true, deleted: deletedCount });
   },
 };

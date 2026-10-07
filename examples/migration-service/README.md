@@ -14,6 +14,7 @@ POST /migrations/up ──► BullMQ queue "migrations" ──► worker ──�
 | ----------------------------- | ----------------------------------------------------------------------------------- |
 | [`mq.js`](mq.js)              | `createMigrationQueue(...)` — BullMQ is **injected**; migronaut never imports it    |
 | [`server.js`](server.js)      | The HTTP routes, the worker, error → status mapping, graceful shutdown              |
+| [`logs.js`](logs.js)          | What the migrations log for the service's users, kept in a collection of its own    |
 | [`tracing.js`](tracing.js)    | Optional OpenTelemetry: one trace from the HTTP request to the MongoDB commands     |
 | [`migrations/`](migrations)   | Two idempotent migrations (safe to re-run after a crash) and a background one       |
 | [`collections/`](collections) | Declared indexes, a search index, a validator and versioning, applied by `converge` |
@@ -64,10 +65,42 @@ curl -s localhost:3000/migrations/background
 # (and this runs the periodic drift check now)
 curl -s -X POST localhost:3000/migrations/background/verify
 
+# What a run's migrations logged for this service's users — the runId is on the job's result
+# (returnvalue.runId above); or by job id, which also collects a background lane's slices
+curl -s localhost:3000/migrations/runs/<runId>/logs
+curl -s localhost:3000/migrations/jobs/2/logs
+
 # Keep the database migrated every 5 minutes
 curl -s -X PUT localhost:3000/migrations/schedule -H 'content-type: application/json' -d '{"every":300000}'
 curl -s -X DELETE localhost:3000/migrations/schedule
 ```
+
+## Migration logs for the service's users
+
+A migration says what it did with `logger.info(…, { userland: true })` — the seed migration logs
+how many plans it inserted. Migronaut binds the run, the migration, the transaction attempt and the
+queue job to the line, writes it into the job's own log (`✎ plans seeded {…}`, visible in Bull
+Board), and emits it as `migration:log` in the worker's process. Storing it is the service's job:
+[`logs.js`](logs.js) inserts every event into `migration_logs` (indexed by run, job and migration,
+expired after 90 days), and the API serves them:
+
+```json
+GET /migrations/runs/<runId>/logs
+{
+  "runId": "…",
+  "logs": [
+    {
+      "kind": "migration", "runId": "…", "direction": "up", "jobId": "2", "groupId": "…",
+      "migration": "20260102000000-seed-plans.js", "batch": 1, "attempt": 1,
+      "level": "info", "msg": "plans seeded", "data": { "plans": 2, "inserted": 2 },
+      "at": "…", "seq": 1
+    }
+  ]
+}
+```
+
+The lines survive a rollback of the migration that logged them, and a transaction the driver
+retried logs once per `attempt`. See [Migration Logs](https://migronaut.vercel.app/guide/migration-logs).
 
 ## Running it as separate roles
 

@@ -3,7 +3,9 @@ const { metrics, trace } = require('@opentelemetry/api');
 const { Queue, QueueEvents, Worker } = require('bullmq');
 const { BullMQOtel } = require('bullmq-otel');
 const IORedis = require('ioredis');
+const { MongoClient } = require('mongodb');
 const { createMigrationQueue } = require('@alexify/migronaut/bullmq');
+const { createLogStore } = require('./logs.js');
 
 // REDIS_URL is needed before migronaut resolves its own config (which is when
 // it would load .env), so load the file here. Absent in containers — fine.
@@ -19,9 +21,21 @@ const connection = new IORedis(process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
   maxRetriesPerRequest: null,
 });
 
+// One MongoDB client too, also owned by this module: the kit runs on it (an
+// injected client — the kit never closes it), and the log store below reads
+// and writes the service's own collection through it, in the api role too.
+if (!process.env.MIGRONAUT_URI) throw new Error('MIGRONAUT_URI is not set (see .env.example)');
+const client = new MongoClient(process.env.MIGRONAUT_URI);
+const dbName = process.env.MIGRONAUT_DB ?? 'migration_service_example';
+
+// What the migrations log for this service's users — see logs.js.
+const logStore = createLogStore({ client, dbName });
+
 const mq = createMigrationQueue({
-  // The connection string and database come from MIGRONAUT_URI / MIGRONAUT_DB.
+  // The database comes from MIGRONAUT_DB; the connection is the client above.
   config: {
+    client,
+    dbName,
     migrationsDir: path.join(__dirname, 'migrations'),
     // Declared collections, one file each: their indexes and validators as an
     // end state. With convergeAfterUp, every group that reaches the newest
@@ -67,4 +81,4 @@ const mq = createMigrationQueue({
   background: true,
 });
 
-module.exports = { connection, mq };
+module.exports = { client, connection, logStore, mq };
