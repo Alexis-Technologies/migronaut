@@ -66,6 +66,10 @@ change before it touches your database.
 - **Zero config files required** — drive everything from env vars if you prefer.
 - **Pino-friendly logging** — the `logger` option is pino-compatible; pass a pino instance directly
   and migronaut logs through it (with a `component: 'migronaut'` child binding).
+- **Migration logs for your users (experimental)** — every migration gets `ctx.logger`, bound to its
+  run (run id, migration, attempt, queue job), and `ctx.run`; a line marked `userland: true` is also
+  emitted as `migration:log` for your service to store and show — migronaut stores none of it
+  ([guide](https://migronaut.vercel.app/guide/migration-logs)).
 - **Your id format** — run ids and queue group ids are random UUIDs by default; pass
   `generateId: ulid` (or cuid2, nanoid, UUIDv7 — any `() => string`) and every id migronaut mints
   comes from your generator.
@@ -189,7 +193,7 @@ Full docs, guides, and the API reference live at
 - [Core Concepts](https://migronaut.vercel.app/guide/concepts) — migrations, batches, the changelog, locking
 - [Getting Started](https://migronaut.vercel.app/guide/getting-started) & [Tutorial](https://migronaut.vercel.app/guide/tutorial)
 - [Configuration](https://migronaut.vercel.app/guide/configuration) · [Writing Migrations](https://migronaut.vercel.app/guide/writing-migrations) · [Transactions](https://migronaut.vercel.app/guide/transactions) · [Hooks](https://migronaut.vercel.app/guide/hooks)
-- [Programmatic API](https://migronaut.vercel.app/guide/api) · [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq) · [OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry) · [CI/CD](https://migronaut.vercel.app/guide/ci-cd) · [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting)
+- [Programmatic API](https://migronaut.vercel.app/guide/api) · [Migrations as a Queue (BullMQ)](https://migronaut.vercel.app/guide/bullmq) · [Migration Logs](https://migronaut.vercel.app/guide/migration-logs) · [OpenTelemetry](https://migronaut.vercel.app/guide/opentelemetry) · [CI/CD](https://migronaut.vercel.app/guide/ci-cd) · [Troubleshooting](https://migronaut.vercel.app/guide/troubleshooting)
 - Reference: [CLI Cheatsheet](https://migronaut.vercel.app/reference/cli) · [Error Codes](https://migronaut.vercel.app/reference/error-codes)
 
 ---
@@ -753,6 +757,9 @@ await mq.enqueueConverge();              // declared indexes and validators, as 
   failed one. Duplicate enqueues are deduplicated; an already-applied migration completes as
   `skipped`.
 - **Bring your own Worker** with `createMigrationProcessor()` (NestJS, BullMQ Pro).
+- **What a migration logs for your users** (`logger.info(…, { userland: true })`) lands in the
+  job's log and reaches `mq.kit.on('migration:log', …)` with the job's id — keep it in a
+  collection of your own ([Migration Logs](https://migronaut.vercel.app/guide/migration-logs)).
 
 → **[Migrations as a Queue](https://migronaut.vercel.app/guide/bullmq)** ·
 [runnable example service](examples/migration-service)

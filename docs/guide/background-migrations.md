@@ -80,8 +80,11 @@ What the engine does with it:
   migration is one-way (see [`down`](#up-down-redo)).
 
 `ctx` holds `signal` (aborted when the slice stops), `logger`, `direction` (`'forward'` or
-`'revert'`), and `background: { name, generation, partition }`. In a dry run it also has
-`dryRun: true`. It holds `session`, `db` and `client` only in [transactional
+`'revert'`), and `background: { name, generation, partition, runId?, jobId?, attempt }` — frozen;
+`runId` is the lane's, `attempt` counts the transactions a transactional batch went through.
+`logger` binds it to every line, and a `userland: true` line emits
+[`migration:log`](/guide/migration-logs#background-migrations) — log per batch, not per document.
+In a dry run it also has `dryRun: true`, and its lines emit nothing. It holds `session`, `db` and `client` only in [transactional
 mode](#transactions-and-writes-to-other-collections). Outside it, `migrate` should be a pure
 function of the document.
 

@@ -86,6 +86,11 @@ converge history entry — and `status()` shows them. `executedBy` stays the OS 
 `up(file, { checksum })` refuses any other version of the file than the one with that SHA-256 (the
 `checksum` that `dryRun('up')` rows carry).
 
+`up`, `down` and `redo` also take `job: { id, groupId? }` — the queue job a run works for, when you
+drive the kit from a queue of your own (the [BullMQ adapter](/guide/bullmq) sets it). Nothing is
+stored: the ids go on the migration's `ctx.run`, its log lines and its
+[`migration:log`](/guide/migration-logs) events.
+
 `baseline({ to?, noLock? })` adopts an existing database with no prior migration tool: it stamps
 migration files as applied — checksums from disk, one shared batch, `origin: 'baseline'` — without
 executing anything, and resolves to `{ baselined, skipped, batch }`. Baselined records are
@@ -209,7 +214,9 @@ on `runMigrations`), ends the line cleanly and reports it as `summary.waiting`.
 Subscribe to `run:start`, `run:end`, `migration:start`, `migration:success`, `migration:skipped`,
 `migration:error`, `lock:acquired`, `lock:released`, `lock:lost` and — for a real converge run —
 `converge:start`, `converge:action`, `converge:wait` and `converge:end` to feed metrics or alerting without
-parsing log lines. See [Lifecycle Hooks → Events](/guide/hooks#events) for the payloads. For traces — spans that the
+parsing log lines. See [Lifecycle Hooks → Events](/guide/hooks#events) for the payloads.
+`migration:log` carries what a migration logged with `userland: true`, for your application to
+keep — see [Migration Logs](/guide/migration-logs). For traces — spans that the
 MongoDB driver's own spans nest under — and ready-made OpenTelemetry metrics, pass
 [`telemetry`](/guide/opentelemetry) in the config instead.
 :::

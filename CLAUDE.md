@@ -155,7 +155,8 @@ src/
 ├── index.js                # Public API barrel — re-exported at the package root
 ├── errors/index.js          # MigronautError base + one subclass per error code
 ├── core/                     # The engine (config, lock, lock-wait, changelog, runner, context, import, migrator, run,
-│                             #   options, sequence, run-recorder, and declared collections: collections,
+│                             #   options, sequence, run-recorder, migration-logger (ctx.run, ctx.logger,
+│                             #   migration:log), and declared collections: collections,
 │                             #   index-spec, search-index-spec, converge-plan, converge, converge-search,
 │                             #   converge-search-run, converge-log, server-info, versioning-spec,
 │                             #   shard-info; background migrations: background-spec, -partition, -shard,
@@ -164,7 +165,7 @@ src/
 ├── versioning/                # The ./versioning runtime: internal, config, document (the shared contract),
 │                             #   occ, registry, upcaster, mongoose
 ├── utils/                     # logger, colors, env, checksum, loader, template, date, migration-name, id, telemetry,
-│                             #   canonical, collection-name, actor, error, redact — pure-ish helpers
+│                             #   canonical, collection-name, actor, job-ref, error, redact — pure-ish helpers
 ├── cli/                        # own arg parser (args.js) + spinner + table + one file per command
 └── bullmq/                      # Queue adapter: jobs (contract), producer, processor, background-processor,
                                  #   wait, service (facade)
@@ -392,11 +393,20 @@ mongos takes a `$lt` bound as inclusive when it picks shards); the shard-key gua
 numbers by value; the live watcher opens its stream *before* it probes the past; a typed
 `current` past the highest shape, written inline, errors as "not assignable to type 'never'"
 (from an imported `as const` definition it names the two numbers); there is no
-`maximum` on the version, and a validator synthesized for versioning alone is `moderate`. Names
+`maximum` on the version, and a validator synthesized for versioning alone is `moderate`. For
+migration logs: migronaut **stores none** — `ctx.logger` lines go to the configured logger, and only
+fields with `userland: true` (exactly; the marker stays on the line) also emit `migration:log`, at
+any level and with `logger: null`, never in a dry run; the event is not a session write (it
+survives a rollback) and fires once per transaction attempt (`ctx.run.attempt`, a fresh frozen
+context per attempt); `logger`/`run` are *optional* in `MigrationContext`'s types on purpose (a
+hand-built context in a test must type-check); the queue processors route userland rows by **job
+id**, never by `current` alone, and seal a job before its last flush; the kit is an
+`EventEmitter` with `captureRejections`, so a rejecting `async` listener is a debug line. Names
 already taken, so not to reuse for anything else: `sync` (the queue job), `ensureIndexes` and the
 audit check `indexes` (the changelog's own indexes), the audit check `search`, `schema`
 (`migronaut.schema.json`), the queue jobs `background`, `background-lane` and
 `background-verify` (and the scheduler `migronaut-background-verify`), the audit check
 `background`, the collections `_migronaut_background`, `_migronaut_background_partitions` and
-`_migronaut_background_watch`, and the lock ids `background:*` and `watch:*`.
+`_migronaut_background_watch`, the lock ids `background:*` and `watch:*`, the event
+`migration:log`, the log-field marker `userland`, `ctx.run` and the run option `job`.
 Don't "fix" these without checking the doc first.

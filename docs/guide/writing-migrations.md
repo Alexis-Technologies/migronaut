@@ -74,8 +74,30 @@ interface MigrationContext {
   mongoose?: Mongoose;
   /** Active session — present when the migration runs in a transaction */
   session?: ClientSession;
+  /** Aborted when the run is stopping: the lock was lost, stop(), SIGTERM, a timeout */
+  signal?: AbortSignal;
+  /** The kit's logger, bound to this run — see Migration Logs */
+  logger?: MigronautLogger;
+  /** The run id, migration, direction, batch, attempt, queue job and actor — frozen */
+  run?: MigrationRunInfo;
 }
 ```
+
+A long migration should watch `signal`: migronaut cannot interrupt a running function, but it
+can tell it to stop. `logger` and `run` are always there when migronaut runs the file (optional in
+the types only so that a context built by hand in a test type-checks):
+
+```ts
+export async function up({ db, logger }: MigrationContext): Promise<void> {
+  const { modifiedCount } = await db
+    .collection('users')
+    .updateMany({ plan: { $exists: false } }, { $set: { plan: 'free' } });
+  // A line for your logs — and, marked `userland`, an event your service can keep for its users.
+  logger?.info('plans defaulted', { userland: true, modifiedCount });
+}
+```
+
+See [Migration Logs](/guide/migration-logs) for what the line carries and how to keep it.
 
 When a migration runs inside a [transaction](/guide/transactions), pass `ctx.session` to your driver
 calls so they participate in it:

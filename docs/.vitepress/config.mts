@@ -146,6 +146,7 @@ export default defineConfig({
           items: [
             { text: 'Programmatic API', link: '/guide/api' },
             { text: 'Migrations as a Queue (BullMQ)', link: '/guide/bullmq' },
+            { text: 'Migration Logs', link: '/guide/migration-logs' },
             { text: 'OpenTelemetry', link: '/guide/opentelemetry' },
             { text: 'CI/CD & Deployment', link: '/guide/ci-cd' },
             { text: 'Troubleshooting', link: '/guide/troubleshooting' },

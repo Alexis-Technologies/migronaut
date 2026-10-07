@@ -5,6 +5,49 @@ Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
 ## v2.4.0 — unreleased
 
+Migration logs for the application's users. Additive: a migration that never touches the new
+context fields, and a kit with no `migration:log` listener, behave as before. Everything new is
+experimental — its shape may still change in a minor release (named here).
+
+### Added
+
+- **`ctx.logger` in every migration** — the kit's logger with the run's correlation bound into the
+  fields of every line: `runId`, `migration`, `direction`, `batch`, `attempt`, and `jobId` /
+  `groupId` when a queue job runs it. Pino's `(fields, msg)` order is accepted too.
+- **`ctx.run`** — that correlation as a frozen object: `{ id, direction, migration?, batch?,
+  attempt?, jobId?, groupId?, requestedBy?, reason? }`. `attempt` is 2 or more when the driver
+  retried the transaction and the body runs again (each attempt gets a context of its own).
+- **The `migration:log` event** — a `ctx.logger` call whose fields hold `userland: true` is also
+  emitted, for the application to store and show its users; calls without the marker emit
+  nothing. The payload is `{ kind, runId, …correlation, level, msg, data, at, seq, truncated? }`:
+  `data` a bounded, redacted copy of the fields (8 levels, 1000 entries, 4096-character strings),
+  `seq` increasing within a run, `at` a `Date` (TTL-ready). It fires whatever the logger's level,
+  and with `logger: null`. Migronaut stores none of it — the
+  [Migration Logs](https://migronaut.vercel.app/guide/migration-logs) guide has the recipe.
+- **Hooks get it too** — `beforeAll`/`afterAll` the run's logger and `ctx.run` (no migration, no
+  attempt), `beforeEach`/`afterEach`/`onError` the migration's.
+- **`job: { id, groupId? }` on `up`, `down` and `redo`** — the queue job a run works for, bound into
+  `ctx.run`, its lines (the kit's own included) and its events; and `job: { id }` on
+  `runBackgroundSlice`.
+- **Queue adapter** — the processor passes each job's id and group to its run, and writes the
+  migration's `userland: true` lines into the job's log as `✎ …` rows (matched by job id, so a
+  timed-out body never writes into the next job's log). A background lane does the same for its
+  slice, into the lane job's log.
+- **Background migrations** — `ctx.logger` is bound to `ctx.background`, which gains the lane's
+  `runId`, its `jobId` and the transaction `attempt`; a `userland: true` call emits
+  `migration:log` with `kind: 'background'`. A dry run marks its lines `dryRun: true` and emits
+  nothing.
+- **Types** — `MigrationRunInfo`, `JobRef`, `MigrationLogEvent` (`OrdinaryMigrationLogEvent |
+  BackgroundMigrationLogEvent`), `MigrationLogEventBase`, `MigrationLogLevel`,
+  `BackgroundRunInfo`; `logger?` and `run?` on `MigrationContext` (optional, so a context built by
+  hand still type-checks).
+
+### Changed
+
+- `ctx.background` of a background migration is now frozen, and typed as `BackgroundRunInfo` —
+  its `generation` optional, as it always was for the live drift watcher.
+- The kit's log lines of a run that names a `job` carry `jobId` / `groupId`.
+
 ### Fixed
 
 - **An `async` event listener that rejects no longer crashes the process.** The kit is an

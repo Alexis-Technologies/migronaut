@@ -517,8 +517,8 @@ on the lock. One is the honest setting.
 ## Observing
 
 - **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'search-wait' | 'completed' | 'failed', migration, direction, groupId, index, total, code?, runId? }` — `code` is the typed error code of a failed job (`'UNKNOWN'` for one that is not migronaut's), and `runId` the run's correlation id: the join key to the changelog record and the kit's log lines. A failed job has no return value, so its `runId` is found here and on the error's `context`. A `sync` or `converge` job reports `{ phase, kind }` instead of the migration fields — and, while it waits for search index builds, `{ phase: 'search-wait', kind, searchIndexes, waitedMs }` (updated every 30 s, with a job log line).
-- **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step (as it starts, and as it ends), and the failure line with its run id.
-- **Kit events**: `mq.kit.on('migration:success', …)` — the same [lifecycle events](/guide/api) as everywhere else.
+- **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step (as it starts, and as it ends), the failure line with its run id — and the migration's own `userland: true` lines, as `✎ …` rows (a background lane's in the lane job's log). Each run is told its job, so a migration's `ctx.run` and its [`migration:log`](/guide/migration-logs) events carry `jobId` and `groupId`.
+- **Kit events**: `mq.kit.on('migration:success', …)` — the same [lifecycle events](/guide/api) as everywhere else. `mq.kit.on('migration:log', …)` in the worker's process is where to [keep what migrations log](/guide/migration-logs#keeping-them) for your users.
 - **Worker events**: `mq.worker.on('failed', …)`.
 - **Traces**: pass `bullmq.telemetry` and the kit's `telemetry` option, and one trace runs from the
   request that enqueued, through Redis, to the MongoDB commands the migration issued — see

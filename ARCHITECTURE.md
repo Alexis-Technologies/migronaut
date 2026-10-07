@@ -107,6 +107,7 @@ src/
 │   ├── changelog.js         # Read/write the _migronaut_migrations collection
 │   ├── runner.js            # Execute ONE migration up()/down() (+ transactions)
 │   ├── context.js           # Build the MigrationContext passed to each migration
+│   ├── migration-logger.js  # ctx.run + ctx.logger correlation, the migration:log event (userland: true)
 │   ├── audit.js             # runAudit() — the read-only health-check flow
 │   ├── baseline.js          # runBaseline() — mark existing files applied without running them
 │   ├── collections.js       # Declared collections: validate, normalize, load collectionsDir
@@ -146,10 +147,11 @@ src/
 │   ├── concurrency.js       # mapLimit() — bounded fan-out for per-file reads/writes
 │   ├── env.js               # .env loader — native util.parseEnv, override:false semantics
 │   ├── checksum.js          # SHA-256 file hashing
-│   ├── redact.js            # Mask credentials (userinfo + query secrets) leaving the process
+│   ├── redact.js            # Mask credentials (userinfo + query secrets) leaving the process; redactBounded
 │   ├── sanitize.js          # Strip terminal control chars (C0 + full C1) from untrusted text
 │   ├── error.js             # errorText()/errorWithCause() — stringify caught errors, redaction built in
 │   ├── actor.js             # requestedBy/reason — limits, validation, changelog fields
+│   ├── job-ref.js           # job: { id, groupId? } — the queue job a run works for: limits, fields
 │   ├── canonical.js         # canonical()/deepEqual()/toWire() — declared vs. stored value comparison
 │   ├── collection-name.js   # isCollectionName() — the one rule for a usable collection name
 │   ├── id.js                # The one place an id is minted — randomUUID, or the user's generateId
@@ -377,12 +379,33 @@ Each entry: **responsibility · key exports · nuances you must know.**
   commit protocol — **so the migration body may run more than once; bodies must be idempotent**.
   `endSession()` always runs in `finally`. `onError` runs *before* the wrapped error is thrown.
   Errors are never swallowed.
+- **Attempts:** `attemptContext(attempt)` (from the migrator) returns what each attempt adds —
+  `{ run, logger }` — and every attempt gets a **fresh** context built from it, not one mutated in
+  place: a body from attempt 1 still running after a timeout keeps seeing attempt 1. `onError`
+  gets the last attempt's context. Resolves to `{ duration, attempts }`.
 
 ### `src/core/context.js` — the migration's world
 - **Responsibility:** build the `MigrationContext` (`{ client, db, mongoose?, signal? }`) handed to
   migrations.
 - **Nuance:** `mongoose` is only attached when present; `signal` (abort on stop/lock loss) is
-  attached here by the run loops. The `session` is added later by the runner, not here.
+  attached here by the run loops. The `session` is added later by the runner, not here — and so are
+  `run` and `logger`, per attempt (see below).
+
+### `src/core/migration-logger.js` — what a migration logs
+- **Responsibility:** `ctx.run` and `ctx.logger`, and the `migration:log` event. Mechanism only —
+  the sink is the kit's resolved logger, the emitter the kit's event channel.
+- **Key exports:** `runInfo(base, direction)` / `migrationRunInfo(run, { migration, batch, attempt })`
+  (frozen `ctx.run`), `correlationOf(kind, info, direction)` — **the one mapping** from `ctx.run`
+  or a background migration's `ctx.background` to what a line binds and what the event carries
+  (`id`→`runId`, `name`→`migration`; `requestedBy`/`reason` on the event only) —
+  `createMigrationLogger(...)`, `sequence()`.
+- **Nuances:** every call is a line on the sink with the correlation merged over the user's fields;
+  only fields with `userland: true` (exactly) also emit, and only while someone listens (`wanted()`
+  spares the copy). The event's `data` is `redactBounded` — a copy, depth/entry/string-bounded,
+  which also ends a cycle; class instances (Date, ObjectId) pass through. The whole call is
+  try/catch-guarded. The kit keeps the run's base correlation and `seq` counter in `#runLog`,
+  set and cleared with `#runId`; a logger closes over what it was made with, so a late call (a
+  timed-out body) keeps its run id and goes on counting.
 
 ### `src/core/import.js` — migrate-mongo adoption (pure)
 - **Responsibility:** **pure** transform from raw migrate-mongo changelog docs to `MigrationRecord`s.
@@ -659,7 +682,8 @@ the design.
   the supported Node range) and never overrides keys already in `process.env`.
 - **checksum.js** — `computeChecksum` (SHA-256 hex of file contents, BOM/CRLF-normalized).
 - **redact.js / error.js** — `redactUris`/`redactDeep` mask `user:password@` in any string leaving
-  the process; `errorText(error)` is the single chokepoint for stringifying caught errors, with
+  the process (`redactBounded` is `redactDeep` within bounds — what a `migration:log` event's
+  `data` is); `errorText(error)` is the single chokepoint for stringifying caught errors, with
   redaction built in. Use it instead of `error.message` everywhere. `errorWithCause(error)` adds the
   wrapped `context.cause` (which migration *and* why) — the changelog's failure trace and a failed
   span's status message.
@@ -667,6 +691,10 @@ the design.
   `pickActor`, and `actorFields` (the changelog field names, `revert`-prefixed for a rollback).
   Shared by the kit's options and the queue's job contract, so a producer cannot send what its
   worker refuses.
+- **job-ref.js** — `job: { id, groupId? }`, the queue job a run works for: `JOB_REF_LIMITS`
+  (`id` ≤ 1024 — custom BullMQ ids can be long — `groupId` ≤ `MAX_ID_LENGTH`), `jobRefIssue` (a
+  lane's `{ id }` refuses `groupId`) and `jobFields` (→ `{ jobId, groupId? }`). In `utils/` so the
+  queue adapter can check what it passes without requiring a core mechanism module.
 - **id.js** — the only module that mints an identifier. `randomId()` is the default
   (`crypto.randomUUID()`); `createIdGenerator(generateId)` wraps the user's function so that every
   call is bare (no arguments, no receiver), synchronous, and checked by `assertId` (a non-empty
@@ -1033,6 +1061,16 @@ line above, and for a reason that does not apply there: the ordering truth stays
   lane checkpoints at its batch boundary and moves itself back to delayed for the next worker),
   then both processors, QueueEvents, the queues, the kit.
 
+**What a migration logs.** Each run is told its job (`job: { id, groupId }`; a lane's slice
+`{ id }`), so `ctx.run`, the run's lines and its `migration:log` events name it. The processors
+listen to `migration:log` and write `userland: true` lines into the job's log (`✎ …`,
+`userlandRow`, ≤ 1024 characters). The migration processor matches by **job id**, not by
+`current` alone — a body that outlived its timeout may still log while the next job runs — and
+seals a job before its final flush, so no row lands after BullMQ removed it. The background
+processor runs lanes side by side: a `Map` of the lanes in flight, keyed by job id, routes the rows,
+and a lane's writes are drained before it moves on. Storing the events is the application's job
+(`mq.kit.on('migration:log', …)` in the worker's process) — the adapter only mirrors them.
+
 ### 6.7 Declared collections (converge)
 Files: [collections.js](src/core/collections.js), [index-spec.js](src/core/index-spec.js),
 [converge-plan.js](src/core/converge-plan.js), [converge.js](src/core/converge.js).
@@ -1346,6 +1384,14 @@ The high-impact ones for code changes:
 - **`markApplied` upserts (not inserts)** — required for `redo`/`force`/`import` over the unique index.
 - **`markReverted` never deletes** — audit trail. Reverted ≠ gone.
 - **`MigrationContext.session`** — beyond the original type spec; how transactions actually work.
+- **Migronaut stores no migration logs.** `ctx.logger` lines go to the configured logger, and
+  only fields with `userland: true` (exactly) also become `migration:log` — for the application to
+  store. The marker stays on the line. The event fires at any level and with `logger: null`, is not
+  a session write (it survives a rollback), is emitted once per transaction attempt (`attempt`
+  tells them apart), and never in a dry run. `logger`/`run` are optional in `MigrationContext`'s
+  types on purpose: a context built by hand in a test must still type-check. The kit is an
+  `EventEmitter` with `captureRejections`, so the usual `async` storing listener whose insert
+  fails is contained (debug line) instead of crashing the process.
 - **Spinner / prompts / JSON routing live in the CLI**, never in core. Core takes a `ProgressReporter`
   callback. Don't require `cli/spinner.js` or `cli/table.js` from `core/`.
 - **`createExtension` defaults to `'js'`** and `.ts` is opt-in — because of the shipped-binary
@@ -1522,6 +1568,13 @@ The high-impact ones for code changes:
   picks shards, and a partition ends where its run of chunks does (§6.8).
 - **The live watcher opens its stream before it probes.** The other order leaves a window where a
   write is neither probed nor streamed.
+- **`ctx.background` is frozen and carries the lane.** `runId` is the lane's (or the watcher's)
+  owner — the runId of its `background:*` events — taken from the deps' explicit `runId` (the
+  watcher's deps override `owner` with a string). `attempt` counts transactions where the engine
+  runs user code again in a new one: each turn of `transactionalBatch`, each try of a
+  transactional `step`, each `withTransaction` callback of the watcher's rewrite; it is 1 for the
+  conflict rounds of a plain batch. A dry run's logger marks lines `dryRun: true` and has no
+  emitter.
 - **A typed `current` past the highest shape errors as "not assignable to type 'never'"** when it
   is written inline — the check works through a conditional type there; from an imported
   `as const` definition the same check names the two numbers.
