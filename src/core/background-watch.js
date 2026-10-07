@@ -518,17 +518,22 @@ function startWatch(deps, options = {}) {
   async function rewrite(job, doc) {
     if (!job.spec.transaction) return applyBatch(job, [doc], { db: deps.db });
     let current = doc;
+    // Each transaction — the driver's retries included — runs the
+    // transformation again; what it logs says which one it was.
+    let transactions = 0;
     for (let attempt = 0; ; attempt++) {
       const session = deps.client.startSession();
       try {
         let result;
         await session.withTransaction(async () => {
+          transactions += 1;
           result = await applyBatch(job, [current], {
             db: deps.db,
             session,
             ctxExtra: { session, db: deps.db, client: deps.client },
             abortOnConflict: true,
             strict: true,
+            attempt: transactions,
           });
         }, transactionOptions(job.spec));
         return result;

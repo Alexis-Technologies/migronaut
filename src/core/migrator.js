@@ -93,6 +93,7 @@ const {
   assertFilename,
   assertHistoryLimit,
   assertImportOptions,
+  assertJobValid,
   assertListOptions,
   assertRedoOptions,
   assertUpOptions,
@@ -2375,17 +2376,37 @@ class MigratorKit extends EventEmitter {
     };
   }
 
-  /** What background.js runs with — `owner` names a lane: its lease's owner, its events' runId */
-  #backgroundDeps(owner) {
+  /**
+   * What background.js runs with — `owner` names a lane: its lease's owner, its
+   * events' runId. `job` is the queue job working the lane, when there is one:
+   * its id goes on the lane's log lines and `migration:log` events.
+   */
+  #backgroundDeps(owner, { job } = {}) {
     const config = this.#config;
     const db = this.#requireDb();
     const stamp = owner ? { runId: owner } : {};
+    const lineStamp = job ? { ...stamp, jobId: job.id } : stamp;
+    // One counter per lane slice (or watcher): orders its migration:log events.
+    const nextSeq = sequence();
     return {
       db,
       client: this.#client,
       store: this.#backgroundStore(),
       logger: this.#logger,
-      fields: (extra) => ({ ...stamp, ...extra }),
+      // The lane's (or watcher's) run id, for ctx.background — `owner` itself
+      // is a function here and a string in the watcher's deps.
+      ...(owner ? { runId: owner } : {}),
+      logs: (info, direction) =>
+        createMigrationLogger({
+          sink: this.#logger,
+          kind: 'background',
+          info,
+          direction,
+          emitter: this.#logEmitter(),
+          nextSeq,
+        }),
+      ...(job ? { job } : {}),
+      fields: (extra) => ({ ...lineStamp, ...extra }),
       emit: (event, payload) => this.#emit(event, { ...stamp, ...payload }),
       lockFor: (name) =>
         new MigrationLock(db, config.lockCollection, config.lockTTLSeconds, {
@@ -2723,13 +2744,20 @@ class MigratorKit extends EventEmitter {
   /**
    * One slice of one lane of a background migration: claim a partition and a
    * slot, work it until `sliceMs` (the spec's by default) runs out, release.
+   * `job: { id }` names the queue job working the lane, for its log lines.
    * @experimental
    */
-  async runBackgroundSlice(name, { signal, sliceMs } = {}) {
+  async runBackgroundSlice(name, { signal, sliceMs, job } = {}) {
     if (sliceMs !== undefined) assertSliceMs(sliceMs);
+    // A lane's job has no group: `{ id }` only.
+    assertJobValid(job, { groupId: false });
     await this.#backgroundReady(name, { lanes: true });
     const owner = this.#newId();
-    return runSlice(this.#backgroundDeps(owner), name, { signal, sliceMs, owner });
+    return runSlice(this.#backgroundDeps(owner, job ? { job } : {}), name, {
+      signal,
+      sliceMs,
+      owner,
+    });
   }
 
   /**

@@ -13,6 +13,7 @@ const {
 const { idRangePartitioner } = require('./background-partition.js');
 const { runSandbox } = require('./background-sandbox.js');
 const { toRelaxedEjson } = require('./bson-peer.js');
+const { createMigrationLogger, sequence } = require('./migration-logger.js');
 const { READ_OPTIONS } = require('./server-info.js');
 
 /**
@@ -52,6 +53,23 @@ function sampleSize({ sample, first }) {
   return n;
 }
 
+/**
+ * `ctx.logger` in a dry run: the lines say `dryRun: true`, and nothing is
+ * emitted — a preview's logs are not the application's to keep.
+ */
+function dryLogs(logger) {
+  const nextSeq = sequence();
+  return (info, direction) =>
+    createMigrationLogger({
+      sink: logger,
+      kind: 'background',
+      info,
+      direction,
+      nextSeq,
+      dryRun: true,
+    });
+}
+
 /** The job a dry run works with — no partition, no lease */
 function dryJob(name, loaded, direction, logger) {
   return {
@@ -64,6 +82,7 @@ function dryJob(name, loaded, direction, logger) {
     partitionId: 'dry-run',
     match: matchOf(loaded.spec, direction),
     logger,
+    logs: dryLogs(logger),
   };
 }
 
@@ -301,6 +320,7 @@ async function previewSteps(deps, name, loaded, options = {}) {
     generation: 0,
     partitionId: 'dry-run',
     logger: deps.logger,
+    logs: dryLogs(deps.logger),
   };
   const log = [];
   let stoppedBy = 'steps';

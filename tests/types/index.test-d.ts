@@ -220,18 +220,28 @@ expectError(kit.on('migration:done', () => undefined));
 
 kit.on('migration:log', (event) => {
   expectType<MigrationLogEvent>(event);
-  expectType<'migration'>(event.kind);
-  expectType<string>(event.runId);
-  expectType<'up' | 'down'>(event.direction);
-  expectType<string | undefined>(event.migration);
-  expectType<number | undefined>(event.attempt);
-  expectType<string | undefined>(event.jobId);
   expectType<'debug' | 'info' | 'warn' | 'error'>(event.level);
   expectType<string>(event.msg);
   expectType<Record<string, unknown>>(event.data);
   expectType<Date>(event.at);
   expectType<number>(event.seq);
   expectType<true | undefined>(event.truncated);
+  expectType<string | undefined>(event.jobId);
+  // `kind` tells the two apart.
+  if (event.kind === 'migration') {
+    expectType<string>(event.runId);
+    expectType<'up' | 'down'>(event.direction);
+    expectType<string | undefined>(event.migration);
+    expectType<number | undefined>(event.attempt);
+    expectType<string | undefined>(event.groupId);
+  } else {
+    expectType<'background'>(event.kind);
+    expectType<'forward' | 'revert'>(event.direction);
+    expectType<string>(event.migration);
+    expectType<string>(event.partition);
+    expectType<number>(event.attempt);
+    expectType<number | undefined>(event.generation);
+  }
 });
 // An async subscriber — the usual one, which stores the event — is accepted.
 kit.on('migration:log', async (event) => {
@@ -687,3 +697,16 @@ expectType<Promise<'poll' | 'stream' | 'both'>>(kit.driftMode());
 const backgroundState = await kit.backgroundStatus('0001-orders.js');
 expectType<string | undefined>(backgroundState?.previous?.registration);
 expectType<number | undefined>(backgroundState?.previous?.totals.migrated);
+
+// ─── Background migrations: ctx.background carries the lane ──────────────────
+
+declare const backgroundCtx: import('../../index.js').BackgroundMigrationContext;
+expectType<number>(backgroundCtx.background.attempt);
+expectType<string | undefined>(backgroundCtx.background.runId);
+expectType<string | undefined>(backgroundCtx.background.jobId);
+expectType<number | undefined>(backgroundCtx.background.generation);
+expectError((backgroundCtx.background.attempt = 2));
+expectType<Promise<import('../../index.js').BackgroundSliceResult>>(
+  kit.runBackgroundSlice('0002-bg.js', { job: { id: 'bgl-1' } }),
+);
+expectError(kit.runBackgroundSlice('0002-bg.js', { job: { id: 'bgl-1', groupId: 'g' } }));

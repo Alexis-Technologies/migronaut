@@ -140,14 +140,53 @@ export type Body<T, N extends ShapeFieldNames = DefaultShapeFieldNames> = T exte
 export interface BackgroundMigrationContext {
   /** Aborted when the slice is stopping (lease lost, pause, shutdown) */
   signal: AbortSignal;
+  /**
+   * The kit's logger with {@link background} bound into every line. Fields
+   * with `userland: true` also emit `migration:log` (`kind: 'background'`) —
+   * but `migrate` runs once per document, and again for a document a
+   * concurrent write moved: log from `migrateBatch` or a `step` rather than
+   * per document. In a dry run the lines say `dryRun: true` and nothing is
+   * emitted.
+   */
   logger: MigronautLogger;
   direction: 'forward' | 'revert';
-  background: { name: string; generation: number; partition: string };
+  /** Where this runs — frozen */
+  background: BackgroundRunInfo;
   session?: ClientSession;
   db?: Db;
   client?: MongoClient;
   /** True in a dry run — the writes are rolled back */
   dryRun?: boolean;
+}
+
+/**
+ * `ctx.background`: which background migration, generation and partition —
+ * and the lane, its queue job and the transaction attempt, as its log lines
+ * and `migration:log` events carry them.
+ */
+export interface BackgroundRunInfo {
+  readonly name: string;
+  /** The plan generation — absent when the live drift watcher runs the transformation */
+  readonly generation?: number;
+  /** The partition (`''` for the drift watcher, `'dry-run'` in a dry run) */
+  readonly partition: string;
+  /**
+   * The lane's run id — its lease's owner, the runId of its `background:*`
+   * events. Absent in a dry run.
+   * @experimental New in 2.4
+   */
+  readonly runId?: string;
+  /**
+   * The queue job working the lane
+   * @experimental New in 2.4
+   */
+  readonly jobId?: string;
+  /**
+   * 1 — or more when a transactional batch or step runs again in a new
+   * transaction (a transient error, a conflict, a smaller batch)
+   * @experimental New in 2.4
+   */
+  readonly attempt: number;
 }
 
 /** How a background migration splits its collection into partitions */
@@ -1743,10 +1782,28 @@ export interface OrdinaryMigrationLogEvent extends MigrationLogEventBase {
 }
 
 /**
- * The `migration:log` event.
+ * A `ctx.logger` call with `userland: true` in a background migration's
+ * `migrate`, `migrateBatch`, `step` (or their way back). `runId` is the lane's,
+ * the one its `background:*` events carry.
  * @experimental New in 2.4
  */
-export type MigrationLogEvent = OrdinaryMigrationLogEvent;
+export interface BackgroundMigrationLogEvent extends MigrationLogEventBase {
+  kind: 'background';
+  runId?: string;
+  migration: string;
+  direction: 'forward' | 'revert';
+  generation?: number;
+  partition: string;
+  attempt: number;
+  jobId?: string;
+}
+
+/**
+ * The `migration:log` event — `kind` tells an ordinary migration's from a
+ * background migration's.
+ * @experimental New in 2.4
+ */
+export type MigrationLogEvent = OrdinaryMigrationLogEvent | BackgroundMigrationLogEvent;
 
 /**
  * Lifecycle events emitted by {@link MigratorKit}. Subscribe to feed metrics or
@@ -2090,7 +2147,15 @@ export class MigratorKit extends EventEmitter {
   /** One slice of one lane: claim a partition and a slot, work it, release. @experimental */
   runBackgroundSlice(
     name: string,
-    options?: { signal?: AbortSignal; sliceMs?: number },
+    options?: {
+      signal?: AbortSignal;
+      sliceMs?: number;
+      /**
+       * The queue job working the lane — on its log lines and `migration:log` events
+       * @experimental New in 2.4
+       */
+      job?: Pick<JobRef, 'id'>;
+    },
   ): Promise<BackgroundSliceResult>;
   /**
    * Drive a background migration from this process until it is done (or one

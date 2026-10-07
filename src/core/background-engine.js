@@ -70,17 +70,37 @@ function excludeBadIds(match, badIds = []) {
   return badIds.length > 0 ? { $and: [match, { _id: { $nin: badIds } }] } : match;
 }
 
-/** What a transformation sees besides the document */
-function transformContext(job, extra = {}) {
+/**
+ * `ctx.background`: which background migration, generation and partition —
+ * and, for `ctx.logger` and `migration:log`, the lane (`runId`, its owner),
+ * the queue job working it and the transaction attempt. Frozen, like an
+ * ordinary migration's `ctx.run`.
+ */
+function backgroundInfo(job, attempt) {
+  return Object.freeze({
+    name: job.name,
+    generation: job.generation,
+    partition: String(job.partitionId ?? ''),
+    ...(job.runId !== undefined ? { runId: job.runId } : {}),
+    ...(job.jobId !== undefined ? { jobId: job.jobId } : {}),
+    attempt,
+  });
+}
+
+/**
+ * What a transformation sees besides the document. `attempt` counts the
+ * transactions a transactional batch or step went through — each one runs the
+ * user's code again — and is 1 everywhere else. `job.logs` binds a logger to
+ * `ctx.background`; a job without it (a test's) gets the plain logger.
+ */
+function transformContext(job, extra = {}, attempt = 1) {
+  const direction = job.direction ?? 'forward';
+  const background = backgroundInfo(job, attempt);
   return {
     signal: job.signal,
-    logger: job.logger,
-    direction: job.direction ?? 'forward',
-    background: {
-      name: job.name,
-      generation: job.generation,
-      partition: String(job.partitionId ?? ''),
-    },
+    logger: job.logs ? job.logs(background, direction) : job.logger,
+    direction,
+    background,
     ...extra,
   };
 }
@@ -228,14 +248,14 @@ function byIds(docs, partitioner) {
 async function applyBatch(
   job,
   docs,
-  { db, session, ctxExtra, abortOnConflict = false, strict = false, bare = false } = {},
+  { db, session, ctxExtra, abortOnConflict = false, strict = false, bare = false, attempt } = {},
 ) {
   const spec = job.spec;
   const collection = db.collection(spec.collection);
   const { source, target } = directionOf(spec, job.fns, job.direction);
   // `left`: documents read and not rewritten — a draining partition steps over them.
   const counts = { migrated: 0, skipped: 0, conflicts: 0, retried: 0, errors: [], left: [] };
-  const ctx = transformContext(job, ctxExtra);
+  const ctx = transformContext(job, ctxExtra, attempt);
   let pending = docs;
   for (let round = 0; pending.length > 0; round++) {
     const transformed = await transformAll(job, pending, ctx);
@@ -338,9 +358,12 @@ function documentError(entry) {
  * (and, in a transaction or a dry run, the session), its last checkpoint,
  * and the deadline it should return by.
  */
-function buildStepContext(job, { db, client, session, checkpoint, deadline, dryRun } = {}) {
+function buildStepContext(
+  job,
+  { db, client, session, checkpoint, deadline, dryRun, attempt } = {},
+) {
   return {
-    ...transformContext(job),
+    ...transformContext(job, {}, attempt),
     db,
     client,
     checkpoint: checkpoint ?? null,
@@ -427,20 +450,22 @@ async function runStep(job, ctx, cursor) {
     );
     return { next, counts };
   };
-  const stepContext = (session) =>
+  const stepContext = (session, attempt) =>
     buildStepContext(job, {
       db,
       client,
       checkpoint: cursor.checkpoint,
       deadline: ctx.deadline,
+      attempt,
       ...(session ? { session } : {}),
     });
-  if (!job.spec.transaction) return save(readStepResult(await fn(stepContext())));
+  if (!job.spec.transaction) return save(readStepResult(await fn(stepContext(undefined, 1))));
   for (let attempt = 0; ; attempt++) {
     const session = client.startSession();
     try {
       session.startTransaction(transactionOptions(job.spec));
-      const saved = await save(readStepResult(await fn(stepContext(session))), session);
+      const result = await fn(stepContext(session, attempt + 1));
+      const saved = await save(readStepResult(result), session);
       await commit(session);
       lease.touch();
       return saved;
@@ -602,9 +627,13 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
   let size = Math.min(ctx.txn.size, batchSize);
   let attempts = 0;
   let txnRetries = 0;
+  // Every turn of the loop is a transaction of its own that runs the
+  // transformations again: what they log says which one it was.
+  let transactions = 0;
   const excluded = new Map();
   for (;;) {
     if (signal?.aborted) throw signal.reason;
+    transactions += 1;
     const session = client.startSession();
     let docs = [];
     try {
@@ -628,6 +657,7 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
               ctxExtra: { session, db, client },
               abortOnConflict: true,
               strict: true,
+              attempt: transactions,
             })
           : { migrated: 0, skipped: 0, conflicts: 0, retried: 0, errors: [], left: [] };
       const errors = [...excluded.values()];

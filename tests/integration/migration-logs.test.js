@@ -283,3 +283,141 @@ export async function down() {}
     assert.ok(!('jobId' in reverted.fields));
   });
 });
+
+describe('userland logs of background migrations (integration)', () => {
+  const NAME = '0001-orders.js';
+
+  beforeEach(async () => {
+    await mongo.db.collection('orders').createIndex({ __v: 1, _id: 1 });
+    await mongo.db
+      .collection('orders')
+      .insertMany(
+        Array.from({ length: 30 }, (_, i) => ({ __v: 1, __rev: 0, address: `A${i}`, i })),
+      );
+  });
+
+  afterEach(() => {
+    delete globalThis.__stepHook;
+  });
+
+  it('should bind the lane into ctx.background, its lines and its events', async () => {
+    project.write(
+      NAME,
+      `export const background = {
+  collection: 'orders',
+  from: 1,
+  to: 2,
+  pauseMs: 0,
+  batchSize: 10,
+  migrateBatch(docs, { logger, background }) {
+    logger.info('batch', {
+      userland: true,
+      n: docs.length,
+      seen: { ...background },
+      frozen: Object.isFrozen(background),
+    });
+    return docs.map(({ address, ...doc }) => ({ ...doc, shipping: { address } }));
+  },
+};
+`,
+    );
+    const { lines, logger } = recordingLogger();
+    const kit = migrator({ logger });
+    const { events } = listen(kit);
+    const lanes = new Set();
+    kit.on('background:slice:start', (event) => lanes.add(event.runId));
+    await kit.up();
+    assert.deepStrictEqual(events, [], 'up only registers');
+    const status = await kit.runBackground(NAME);
+    assert.strictEqual(status.status, 'completed');
+
+    assert.ok(events.length >= 3, `one event per batch: ${events.length}`);
+    let documents = 0;
+    for (const event of events) {
+      const { seen } = event.data;
+      assert.strictEqual(event.kind, 'background');
+      assert.strictEqual(event.migration, NAME);
+      assert.strictEqual(event.direction, 'forward');
+      assert.strictEqual(event.attempt, 1);
+      assert.ok(lanes.has(event.runId), 'the runId of the lane that logged it');
+      assert.strictEqual(event.data.frozen, true);
+      assert.deepStrictEqual(
+        [seen.name, seen.generation, seen.partition, seen.runId, seen.attempt],
+        [event.migration, event.generation, event.partition, event.runId, event.attempt],
+      );
+      documents += event.data.n;
+    }
+    assert.strictEqual(documents, 30);
+    const line = lines.find((entry) => entry.msg === 'batch');
+    assert.strictEqual(line.fields.migration, NAME);
+    assert.strictEqual(line.fields.direction, 'forward');
+    assert.ok(lanes.has(line.fields.runId));
+  });
+
+  it('should tell a transactional step run again apart by its attempt', async () => {
+    project.write(
+      NAME,
+      `export const background = {
+  collection: 'orders',
+  pauseMs: 0,
+  transaction: { timeoutMs: 5000, maxRetries: 3 },
+  async step(ctx) {
+    ctx.logger.info('step', { userland: true, attempt: ctx.background.attempt });
+    await globalThis.__stepHook?.(ctx);
+    return { checkpoint: { done: true }, done: true, processed: 1 };
+  },
+};
+`,
+    );
+    let thrown = false;
+    globalThis.__stepHook = async () => {
+      if (thrown) return;
+      thrown = true;
+      throw Object.assign(new Error('injected transient error'), {
+        errorLabels: ['TransientTransactionError'],
+        hasErrorLabel: (label) => label === 'TransientTransactionError',
+      });
+    };
+    const kit = migrator();
+    const { events } = listen(kit);
+    await kit.up();
+    const status = await kit.runBackground(NAME);
+    assert.strictEqual(status.status, 'completed');
+    assert.deepStrictEqual(
+      events.map((event) => [event.attempt, event.data.attempt, event.seq]),
+      [
+        [1, 1, 1],
+        [2, 2, 2],
+      ],
+    );
+  });
+
+  it('should emit nothing from a dry run, and say dryRun on its lines', async () => {
+    project.write(
+      NAME,
+      `export const background = {
+  collection: 'orders',
+  from: 1,
+  to: 2,
+  migrate(doc, { logger }) {
+    logger.info('preview', { userland: true, i: doc.i });
+    return { ...doc, seen: true };
+  },
+};
+`,
+    );
+    const { lines, logger } = recordingLogger();
+    const kit = migrator({ logger });
+    const { events } = listen(kit);
+    const report = await kit.dryRunBackground(NAME, { first: 2 });
+    assert.ok(report);
+    assert.deepStrictEqual(events, []);
+    const previews = lines.filter((entry) => entry.msg === 'preview');
+    assert.strictEqual(previews.length, 2);
+    for (const entry of previews) {
+      assert.strictEqual(entry.fields.dryRun, true);
+      assert.strictEqual(entry.fields.partition, 'dry-run');
+      assert.ok(!('runId' in entry.fields));
+    }
+  });
+});
