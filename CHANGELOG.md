@@ -71,6 +71,21 @@ experimental — its shape may still change in a minor release (named here).
   `EventEmitter` with `captureRejections`: a listener's rejected promise is logged at debug level,
   like a listener that throws, instead of surfacing as an `unhandledRejection`.
 
+### Documentation
+
+- **How It Works** — a new guide page with architecture diagrams: the engine and its entry points,
+  the life of a run, the lock, where the state lives, which tool fits which change, background
+  migrations and what a run reports.
+- **Diagrams across the guides** — Core Concepts (a migration's states, batches, a run), Transactions,
+  Declared Collections (a converge run), Document Versioning (the contract, optimistic concurrency,
+  the revision invariant, expand → background → contract), Background Migrations (statuses, one
+  lane's batches, passes, drift), the queue adapter (the line, a failure, background jobs) and
+  Migration Logs. They are Mermaid, drawn in the browser by a small theme component; `mermaid` is a
+  docs-only devDependency, loaded only by a page that has a diagram.
+- **The home page** shows what 2.1 – 2.4 added — declared collections, Atlas Search, document
+  versioning, background migrations, OpenTelemetry, migration logs — with a diagram of how the parts
+  fit together.
+
 ## v2.3.0 — 2026-10-06
 
 Document versioning and background migrations. Additive: nothing changes for a project that

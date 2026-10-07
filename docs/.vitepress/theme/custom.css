@@ -146,3 +146,57 @@
   overflow-x: auto;
   font-size: 13px;
 }
+
+/* ─── Home: the sections under the feature cards (docs/index.md) ──────── */
+.home-section {
+  max-width: 1152px;
+  margin: 48px auto 0;
+}
+
+.home-section .mermaid-diagram {
+  margin-top: 20px;
+}
+
+.vp-doc .home-section-link {
+  margin-top: 8px;
+  text-align: right;
+  font-weight: 500;
+}
+
+.vp-doc .home-section-link a {
+  text-decoration: none;
+}
+
+.vp-doc .home-section ul {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px 32px;
+  padding-left: 0;
+  list-style: none;
+}
+
+.vp-doc .home-section li {
+  margin: 0;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--vp-c-divider);
+  line-height: 1.5;
+  font-size: 14px;
+  color: var(--vp-c-text-2);
+}
+
+.vp-doc .home-section li a {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+@media (min-width: 768px) {
+  .vp-doc .home-section ul {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1100px) {
+  .vp-doc .home-section ul {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
