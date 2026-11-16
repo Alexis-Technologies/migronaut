@@ -564,8 +564,19 @@ function startWatch(deps, options = {}) {
       drift(collection, migration, 'reported');
       return;
     }
+    // The event follows the write it reports, as everywhere: a subscriber
+    // that reads the status on 'reopened' must find it reopened. Said first,
+    // it was read as `completed` for the moment the write took — and said
+    // even when the reopening failed, which is no reopening: then the drift
+    // is only reported.
+    try {
+      await control(deps, migration, 'retry', { reason });
+    } catch (error) {
+      report(error, collection);
+      drift(collection, migration, 'reported');
+      return;
+    }
     drift(collection, migration, 'reopened');
-    await control(deps, migration, 'retry', { reason }).catch((error) => report(error, collection));
   }
 
   function drift(collection, migration, action) {

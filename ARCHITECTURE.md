@@ -1789,6 +1789,9 @@ The high-impact ones for code changes:
   picks shards, and a partition ends where its run of chunks does (§6.8).
 - **The live watcher opens its stream before it probes.** The other order leaves a window where a
   write is neither probed nor streamed.
+- **A drift event follows the write it reports** — `upgraded` after the rewrite, `reopened` after
+  the state was reopened (a reopening that fails is `reported`). A subscriber may read the status
+  on the event and act on it.
 - **`ctx.background` is frozen and carries the lane.** `runId` is the lane's (or the watcher's)
   owner — the runId of its `background:*` events — taken from the deps' explicit `runId` (the
   watcher's deps override `owner` with a string). `attempt` counts transactions where the engine

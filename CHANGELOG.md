@@ -80,6 +80,10 @@ things listed under "Changed behaviour".
   last document in conflict) and be worked again from its start.
 - **A repin that lowered `batchSize` did not reach a long-lived runner**: its adaptive controller
   kept the old ceiling.
+- **The live watcher said `background:drift` `reopened` before it had reopened anything.** A
+  subscriber reading the status on that event found `completed`; and the event was emitted even
+  when the reopening failed. The event follows the write now, and a reopening that failed is
+  `reported`.
 - **`startBackgroundRunner`'s `signal` left the runner's own kit connected.** It stops the runner
   as `stop()` does.
 - **`afterAll` throwing after a successful run lost the applied rows** on its error and `run:end`.
