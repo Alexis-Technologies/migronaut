@@ -1769,6 +1769,14 @@ The high-impact ones for code changes:
   both protect a rolling deploy and a rollback.
 - **The shard-key guard compares numbers by value.** A `Long 5` that becomes an `int 5` routes the
   same; anything it cannot prove equal counts as a change.
+- **Errors speak the server's words where driver 7 put its own over them.** From 7.x the driver
+  replaces any refused write of code 20 (IllegalOperation) with "This MongoDB deployment does not
+  support retryable writes. Please add retryWrites=false…" — no code, the server's error under
+  `originalError` (6.x did so only on a retried write). `serverErrorOf` (utils/error.js) reads
+  through it: `errorText` prints the server's message, and `isTransactionsUnsupported` judges by
+  the server's error — told by the driver's alone, a standalone server refusing a transaction was
+  `MIGRATION_EXECUTION_FAILED` with advice that does not apply. The sharded suite's probe for a
+  refused shard-key change reads the same way.
 - **A plan is worked by the partitioner that made it, or re-split.** A change of
   `backgroundShardAware` (or of the indexes) in the middle of a rolling deploy therefore re-splits
   the pass once per side that takes a coordinator step — it settles when the deploy does, and a

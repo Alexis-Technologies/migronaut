@@ -65,6 +65,12 @@ things listed under "Changed behaviour".
   made every slice fail with a `TypeError` until the migration failed. A lane now steps back and
   the coordinator re-splits the same pass. A topology or a list of indexes that could not be read
   is no longer taken for "not sharded" or "no index".
+- **On the 7.x driver, a transactional migration on a standalone server failed as
+  `MIGRATION_EXECUTION_FAILED`** with *"This MongoDB deployment does not support retryable writes.
+  Please add retryWrites=false…"* instead of `TRANSACTIONS_UNSUPPORTED`. Driver 7 puts that
+  message, without a code, over any refused write of code 20 and keeps the server's error under
+  `originalError`; migronaut reads the server's error there, and every message it prints speaks
+  the server's words (a shard key changed without a transaction, too).
 - **`reloadMigrations` did nothing for CommonJS files** — the default scaffold. The edited file
   kept running as first loaded, under the new file's checksum.
 - **`audit` called a live lock stale** when its holder ran with a longer TTL than the auditor, or
@@ -101,9 +107,10 @@ things listed under "Changed behaviour".
 ### Tooling
 
 - **The suite runs on the newest majors**: `mongodb` 7, `mongoose` 9, TypeScript 7 (and `bullmq`
-  6.7, `ioredis` 6, `mongodb-memory-server` 11). No source change was needed. CI's new `compat` job
-  runs both test tiers on `mongodb` 6 with `mongoose` 8, and the unit job names the Node floor
-  exactly (22.18.0).
+  6.7, `ioredis` 6, `mongodb-memory-server` 11). It found one incompatibility, fixed above: how
+  driver 7 reports a standalone server's refusal of a transaction. CI's new `compat` job runs both
+  test tiers on `mongodb` 6 with `mongoose` 8, and the unit job names the Node floor exactly
+  (22.18.0).
 - **`check:dts` names `--types node --lib esnext`**: TypeScript 7 includes neither by default.
 - **Guard tests for the conventions that had none** — no `console.*`, no bare `Error`, no tracer
   call outside `utils/telemetry.js` — and the existing ones cover `versioning.d.ts`, `ioredis` and

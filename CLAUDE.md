@@ -441,7 +441,10 @@ field of its own (`converge` stays the job that was added), and is held until th
 (`JOB_WRITE_WAIT_MS`), and `close({ force: true })` on top of a `close()` under way only stops
 waiting; a background plan is worked by the partitioner that split it or re-split (`planMismatch`),
 and a lane waiting for a lagging secondary yields at its slice's deadline; a throttle hook's pause
-and a retry backoff are capped at an hour. Names
+and a retry backoff are capped at an hour; driver 7 words any refused write of code 20 as "This
+MongoDB deployment does not support retryable writes…" with no code and the server's error under
+`originalError` — `serverErrorOf` reads through it (`errorText`, `isTransactionsUnsupported`), so
+do not match on that message or on the outer `code`. Names
 already taken, so not to reuse for anything else: `sync` (the queue job), `ensureIndexes` and the
 audit check `indexes` (the changelog's own indexes), the audit check `search`, `schema`
 (`migronaut.schema.json`), the queue jobs `background`, `background-lane` and

@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { Binary, Long, MongoServerError, ObjectId } = require('mongodb');
-const { errorText, isTransientTransaction } = require('../../src/utils/error.js');
+const { errorText, isTransientTransaction, serverErrorOf } = require('../../src/utils/error.js');
 const {
   BOUNDS,
   redactBounded,
@@ -130,6 +130,31 @@ describe('errorText', () => {
     );
     assert.strictEqual(errorText('plain string'), 'plain string');
     assert.strictEqual(errorText(7), '7');
+  });
+});
+
+describe('errorText — the server’s words behind the driver’s', () => {
+  it('should speak for the error the driver wrapped, credentials masked all the same', () => {
+    // Driver 7: a refused write of code 20 comes back as this, the server's
+    // error under `originalError`.
+    const wrapped = Object.assign(
+      new Error('This MongoDB deployment does not support retryable writes. Please add …'),
+      { originalError: new Error('Must run update to shard key field of mongodb://u:pw@h/db') },
+    );
+    assert.strictEqual(
+      errorText(wrapped),
+      'Must run update to shard key field of mongodb://u:****@h/db',
+    );
+    assert.strictEqual(serverErrorOf(wrapped), wrapped.originalError);
+  });
+
+  it('should take any other error as its own', () => {
+    const plain = new Error('boom');
+    assert.strictEqual(serverErrorOf(plain), plain);
+    // Not an Error under that name: nothing to speak for.
+    const odd = Object.assign(new Error('outer'), { originalError: 'a string' });
+    assert.strictEqual(errorText(odd), 'outer');
+    assert.strictEqual(serverErrorOf(undefined), undefined);
   });
 });
 

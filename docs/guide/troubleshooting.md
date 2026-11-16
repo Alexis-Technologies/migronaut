@@ -102,7 +102,13 @@ nearest `package.json`, so files they create never trigger this.
 ## "Transaction numbers are only allowed on a replica set"
 
 **Why:** you set `useTransaction` but your MongoDB is a standalone server. Transactions require a
-replica set or sharded cluster.
+replica set or sharded cluster. Migronaut reports it as `TRANSACTIONS_UNSUPPORTED` (exit 15).
+
+From version 7 the driver words this refusal differently — *"This MongoDB deployment does not
+support retryable writes. Please add retryWrites=false to your connection string."* — which is
+advice for another problem: adding `retryWrites=false` does not make a standalone server run a
+transaction. Migronaut shows what the server said instead, here and for any other write the
+driver rewords this way.
 
 **Fix:**
 - Run a single-node replica set locally, or use a managed cluster (Atlas) which already is one.

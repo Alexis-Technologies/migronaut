@@ -2,7 +2,12 @@ const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it, mock } = require('node:test');
 const { buildContext } = require('../../src/core/context.js');
 const { runMigration } = require('../../src/core/runner.js');
-const { MigrationExecutionFailedError } = require('../../src/errors/index.js');
+const { MongoClient } = require('mongodb');
+const { MongoMemoryServer } = require('mongodb-memory-server');
+const {
+  MigrationExecutionFailedError,
+  TransactionsUnsupportedError,
+} = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
 let mongo;
@@ -171,5 +176,48 @@ describe('runMigration transactions (integration)', () => {
       MigrationExecutionFailedError,
     );
     assert.strictEqual(onError.mock.callCount(), 1);
+  });
+});
+
+describe('runMigration on a standalone server (integration)', () => {
+  let standalone;
+  let client;
+
+  before(async () => {
+    standalone = await MongoMemoryServer.create();
+    client = await MongoClient.connect(standalone.getUri());
+  });
+
+  after(async () => {
+    await client?.close();
+    await standalone?.stop();
+  });
+
+  it('should refuse a transaction as TRANSACTIONS_UNSUPPORTED, in the server’s words', async () => {
+    const db = client.db('migronaut_tx_standalone');
+    const migration = {
+      up: async (ctx) => {
+        await ctx.db.collection(COLLECTION).insertOne({ v: 1 }, { session: ctx.session });
+      },
+      down: async () => undefined,
+    };
+    // The real refusal, as the installed driver throws it. Driver 7 wraps the
+    // server's error in one of its own ("…does not support retryable writes"):
+    // read by that one alone, a standalone server was a migration that failed.
+    await assert.rejects(
+      runMigration({
+        name: 'standalone.ts',
+        migration,
+        direction: 'up',
+        context: buildContext(client, db),
+        useTransaction: true,
+      }),
+      (error) => {
+        assert.ok(error instanceof TransactionsUnsupportedError, error.message);
+        assert.match(error.context.cause, /Transaction numbers are only allowed/);
+        return true;
+      },
+    );
+    assert.strictEqual(await db.collection(COLLECTION).countDocuments(), 0);
   });
 });

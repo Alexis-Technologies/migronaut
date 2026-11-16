@@ -1,9 +1,10 @@
 const assert = require('node:assert/strict');
 const { describe, it, mock } = require('node:test');
-const { runMigration } = require('../../src/core/runner.js');
+const { isTransactionsUnsupported, runMigration } = require('../../src/core/runner.js');
 const {
   MigrationExecutionFailedError,
   MigrationTimeoutError,
+  TransactionsUnsupportedError,
 } = require('../../src/errors/index.js');
 const { keepEventLoopAlive } = require('../helpers/event-loop.js');
 
@@ -248,6 +249,74 @@ describe('runMigration', () => {
     await assert.rejects(
       runMigration({ name: 'a.ts', migration, direction: 'up', context, useTransaction: false }),
       MigrationExecutionFailedError,
+    );
+  });
+});
+
+describe('a standalone server refusing a transaction', () => {
+  const SERVER_SAYS = 'Transaction numbers are only allowed on a replica set member or mongos';
+  /** The server's refusal as the driver threw it up to 6.x: its own error, code 20 */
+  const plain = () => Object.assign(new Error(SERVER_SAYS), { code: 20 });
+  /**
+   * The same refusal from driver 7: its own words and no code, the server's
+   * error kept under `originalError`.
+   */
+  const wrapped = () =>
+    Object.assign(
+      new Error(
+        'This MongoDB deployment does not support retryable writes. ' +
+          'Please add retryWrites=false to your connection string.',
+      ),
+      { originalError: plain() },
+    );
+
+  it('should be recognised by code, by message, and behind the driver’s own error', () => {
+    assert.strictEqual(isTransactionsUnsupported(plain()), true);
+    assert.strictEqual(isTransactionsUnsupported(new Error(SERVER_SAYS)), true);
+    // Driver 7: told by the outer error alone, it read as a failed migration.
+    assert.strictEqual(isTransactionsUnsupported(wrapped()), true);
+    for (const other of [new Error('boom'), { code: 11000 }, 'nope', null, undefined]) {
+      assert.strictEqual(isTransactionsUnsupported(other), false);
+    }
+  });
+
+  for (const [label, make] of [
+    ['as the driver threw it up to 6.x', plain],
+    ['wrapped, as driver 7 throws it', wrapped],
+  ]) {
+    it(`should be TRANSACTIONS_UNSUPPORTED, in the server’s words — ${label}`, async () => {
+      const { context } = makeContext();
+      const refusal = make();
+      const migration = { up: () => Promise.reject(refusal), down: async () => undefined };
+      await assert.rejects(
+        runMigration({ name: 'a.ts', migration, direction: 'up', context, useTransaction: true }),
+        (error) => {
+          assert.ok(error instanceof TransactionsUnsupportedError);
+          assert.match(error.message, /this deployment is standalone/);
+          // Not "add retryWrites=false": that advice is for another problem.
+          assert.strictEqual(error.context.cause, SERVER_SAYS);
+          assert.strictEqual(error.cause, refusal, 'the error as thrown is kept');
+          return true;
+        },
+      );
+    });
+  }
+
+  it('should report the server’s words for any other refusal the driver wrapped', async () => {
+    const { context } = makeContext();
+    const refusal = Object.assign(new Error('This MongoDB deployment does not support …'), {
+      originalError: Object.assign(new Error('Must run update to shard key field in …'), {
+        code: 72,
+      }),
+    });
+    const migration = { up: () => Promise.reject(refusal), down: async () => undefined };
+    await assert.rejects(
+      runMigration({ name: 'a.ts', migration, direction: 'up', context, useTransaction: false }),
+      (error) => {
+        assert.ok(error instanceof MigrationExecutionFailedError);
+        assert.strictEqual(error.context.cause, 'Must run update to shard key field in …');
+        return true;
+      },
     );
   });
 });

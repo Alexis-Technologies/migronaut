@@ -3,19 +3,22 @@ const {
   MigrationTimeoutError,
   TransactionsUnsupportedError,
 } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
+const { errorText, serverErrorOf } = require('../utils/error.js');
 
 /**
  * True when the driver refused to start a transaction because the deployment
  * cannot run one (standalone server; code 20 = IllegalOperation). Matched on
- * the message too, since older servers phrase it without the code.
+ * the message too, since older servers phrase it without the code — and on
+ * the server's error behind the driver's (see {@link serverErrorOf}): told by
+ * the driver's own alone, a standalone server read as a migration that failed.
  */
 function isTransactionsUnsupported(error) {
-  if (typeof error !== 'object' || error === null) return false;
+  const refusal = serverErrorOf(error);
+  if (typeof refusal !== 'object' || refusal === null) return false;
   return (
-    error.code === 20 ||
-    (typeof error.message === 'string' &&
-      error.message.includes('Transaction numbers are only allowed'))
+    refusal.code === 20 ||
+    (typeof refusal.message === 'string' &&
+      refusal.message.includes('Transaction numbers are only allowed'))
   );
 }
 
@@ -199,13 +202,15 @@ async function runMigration(params) {
       err.context = { durationMs: elapsed, ...attemptsField, ...err.context };
       throw err;
     }
+    // What the server said, when the driver put its own words over it.
+    const cause = serverErrorOf(err).message;
     // A standalone deployment refusing the transaction is a topology problem,
     // not a bug in the migration — say so instead of blaming the file.
     if (useTransaction && isTransactionsUnsupported(err)) {
       throw new TransactionsUnsupportedError(
         `Cannot run ${name} in a transaction — this deployment is standalone. ` +
           'Set useTransaction: false, or run against a replica set / mongos.',
-        { name, direction, durationMs: elapsed, ...attemptsField, cause: err.message },
+        { name, direction, durationMs: elapsed, ...attemptsField, cause },
         { cause: err },
       );
     }
@@ -213,7 +218,7 @@ async function runMigration(params) {
       `Migration ${direction} failed: ${name}`,
       // The message is duplicated into context because that is what survives
       // JSON serialization; `cause` keeps the real Error (and its stack).
-      { name, direction, durationMs: elapsed, ...attemptsField, cause: err.message },
+      { name, direction, durationMs: elapsed, ...attemptsField, cause },
       { cause: err },
     );
   } finally {
