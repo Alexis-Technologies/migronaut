@@ -2023,7 +2023,11 @@ class MigratorKit extends EventEmitter {
     const config = await this.#ensureConfig(false, true);
     const dir = this.#migrationsPath();
     await fs.mkdir(dir, { recursive: true });
-    const templatePath = options.template ?? config.templatePath;
+    // Against the kit's cwd, like migrationsDir and collectionsDir: a relative
+    // `templatePath` in a config loaded from elsewhere is relative to that
+    // config's place, not to wherever the process happened to start.
+    const template = options.template ?? config.templatePath;
+    const templatePath = template ? path.resolve(this.#cwd ?? process.cwd(), template) : undefined;
     const js = options.js ?? config.createExtension === 'js';
     const filepath = await createMigrationFile({
       dir,

@@ -19,42 +19,8 @@ const UNSUPPORTED = 40573;
 /** Events that end a stream for good: the collection is gone or renamed */
 const ENDING = new Set(['drop', 'rename', 'dropDatabase', 'invalidate']);
 
-/**
- * The background migrations a collection's watcher may upgrade with — its
- * edges: completed, forward, declarative ones (a step migration cannot run
- * on one document). Returns `{ edges, target }`: `edges` by the version they
- * start from (the first registered wins a tie), `target` the highest
- * version any reaches — the shape a document should have at least.
- */
-function edgesOf(states, collection) {
-  const edges = new Map();
-  let target;
-  for (const state of states) {
-    const spec = state.spec;
-    if (spec?.collection !== collection || spec.mode !== 'declarative') continue;
-    if (state.status !== 'completed' || state.direction === 'revert') continue;
-    if (!edges.has(spec.from)) {
-      edges.set(spec.from, { name: state._id, from: spec.from, to: spec.to });
-    }
-    if (target === undefined || spec.to > target) target = spec.to;
-  }
-  return { edges, target };
-}
-
 /** Statuses after which a background migration does nothing more */
 const SETTLED = new Set(['completed', 'failed', 'cancelled']);
-
-/**
- * The revert that makes a collection's watcher stand aside, if any: one not
- * settled yet — the watcher would upgrade straight back what it rewrites.
- */
-function suspendedBy(states, collection) {
-  for (const state of states) {
-    if (state.spec?.collection !== collection || state.direction !== 'revert') continue;
-    if (!SETTLED.has(state.status)) return state._id;
-  }
-  return undefined;
-}
 
 /**
  * The change stream's pipeline: only the writes that can leave a document
@@ -125,9 +91,16 @@ function tokenDue(lastSavedAt, now, checkpointMs, { force = false } = {}) {
 }
 
 /**
- * A leader's view of its collection, in one pass over the states: the revert
- * it stands aside for (`suspended`), its `edges` and `target` (as
- * {@link edgesOf}), and every state by name.
+ * A leader's view of its collection, in one pass over the states:
+ * - `edges` — the background migrations its watcher may upgrade with:
+ *   completed, forward, declarative ones (a step migration cannot run on one
+ *   document), by the version they start from (the first registered wins a
+ *   tie);
+ * - `target` — the highest version any of them reaches: the shape a document
+ *   should have at least;
+ * - `suspended` — the revert it stands aside for, if any: one not settled
+ *   yet — the watcher would upgrade straight back what it rewrites;
+ * - `byName` — every state, by name.
  */
 function watchView(states, collection) {
   const edges = new Map();
@@ -154,10 +127,8 @@ function watchView(states, collection) {
 module.exports = {
   HISTORY_LOST,
   classifyStreamError,
-  edgesOf,
   isEnding,
   lagOf,
-  suspendedBy,
   tokenDue,
   watchPipeline,
   watchView,

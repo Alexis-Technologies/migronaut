@@ -3,10 +3,8 @@ const { describe, it } = require('node:test');
 const { Timestamp } = require('mongodb');
 const {
   classifyStreamError,
-  edgesOf,
   isEnding,
   lagOf,
-  suspendedBy,
   watchView,
   tokenDue,
   watchPipeline,
@@ -26,7 +24,7 @@ const withSpec = (name, spec, fields) =>
 
 describe('background-watch-plan — edges and suspension', () => {
   it('should take completed forward declarative migrations of the collection as its edges', () => {
-    const { edges, target } = edgesOf(
+    const { edges, target } = watchView(
       [
         withSpec('a.js', { from: 1, to: 2 }),
         withSpec('b.js', { from: 2, to: 3 }),
@@ -41,35 +39,37 @@ describe('background-watch-plan — edges and suspension', () => {
     assert.deepStrictEqual([...edges.keys()], [1, 2]);
     assert.strictEqual(edges.get(1).name, 'a.js', 'the first registered wins');
     assert.strictEqual(target, 3);
-    assert.deepStrictEqual(edgesOf([], 'orders'), { edges: new Map(), target: undefined });
+    const empty = watchView([], 'orders');
+    assert.deepStrictEqual(empty.edges, new Map());
+    assert.strictEqual(empty.target, undefined);
   });
 
   it('should stand aside while a revert of the collection is not settled', () => {
     const revert = (status) =>
       withSpec('r.js', { from: 1, to: 2 }, { direction: 'revert', status });
-    assert.strictEqual(suspendedBy([revert('running')], 'orders'), 'r.js');
-    assert.strictEqual(suspendedBy([revert('paused')], 'orders'), 'r.js');
-    assert.strictEqual(suspendedBy([revert('completed')], 'orders'), undefined);
-    assert.strictEqual(suspendedBy([revert('running')], 'users'), undefined);
-    assert.strictEqual(suspendedBy([state('f.js', { status: 'running' })], 'orders'), undefined);
+    const suspended = (states, collection) => watchView(states, collection).suspended;
+    assert.strictEqual(suspended([revert('running')], 'orders'), 'r.js');
+    assert.strictEqual(suspended([revert('paused')], 'orders'), 'r.js');
+    assert.strictEqual(suspended([revert('completed')], 'orders'), undefined);
+    assert.strictEqual(suspended([revert('running')], 'users'), undefined);
+    assert.strictEqual(suspended([state('f.js', { status: 'running' })], 'orders'), undefined);
   });
 
-  it('should see the edges, the suspension and every state in one pass, as the two do', () => {
+  it('should see the edges, the suspension and every state in one pass', () => {
     const states = [
       withSpec('a.js', { from: 1, to: 2 }),
       withSpec('b.js', { from: 2, to: 3 }),
-      withSpec('dup.js', { from: 1, to: 2 }),
       withSpec('running.js', { from: 3, to: 4 }, { status: 'running' }),
       withSpec('r.js', { from: 4, to: 5 }, { direction: 'revert', status: 'running' }),
-      withSpec('step.js', { from: 5, to: 6, mode: 'step' }),
       withSpec('other.js', { from: 0, to: 9, collection: 'users' }),
     ];
     const view = watchView(states, 'orders');
-    const { edges, target } = edgesOf(states, 'orders');
-    assert.deepStrictEqual(view.edges, edges);
-    assert.strictEqual(view.target, target);
-    assert.strictEqual(view.suspended, suspendedBy(states, 'orders'));
+    assert.deepStrictEqual([...view.edges.keys()], [1, 2]);
+    assert.strictEqual(view.target, 3);
+    assert.strictEqual(view.suspended, 'r.js');
+    // Every state, the other collections' too: the watcher looks them up by name.
     assert.strictEqual(view.byName.size, states.length);
+    assert.strictEqual(view.byName.get('other.js'), states[4]);
     assert.strictEqual(watchView(states, 'users').suspended, undefined);
   });
 });

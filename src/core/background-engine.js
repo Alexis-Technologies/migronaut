@@ -4,7 +4,7 @@ const {
   LockLostError,
 } = require('../errors/index.js');
 const { canonical, isPlainObject } = require('../utils/canonical.js');
-const { documentErrorText } = require('../utils/error.js');
+const { documentErrorText, isTransientTransaction } = require('../utils/error.js');
 const {
   cloneDocument,
   occFilter,
@@ -571,12 +571,6 @@ const MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
 
 /** Errors that mean "the batch took too long or grew too big" — halve it and retry */
 const TIME_OR_SIZE = new Set([50, 262, 290, 334, 10334, 17419]);
-
-const isTransientTransaction = (error) =>
-  error?.hasErrorLabel?.('TransientTransactionError') === true ||
-  error?.code === 112 ||
-  error?.code === 251 ||
-  error?.code === 24;
 
 const isUnknownCommit = (error) =>
   error?.hasErrorLabel?.('UnknownTransactionCommitResult') === true;

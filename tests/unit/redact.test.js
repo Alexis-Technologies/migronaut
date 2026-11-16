@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { Binary, Long, MongoServerError, ObjectId } = require('mongodb');
-const { errorText } = require('../../src/utils/error.js');
+const { errorText, isTransientTransaction } = require('../../src/utils/error.js');
 const {
   BOUNDS,
   redactBounded,
@@ -130,6 +130,29 @@ describe('errorText', () => {
     );
     assert.strictEqual(errorText('plain string'), 'plain string');
     assert.strictEqual(errorText(7), '7');
+  });
+});
+
+describe('isTransientTransaction', () => {
+  it('should know a transaction worth running again, by label or by code', () => {
+    const labelled = { hasErrorLabel: (label) => label === 'TransientTransactionError' };
+    assert.strictEqual(isTransientTransaction(labelled), true);
+    // WriteConflict, NoSuchTransaction, LockTimeout: what the background
+    // engine retried and its dry run did not — one answer for both now.
+    for (const code of [112, 251, 24]) assert.strictEqual(isTransientTransaction({ code }), true);
+  });
+
+  it('should take anything else for an answer, not a blip', () => {
+    for (const error of [
+      { code: 11000 },
+      { code: 50 },
+      { hasErrorLabel: () => false },
+      new Error('boom'),
+      undefined,
+      null,
+    ]) {
+      assert.strictEqual(isTransientTransaction(error), false);
+    }
   });
 });
 
