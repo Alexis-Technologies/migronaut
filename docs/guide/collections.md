@@ -508,7 +508,14 @@ const [last] = await kit.convergeHistory({ limit: 1 });
 ```
 
 Writing the history is best-effort, like the changelog's failure trace: if it cannot be written the
-converge warns and carries on.
+converge warns and carries on. Its `startedAt` index is created with the first entry — unless
+`ensureIndexes: false`, which leaves it to you like the changelog's.
+
+A failure that repeats is not a new entry. Every entry carries the `fingerprint` of the plan its
+run started from (a dry run's result has it too); a converge that is refused or fails on the same
+plan, with the same error, as the newest entry is counted on that entry — `repeats`, and `lastAt`
+for when it last happened. A schedule that converges every minute against a conflict only you can
+settle leaves one entry, not 1,440 a day.
 
 ## When to use a migration instead
 
@@ -544,6 +551,10 @@ Use a migration when the change needs **ordering against data**:
   `collMod` with `prepareUnique`, then `unique` — duplicates make it fail and the index is left as
   it was; 6.0 has the commands but did not enforce the converted index in our tests, so it gets a
   rebuild) and **adding a TTL** to a single-field index (5.1+). The plan shows these as `modify`.
+  If taking `prepareUnique` back off fails as well (a failover between the two commands), the
+  error says so (`context.prepareUniqueLeft`): the index then refuses new duplicates while it is
+  still not unique. The next converge finds the flag and takes it off — or completes the
+  conversion, if the declaration is still unique.
 - **No zero-gap rebuild.** Anything else is a `recreate`, which drops before it creates. To change an index with no
   window, declare the new one under a **new name**, converge, then remove the old declaration
   and converge with `prune`. For a **unique** index the window is a real risk — a duplicate

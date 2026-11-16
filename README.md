@@ -540,7 +540,9 @@ otherwise it warns and skips. To intentionally re-run an edited, already-applied
 `list`, `dry-run`, `import`, `create`, `audit`, `lock`, `unlock`) to get a single JSON document on **stdout** — all
 human logs and the spinner are redirected to stderr, so the stream is safe to pipe into `jq` or parse
 in a script. On failure the command prints `{ "error": { "code": "...", "message": "..." } }` to
-stdout and exits `1`.
+stdout and exits with that error's own code (`EXIT_CODES`: 3 for a held lock, 6 for bad
+configuration or flags — a command line that does not parse included — 7 for a migration that
+threw, …; 1 for anything unclassified).
 
 ```bash
 # Apply pending migrations and capture the result in CI

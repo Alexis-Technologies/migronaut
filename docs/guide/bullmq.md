@@ -95,8 +95,9 @@ Three rules explain every behaviour on this page:
 
 | Method | Returns | |
 |---|---|---|
-| `enqueueUp(filename?, { to?, force?, ordered?, requestedBy?, reason? })` | `MigrationGroup` | All pending, pending up to `to`, or one file |
-| `enqueueDown(filename?, { steps?, batch?, to?, ordered? })` | `MigrationGroup` | Last batch (default), a batch, the last N, back to `to`, or one file |
+| `enqueueUp(filename?, { to?, force?, ordered?, converge?, requestedBy?, reason? })` | `MigrationGroup` | All pending, pending up to `to`, or one file |
+| `enqueueDown(filename?, { steps?, batch?, to?, ordered?, requestedBy?, reason? })` | `MigrationGroup` | Last batch (default), a batch, the last N, back to `to`, or one file |
+| `enqueueConverge({ ordered?, requestedBy?, reason? })` | `{ groupId, jobId, deduplicated, wait() }` | One [converge](/guide/collections) job on its own — see [below](#converge-jobs) |
 | `startWorker(options?)` | your `Worker` | Connects to MongoDB, then starts a concurrency-1 worker |
 | `status()` / `pending()` / `audit()` / `lockInfo()` | | Read straight from MongoDB — same as the [kit methods](/guide/api) |
 | `getJob(id)` | `MigrationJobView \| null` | A job as plain, redacted data — safe to return from an API |
@@ -104,8 +105,13 @@ Three rules explain every behaviour on this page:
 | `schedule({ every \| pattern, tz?, to?, id?, job? })` / `unschedule(id?)` | | Keep the database migrated on a schedule — `job: 'converge'` or `'background-verify'` for those schedules |
 | `startBackgroundWorker(options?)` | your `Worker` | The [background](#background-migrations-on-the-queue) worker: coordinators and lanes, side by side |
 | `enqueueBackground(name?, options?)` / `backgroundStatus(name?)` / `verifyBackground(options?)` | | Background migrations on the queue — see [below](#background-migrations-on-the-queue) |
-| `close({ force? })` | | Graceful shutdown |
+| `close({ force? })` | | Graceful shutdown — `force` does not wait for the job in flight, nor for a `close()` already under way |
 | `kit`, `queue`, `worker`, `queueEvents`, `processor`, `queueName` | | The parts, when you need them — and `backgroundQueue`, `backgroundWorker`, `backgroundProcessor`, `backgroundWatcher` |
+
+An option these calls do not read — a typo, such as `{ too: '0002-b.js' }` for `to` — is warned
+about once and ignored, not refused: `enqueueUp` then enqueues everything pending, and the log
+says why. TypeScript catches it at compile time. (`enqueueBackground` refuses an unknown option
+outright.)
 
 ### The group handle
 
@@ -228,6 +234,14 @@ explicitly whenever you decide a retry is right. A line that only **waits** — 
 comes before it and reports `returnvalue.waiting` (`{ migration, waitsFor }`). While it still waits
 for the same thing, later ticks say so again without planning; once it completes, the next tick
 goes on.
+
+The converge a tick adds (`convergeAfterUp`) is held the same way. When the declared collections
+are not in sync and the last converge **failed on this very plan** — a conflict only you can
+settle, such as a unique index that needs `--rebuild-unique`, or data that must be fixed first —
+the tick adds no job and reports `returnvalue.convergeHeld` (`{ reason, failedAt?, error? }`), with
+one warning. A changed definition changes the plan, and the next tick asks again; so does an
+explicit `enqueueConverge()` or `migronaut converge` that goes through. A converge job a tick does
+add is kept like the tick itself (100 completed, 500 failed) unless `jobOptions` sets a retention.
 
 ## Converge jobs
 
@@ -463,6 +477,12 @@ little later.
 
 A pod killed without that loses nothing either: its leases expire after `lockTTLSeconds`, and
 another lane resumes from the last checkpoint.
+
+`close({ force: true })` does not wait for the job in flight. Called on top of a `close()` that
+has not returned — a job that will not end, a Redis that is away — it stops waiting for that close
+(after a second more) instead of handing back the same pending promise; the close goes on in the
+background. A finished job never waits long for Redis either: its log rows and progress updates
+are best-effort, and the job settles without them after 5 seconds.
 
 ### Your own Worker
 

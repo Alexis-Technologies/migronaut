@@ -33,9 +33,10 @@ be `.ts`, ESM or CJS.)
 
 **3. A public API change touches two files together** — an entry point's runtime
 barrel and its hand-written types: `src/index.js` + `index.d.ts` for the package
-root, `src/bullmq/index.js` + `bullmq.d.ts` for the `./bullmq` subpath. Each pair
-is maintained in lockstep — neither file is generated from the other. Add a
-`tests/types` assertion for anything new. `pnpm run check:dts` compiles both
+root, `src/bullmq/index.js` + `bullmq.d.ts` for the `./bullmq` subpath,
+`src/versioning/index.js` + `versioning.d.ts` for `./versioning`. Each pair is
+maintained in lockstep — neither file is generated from the other. Add a
+`tests/types` assertion for anything new. `pnpm run check:dts` compiles the three
 declaration files on their own.
 
 **4. Never `throw new Error`, never `console.*` in core.** Every failure is a
@@ -54,7 +55,8 @@ Node's built-in `node:test` — no external framework.
   transactions are genuinely exercised. Run serially (`--test-concurrency=1`):
   each file boots its own replica set, and running them at once collides on
   ports and starves the timing-sensitive lock tests.
-- `tests/types/` — `tsd` assertions against `index.d.ts` and `bullmq.d.ts`.
+- `tests/types/` — `tsd` assertions against `index.d.ts`, `bullmq.d.ts` and
+  `versioning.d.ts`.
 
 The queue adapter (`src/bullmq/`) is tested without Redis:
 [tests/helpers/fake-bullmq.js](tests/helpers/fake-bullmq.js) is an in-memory
@@ -76,11 +78,23 @@ assuming a failure is real. A test whose awaited promise can only settle from an
 `unref()`ed timer passes on 24 and is cancelled on 22; see
 [tests/helpers/event-loop.js](tests/helpers/event-loop.js).
 
+The lockfile pins the newest majors of the peers (`mongodb` 7, `mongoose` 9),
+and CI's `compat` job runs both tiers again on the majors before them. To do the
+same locally, in a throwaway worktree: `pnpm add -D mongodb@^6 mongoose@^8`, then
+`pnpm test`. Swap them as a pair — Mongoose ships its own copy of the driver, and
+a driver and a Mongoose of different majors refuse each other's BSON types.
+
 Use `before`/`after`, not `beforeAll`/`afterAll` (those are Jest/Vitest names).
 Silence the logger with `logger: null`. No committed `.only` or `.skip` — the
-two sanctioned exceptions are `bullmq-redis.test.js` and `search-atlas.test.js`
-skipping themselves, with a reason, when there is no Redis or no Atlas Search
-to run against. The coverage gate must pass without either.
+four sanctioned exceptions skip themselves, with a reason, when what they need
+is not there: `bullmq-redis.test.js` (no Redis), `search-atlas.test.js` (no
+Atlas Search), `sharded.test.js` (no sharded cluster), and the symlink case of
+`tests/unit/sequence.test.js` (an OS that will not create a file symlink). The
+coverage gate must pass without them.
+
+An integration test that expects a failure disconnects its kit in a `finally`:
+when an assertion inside `assert.rejects` fails, a kit left connected keeps the
+file's process alive, and the run hangs instead of failing.
 
 `search-atlas.test.js` is manual: CI does not run it. Run it locally after a
 change to how search indexes are compared, planned or applied
@@ -102,7 +116,7 @@ treats servers from 7.2.1 differently, and CI never boots one:
 MONGOMS_VERSION=8.0.32 node --test tests/integration/converge.test.js
 ```
 
-Five environment variables control the test run:
+Six environment variables control the test run:
 
 | Env var | Effect |
 |---|---|
@@ -111,6 +125,7 @@ Five environment variables control the test run:
 | `MONGOMS_DOWNLOAD_DIR` | `mongodb-memory-server`'s binary cache directory. CI points it at a cached path. |
 | `MIGRONAUT_TEST_REDIS_URL` | Opt-in: run the queue adapter's scenarios against the real `bullmq` on this Redis (`docker run --rm -d -p 6379:6379 redis:7-alpine`, then `redis://127.0.0.1:6379`). Unset → that one file is skipped. |
 | `MIGRONAUT_TEST_ATLAS_URI` | Opt-in, manual (never set in CI): run `search-atlas.test.js` — declared search indexes against a server with Atlas Search, such as `mongodb/mongodb-atlas-local` (above). Unset → that one file is skipped. |
+| `MIGRONAUT_TEST_SHARDED_URI` | Opt-in, manual (never set in CI): run `sharded.test.js` against a sharded cluster — one `mongo:8.0` container started with `tests/fixtures/sharded/start.sh`. Run it after changing the shard-aware code. Unset → that one file is skipped. |
 
 The two `MONGOMS_*` names belong to `mongodb-memory-server`, so they keep their
 prefix. Everything migronaut itself reads is `MIGRONAUT_*` — including
@@ -145,7 +160,8 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 Before "fixing" one of these, read [ARCHITECTURE.md §8](ARCHITECTURE.md):
 `markApplied` upserts rather than inserts; `markReverted` never deletes;
-migrate-mongo imports are forward-only and refused by `down`/`redo`; `--json` on
-`init` selects the config *format* rather than machine output; queue jobs get a
+migrate-mongo imports are forward-only and refused by `down`/`redo`; `init` has
+no JSON output — `--json` on it is refused with a pointer to `--format json`,
+which selects the config file's format; queue jobs get a
 single attempt, and a job behind a failed migration fails as `MIGRATION_BLOCKED`
 instead of waiting.

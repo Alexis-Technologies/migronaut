@@ -721,7 +721,8 @@ repository write by the same rules.
 Six small modules behind the `./bullmq` subpath; see [§6.6](#66-the-queue-adapter-bullmq) for
 the design.
 - **`jobs.js`** — the contract shared by producer and worker: job names
-  (`up`/`down`/`sync`/`converge`), the versioned data shape, `parseJobData` (validation of
+  (`up`/`down`/`sync`/`converge`, and `background`/`background-lane`/`background-verify` on the
+  background queue), the versioned data shape, `parseJobData` (validation of
   *untrusted* payloads), `dedupId` / `convergeDedupId`, the job and scheduler templates.
 - **`producer.js`** — `planUpJobs`/`planDownJobs` (the plan *is* `kit.dryRun`, so it can never
   disagree with a run), `enqueueUp`/`enqueueDown` (one atomic `addBulk`, returns the group
@@ -809,16 +810,20 @@ the design.
   boolean/value/negatable (`--no-x` seeds `true` — unless `--x` is declared too, which makes the
   pair tri-state, as in commander) options with camelCase keys and short aliases,
   required `<x>` / optional `[x]` positionals, `optsWithGlobals()`, generated `--help`/`--version`.
-  Global options are recognized both before and after the command name; parse errors go to stderr
-  with `process.exitCode = 1` — it never calls `process.exit()`. Deliberately unsupported (unused):
-  combined short flags (`-fy`), variadic arguments. `util.parseArgs` was rejected: absent on
-  Node 18.0–18.2, no `--no-x` before 22.4, no subcommands/help.
+  Global options are recognized both before and after the command name. A parse error goes to
+  stderr with `process.exitCode = 1` — unless the program set `onUsageError(handler)`, which the
+  CLI does (`index.js`): there a command line that does not parse is `CONFIG_INVALID` — exit 6, and
+  one JSON document on stdout under `--json` (`reportUsageError` in shared.js). A value on a flag
+  that takes none (`--yes=false`) is a parse error, not the flag. It never calls
+  `process.exit()`. Deliberately unsupported (unused): combined short flags (`-fy`), variadic
+  arguments. `util.parseArgs` was rejected: no `--no-x` before 22.4, no subcommands/help.
 - **shared.js** — the CLI's workhorse:
   - `defineCommand(program, spec)` — the envelope every data command registers through:
     `optsWithGlobals`, presentation-only `preflight`, `withMigrator`, JSON-vs-`render` routing,
     and `after` for exit-code logic. Command files stay pure declaration because of it.
   - `withMigrator(opts, fn, {spinner, json})` — constructs `MigratorKit`, drives the spinner,
-    routes output for `--json`, runs `fn`, **always disconnects**, maps errors to exit code 1.
+    routes output for `--json`, runs `fn`, **always disconnects**, maps errors to their exit code
+    (`EXIT_CODES` by error code; 1 for an error that is not migronaut's).
     `fn` gets `{ logger, json, opts, spinner, stopRequested }` — the last two for a command that
     reads, asks, then acts (`converge`): a signal during the prompt makes `migrator.stop()` a
     no-op, so the command checks `stopRequested()` itself.
@@ -828,8 +833,8 @@ the design.
 - **spinner.js** — minimal spinner with the `start(text)`/`stop()` surface, writing to stderr;
   a complete no-op when the stream isn't a TTY, so piped/CI output never sees control sequences.
 - **table.js** — hand-rolled box-drawing renderers; column widths are computed ANSI-aware via
-  `stripAnsi` so colored cells never skew alignment (no wcwidth — CJK/emoji cells would mis-align;
-  migration names are ASCII).
+  `stripAnsi` so colored cells never skew alignment, and wide characters (CJK, emoji —
+  `WIDE_RANGES`) count as two columns.
 - **commands/*.js** — one `registerX(program)` per command. They parse flags, do presentation-only
   pre-flight checks, then call `withMigrator`. Look at [up.js](src/cli/commands/up.js) as the
   canonical example (force/yes/json pre-flight rules + delegation).
@@ -1619,6 +1624,27 @@ The high-impact ones for code changes:
   migration's `'failed'` trace carries the checksum of the file still on disk (`markFailed` records
   it) — a circuit breaker, since re-running a half-applied migration on every tick is the worst
   retry policy. A changed file, or an explicit `enqueueUp(name)`, resumes it.
+- **A tick holds a converge that failed on the same plan.** A converge result carries a
+  `fingerprint` — a digest of every row the plan would change or refuse — and so does its history
+  entry. When the newest entry is a failure with the fingerprint of the tick's own dry run, the
+  tick adds no converge job (`convergeHeld`): a conflict that needs `rebuildUnique`, or data to fix
+  first, is not settled by a failed job, a lock taken and a history entry per tick. The history
+  counts a failure that repeats on the entry it repeats (`repeats`, `lastAt`), so a schedule of
+  converge jobs cannot fill it either. Not a time-out: it is held until the plan changes or a
+  converge asked for explicitly goes through.
+- **An option nobody reads is warned about, once — not refused**, on `enqueueUp`, `enqueueDown`,
+  `enqueueConverge`, `schedule`, `createMigrationQueue` and `createMigrationProcessor`
+  (`KNOWN_OPTIONS`, `warnUnknownOptions`): these calls always took a wider object.
+  `enqueueBackground` and `createBackgroundProcessor` refuse one, as they always have. A *job's*
+  unknown field is still refused (see above) — that is untrusted input, this is the caller's code.
+- **A job does not wait for Redis to take its log rows.** They are best-effort; a job that is done
+  settles after `JOB_WRITE_WAIT_MS` (5 s) without them, since with Redis away they never settle
+  and the job, the line behind it and a graceful close would wait as long as the outage lasts.
+- **`close({ force: true })` on top of a `close()` under way stops waiting** (after
+  `FORCE_CLOSE_GRACE_MS`) instead of returning the pending promise. It cannot turn that close into
+  a forced one — BullMQ answers a second `close()` with the first — so it only ends the wait.
+- **A worker's `prefix` is the queue's**, whatever `workerOptions` or `startWorker()` say: placed
+  after them, like `concurrency: 1`.
 - **`generateId` is called with no arguments, and must be synchronous.** No "purpose" argument
   (`'run'`/`'group'`) is passed on purpose: `ulid(seedTime)` and `nanoid(size)` would read it as
   their own first parameter, and passing third-party generators as they are is the point. Async is
@@ -1647,6 +1673,12 @@ The high-impact ones for code changes:
 - **`createMigrationQueue` takes BullMQ's telemetry as `bullmq.telemetry`, not a top-level
   option** — `telemetry` at the top would read as the kit's own (`config.telemetry`), which is a
   different object with a different job.
+- **A conversion to unique that cannot be rolled back says so.** `collMod prepareUnique` then
+  `unique`; duplicates fail the second and the first is taken back off. If that fails too, the
+  error carries `prepareUniqueLeft` instead of claiming the index was left as it was, and the
+  comparison treats a live `prepareUnique: true` on a declaration that is not unique as a diff to
+  take off in place — otherwise the leftover would be invisible for good (`unique` is false on
+  both sides).
 - **A unique index is never rebuilt unasked.** A rebuild that drops a unique index and builds a
   unique one back plans as a `conflict` unless `converge({ rebuildUnique: true })`
   (`--rebuild-unique`): the constraint is gone until the build ends, and a duplicate written in
@@ -1822,8 +1854,9 @@ The high-impact ones for code changes:
 - **Gotcha:** Node caches dynamic `import()` by path. A test that rewrites the *same* migration
   filename mid-run will re-load the *cached* module. Use a new filename, or assert via a read-only
   path (`pendingMigrations`), when you need "changed file" behavior.
-- **Type coverage:** the public type surface ([index.d.ts](index.d.ts), [bullmq.d.ts](bullmq.d.ts))
-  is checked separately by `tsd` against [tests/types/](tests/types/) — `pnpm run test:types`.
+- **Type coverage:** the public type surface ([index.d.ts](index.d.ts), [bullmq.d.ts](bullmq.d.ts),
+  [versioning.d.ts](versioning.d.ts)) is checked separately by `tsd` against
+  [tests/types/](tests/types/) — `pnpm run test:types`.
   This is a type-assertion pass over hand-written types, not a build/typecheck step.
   `bullmq.test-d.ts` also asserts that the *real* BullMQ classes satisfy the structural
   `BullMQ*Like` types — the one place that claim is checked, since the declaration file itself
@@ -1848,11 +1881,11 @@ The high-impact ones for code changes:
 
 Useful commands:
 ```bash
-pnpm test                                  # unit + integration (~1200 tests)
+pnpm test                                  # unit + integration (~2550 tests)
 node --test tests/integration/up.test.js   # one file (boots its own replica set)
 pnpm run test:coverage                     # full suite under c8, gated at 90/90/90
-pnpm run test:types                        # tsd — index.d.ts + bullmq.d.ts vs tests/types/*.test-d.ts
-pnpm run check:dts                         # tsc --noEmit --strict over both .d.ts files alone
+pnpm run test:types                        # tsd — the three .d.ts files vs tests/types/*.test-d.ts
+pnpm run check:dts                         # tsc --noEmit --strict over the three .d.ts files alone
 # opt-in: the adapter scenarios against the real bullmq + Redis (CI runs this)
 docker run --rm -d -p 6379:6379 redis:7-alpine
 MIGRONAUT_TEST_REDIS_URL=redis://127.0.0.1:6379 node --test tests/integration/bullmq-redis.test.js
@@ -1875,8 +1908,8 @@ MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admi
   (`pnpm run test:types`) against [tests/types/](tests/types/), and `pnpm run check:dts` compiles
   the three files in one program.
 - **Lint/format:** `pnpm run lint` (`oxlint src bin scripts tests bench examples`), `pnpm run format`
-  (`oxfmt` to fix formatting), `pnpm run format:check` (`oxfmt --check`, no writes). The two root
-  shims (`index.js`, `bullmq.js`) are one-line re-exports and are not in the globs.
+  (`oxfmt` to fix formatting), `pnpm run format:check` (`oxfmt --check`, no writes). The three root
+  shims (`index.js`, `bullmq.js`, `versioning.js`) are one-line re-exports and are not in the globs.
 - **Bundle-size report (informational only):** `pnpm run size` runs `scripts/size.js`, which uses
   esbuild to report library, CLI and queue-adapter bundle size — it does not produce a published
   artifact. `bullmq` is deliberately *not* marked external there: the adapter never imports it, so
@@ -1887,9 +1920,9 @@ MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admi
   throwaway in-memory MongoDB replica set for the run. Not run in CI; results are hand-copied
   into the README's Benchmarks section before releases.
 - **Published artifact:** exactly what `files` in [package.json](package.json) lists —
-  `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`, `migronaut.schema.json`, `bin`, `src`,
-  `README.md`, `CHANGELOG.md`. The `exports` map exposes two entry points (`.` and `./bullmq`) and
-  nothing else. `docs/`, `blog/`, `examples/` and this `ARCHITECTURE.md` live in the repo but are
+  `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`, `versioning.js`, `versioning.d.ts`,
+  `migronaut.schema.json`, `bin`, `src`, `README.md`, `CHANGELOG.md`. The `exports` map exposes
+  three entry points (`.`, `./bullmq` and `./versioning`) and nothing else. `docs/`, `blog/`, `examples/` and this `ARCHITECTURE.md` live in the repo but are
   **never** shipped to npm.
 - **Release:** manual — bump `version` in `package.json`, write the dated entry in `CHANGELOG.md`
   by hand, commit and tag, then `pnpm run release` (= `pnpm publish`). `prepublishOnly` re-runs

@@ -3,6 +3,120 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
+## Unreleased
+
+A hardening pass over 2.4: no new feature, and no change for a project that does none of the
+things listed under "Changed behaviour".
+
+### Changed behaviour
+
+- **The CLI exits 6 (`CONFIG_INVALID`) on a command line that does not parse** — an unknown flag
+  or command, a missing value or argument, no command at all — as the reference has always said.
+  It used to exit 1. Under `--json` the error is one JSON document on stdout, like every other.
+- **A value on a flag that takes none is refused.** `--yes=false` and `--no-lock=0` used to drop
+  the value and set the flag — consent to a destructive action, or a run without the lock, read
+  from a line that said no. They are parse errors now; leave the flag out instead.
+- **`noLock`, `force`, `step`, `dryRun` and `trustHash` must be booleans** on `up`, `down`, `redo`,
+  `baseline`, `import` and `runMigrations`. They were read by truthiness, so `noLock: 'false'` ran
+  without the lock.
+- **A config file must come to an object.** A factory that returns nothing (a forgotten `return`),
+  a JSON `null`, a string or an array is `CONFIG_INVALID`; it used to be a `TypeError`, a "could
+  not resolve" warning, or keys named `'0'`, `'1'`, … merged in.
+- **An option the queue's entry points do not read is warned about**, once, on `enqueueUp`,
+  `enqueueDown`, `enqueueConverge`, `schedule`, `createMigrationQueue` and
+  `createMigrationProcessor`. It is still ignored — but `enqueueUp(undefined, { too: 'x.js' })` no
+  longer enqueues everything in silence.
+- **A sync tick holds a converge that failed on the same plan** (`returnvalue.convergeHeld`)
+  instead of adding a failed job on every tick; and a converge job a tick does add is kept like
+  the tick (100 completed, 500 failed) unless `jobOptions` sets a retention.
+- **A lost lock is reported once** — one warning, one `lock:lost` — not on every heartbeat until
+  the run ends.
+- **A throttle hook's pause and a `retryOnConflict` backoff are capped at one hour.** A timer
+  past 2³¹−1 ms (or `Infinity`) fires after 1 ms in Node, so "back off a lot" used to mean "do
+  not wait at all".
+
+### Added
+
+- **`code` on `migration:error` and `run:end`** — the failure's typed error code. A run the lock
+  refused ends with `code: 'LOCK_ALREADY_HELD'`, so a subscriber waiting for the lock can tell its
+  refusals from a run that failed.
+- **`fingerprint` on a converge result and its history entry** — a digest of everything the plan
+  would change or refuse; a failure that repeats the newest history entry is counted on it
+  (`repeats`, `lastAt`) instead of appended.
+- **`background:throttle` with `reason: 'lag'`** (and the `migronaut.background.throttled` metric)
+  while lanes wait for a lagging secondary — with a warning once it has lasted a minute. A lane
+  whose slice ends meanwhile gives its slot back, so a pause or a cancel is not held up by the
+  secondary.
+- **`degraded: 'sample-timeout'` on a background dry run** whose sample could not be drawn in 30 s
+  and was replaced by the first documents.
+- **`migronaut.lock.wait.outcome: failed`** — a wait for the lock that ended in another error.
+- **`MigrationLock` reads its age in server time** (`inspectWithAge`), which `audit` uses.
+
+### Fixed
+
+- **Secrets in `clientOptions` reached the log.** The debug line "Resolved config" carried the
+  options as they are — `auth.password`, a TLS key passphrase, KMS credentials — to any structured
+  logger at debug level. It lists the option names only.
+- **Redaction could hold the event loop for minutes.** The credential pattern was retried from
+  every position of a long run of letters or digits: 400 KB took two minutes, heartbeat timers
+  included. It is linear now, and text kept only up to a bound is read no further than twice it.
+- **A background plan made by one partitioner was worked by the other.** On a sharded collection,
+  converging the shard-aware index in during a pass — what the "not shard-aware" warning asks for —
+  made every slice fail with a `TypeError` until the migration failed. A lane now steps back and
+  the coordinator re-splits the same pass. A topology or a list of indexes that could not be read
+  is no longer taken for "not sharded" or "no index".
+- **`reloadMigrations` did nothing for CommonJS files** — the default scaffold. The edited file
+  kept running as first loaded, under the new file's checksum.
+- **`audit` called a live lock stale** when its holder ran with a longer TTL than the auditor, or
+  the auditor's clock was off, and advised `migronaut unlock`. It goes by the holder's own TTL and
+  the server's clock.
+- **A background partition could stay open with no cursor** (transactional, hashed shard key, the
+  last document in conflict) and be worked again from its start.
+- **A repin that lowered `batchSize` did not reach a long-lived runner**: its adaptive controller
+  kept the old ceiling.
+- **`startBackgroundRunner`'s `signal` left the runner's own kit connected.** It stops the runner
+  as `stop()` does.
+- **`afterAll` throwing after a successful run lost the applied rows** on its error and `run:end`.
+- **A file that does not load was reported outside its migration span**, before `beforeEach`, with
+  no duration point; under `reloadMigrations` a file was evaluated twice per run.
+- **A failed `ensureIndexes` read as "Failed to connect to MongoDB"**; it says what failed.
+- **A `connect()` overtaken by `disconnect()` still opened a connection** nobody would close.
+- **A converge to unique whose rollback failed said "the index was left as it was"** of an index
+  that refused new duplicates from then on. The error says so (`context.prepareUniqueLeft`), and
+  the next converge takes the leftover `prepareUnique` off.
+- **The converge history ignored `ensureIndexes: false`.**
+- **A queue job waited for its log rows without limit** — with Redis away, a finished job, the
+  jobs behind it and a graceful `close()` hung. It settles without them after 5 s, and
+  `close({ force: true })` on top of a `close()` under way stops waiting for it.
+- **`group.wait()` could throw instead of rejecting**; a worker's `prefix` could be overridden away
+  from its queue's; a failed background queue job left no log row, a stalled one no warning.
+- **`dryRun('up')` skipped the `strict` checksum check** of the run it previews.
+- **A symlinked migration file** was left out of a bulk `up` and `status`, though `up <name>` ran
+  it. A dry run of a background migration did not apply the shard-key guard, and drew its sample
+  with a full scan on a large match. A verify round stopped at the first migration someone else
+  had moved. A failed document past a halved transactional batch was counted once per commit.
+  `forceRelease` could report one holder and delete another; a failed lock readback left the
+  document behind until its TTL. `$schema` in a generated JSON config was called unrecognized.
+
+### Tooling
+
+- **The suite runs on the newest majors**: `mongodb` 7, `mongoose` 9, TypeScript 7 (and `bullmq`
+  6.7, `ioredis` 6, `mongodb-memory-server` 11). No source change was needed. CI's new `compat` job
+  runs both test tiers on `mongodb` 6 with `mongoose` 8, and the unit job names the Node floor
+  exactly (22.18.0).
+- **`check:dts` names `--types node --lib esnext`**: TypeScript 7 includes neither by default.
+- **Guard tests for the conventions that had none** — no `console.*`, no bare `Error`, no tracer
+  call outside `utils/telemetry.js` — and the existing ones cover `versioning.d.ts`, `ioredis` and
+  subpath imports.
+
+### Documentation
+
+- SECURITY.md lists the supported version again, and says where the values of a duplicate-key
+  error are masked and where they are not. CONTRIBUTING.md, ARCHITECTURE.md and CLAUDE.md are back
+  in step with three entry points, four opt-in suites and the current test count.
+- New troubleshooting entries: `BSONVersionError` (a driver and a Mongoose of different majors)
+  and Node types under TypeScript 6+.
+
 ## v2.4.0 — 2026-10-07
 
 Migration logs for the application's users. Additive: a migration that never touches the new
