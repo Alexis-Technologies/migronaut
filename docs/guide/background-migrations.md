@@ -560,7 +560,8 @@ every batch, a lane waits for each of these in turn:
 
 1. **`pauseMs`**, the fixed pause between batches.
 2. **Your `throttle(ctx)` hook.** It gets `{ name, collection, generation, partition, batchSize,
-   signal }`, and a number it returns is an extra pause in ms:
+   signal }`, and a number it returns is an extra pause in ms (an hour at most — it is asked again
+   before the next batch):
 
    ```js
    throttle: async () => ((await isPeakHour()) ? 2000 : 0),

@@ -382,6 +382,50 @@ describe('loadConfig', () => {
     assert.deepStrictEqual(dump.fields.collections, ['users']);
   });
 
+  it('should show clientOptions as option names only — its values can be secrets', async () => {
+    const lines = [];
+    const logger = {
+      debug: (msg, fields) => lines.push({ msg, fields }),
+      info() {},
+      warn() {},
+      error() {},
+    };
+    // None of these is URI-shaped, so redaction by shape alone would keep them.
+    const clientOptions = {
+      auth: { username: 'app', password: 'S3CRET-PASSWORD' },
+      tlsCertificateKeyFilePassword: 'S3CRET-PASSPHRASE',
+      proxyPassword: 'S3CRET-PROXY',
+      autoEncryption: { kmsProviders: { aws: { secretAccessKey: 'S3CRET-KMS' } } },
+    };
+    const config = await loadConfig({
+      cwd: tmp,
+      flags: { uri: 'mongodb://x:27017', dbName: 'x', logger, clientOptions },
+    });
+    // The config itself is untouched: the driver still gets the real options.
+    assert.strictEqual(config.clientOptions, clientOptions);
+    const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+    assert.deepStrictEqual(dump.fields.clientOptions, [
+      'auth',
+      'tlsCertificateKeyFilePassword',
+      'proxyPassword',
+      'autoEncryption',
+    ]);
+    for (const line of lines) assert.ok(!JSON.stringify(line).includes('S3CRET'));
+  });
+
+  it('should leave clientOptions out of the debug dump when none is configured', async () => {
+    const lines = [];
+    const logger = {
+      debug: (msg, fields) => lines.push({ msg, fields }),
+      info() {},
+      warn() {},
+      error() {},
+    };
+    await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x', logger } });
+    const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+    assert.ok(!('clientOptions' in dump.fields));
+  });
+
   it('should not let a JSON config poison the prototype via __proto__', async () => {
     writeFileSync(
       path.join(tmp, 'migronaut.config.json'),

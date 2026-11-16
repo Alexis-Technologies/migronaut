@@ -27,7 +27,8 @@ function renderSection(title, rows) {
  * `<x>` / optional `[x]` positional arguments, `optsWithGlobals()`, and
  * generated `--help` / `--version`. Global (root) options are recognized both
  * before and after the subcommand name. Parse errors are written to stderr
- * and set `process.exitCode = 1` — `process.exit()` is never called.
+ * and set `process.exitCode = 1` — unless `onUsageError` takes them over;
+ * `process.exit()` is never called.
  *
  * Deliberately unsupported (unused by migronaut): combined short flags
  * (`-fy`), variadic arguments, option defaults other than negatable `true`.
@@ -44,6 +45,8 @@ class Command {
   #values = {};
   /** Lazily-built `--long`/`-s` → option lookup; reset whenever options change */
   #optionIndex = null;
+  /** What a parse error does instead of the default — see {@link onUsageError} */
+  #usageError = null;
 
   name(value) {
     this.#name = value;
@@ -98,6 +101,17 @@ class Command {
 
   action(fn) {
     this.#actionFn = fn;
+    return this;
+  }
+
+  /**
+   * Take over how a parse error ends: `handler(message, help)`, where `help`
+   * is the help text when no command was given at all. Set on the root
+   * program. Without one the message (or that help) goes to stderr and
+   * `process.exitCode` becomes 1.
+   */
+  onUsageError(handler) {
+    this.#usageError = handler;
     return this;
   }
 
@@ -173,6 +187,12 @@ class Command {
           }
           owner.#values[option.key] = value;
         } else {
+          // `--yes=false` is not "no": the value would be dropped and the flag
+          // set — consent to a destructive action, or `--no-lock=false`
+          // running without the lock. Refused, as commander refuses it.
+          if (inlineValue !== undefined) {
+            return this.#fail(`option '${option.long}' does not take a value`);
+          }
           owner.#values[option.key] = !option.negated;
         }
         continue;
@@ -194,11 +214,7 @@ class Command {
       positionals.push(token);
     }
 
-    if (command === null) {
-      process.stderr.write(`${this.#helpText(this)}\n`);
-      process.exitCode = 1;
-      return;
-    }
+    if (command === null) return this.#fail('no command given', this.#helpText(this));
 
     const args = [];
     for (let i = 0; i < command.#arguments.length; i++) {
@@ -261,8 +277,13 @@ class Command {
     return lookup(command) ?? lookup(this);
   }
 
-  #fail(message) {
-    process.stderr.write(`error: ${message}\n`);
+  /** End the parse on an error — `help`: what to show instead of the message (no command) */
+  #fail(message, help) {
+    if (this.#usageError !== null) {
+      this.#usageError(message, help);
+      return;
+    }
+    process.stderr.write(help !== undefined ? `${help}\n` : `error: ${message}\n`);
     process.exitCode = 1;
   }
 

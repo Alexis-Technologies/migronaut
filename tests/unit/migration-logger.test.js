@@ -256,6 +256,17 @@ describe('createMigrationLogger', () => {
     assert.strictEqual(events[0].truncated, true);
   });
 
+  it('should mark a message cut before it was masked, however short masking left it', () => {
+    const { events, logger } = ordinary();
+    // Far past what is read: the duplicate key's closing brace is never seen,
+    // and its values must not be the part that survives.
+    logger.info(`E11000 dup key: { email: "${'v'.repeat(MAX_MESSAGE_LENGTH * 3)}" }`, {
+      userland: true,
+    });
+    assert.strictEqual(events[0].msg, 'E11000 dup key: { <redacted> }…');
+    assert.strictEqual(events[0].truncated, true);
+  });
+
   it('should drop a call whose fields throw, and never throw itself', () => {
     const { lines, events, logger } = ordinary();
     const hostile = {

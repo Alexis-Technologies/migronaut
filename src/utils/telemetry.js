@@ -1,6 +1,6 @@
 const { MigronautError } = require('../errors/index.js');
 const { errorWithCause } = require('./error.js');
-const { redactOutbound } = require('./redact.js');
+const { redactWithin } = require('./redact.js');
 
 /**
  * OpenTelemetry's `SpanStatusCode.ERROR`. Spelled as a number because the enum
@@ -142,8 +142,8 @@ function errorType(error) {
  */
 function failureText(error) {
   // A span goes to a third-party backend: no data values, and a bounded size.
-  const text = redactOutbound(errorWithCause(error));
-  return text.length > MAX_STATUS_MESSAGE_LENGTH
+  const { text, cut } = redactWithin(errorWithCause(error), MAX_STATUS_MESSAGE_LENGTH);
+  return cut || text.length > MAX_STATUS_MESSAGE_LENGTH
     ? `${text.slice(0, MAX_STATUS_MESSAGE_LENGTH - 1)}…`
     : text;
 }

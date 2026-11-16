@@ -659,13 +659,27 @@ async function loadConfig(options = {}) {
   // debug level. Live instances (client, mongoose, hooks, logger, telemetry)
   // and the generateId function are elided: they are not serializable and
   // redactDeep rightly refuses to clone them. Declared collections show as
-  // names only — validators can run to hundreds of lines.
+  // names only — validators can run to hundreds of lines. clientOptions shows
+  // as its option names only: it is where secrets that are not URI-shaped
+  // live (`auth.password`, a TLS key passphrase, KMS credentials), and
+  // redactDeep masks strings by their shape, never by the key they sit under.
   {
-    const { client, mongoose, hooks, logger, generateId, telemetry, collections, ...rest } = config;
+    const {
+      client,
+      mongoose,
+      hooks,
+      logger,
+      generateId,
+      telemetry,
+      collections,
+      clientOptions,
+      ...rest
+    } = config;
     effectiveLogger(config.logger).debug(
       `Resolved config (source: ${configFilePath ? path.basename(configFilePath) : 'env/flags/defaults'})`,
       redactDeep({
         ...rest,
+        ...(clientOptions ? { clientOptions: Object.keys(clientOptions) } : {}),
         ...(collections ? { collections: collections.map((definition) => definition.name) } : {}),
         ...(client ? { client: '[injected]' } : {}),
         ...(mongoose ? { mongoose: '[injected]' } : {}),

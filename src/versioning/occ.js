@@ -269,6 +269,16 @@ const sleep = (ms, signal) =>
   });
 
 /**
+ * The longest one backoff waits. A `backoff` function is the caller's: past
+ * 2³¹−1 ms (or `Infinity`) Node fires a timer after 1 ms, so the longest
+ * wait asked for would be the shortest one given.
+ */
+const MAX_BACKOFF_MS = 3_600_000;
+
+/** What a backoff's answer means in ms — nothing for a negative or `NaN` */
+const backoffMs = (ms) => (ms > 0 ? Math.min(ms, MAX_BACKOFF_MS) : 0);
+
+/**
  * Run `fn(attempt)` — which reads, decides and writes with a revision guard —
  * again after a conflict, up to `attempts` times in all (default 3), with a
  * full-jitter backoff between tries. A `not-found` is never retried: the
@@ -276,7 +286,8 @@ const sleep = (ms, signal) =>
  * that is not a `RevisionConflictError` is thrown at once.
  *
  * `backoff` is `{ baseMs, maxMs }` (default 10 and 1000) or a function of
- * the attempt number returning milliseconds; `signal` cuts a wait short.
+ * the attempt number returning milliseconds (an hour at most); `signal` cuts
+ * a wait short.
  */
 async function retryOnConflict(fn, { attempts = 3, backoff, signal } = {}) {
   if (typeof fn !== 'function') throw new ConfigInvalidError('retryOnConflict needs a function');
@@ -291,7 +302,7 @@ async function retryOnConflict(fn, { attempts = 3, backoff, signal } = {}) {
       const retryable =
         error instanceof RevisionConflictError && error.context?.reason !== 'not-found';
       if (!retryable || attempt + 1 >= attempts) throw error;
-      await sleep(delay(attempt), signal);
+      await sleep(backoffMs(delay(attempt)), signal);
     }
   }
 }

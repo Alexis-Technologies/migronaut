@@ -91,6 +91,40 @@ describe('MigratorKit import collection guards', () => {
   }
 });
 
+describe('MigratorKit flag option guards', () => {
+  // These options are read by truthiness: 'false' from an environment
+  // variable or a JSON body would run without the lock, or force a re-run.
+  const notBooleans = ['false', 'true', 0, 1, null, {}];
+  const calls = [
+    ['up noLock', (kit, value) => kit.up(undefined, { noLock: value }), 'noLock'],
+    ['up force', (kit, value) => kit.up('0001-a.js', { force: value }), 'force'],
+    ['up step', (kit, value) => kit.up(undefined, { step: value }), 'step'],
+    ['down noLock', (kit, value) => kit.down(undefined, { noLock: value }), 'noLock'],
+    ['redo noLock', (kit, value) => kit.redo(undefined, { noLock: value }), 'noLock'],
+    ['baseline noLock', (kit, value) => kit.baseline({ noLock: value }), 'noLock'],
+    ['import noLock', (kit, value) => kit.import({ noLock: value }), 'noLock'],
+    ['import dryRun', (kit, value) => kit.import({ dryRun: value }), 'dryRun'],
+    ['import force', (kit, value) => kit.import({ force: value }), 'force'],
+    ['import trustHash', (kit, value) => kit.import({ trustHash: value }), 'trustHash'],
+  ];
+
+  for (const [label, call, key] of calls) {
+    it(`should reject a non-boolean ${label} before anything connects`, async () => {
+      for (const value of notBooleans) {
+        await assert.rejects(call(guardedKit(), value), (error) => {
+          assert.ok(error instanceof ConfigInvalidError, JSON.stringify(value));
+          assert.strictEqual(error.message, `${key} must be a boolean`);
+          return true;
+        });
+      }
+    });
+  }
+
+  it('should still refuse a baseline target that is not a string', async () => {
+    await assert.rejects(guardedKit().baseline({ to: { $ne: null } }), MigrationInvalidNameError);
+  });
+});
+
 describe('MigratorKit sequenced-run option guards', () => {
   // `batch` and `ordered` are what a queue job passes for every migration, so
   // a malformed value must be refused before anything connects — never stamped

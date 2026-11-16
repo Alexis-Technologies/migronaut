@@ -1,7 +1,7 @@
 const { isPlainObject } = require('../utils/canonical.js');
 const { errorText } = require('../utils/error.js');
 const { jobFields } = require('../utils/job-ref.js');
-const { BOUNDS, redactBounded, redactOutbound } = require('../utils/redact.js');
+const { BOUNDS, redactBounded, redactWithin } = require('../utils/redact.js');
 
 /**
  * The logger a migration gets as `ctx.logger`, and the `migration:log` event.
@@ -162,8 +162,8 @@ function createMigrationLogger({
       // The event leaves the process: the values a server error quotes (an
       // E11000's duplicate key) are masked too, as everywhere text leaves it.
       // The log line keeps them — it is what a developer debugs with.
-      const message = redactOutbound(text);
-      const clipped = message.length > MAX_MESSAGE_LENGTH;
+      const { text: message, cut } = redactWithin(text, MAX_MESSAGE_LENGTH);
+      const clipped = cut || message.length > MAX_MESSAGE_LENGTH;
       const truncated = data.truncated || clipped;
       emitter.emit({
         ...event,

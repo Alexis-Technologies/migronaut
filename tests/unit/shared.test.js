@@ -5,6 +5,7 @@ const {
   attachSignalHandlers,
   exitCodeFor,
   partialFromOpts,
+  reportUsageError,
   resolveLevel,
 } = require('../../src/cli/shared.js');
 const { ConfigInvalidError, LockAlreadyHeldError } = require('../../src/errors/index.js');
@@ -51,6 +52,48 @@ describe('exitCodeFor', () => {
   it('should collapse a non-Migronaut error to 1', () => {
     assert.strictEqual(exitCodeFor(new Error('boom')), 1);
     assert.strictEqual(exitCodeFor('string failure'), 1);
+  });
+});
+
+describe('reportUsageError', () => {
+  /** Run `fn` with both streams captured and the exit code put back afterwards */
+  function captured(fn) {
+    const out = [];
+    const err = [];
+    const stdout = mock.method(process.stdout, 'write', (chunk) => out.push(chunk) > 0);
+    const stderr = mock.method(process.stderr, 'write', (chunk) => err.push(chunk) > 0);
+    try {
+      fn();
+      return { out: out.join(''), err: err.join(''), code: process.exitCode };
+    } finally {
+      stdout.mock.restore();
+      stderr.mock.restore();
+      process.exitCode = undefined;
+    }
+  }
+
+  it('should exit as CONFIG_INVALID with the message on stderr', () => {
+    const seen = captured(() => reportUsageError("unknown option '--bogus'"));
+    assert.strictEqual(seen.code, EXIT_CODES.CONFIG_INVALID);
+    assert.strictEqual(seen.err, "error: unknown option '--bogus'\n");
+    assert.strictEqual(seen.out, '');
+  });
+
+  it('should show the help in place of the message when there is one', () => {
+    const seen = captured(() => reportUsageError('no command given', { help: 'Usage: x' }));
+    assert.strictEqual(seen.code, EXIT_CODES.CONFIG_INVALID);
+    assert.strictEqual(seen.err, 'Usage: x\n');
+  });
+
+  it('should print one JSON document on stdout under --json, and nothing else', () => {
+    const seen = captured(() =>
+      reportUsageError("option '--yes' does not take a value", { json: true, help: 'Usage: x' }),
+    );
+    assert.strictEqual(seen.code, EXIT_CODES.CONFIG_INVALID);
+    assert.strictEqual(seen.err, '');
+    assert.deepStrictEqual(JSON.parse(seen.out), {
+      error: { code: 'CONFIG_INVALID', message: "option '--yes' does not take a value" },
+    });
   });
 });
 

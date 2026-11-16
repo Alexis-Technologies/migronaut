@@ -148,6 +148,32 @@ function assertOrderedValid(ordered, filename) {
   }
 }
 
+/**
+ * Options that are flags: a boolean, or left out. They are read by
+ * truthiness, so `noLock: 'false'` — a value that came from an environment
+ * variable or a JSON body — would run without the lock, and `force: 'no'`
+ * re-run an applied migration.
+ */
+function assertFlags(options, keys) {
+  for (const key of keys) {
+    if (options[key] !== undefined && typeof options[key] !== 'boolean') {
+      throw new ConfigInvalidError(`${key} must be a boolean`, { [key]: options[key] });
+    }
+  }
+}
+
+const UP_FLAGS = Object.freeze(['noLock', 'force', 'step']);
+const LOCK_FLAGS = Object.freeze(['noLock']);
+const IMPORT_FLAGS = Object.freeze(['noLock', 'dryRun', 'force', 'trustHash']);
+const CONVERGE_FLAGS = Object.freeze([
+  'dryRun',
+  'prune',
+  'noLock',
+  'ordered',
+  'rebuildUnique',
+  'waitForSearchIndexes',
+]);
+
 /** `up`'s `converge` option: a boolean, and only for a bulk run that reaches the head */
 function assertConvergeAfterUpValid(converge, filename, to) {
   if (converge === undefined) return;
@@ -185,6 +211,7 @@ function assertBackgroundPendingValid(onBackgroundPending) {
 /** `up(filename, options)` */
 function assertUpOptions(filename, options) {
   assertFilename(filename);
+  assertFlags(options, UP_FLAGS);
   // `to` is checked against a filename only: unlike `down`, an explicit
   // `batch` here is a label for whatever gets applied, not a selector.
   assertToValid(options.to, filename);
@@ -205,6 +232,7 @@ function assertUpOptions(filename, options) {
 /** `down(filename, options)` */
 function assertDownOptions(filename, options) {
   assertFilename(filename);
+  assertFlags(options, LOCK_FLAGS);
   assertStepsValid(options.steps, filename, options.batch);
   assertBatchValid(options.batch);
   assertToValid(options.to, filename, options);
@@ -216,6 +244,7 @@ function assertDownOptions(filename, options) {
 /** `redo(filename, options)` */
 function assertRedoOptions(filename, options) {
   assertFilename(filename);
+  assertFlags(options, LOCK_FLAGS);
   assertActorValid(options);
   assertJobValid(options.job);
 }
@@ -232,18 +261,7 @@ function assertDryRunOptions(filename, options) {
 
 /** `converge(options)` */
 function assertConvergeOptions(options) {
-  for (const key of [
-    'dryRun',
-    'prune',
-    'noLock',
-    'ordered',
-    'rebuildUnique',
-    'waitForSearchIndexes',
-  ]) {
-    if (options[key] !== undefined && typeof options[key] !== 'boolean') {
-      throw new ConfigInvalidError(`${key} must be a boolean`, { [key]: options[key] });
-    }
-  }
+  assertFlags(options, CONVERGE_FLAGS);
   // A dry run builds nothing, so there is nothing to wait for — asking for
   // both is a mistake worth saying, not a wait that silently never happens.
   if (options.dryRun && options.waitForSearchIndexes) {
@@ -274,11 +292,23 @@ function assertListOptions(filter, options) {
   }
 }
 
+/** `baseline(options)` */
+function assertBaselineOptions(options) {
+  assertFilename(options.to);
+  assertFlags(options, LOCK_FLAGS);
+}
+
+/** `runMigrations(config, options)`: its own `noLock`, before a kit is built */
+function assertRunFlags(options) {
+  assertFlags(options, LOCK_FLAGS);
+}
+
 /**
  * `import(options)`: a bad --from/--to must not cost a round trip or take the
  * lock. Defaults come from the already-validated config.
  */
 function assertImportOptions(options) {
+  assertFlags(options, IMPORT_FLAGS);
   if (options.from !== undefined && !isCollectionName(options.from)) {
     throw new ConfigInvalidError('Invalid source collection name', { from: options.from });
   }
@@ -290,6 +320,7 @@ function assertImportOptions(options) {
 module.exports = {
   assertActorValid,
   assertJobValid,
+  assertBaselineOptions,
   assertConvergeOptions,
   assertDownOptions,
   assertDryRunOptions,
@@ -298,5 +329,6 @@ module.exports = {
   assertImportOptions,
   assertListOptions,
   assertRedoOptions,
+  assertRunFlags,
   assertUpOptions,
 };

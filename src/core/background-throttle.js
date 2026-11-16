@@ -26,6 +26,14 @@ const CONFIG_CHECK_INTERVAL_MS = 60_000;
 /** How long to wait between two looks at a lag that is too high */
 const LAG_WAIT_MS = 1_000;
 
+/**
+ * The longest pause a throttle hook gets in one go. A timer past 2³¹−1 ms —
+ * or `Infinity` — is not a long wait in Node: it fires after 1 ms, so a hook
+ * that meant "back off a lot" would switch the throttle off. The hook is
+ * asked again before every batch, so an hour at a time loses nothing.
+ */
+const MAX_HOOK_PAUSE_MS = 3_600_000;
+
 /** Errors that mean "no replication status here" — not a replica set member */
 const NO_REPLICATION = new Set([
   59, // CommandNotFound (mongos)
@@ -176,7 +184,9 @@ function createThrottle({ spec, db, logger, name, now = Date.now, wait = sleep, 
           batchSize,
           signal,
         });
-        if (typeof extra === 'number' && extra > 0) await wait(extra, signal);
+        if (typeof extra === 'number' && extra > 0) {
+          await wait(Math.min(extra, MAX_HOOK_PAUSE_MS), signal);
+        }
       }
       await waitForLag(signal);
     },
@@ -259,6 +269,7 @@ const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 module.exports = {
   LAG_CHECK_INTERVAL_MS,
+  MAX_HOOK_PAUSE_MS,
   THROTTLE_REPORT_INTERVAL_MS,
   createAdaptive,
   createThrottle,

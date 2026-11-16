@@ -8,7 +8,15 @@ const {
   redactDeep,
   redactOutbound,
   redactUris,
+  redactWithin,
 } = require('../../src/utils/redact.js');
+
+/** How long `fn` takes, in ms */
+function elapsedMs(fn) {
+  const startedAt = process.hrtime.bigint();
+  fn();
+  return Number(process.hrtime.bigint() - startedAt) / 1e6;
+}
 
 describe('redactUris', () => {
   it('should mask the password in a URI anywhere inside a message', () => {
@@ -43,6 +51,43 @@ describe('redactUris', () => {
   it('should pass non-strings through unchanged', () => {
     assert.strictEqual(redactUris(undefined), undefined);
     assert.strictEqual(redactUris(42), 42);
+  });
+
+  it('should mask a URI glued to a long run of scheme characters', () => {
+    const masked = redactUris(`${'x'.repeat(100)}mongodb://user:secret@host/db`);
+    assert.ok(masked.endsWith('mongodb://user:****@host/db'));
+    assert.ok(!masked.includes('secret'));
+  });
+
+  it('should need a letter in the scheme, as a URI does', () => {
+    assert.strictEqual(redactUris('at 1://u:p@h'), 'at 1://u:p@h');
+    assert.strictEqual(redactUris('at a1://u:p@h'), 'at a1://u:****@h');
+    assert.strictEqual(redactUris('://u:p@h'), '://u:p@h');
+  });
+
+  it('should find the credentials of a URI that follows one without any', () => {
+    assert.strictEqual(
+      redactUris('a://user:pa://x:secret@h and http://h:8080/p'),
+      'a://user:pa://x:****@h and http://h:8080/p',
+    );
+  });
+
+  it('should take time in proportion to the text, whatever it holds', () => {
+    // Each of these took seconds to minutes while the scheme was matched by a
+    // pattern retried from every position; a generous bound still tells.
+    const size = 400_000;
+    const inputs = [
+      'a'.repeat(size),
+      `${'a'.repeat(size)}://x`,
+      `${'1'.repeat(size)}://u:p@h`,
+      `a://b:${'c'.repeat(size)}`,
+      'a://b:c'.repeat(size / 8),
+      `dup key: { ${'{'.repeat(size / 100)} }`,
+    ];
+    for (const input of inputs) {
+      const ms = elapsedMs(() => redactOutbound(input));
+      assert.ok(ms < 1000, `${input.slice(0, 12)}… took ${Math.round(ms)}ms`);
+    }
   });
 });
 
@@ -147,6 +192,35 @@ describe('redactOutbound', () => {
   });
 });
 
+describe('redactWithin', () => {
+  it('should redact a text within the limit as redactOutbound does', () => {
+    assert.deepStrictEqual(redactWithin('mongodb://u:pw@h failed', 100), {
+      text: 'mongodb://u:****@h failed',
+      cut: false,
+    });
+  });
+
+  it('should mask credentials whose @ was past the cut', () => {
+    const { text, cut } = redactWithin(`see mongodb://user:${'p'.repeat(500)}@host`, 100);
+    assert.strictEqual(text, 'see mongodb://user:****');
+    assert.strictEqual(cut, true);
+  });
+
+  it('should mask a duplicate key whose closing brace was past the cut', () => {
+    const { text, cut } = redactWithin(
+      `E11000 dup key: { a: { b: 1 }, email: "${'v'.repeat(500)}" }`,
+      100,
+    );
+    assert.strictEqual(text, 'E11000 dup key: { <redacted> }');
+    assert.strictEqual(cut, true);
+  });
+
+  it('should leave a port at the cut alone enough to stay readable', () => {
+    const { text } = redactWithin(`ok http://host:8080/path ${'p'.repeat(500)}`, 100);
+    assert.ok(text.startsWith('ok http://host:8080/path '));
+  });
+});
+
 describe('redactBounded', () => {
   it('should copy plain objects and arrays with every string redacted', () => {
     const input = { uri: 'mongodb://u:secret@h/db', nested: { list: ['mongodb://a:b@h', 2] } };
@@ -186,6 +260,28 @@ describe('redactBounded', () => {
     const { value, truncated } = redactBounded({ text: 'x'.repeat(BOUNDS.string + 10) });
     assert.strictEqual(value.text.length, BOUNDS.string + 1);
     assert.ok(value.text.endsWith('…'));
+    assert.strictEqual(truncated, true);
+  });
+
+  it('should read no more of a string than it may keep', () => {
+    // A thousand fields of 400 KB each: the copy keeps 4 KB of each, and must
+    // not pay for the rest.
+    const blob = `http://x ${'a'.repeat(400_000)}`;
+    const rows = Array.from({ length: BOUNDS.entries - 10 }, () => blob);
+    let copy;
+    const ms = elapsedMs(() => {
+      copy = redactBounded({ rows });
+    });
+    assert.ok(ms < 2000, `took ${Math.round(ms)}ms`);
+    assert.strictEqual(copy.truncated, true);
+    assert.strictEqual(copy.value.rows[0].length, BOUNDS.string + 1);
+  });
+
+  it('should say a string was cut even when masking made it short', () => {
+    const { value, truncated } = redactBounded({
+      text: `E11000 dup key: { blob: "${'v'.repeat(BOUNDS.string * 3)}" }`,
+    });
+    assert.strictEqual(value.text, 'E11000 dup key: { <redacted> }…');
     assert.strictEqual(truncated, true);
   });
 

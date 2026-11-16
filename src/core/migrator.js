@@ -81,10 +81,10 @@ const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
 const { MIGRATION_LOG_EVENT, backgroundLogs, createRunLog } = require('./migration-logger.js');
 const {
   assertActorValid,
+  assertBaselineOptions,
   assertConvergeOptions,
   assertDownOptions,
   assertDryRunOptions,
-  assertFilename,
   assertHistoryLimit,
   assertImportOptions,
   assertJobValid,
@@ -2011,7 +2011,7 @@ class MigratorKit extends EventEmitter {
    * baseline racing an `up`) must serialize like any other mutation.
    */
   async baseline(options = {}) {
-    assertFilename(options.to);
+    assertBaselineOptions(options);
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();

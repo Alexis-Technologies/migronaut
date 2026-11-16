@@ -5,6 +5,7 @@ const {
   excludedMembers,
   replicationLagMs,
   sleep,
+  MAX_HOOK_PAUSE_MS,
 } = require('../../src/core/background-throttle.js');
 
 const at = (ms) => new Date(ms);
@@ -104,6 +105,31 @@ describe('createThrottle', () => {
     assert.deepStrictEqual(time.waits, [50, 100, 50]);
     assert.strictEqual(calls[0].name, 'm.js');
     assert.strictEqual(calls[0].collection, 'orders');
+  });
+
+  it('should cap what the hook asks for — a timer past 2^31 ms would fire at once', async () => {
+    for (const [asked, waited] of [
+      [Infinity, [MAX_HOOK_PAUSE_MS]],
+      [3e9, [MAX_HOOK_PAUSE_MS]],
+      [MAX_HOOK_PAUSE_MS + 1, [MAX_HOOK_PAUSE_MS]],
+      [250, [250]],
+      // Not a pause at all: nothing is waited.
+      [Number.NaN, []],
+      [-5, []],
+      ['2000', []],
+    ]) {
+      const time = fakeTime();
+      const throttle = createThrottle({
+        spec: { pauseMs: 0, maxReplicationLagMs: false, throttle: () => asked },
+        db: {},
+        logger: logger(),
+        name: 'm.js',
+        now: time.now,
+        wait: time.wait,
+      });
+      await throttle.beforeBatch({ generation: 1, partition: 'p', batchSize: 10 });
+      assert.deepStrictEqual(time.waits, waited, String(asked));
+    }
   });
 
   it('should wait while a secondary lags too far, reading at most every 5 s', async () => {

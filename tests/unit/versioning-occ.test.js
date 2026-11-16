@@ -320,6 +320,39 @@ describe('retryOnConflict', () => {
     assert.strictEqual(calls, 2);
   });
 
+  it('should wait on a backoff past what a timer holds, not retry at once', async () => {
+    // setTimeout(fn, Infinity) fires after 1 ms: the longest wait asked for
+    // used to be the shortest one given.
+    const controller = new AbortController();
+    let calls = 0;
+    const pending = retryOnConflict(
+      () => {
+        calls += 1;
+        return Promise.reject(conflictError('conflict'));
+      },
+      { backoff: () => Infinity, signal: controller.signal },
+    );
+    setTimeout(() => controller.abort(new Error('stopped')), 30);
+    await assert.rejects(pending, /stopped/);
+    assert.strictEqual(calls, 1);
+  });
+
+  it('should retry at once on a backoff that is not a wait', async () => {
+    for (const answer of [Number.NaN, -1, 0]) {
+      let calls = 0;
+      await assert.rejects(
+        retryOnConflict(
+          () => {
+            calls += 1;
+            return Promise.reject(conflictError('conflict'));
+          },
+          { attempts: 2, backoff: () => answer },
+        ),
+      );
+      assert.strictEqual(calls, 2);
+    }
+  });
+
   it('should stop a wait on abort, and validate its arguments', async () => {
     const controller = new AbortController();
     const pending = retryOnConflict(() => Promise.reject(conflictError('conflict')), {
