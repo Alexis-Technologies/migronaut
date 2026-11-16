@@ -194,6 +194,10 @@ class MigratorKit extends EventEmitter {
   #adaptiveCache = new Map();
   /** Index keys per collection, read at most every few seconds — every slice asks */
   #indexCache = new Map();
+  /** Shard keys per collection, reused the same way — a read of `config` through the mongos */
+  #shardKeyCache = new Map();
+  /** Waits for a lagging secondary in progress, per background migration — said once per process */
+  #lagWaits = new Map();
   /** Declared collections, for background specs — resolved once unless migrations reload */
   #backgroundDefinitions;
   /** The server's topology, read once — transactional background migrations need it */
@@ -462,6 +466,12 @@ class MigratorKit extends EventEmitter {
     this.#watchStoreInstance = undefined;
     this.#topology = undefined;
     this.#backgroundDefinitions = undefined;
+    // What was learned or read about this deployment: the next connection may
+    // be another one.
+    this.#adaptiveCache.clear();
+    this.#indexCache.clear();
+    this.#shardKeyCache.clear();
+    this.#lagWaits.clear();
     this.#ownsClient = true;
     if (owned) await client.close();
   }
@@ -2414,6 +2424,8 @@ class MigratorKit extends EventEmitter {
       warned: this.#backgroundWarned,
       adaptiveCache: this.#adaptiveCache,
       indexCache: this.#indexCache,
+      shardKeyCache: this.#shardKeyCache,
+      lagWaits: this.#lagWaits,
       telemetry: this.#telemetry,
       // The third wrap site: a span per lease held (slice) and per coordinator
       // step — each opened only once the lease or the lock is held.

@@ -2633,6 +2633,8 @@ export type BackgroundDryRun =
       migration: string;
       direction: 'forward' | 'revert';
       method: 'sample' | 'first';
+      /** The sample ran out of time: these are the first documents by `_id` instead */
+      degraded?: 'sample-timeout';
       requested: number;
       found: number;
       migrated: number;

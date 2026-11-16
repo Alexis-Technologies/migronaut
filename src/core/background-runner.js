@@ -71,7 +71,7 @@ function readOptions(options) {
  * pollIntervalMs?, sliceMs?, verifyIntervalMs?, signal?, onError? }`.
  * Returns `{ kit, running, stop() }` — `stop()` resolves once every lane
  * has released its lease (at the next batch) and, when the runner made the
- * kit, the kit is disconnected.
+ * kit, the kit is disconnected. Aborting `signal` is a `stop()`.
  */
 function startBackgroundRunner(options = {}) {
   const { concurrency, pollIntervalMs, verifyIntervalMs } = readOptions(options);
@@ -79,7 +79,12 @@ function startBackgroundRunner(options = {}) {
   const ownsKit = options.kit === undefined;
   const controller = new AbortController();
   const signal = controller.signal;
-  const onOuterAbort = () => controller.abort(options.signal.reason);
+  // Set once the runner exists: what its `signal` ends like — see stop().
+  let stopOnSignal = () => undefined;
+  const onOuterAbort = () => {
+    controller.abort(options.signal.reason);
+    stopOnSignal();
+  };
   options.signal?.addEventListener('abort', onOuterAbort, { once: true });
   if (options.signal?.aborted) controller.abort(options.signal.reason);
 
@@ -242,7 +247,7 @@ function startBackgroundRunner(options = {}) {
   watching.then((started) => {
     hosted = started;
   });
-  return {
+  const runner = {
     kit,
     get running() {
       return !signal.aborted;
@@ -300,6 +305,14 @@ function startBackgroundRunner(options = {}) {
       return stopping;
     },
   };
+  // The signal stops the runner as stop() does — the watcher stopped, the
+  // lanes waited for, a kit this runner made disconnected. Aborting only the
+  // lanes left that kit's connection open, and the process alive with it.
+  stopOnSignal = () => {
+    runner.stop().catch(() => undefined);
+  };
+  if (options.signal?.aborted) stopOnSignal();
+  return runner;
 }
 
 module.exports = { BACKGROUND_RUNNER_DEFAULTS: DEFAULTS, startBackgroundRunner };

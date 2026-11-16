@@ -489,6 +489,9 @@ function renderDryRun(dry, logger) {
       else logger.info(`✔ ${id}: ${JSON.stringify(row.change ?? row.after)}`);
     }
     logger.info(`◎ ${dry.migrated} of ${dry.found} would be migrated, ${dry.failed} would fail`);
+    if (dry.degraded === 'sample-timeout') {
+      logger.warn('⚠ The sample ran out of time — these are the first documents by _id instead');
+    }
   }
   for (const refusal of dry.refusals ?? []) {
     logger.error(`✖ Refused ${refusal.method}: ${refusal.reason}`);

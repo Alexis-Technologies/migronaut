@@ -105,7 +105,7 @@ attribute.
 | `migronaut.background.documents` | counter, `{document}` | Documents a background migration slice handled | `migronaut.background.name`, `migronaut.background.result`: `migrated`, `skipped`, `conflict` or `failed` |
 | `migronaut.background.slice.duration` | histogram, `s` | Every background migration slice | `migronaut.background.name`, `migronaut.background.outcome`, `error.type` |
 | `migronaut.background.batch.write.duration` | histogram, `s` | Every batch a background migration writes — what the adaptive throttle reacts to | `migronaut.background.name`, `migronaut.background.shard` (sharded collections) |
-| `migronaut.background.throttled` | counter, `{change}` | A change of the adaptive throttle, at most every 10 s per lane | `migronaut.background.name`, `migronaut.background.reason`: `slow`, `overload` or `recover` |
+| `migronaut.background.throttled` | counter, `{change}` | A change of the adaptive throttle, at most every 10 s per lane — or lanes waiting for a lagging secondary, at most every 10 s per process | `migronaut.background.name`, `migronaut.background.reason`: `slow`, `overload`, `recover` or `lag` |
 | `migronaut.background.drift.detected` | counter, `{finding}` | Old-shape documents found after a background migration completed | `migronaut.background.name` |
 | `migronaut.background.transaction.retried` | counter, `{retry}` | A transactional background batch retried | `migronaut.background.name`, `migronaut.background.reason` |
 | `migronaut.background.leases.reclaimed` | counter, `{lease}` | Partition leases taken from a lane that stopped renewing | `migronaut.background.name` |

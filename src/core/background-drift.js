@@ -1,3 +1,4 @@
+const { BackgroundConflictError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { STATE_SUMMARY, control, probeHint } = require('./background.js');
 const { excludeBadIds, matchOf } = require('./background-engine.js');
@@ -104,7 +105,19 @@ async function verify(deps, { onDrift = 'reopen', collections, streaming } = {})
     if (found === null) continue;
     const action = onDrift === 'reopen' ? 'reopened' : 'reported';
     if (action === 'reopened') {
-      await control(deps, state._id, 'retry', { reason: 'old-shape documents reappeared' });
+      try {
+        await control(deps, state._id, 'retry', { reason: 'old-shape documents reappeared' });
+      } catch (error) {
+        // Someone moved it since the list was read — paused or cancelled it,
+        // or another runner's watch reopened it first. Its drift is theirs to
+        // see; the migrations after it in the list are still this round's.
+        if (!(error instanceof BackgroundConflictError)) throw error;
+        deps.logger.debug(
+          `Drift check of ${state._id}: not reopened — ${errorText(error)}`,
+          deps.fields({ background: state._id }),
+        );
+        continue;
+      }
     }
     deps.telemetry?.backgroundDrift({ name: state._id });
     deps.emit('background:drift', {

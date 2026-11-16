@@ -721,6 +721,12 @@ expectType<Promise<'poll' | 'stream' | 'both'>>(kit.driftMode());
 const backgroundState = await kit.backgroundStatus('0001-orders.js');
 expectType<string | undefined>(backgroundState?.previous?.registration);
 expectType<number | undefined>(backgroundState?.previous?.totals.migrated);
+// A sample that ran out of time is the first documents instead, and says so.
+const backgroundPreview = await kit.dryRunBackground('0001-orders.js', { sample: 5 });
+if (backgroundPreview.mode === 'declarative') {
+  expectType<'sample' | 'first'>(backgroundPreview.method);
+  expectType<'sample-timeout' | undefined>(backgroundPreview.degraded);
+}
 
 // ─── Background migrations: ctx.background carries the lane ──────────────────
 

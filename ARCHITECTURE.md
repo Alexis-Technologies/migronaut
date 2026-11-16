@@ -1361,10 +1361,16 @@ fenced checkpoint is its last write, so a lane that lost its lease cannot commit
 retry loop (transient errors, commit-unknown, time/size limits → a smaller batch), and lets the
 transform write elsewhere through `ctx.session`.
 
-**Pacing.** `pauseMs` and the `throttle` hook before each batch, replication lag
-(`replSetGetStatus`, quietly off without the privilege), and the AIMD controller per process and
-shard: slow or overloaded writes halve the batch, then double the pause; healthy ones grow it back
-— never past the author's `batchSize`.
+**Pacing.** `pauseMs` and the `throttle` hook before each batch (a pause of at most an hour at a
+time — a longer timer fires at once in Node), replication lag (`replSetGetStatus`, quietly off
+without the privilege), and the AIMD controller per process and shard: slow or overloaded writes
+halve the batch, then double the pause; healthy ones grow it back — never past the author's
+`batchSize` (a controller is made anew when its settings change: a repin that lowers `batchSize`
+reaches a runner that has been up for days). A wait for a lagging secondary is not silent: it is
+`background:throttle` with `reason: 'lag'` and a metric point (at most every 10 s per process and
+migration), a warning once it has lasted a minute and then every five (`lagWaits`, the process's
+memory of the wait across its slices and lanes), and it ends with the slice — the lane yields, so
+its slot is free and its controls are read again.
 
 **Drift.** After `completed`, an old pod can still write the old shape. Three lines of defence: the
 validator once `min` is raised (converge refuses to raise it over old documents); the `requires`
@@ -1395,6 +1401,18 @@ stepped over by id). Writes carry the shard key; a transform that changes it is 
 (`shard-key-changed`). A plan records the collection's epoch (uuid, key): resharded since, the
 pass is re-split. Without the privilege, or without that index, the collection stays on `_id`
 ranges ("untargeted"), said once per process.
+
+A plan also records which partitioner split it, and only that one works it (`planMismatch`): the
+partitioner is chosen from what is live — the indexes, the shard key, `backgroundShardAware` — so
+it can change under a pass, most often because the operator did what the "untargeted" warning
+asks and converged the shard-aware index in. A lane that meets a plan of the other partitioner
+returns `stale` before it claims anything, and the coordinator re-splits the same pass, as after
+a reshard. (An `_id` range has no bounds for the shard-aware reads; a key range is "everything"
+to the `_id` ones.) Two readings are never taken for an answer: a topology that could not be read
+(a `hello` lost to an election) leaves a shard-aware plan shard-aware, and a list of indexes that
+could not be read is an error for the step to retry, not "no index". A slice that fails drops
+what was cached about its collection (indexes, shard key), so a hint on an index dropped since
+fails once, not until the cache runs out.
 
 **On a sharded cluster: what the probes established.** The shard-aware side rests on what a
 mongos and the `config` database actually do — so those assumptions were probed on a real cluster
@@ -1698,6 +1716,14 @@ The high-impact ones for code changes:
   both protect a rolling deploy and a rollback.
 - **The shard-key guard compares numbers by value.** A `Long 5` that becomes an `int 5` routes the
   same; anything it cannot prove equal counts as a change.
+- **A plan is worked by the partitioner that made it, or re-split.** A change of
+  `backgroundShardAware` (or of the indexes) in the middle of a rolling deploy therefore re-splits
+  the pass once per side that takes a coordinator step — it settles when the deploy does, and a
+  replan is not a new pass.
+- **A dry run's sample can be the first documents.** `$match` then `$sample` reads and sorts every
+  matched document, so a large match is sampled collection-first and every read is time-boxed;
+  out of time, the first `n` by `_id` stand in and the report says `degraded: 'sample-timeout'`.
+  An explicit `first` is not time-boxed: it is the caller's choice, and deterministic.
 - **A shard-aware read may reach two shards.** The mongos takes a `$lt` bound as inclusive when it
   picks shards, and a partition ends where its run of chunks does (§6.8).
 - **The live watcher opens its stream before it probes.** The other order leaves a window where a

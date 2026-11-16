@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
+const { after, afterEach, before, beforeEach, describe, it, mock } = require('node:test');
 const { startBackgroundRunner } = require('../../index.js');
 const { ConfigInvalidError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
@@ -238,5 +238,39 @@ describe('in-process background runner (integration)', () => {
     controller.abort();
     await stopped.stop();
     assert.strictEqual(stopped.running, false);
+  });
+
+  it('should stop on its signal as stop() does: a kit it made is disconnected', async () => {
+    project = makeProject();
+    project.write(NAME, SPEC);
+    await seed(40);
+    const setup = kitWith();
+    await setup.up();
+    const controller = new AbortController();
+    const runner = runnerWith({ config: config(), signal: controller.signal });
+    const disconnect = mock.method(runner.kit, 'disconnect');
+    for (let i = 0; i < 100 && (await setup.backgroundStatus(NAME)).status !== 'completed'; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    // No stop() here: the signal alone used to end the lanes and leave the
+    // runner's own connection open — and the process alive with it.
+    controller.abort();
+    for (let i = 0; i < 100 && disconnect.mock.callCount() === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.strictEqual(disconnect.mock.callCount(), 1);
+    assert.strictEqual(runner.running, false);
+    // A later stop() is the same stop: nothing is closed twice.
+    await runner.stop();
+    assert.strictEqual(disconnect.mock.callCount(), 1);
+  });
+
+  it('should disconnect a kit it made when its signal was aborted from the start', async () => {
+    project = makeProject();
+    const runner = runnerWith({ config: config(), signal: AbortSignal.abort() });
+    const disconnect = mock.method(runner.kit, 'disconnect');
+    await runner.stop();
+    assert.strictEqual(runner.running, false);
+    assert.strictEqual(disconnect.mock.callCount(), 1);
   });
 });

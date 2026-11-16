@@ -372,7 +372,7 @@ function createTelemetry(telemetry, { dbName } = {}) {
   );
   const backgroundThrottle = counter(
     METRICS.BACKGROUND_THROTTLE,
-    'Adaptive throttle changes of background migrations, by reason',
+    'Throttle changes and lag waits of background migrations, by reason',
     '{change}',
   );
   const backgroundDrift = counter(

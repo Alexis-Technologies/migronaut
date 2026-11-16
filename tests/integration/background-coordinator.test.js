@@ -366,6 +366,132 @@ describe('background coordinator (integration)', () => {
     assert.strictEqual(unchanged.replan, false);
   });
 
+  describe('a plan split by the other partitioner', () => {
+    const SHARD_INDEX = { __v: 1, region: 1, _id: 1 };
+    const background = {
+      collection: 'orders',
+      from: 1,
+      to: 2,
+      migrate: moveAddress,
+      batchSize: 50,
+      pauseMs: 0,
+      maxSliceFailures: 1,
+      partitions: { minPartitionDocs: 100 },
+    };
+
+    /** The kit's deps as behind a mongos: a shard key that reads, chunks that do not */
+    function shardedDeps() {
+      return Object.assign(makeDeps({ [NAME]: { background } }), {
+        shardAware: 'auto',
+        topology: async () => 'sharded',
+        shardKeyOf: async () => ({ key: { region: 1 }, uuid: 'epoch-1' }),
+        chunksOf: async () => undefined,
+        indexCache: new Map(),
+      });
+    }
+
+    const seedRegions = () => seed(600, (i) => ({ region: `r${i % 7}` }));
+
+    /** Nothing failed on the way: no partition counted a slice, the state is not failed */
+    async function assertNothingFailed(deps) {
+      for (const partition of await deps.store.partitions(NAME)) {
+        assert.strictEqual(partition.failures ?? 0, 0);
+        assert.notStrictEqual(partition.status, 'failed');
+      }
+      assert.notStrictEqual((await deps.store.get(NAME)).status, 'failed');
+    }
+
+    it('should re-split the pass once the shard-aware index appears, as its warning asks', async () => {
+      await seedRegions();
+      const deps = shardedDeps();
+      await register(deps, NAME);
+      assert.strictEqual((await coordinate(deps, NAME)).next, 'process');
+      const planned = await deps.store.get(NAME);
+      assert.strictEqual(planned.plan.partitioner, 'id');
+      // One batch of the _id plan, then the operator does what the warning
+      // says: declares versioning and converges — the index is there.
+      assert.strictEqual((await runSlice(deps, NAME, { sliceMs: 1 })).outcome, 'yielded');
+      await mongo.db.collection('orders').createIndex(SHARD_INDEX);
+      deps.indexCache.clear();
+
+      // The lane no longer reads an _id range as key bounds (a TypeError per
+      // slice, until the partition and then the migration failed): it steps
+      // back and leaves the plan to the coordinator.
+      assert.deepStrictEqual(await runSlice(deps, NAME, { sliceMs: 60_000 }), {
+        outcome: 'stale',
+        counters: {},
+      });
+      await assertNothingFailed(deps);
+
+      assert.strictEqual((await drive(deps, NAME)).status, 'completed');
+      const done = await deps.store.get(NAME);
+      assert.strictEqual(done.plan.partitioner, 'shard');
+      assert.strictEqual(done.pass, 1, 'a replan is not a new pass');
+      assert.ok(done.generation > planned.generation);
+      assert.strictEqual(await mongo.db.collection('orders').countDocuments({ __v: 2 }), 600);
+      await assertNothingFailed(deps);
+    });
+
+    it('should re-split by _id once the shard-aware index is gone', async () => {
+      await seedRegions();
+      await mongo.db.collection('orders').createIndex(SHARD_INDEX);
+      const deps = shardedDeps();
+      await register(deps, NAME);
+      assert.strictEqual((await coordinate(deps, NAME)).next, 'process');
+      assert.strictEqual((await deps.store.get(NAME)).plan.partitioner, 'shard');
+      assert.strictEqual((await runSlice(deps, NAME, { sliceMs: 1 })).outcome, 'yielded');
+      await mongo.db.collection('orders').dropIndex(SHARD_INDEX);
+      deps.indexCache.clear();
+
+      // Without this the _id partitioner took every key range for "all of
+      // it": each partition scanned the whole collection.
+      assert.strictEqual((await runSlice(deps, NAME, { sliceMs: 60_000 })).outcome, 'stale');
+      assert.strictEqual((await drive(deps, NAME)).status, 'completed');
+      const done = await deps.store.get(NAME);
+      assert.strictEqual(done.plan.partitioner, 'id');
+      assert.strictEqual(done.pass, 1);
+      assert.strictEqual(await mongo.db.collection('orders').countDocuments({ __v: 2 }), 600);
+      await assertNothingFailed(deps);
+    });
+
+    it('should keep a shard-aware plan through a topology it could not read', async () => {
+      await seedRegions();
+      await mongo.db.collection('orders').createIndex(SHARD_INDEX);
+      const deps = shardedDeps();
+      await register(deps, NAME);
+      assert.strictEqual((await coordinate(deps, NAME)).next, 'process');
+      const planned = await deps.store.get(NAME);
+      // A `hello` lost to an election: unknown is not "not sharded".
+      deps.topology = async () => undefined;
+      assert.strictEqual((await drive(deps, NAME)).status, 'completed');
+      const done = await deps.store.get(NAME);
+      assert.strictEqual(done.plan.token, planned.plan.token, 'the plan was worked, not replaced');
+      assert.strictEqual(await mongo.db.collection('orders').countDocuments({ __v: 2 }), 600);
+    });
+
+    it('should read the indexes again after a slice that failed', async () => {
+      await seed(10);
+      const deps = makeDeps({
+        [NAME]: {
+          background: {
+            ...background,
+            migrate: undefined,
+            migrateBatch: () => {
+              throw new Error('broken transform');
+            },
+          },
+        },
+      });
+      deps.indexCache = new Map();
+      await register(deps, NAME);
+      assert.strictEqual((await coordinate(deps, NAME)).next, 'process');
+      assert.ok(deps.indexCache.has('orders'));
+      await assert.rejects(runSlice(deps, NAME), /broken/);
+      // What failed may be what was cached — a hint on an index dropped since.
+      assert.strictEqual(deps.indexCache.has('orders'), false);
+    });
+  });
+
   it('should wait out a deploy (file gone or changed) instead of failing', async () => {
     await seed(10);
     const files = {
