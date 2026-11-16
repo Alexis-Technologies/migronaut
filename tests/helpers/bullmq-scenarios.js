@@ -502,7 +502,13 @@ function defineBullMQScenarios(harness) {
     await holdLock();
     const group = await mq.enqueueUp();
     await mq.startWorker();
-    setTimeout(() => releaseLock().catch(() => undefined), 150);
+    // Released once the job says it waits — not after a pause the worker may
+    // or may not beat to the job (on a real Redis it sometimes did not, and
+    // the job then never waited at all).
+    await eventually(async () =>
+      (await harness.logsOf(mq.queue, group.jobs[0].id)).some((row) => /waiting/.test(row)),
+    );
+    await releaseLock();
 
     const { results } = await group.wait({ timeoutMs: 10_000 });
     assert.strictEqual(results[0].status, 'applied');
