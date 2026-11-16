@@ -10,11 +10,22 @@ const {
 } = require('../errors/index.js');
 const { pickActor } = require('../utils/actor.js');
 const { isPlainObject } = require('../utils/canonical.js');
+const { settledWithin } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { jobRefIssue } = require('../utils/job-ref.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
 const { sanitize } = require('../utils/sanitize.js');
-const { JOB_NAMES, assertAllowed, isObjectLike, parseJobData, resolveAllow } = require('./jobs.js');
+const {
+  JOB_NAMES,
+  JOB_WRITE_WAIT_MS,
+  KNOWN_OPTIONS,
+  TICK_RETENTION,
+  assertAllowed,
+  isObjectLike,
+  parseJobData,
+  resolveAllow,
+  warnUnknownOptions,
+} = require('./jobs.js');
 const {
   assertBackgroundJobOptions,
   assertJobOptions,
@@ -349,12 +360,14 @@ function assertBackgroundLink(background) {
  * Declared with exactly three parameters: BullMQ passes the cancellation
  * signal only to processors whose `length` is at least 3.
  */
-function createMigrationProcessor(options = {}) {
+function createMigrationProcessor(options = {}, internals = {}) {
   const { waitOptions, defaultOrdered, allow, userlandLogRows } = resolveProcessorOptions(options);
+  const writeWaitMs = internals.writeWaitMs ?? JOB_WRITE_WAIT_MS;
   const { kit: injectedKit, config, kitOptions, queue, jobOptions, background } = options;
 
   const ownsKit = injectedKit === undefined;
   const kit = injectedKit ?? new MigratorKit(config ?? {}, kitOptions);
+  warnUnknownOptions(kit, 'createMigrationProcessor', options, KNOWN_OPTIONS.processor);
   const shutdownController = new AbortController();
   /** Serializes jobs in this process — see the factory's doc comment */
   let chain = Promise.resolve();
@@ -394,7 +407,22 @@ function createMigrationProcessor(options = {}) {
         ...extra,
       }),
     );
-  const flush = (ctx) => Promise.allSettled([...ctx.writes]);
+  /**
+   * Drain the job's writes still in flight — for at most `writeWaitMs`
+   * (JOB_WRITE_WAIT_MS): they are best-effort, and a Redis that is away must
+   * not hold a finished job, the line behind it and a graceful close.
+   */
+  async function flush(ctx) {
+    if (ctx.writes.size === 0) return;
+    const drained = await settledWithin(Promise.allSettled([...ctx.writes]), writeWaitMs);
+    if (!drained) {
+      kit.logger.debug(
+        `Job ${ctx.job?.id}: its log and progress writes did not settle in ${writeWaitMs}ms — ` +
+          'not waited for',
+        { ...jobIds(ctx), pendingWrites: ctx.writes.size },
+      );
+    }
+  }
 
   /** A userland line into the job's log — up to `userlandLogRows`, then only counted */
   const mirror = (ctx, event) => {
@@ -685,6 +713,46 @@ function createMigrationProcessor(options = {}) {
     };
   }
 
+  /** The plan the last tick said it holds a converge for — said once, not on every tick */
+  let saidHeldConverge;
+
+  /**
+   * The circuit breaker of the converge a tick adds: the newest entry of the
+   * converge history is a failure, and it failed on this very plan
+   * (`fingerprint`). A conflict only an operator can settle (a unique index
+   * to rebuild, an undeclared one in the way) or data that must be fixed
+   * first is not helped by another try: every tick would add a failed job
+   * and take the lock for it, for as long as the schedule lives. A changed
+   * definition changes the plan and resumes it; so does an explicit
+   * `enqueueConverge()` or `migronaut converge` that goes through. Returns
+   * `{ reason, failedAt?, error? }`.
+   */
+  async function heldConverge(plan) {
+    if (plan.fingerprint === undefined || typeof kit.convergeHistory !== 'function') {
+      return undefined;
+    }
+    const [last] = await kit.convergeHistory({ limit: 1 });
+    if (last?.success !== false || last.fingerprint !== plan.fingerprint) {
+      saidHeldConverge = undefined;
+      return undefined;
+    }
+    if (saidHeldConverge !== plan.fingerprint) {
+      saidHeldConverge = plan.fingerprint;
+      kit.logger.warn(
+        '⚠ sync: the declared collections are not in sync, and the last converge failed on ' +
+          'this very plan — not enqueued again until a definition changes (or ' +
+          'enqueueConverge() / migronaut converge goes through)',
+        { fingerprint: plan.fingerprint },
+      );
+    }
+    const failedAt = last.lastAt ?? last.finishedAt;
+    return {
+      reason: 'failed, and the plan has not changed since',
+      ...(failedAt ? { failedAt } : {}),
+      ...(typeof last.error === 'string' ? { error: redactOutbound(last.error) } : {}),
+    };
+  }
+
   /** What the last sync tick found the line waiting for — `{ migration, waitsFor }` */
   let lastWaiting;
 
@@ -718,11 +786,20 @@ function createMigrationProcessor(options = {}) {
       if (
         to === undefined &&
         typeof kit.convergesAfterUp === 'function' &&
-        (await kit.convergesAfterUp()) &&
-        !(await kit.converge({ dryRun: true })).inSync
+        (await kit.convergesAfterUp())
       ) {
-        const handle = await enqueueConverge(queue, kit, jobOptions ? { jobOptions } : {});
-        result.converge = { jobId: handle.jobId, deduplicated: handle.deduplicated };
+        const plan = await kit.converge({ dryRun: true });
+        const held = plan.inSync ? undefined : await heldConverge(plan);
+        if (held) {
+          result.convergeHeld = held;
+        } else if (!plan.inSync) {
+          // Kept like the tick that added it: a schedule adds one per deploy
+          // at best, one per tick at worst.
+          const handle = await enqueueConverge(queue, kit, {
+            jobOptions: { ...TICK_RETENTION, ...jobOptions },
+          });
+          result.converge = { jobId: handle.jobId, deduplicated: handle.deduplicated };
+        }
       }
       return result;
     }

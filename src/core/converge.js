@@ -1,3 +1,4 @@
+const { createHash } = require('node:crypto');
 const { ConvergeFailedError, MigronautError } = require('../errors/index.js');
 const { pickActor } = require('../utils/actor.js');
 const { mapLimit } = require('../utils/concurrency.js');
@@ -73,8 +74,19 @@ const HINTS = {
   86: 'an index with this name already exists with a different key or options',
   359:
     'existing documents hold duplicate values for this key — deduplicate them in a migration ' +
-    'first (the index was left as it was)',
+    'first',
 };
+
+/** A failed conversion to unique: what became of the index (`prepareUnique` taken back off, or not) */
+function uniqueLeftover(mongoCode, extra) {
+  if (extra.prepareUniqueLeft) {
+    return (
+      ' — and prepareUnique could not be taken back off: the index refuses new duplicates ' +
+      'from now on, until the next converge takes it off'
+    );
+  }
+  return mongoCode === 359 ? ' (the index was left as it was)' : '';
+}
 
 /**
  * How long the version floor probe may scan. With the version index it reads
@@ -127,13 +139,19 @@ async function probeVersionFloors(db, definitions, live) {
 async function readShardKeys(deps, names) {
   const keys = new Map();
   if (typeof deps.shardKeyOf !== 'function') return keys;
-  for (const name of names) {
+  // A few at a time, like the live states: one after another, a few hundred
+  // declared collections were a few hundred round trips through the mongos
+  // before the first decision.
+  const found = await mapLimit(names, READ_CONCURRENCY, async (name) => {
     try {
-      const key = await deps.shardKeyOf(name);
-      if (key) keys.set(name, key);
+      return await deps.shardKeyOf(name);
     } catch {
       // Not readable (privileges): a refused drop is caught when it happens.
+      return undefined;
     }
+  });
+  for (let i = 0; i < names.length; i++) {
+    if (found[i]) keys.set(names[i], found[i]);
   }
   return keys;
 }
@@ -267,7 +285,7 @@ function wrapFailure(error, collection, actions, result, extra = {}) {
   const cause = errorText(error);
   return new ConvergeFailedError(
     `Could not ${VERBS[action.action] ?? action.action} ${describeAll(actions)} on ${collection}: ` +
-      `${cause}${hint ? ` — ${hint}` : ''}${lostIndexes(extra)}`,
+      `${cause}${hint ? ` — ${hint}` : ''}${uniqueLeftover(mongoCode, extra)}${lostIndexes(extra)}`,
     {
       phase: 'apply',
       collection,
@@ -354,20 +372,30 @@ async function runRebuild(db, collection, step, settle) {
  * existing documents. If they hold duplicates, `prepareUnique` is taken back
  * off, so the index is exactly as it was before. Never a window without the
  * index, and no rebuild of a large collection.
+ *
+ * Returns undefined, or `{ error, left }` when the conversion failed —
+ * `left`: `prepareUnique` could not be taken back off either (a failover
+ * between the two commands). The index then refuses new duplicates while
+ * `listIndexes` still says it is not unique; the error says so, and the next
+ * plan finds the flag and takes it off (index-spec.js `compareIndex`).
  */
 async function convertToUnique(db, collection, step) {
   await db.command({ collMod: collection, index: { name: step.name, prepareUnique: true } });
   try {
     await db.command({ collMod: collection, index: { name: step.name, unique: true } });
   } catch (error) {
+    let left = false;
     await db
       .command({ collMod: collection, index: { name: step.name, prepareUnique: false } })
-      .catch(() => undefined);
-    throw error;
+      .catch(() => {
+        left = true;
+      });
+    return { error, left };
   }
   if (Object.keys(step.rest).length > 0) {
     await db.command({ collMod: collection, index: { name: step.name, ...step.rest } });
   }
+  return undefined;
 }
 
 /**
@@ -403,7 +431,14 @@ async function runStep(db, collection, step, settle, search) {
     } else if (step.op === 'collMod') {
       await db.command({ collMod: collection, ...step.command });
     } else if (step.op === 'convertUnique') {
-      await convertToUnique(db, collection, step);
+      const failed = await convertToUnique(db, collection, step);
+      if (failed) {
+        return {
+          error: failed.error,
+          actions: [step.actions[0]],
+          extra: failed.left ? { prepareUniqueLeft: true } : {},
+        };
+      }
     } else if (step.op === 'createIndexes') {
       // One command, one pass over the collection for all of them — and all
       // or nothing: a build that fails leaves none of the batch behind.
@@ -570,6 +605,7 @@ async function recordHistory(deps, options, result, { startedAt, error, history 
       ...pickActor(options),
       changed: result.changed,
       actions: history.map(([collection, action]) => ({ collection, ...action })),
+      ...(result.fingerprint !== undefined ? { fingerprint: result.fingerprint } : {}),
       ...(result.unstable ? { unstable: result.unstable } : {}),
       ...(result.search ? { search: result.search } : {}),
     });
@@ -701,6 +737,32 @@ function reportPlan(deps, result, search) {
   if (result.inSync) deps.logger.debug(line, fields);
   else deps.logger.info(line, fields);
   return result;
+}
+
+/**
+ * A plan in one word: a digest of everything it would change or refuse —
+ * each such row's collection, target, name, action and reason, in a fixed
+ * order. `undefined` for a plan that asks for nothing.
+ *
+ * Two plans with the same fingerprint ask the same of the database, which is
+ * how a failure that repeats is told from news: the history counts it on the
+ * entry it repeats, and a schedule that converges (the queue's sync tick)
+ * stops asking for a converge that failed on this very plan — a definition
+ * that needs `rebuildUnique`, or data that must be fixed first, is not
+ * settled by trying again every minute.
+ */
+function planFingerprint(plans) {
+  const rows = [];
+  for (const { name, actions } of plans) {
+    for (const action of actions) {
+      if (!CHANGE_ACTIONS.has(action.action) && action.action !== 'conflict') continue;
+      rows.push(
+        [name, action.target, action.name, action.action, action.reason ?? ''].join('\u0000'),
+      );
+    }
+  }
+  if (rows.length === 0) return undefined;
+  return createHash('sha256').update(rows.sort().join('\n')).digest('hex').slice(0, 32);
 }
 
 /** The guard phase: a plan with any conflict refuses the whole run, before the first write */
@@ -1069,11 +1131,14 @@ async function runConverge(deps, options, signal) {
     throw attachConverge(error, { dryRun, changed: 0, inSync: false, collections: [] });
   }
   const { planFor, live, plans, search } = planned;
+  const fingerprint = planFingerprint(plans);
   const result = {
     dryRun,
     changed: 0,
     inSync: true,
     collections: plans.map(({ name, actions }) => ({ name, actions })),
+    // Of the plan as first read: what a dry run of the same database gives.
+    ...(fingerprint !== undefined ? { fingerprint } : {}),
   };
   if (dryRun) return reportPlan(deps, result, search);
 
@@ -1109,4 +1174,4 @@ async function runConverge(deps, options, signal) {
   }
 }
 
-module.exports = { readLiveState, readLiveStates, runConverge };
+module.exports = { planFingerprint, readLiveState, readLiveStates, runConverge };

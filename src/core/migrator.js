@@ -3058,7 +3058,8 @@ class MigratorKit extends EventEmitter {
         host: os.hostname(),
         environment: this.#environment(),
       }),
-      record: (entry) => this.#convergeLog().append(db, entry),
+      record: (entry) =>
+        this.#convergeLog().append(db, entry, { ensureIndex: this.#config.ensureIndexes }),
       // Behind a mongos only: the shard key — so prune never drops its index,
       // and the version index takes it as a prefix. An 8.0 `unsplittable`
       // collection is not sharded; `undefined` when config may not be read.

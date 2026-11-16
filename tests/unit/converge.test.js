@@ -211,6 +211,7 @@ function fakeDb(
           maybeFail('collModUnique');
           index.unique = true;
         }
+        if (rest.index.prepareUnique === false) maybeFail('collModPrepareOff');
         if (rest.index.prepareUnique !== undefined) index.prepareUnique = rest.index.prepareUnique;
         if (rest.index.expireAfterSeconds !== undefined) {
           index.expireAfterSeconds = rest.index.expireAfterSeconds;
@@ -895,6 +896,73 @@ describe('runConverge — in place, by server version', () => {
     assert.deepStrictEqual(db.ops, ['collMod c a_1', 'collMod c a_1', 'collMod c a_1']);
     assert.strictEqual(db.state.c.indexes[1].prepareUnique, false);
     assert.strictEqual(db.state.c.indexes[1].unique, undefined);
+  });
+
+  it('should say the index was left as it was only when it was', async () => {
+    const duplicates = serverError(359, 'Cannot convert the index to unique');
+    const rolledBack = fakeDb(nonUnique(), {
+      server: { version: [7, 0] },
+      fail: { collModUnique: duplicates },
+    });
+    await assert.rejects(
+      runConverge(makeDeps(rolledBack).deps, { definitions: declareUnique() }, undefined),
+      (error) => {
+        assert.match(error.message, /\(the index was left as it was\)/);
+        assert.strictEqual(error.context.prepareUniqueLeft, undefined);
+        return true;
+      },
+    );
+
+    // A failover between the two commands: the rollback does not go through.
+    const stuck = fakeDb(nonUnique(), {
+      server: { version: [7, 0] },
+      fail: { collModUnique: duplicates, collModPrepareOff: serverError(189, 'stepped down') },
+    });
+    await assert.rejects(
+      runConverge(makeDeps(stuck).deps, { definitions: declareUnique() }, undefined),
+      (error) => {
+        // It used to swallow this and say "(the index was left as it was)"
+        // of an index that now refuses every new duplicate.
+        assert.strictEqual(error.context.prepareUniqueLeft, true);
+        assert.strictEqual(error.context.mongoCode, 359);
+        assert.match(error.message, /prepareUnique could not be taken back off/);
+        assert.doesNotMatch(error.message, /left as it was/);
+        return true;
+      },
+    );
+    assert.strictEqual(stuck.state.c.indexes[1].prepareUnique, true);
+  });
+
+  it('should take a leftover prepareUnique off an index that is not declared unique', async () => {
+    // What the failure above leaves, once the declaration gave up on unique:
+    // a constraint nobody declared, invisible in `unique`.
+    const db = fakeDb(
+      { c: { indexes: [{ v: 2, key: { a: 1 }, name: 'a_1', prepareUnique: true }] } },
+      { server: { version: [7, 0] } },
+    );
+    const { deps } = makeDeps(db);
+    const plain = definitions({ name: 'c', indexes: [{ key: { a: 1 } }] });
+    const plan = await runConverge(deps, { definitions: plain, dryRun: true }, undefined);
+    const [action] = plan.collections[0].actions;
+    assert.strictEqual(action.action, 'modify');
+    assert.strictEqual(action.reason, 'prepareUnique');
+    assert.strictEqual(plan.inSync, false);
+
+    const result = await runConverge(deps, { definitions: plain }, undefined);
+    assert.deepStrictEqual(db.ops, ['collMod c a_1']);
+    assert.strictEqual(db.state.c.indexes[1].prepareUnique, false);
+    assert.strictEqual(result.inSync, true);
+  });
+
+  it('should go through a leftover prepareUnique when the declaration is unique', async () => {
+    const db = fakeDb(
+      { c: { indexes: [{ v: 2, key: { a: 1 }, name: 'a_1', prepareUnique: true }] } },
+      { server: { version: [7, 0] } },
+    );
+    const { deps } = makeDeps(db);
+    const result = await runConverge(deps, { definitions: declareUnique() }, undefined);
+    assert.strictEqual(result.collections[0].actions[0].reason, 'unique');
+    assert.strictEqual(db.state.c.indexes[1].unique, true);
   });
 
   it('should add a TTL in place on 5.1+, single-field indexes only', async () => {

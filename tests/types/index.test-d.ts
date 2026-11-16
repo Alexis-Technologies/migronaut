@@ -576,6 +576,13 @@ expectType<Promise<RunResult[]>>(kit.up(undefined, { converge: false }));
 declare const converged: ConvergeResult;
 expectType<boolean>(converged.inSync);
 expectType<number>(converged.changed);
+// The plan in one word — on the result, and on the history entry of its run.
+expectType<string | undefined>(converged.fingerprint);
+const [lastConverge] = await kit.convergeHistory({ limit: 1 });
+expectType<string | undefined>(lastConverge.fingerprint);
+// A failure that repeats is counted on the entry it repeats.
+expectType<number | undefined>(lastConverge.repeats);
+expectType<Date | undefined>(lastConverge.lastAt);
 const firstAction = converged.collections[0].actions[0];
 expectType<'collection' | 'validator' | 'index' | 'searchIndex'>(firstAction.target);
 expectType<'planned' | 'applied' | 'failed' | 'skipped'>(firstAction.status);

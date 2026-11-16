@@ -1,5 +1,6 @@
 const { MigratorKit } = require('../core/migrator.js');
 const { ConfigInvalidError, MigronautError } = require('../errors/index.js');
+const { settledWithin } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { isBareFilename } = require('../utils/migration-name.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
@@ -9,6 +10,7 @@ const {
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
   JOB_NAMES,
+  KNOWN_OPTIONS,
   backgroundQueueName,
   buildBackgroundVerifyJobTemplate,
   buildConvergeJobTemplate,
@@ -16,6 +18,7 @@ const {
   resolveAllow,
   buildSyncJobTemplate,
   isObjectLike,
+  warnUnknownOptions,
 } = require('./jobs.js');
 const {
   createBackgroundProcessor,
@@ -165,6 +168,9 @@ function assertName(value, name) {
   }
 }
 
+/** How long a `close({ force: true })` on top of a close under way still gives it */
+const FORCE_CLOSE_GRACE_MS = 1_000;
+
 /**
  * Migrations as a queue: one database's migrations, enqueued as one BullMQ job
  * each and applied by a single-concurrency worker.
@@ -196,6 +202,8 @@ class MigrationQueue {
   #globalConcurrency;
   #allow;
   #closing;
+  /** Whether a close asked for `force` — at once, or on top of one under way */
+  #forced = false;
   #background;
   #backgroundQueue;
   #ownsBackgroundQueue = false;
@@ -335,6 +343,7 @@ class MigrationQueue {
 
     this.#ownsKit = kit === undefined;
     this.#kit = kit ?? new MigratorKit(config ?? {}, kitOptions);
+    warnUnknownOptions(this.#kit, 'createMigrationQueue', options, KNOWN_OPTIONS.queue);
     this.#ownsQueue = !queueIsInstance;
     this.#queue = queueIsInstance
       ? Queue
@@ -725,7 +734,6 @@ class MigrationQueue {
     const Worker = this.#WorkerClass;
     const worker = new Worker(this.#queueName, this.#processor, {
       connection: this.#connection,
-      ...(this.#prefix !== undefined ? { prefix: this.#prefix } : {}),
       lockDuration: DEFAULT_LOCK_DURATION_MS,
       maxStalledCount: DEFAULT_MAX_STALLED_COUNT,
       // Before the worker options, so a `telemetry` given there (or to this
@@ -733,6 +741,10 @@ class MigrationQueue {
       ...(this.#telemetry !== undefined ? { telemetry: this.#telemetry } : {}),
       ...this.#workerOptions,
       ...overrides,
+      // After them, like the concurrency: a `prefix` among the worker options
+      // would have the worker listen on another queue's keys than the ones
+      // this object enqueues into.
+      ...(this.#prefix !== undefined ? { prefix: this.#prefix } : {}),
       concurrency: 1,
     });
     this.#worker = worker;
@@ -807,13 +819,14 @@ class MigrationQueue {
     const prefix = this.#background.queue?.opts?.prefix ?? this.#prefix;
     const worker = new Worker(this.#background.name, this.#backgroundProcessor, {
       connection: this.#connection,
-      ...(prefix !== undefined ? { prefix } : {}),
       lockDuration: DEFAULT_LOCK_DURATION_MS,
       maxStalledCount: DEFAULT_MAX_STALLED_COUNT,
       ...(this.#telemetry !== undefined ? { telemetry: this.#telemetry } : {}),
       concurrency: DEFAULT_BACKGROUND_CONCURRENCY,
       ...workerOptions,
       ...overrides,
+      // The queue's own, whatever the worker options say — see #startWorker.
+      ...(prefix !== undefined ? { prefix } : {}),
     });
     this.#backgroundWorker = worker;
     const fields = { queue: this.#background.name };
@@ -828,6 +841,12 @@ class MigrationQueue {
         `✖ Background job failed${job?.id !== undefined ? ` (${job.id})` : ''}: ${errorText(error)}`,
         { ...fields, ...failedJobFields(job, error), error: errorText(error) },
       ),
+    );
+    this.#listen(worker, 'stalled', (jobId) =>
+      this.#kit.logger.warn(`⚠ Background job stalled (${jobId}) — it will be re-run`, {
+        ...fields,
+        jobId: String(jobId),
+      }),
     );
     await worker.waitUntilReady?.();
     // Closing meanwhile: close() takes it from here — nothing more to start.
@@ -924,6 +943,7 @@ class MigrationQueue {
     if (!isObjectLike(options)) {
       throw new ConfigInvalidError('schedule options must be an object');
     }
+    warnUnknownOptions(this.#kit, 'schedule', options, KNOWN_OPTIONS.schedule);
     const { job = JOB_NAMES.SYNC, every, pattern, tz, to } = options;
     if (
       job !== JOB_NAMES.SYNC &&
@@ -1015,10 +1035,33 @@ class MigrationQueue {
    * Shut down in dependency order: stop taking the lock, let the worker finish
    * its job (`force` skips that wait), then close what this object created and
    * disconnect a kit it created. Idempotent; every step is attempted, and the
-   * first failure is rethrown once they all have been.
+   * first failure is rethrown once they all have been. `close({ force: true })`
+   * on top of a `close()` that has not returned stops waiting for it.
    */
   async close(options = {}) {
-    this.#closing ??= this.#close(options?.force === true);
+    const force = options?.force === true;
+    if (this.#closing === undefined) {
+      this.#forced = force;
+      this.#closing = this.#close(force);
+      return this.#closing;
+    }
+    // `force` on top of a close already under way — a job that will not end,
+    // a Redis that is away. It used to get the first call's promise back: the
+    // very one that hangs. The close under way cannot be made a forced one
+    // (BullMQ, too, answers a second close() with the first), so `force` here
+    // means "stop waiting": the close gets a moment more, then is left to end
+    // on its own.
+    if (force && !this.#forced) {
+      this.#forced = true;
+      if (!(await settledWithin(this.#closing, FORCE_CLOSE_GRACE_MS))) {
+        this.#kit.logger.warn(
+          `⚠ Migration queue: still closing after ${FORCE_CLOSE_GRACE_MS}ms — not waited ` +
+            'for (force)',
+          { forced: true },
+        );
+        return undefined;
+      }
+    }
     return this.#closing;
   }
 

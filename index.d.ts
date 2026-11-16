@@ -1080,6 +1080,16 @@ export interface ConvergeHistoryEntry {
   changed: number;
   /** The rows that changed, failed or refused the run — each with its collection and `from` / `to` */
   actions: Array<ConvergeAction & { collection: string }>;
+  /** The plan the run started from, in one word — see {@link ConvergeResult.fingerprint} */
+  fingerprint?: string;
+  /**
+   * How many more times this failure happened: the same plan, refused or
+   * failed with the same error, is counted here instead of appended — a
+   * schedule that converges cannot fill the history with one failure.
+   */
+  repeats?: number;
+  /** When it last happened (with `repeats`) */
+  lastAt?: Date;
   unstable?: ConvergeUnstable[];
   /**
    * What the run saw of Atlas Search, and how a wait for its builds ended —
@@ -1153,6 +1163,13 @@ export interface ConvergeResult {
    */
   inSync: boolean;
   collections: CollectionConvergeResult[];
+  /**
+   * A digest of everything the plan would change or refuse (collection,
+   * target, name, action, reason) — absent when it asks for nothing. Two
+   * plans with the same fingerprint ask the same of the database: a repeated
+   * failure is told from a new one by it.
+   */
+  fingerprint?: string;
   unstable?: ConvergeUnstable[];
   /** @experimental New in 2.2 */
   search?: ConvergeSearchSummary;

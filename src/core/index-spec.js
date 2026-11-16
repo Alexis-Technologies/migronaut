@@ -441,6 +441,15 @@ function compareIndex(declared, live, defaultCollation, capabilities = {}) {
     // Only towards unique: the server converts that way, not back.
     if (d.unique && capabilities.unique) inPlace.unique = true;
   }
+  // What a conversion to unique leaves when it fails and its rollback does
+  // too: the index refuses new duplicates, and nothing else says so — `unique`
+  // is still false on both sides. On a declaration that is not unique it is a
+  // constraint nobody declared: taken off in place. (On a unique one the
+  // conversion above goes through it anyway.)
+  if (live.raw?.prepareUnique === true && !d.unique) {
+    diffs.push('prepareUnique');
+    inPlace.prepareUnique = false;
+  }
   if (Boolean(d.sparse) !== Boolean(l.sparse)) diffs.push('sparse');
   if (Boolean(d.hidden) !== Boolean(l.hidden)) {
     diffs.push('hidden');

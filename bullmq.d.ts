@@ -364,6 +364,19 @@ export interface SyncJobResult {
   /** The converge job this tick added (`convergeAfterUp`), if any */
   converge?: { jobId: string; deduplicated: boolean };
   /**
+   * Present when the declared collections are not in sync and the tick added
+   * no converge: the last one failed on this very plan (the same
+   * `ConvergeResult.fingerprint`) — a schedule's circuit breaker, like `held`
+   * for a migration. A changed definition changes the plan and resumes it;
+   * so does an explicit `enqueueConverge()` that goes through.
+   */
+  convergeHeld?: {
+    reason: string;
+    failedAt?: Date;
+    /** The failure, as the converge history keeps it (redacted) */
+    error?: string;
+  };
+  /**
    * Present when the tick enqueued nothing because the next migration failed
    * and its file has not changed since — a schedule's circuit breaker. A fix
    * (a changed file) or an explicit `enqueueUp(name)` resumes the line.

@@ -314,9 +314,13 @@ describe('background coordinator jobs', () => {
       }),
     });
     const processor = createBackgroundProcessor({ kit, queue: fakeQueue() });
-    const unknown = await moved(processor, coordinatorJob({}, { attempts: 3 }));
+    const failing = coordinatorJob({}, { attempts: 3 });
+    const unknown = await moved(processor, failing);
     assert.strictEqual(unknown.name, 'Error', 'an unknown failure stays retryable');
     assert.ok(!unknown.message.includes('hunter2'));
+    // Said on the job too, as a migration job says it — redacted the same.
+    assert.strictEqual(failing.logs.length, 1);
+    assert.match(failing.logs[0], /^✖ cannot reach mongodb:\/\/admin:\*\*\*\*@db:27017/);
     const invalid = await moved(
       processor,
       coordinatorJob({ migration: '../x.js' }, { attempts: 3 }),
@@ -350,6 +354,19 @@ describe('background lane jobs', () => {
     const before = Date.now();
     await moved(processor, job);
     assert.ok(job.delayedUntil >= before + 900);
+  });
+
+  it('should not hold a lane for a log row Redis never takes', async () => {
+    const processor = createBackgroundProcessor(
+      { kit: backgroundKit(), queue: fakeQueue() },
+      { writeWaitMs: 20 },
+    );
+    const job = laneJob();
+    job.log = mock.fn(() => new Promise(() => {}));
+    const startedAt = Date.now();
+    const result = await processor(job, 'token');
+    assert.strictEqual(result.kind, 'background-lane');
+    assert.ok(Date.now() - startedAt < 2000);
   });
 
   it('should finish once nothing is left to claim', async () => {

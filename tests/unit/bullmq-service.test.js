@@ -44,6 +44,84 @@ function recordingLogger(kit) {
 const pendingRows = (...files) =>
   files.map((file) => ({ file, status: 'pending', appliedAt: null }));
 
+describe('options nobody reads, on the facade', () => {
+  it('should say a stray option of createMigrationQueue and of schedule, once each', async () => {
+    const kit = stubKit();
+    const lines = recordingLogger(kit);
+    // Meant for `jobOptions`: at the top level nothing reads it.
+    const { mq } = make({ kit, removeOnComplete: { count: 10 } });
+    await mq.schedule({ every: 60_000, jitter: 5 });
+    await mq.schedule({ every: 60_000, jitter: 5 });
+    const warnings = lines.filter((line) => line.level === 'warn').map((line) => line.msg);
+    assert.deepStrictEqual(warnings, [
+      '⚠ createMigrationQueue: "removeOnComplete" is not an option here — ignored',
+      '⚠ schedule: "jitter" is not an option here — ignored',
+    ]);
+    await mq.close();
+  });
+
+  it('should say nothing of a queue configured with everything it knows', async () => {
+    const kit = stubKit();
+    const lines = recordingLogger(kit);
+    const { mq } = make({
+      kit,
+      queueName: 'migrations',
+      prefix: 'app',
+      jobOptions: { removeOnComplete: { count: 10 } },
+      workerOptions: { lockDuration: 60_000 },
+      globalConcurrency: false,
+      lockWait: { lockWaitTimeoutMs: 1000 },
+      allow: { force: true, unordered: true },
+      userlandLogRows: 10,
+      background: false,
+    });
+    await mq.enqueueUp(undefined, { to: '0002-b.js', requestedBy: 'ci', reason: 'r' });
+    await mq.enqueueDown(undefined, { steps: 1, ordered: true });
+    await mq.enqueueConverge({ ordered: false });
+    await mq.schedule({ id: 'nightly', pattern: '0 3 * * *', tz: 'UTC', to: '0002-b.js' });
+    await mq.schedule({ job: 'converge', every: 60_000 });
+    assert.deepStrictEqual(
+      lines.filter((line) => line.level === 'warn'),
+      [],
+    );
+    await mq.close();
+  });
+});
+
+describe('MigrationQueue.close — force on top of a close that hangs', () => {
+  it('should stop waiting, and say so', async () => {
+    const { mq, kit } = make();
+    const lines = recordingLogger(kit);
+    const worker = await mq.startWorker();
+    // A job that will not end, or a Redis that is away: the graceful close
+    // never returns.
+    let release;
+    worker.close = () =>
+      new Promise((resolve) => {
+        release = resolve;
+      });
+    const hanging = mq.close();
+    const startedAt = Date.now();
+    // It used to hand back `hanging` itself: `force` could not help a close
+    // that was already stuck.
+    assert.strictEqual(await mq.close({ force: true }), undefined);
+    assert.ok(Date.now() - startedAt < 5000);
+    assert.ok(lines.some((line) => line.level === 'warn' && /still closing/.test(line.msg)));
+    // The close under way goes on, and ends when what held it does.
+    release();
+    await hanging;
+    // Asked again once it is over, it is the same close.
+    await mq.close({ force: true });
+  });
+
+  it('should return the close under way when it ends in time', async () => {
+    const { mq } = make();
+    const closing = mq.close();
+    await mq.close({ force: true });
+    await closing;
+  });
+});
+
 describe('createMigrationQueue', () => {
   it('should return a MigrationQueue wired to the injected classes', async () => {
     const { mq, kit, connection } = make();
@@ -76,6 +154,16 @@ describe('createMigrationQueue', () => {
     const mq = createMigrationQueue({ bullmq: fakeBullmq(), connection: createFakeConnection() });
     assert.ok(mq.kit instanceof MigratorKit);
     mock.method(mq.kit, 'disconnect', async () => {});
+    await mq.close();
+  });
+
+  it("should keep the worker on the queue's prefix, whatever the worker options say", async () => {
+    // A `prefix` among them would have the worker listen on another queue's
+    // keys than the ones this object enqueues into.
+    const { mq } = make({ prefix: 'app', workerOptions: { prefix: 'stray' } });
+    const worker = await mq.startWorker({ prefix: 'other', lockDuration: 45_000 });
+    assert.strictEqual(worker.opts.prefix, 'app');
+    assert.strictEqual(worker.opts.lockDuration, 45_000);
     await mq.close();
   });
 
