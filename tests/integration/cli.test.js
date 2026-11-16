@@ -1102,8 +1102,9 @@ describe('migronaut CLI — quiet mode and output safety (integration)', () => {
     assert.strictEqual(json.code, 5);
     assert.ok(!json.stdout.includes(secret));
     assert.ok(!json.stderr.includes(secret));
-    // The username may remain; the password must be masked.
-    assert.ok(json.stdout.includes('****'));
+    // Where the driver echoes the URI in its parse error (6.x does, 7.x no
+    // longer), the username may remain; the password must be masked.
+    if (json.stdout.includes('ci-user')) assert.ok(json.stdout.includes('****'));
 
     const verbose = await runCli([
       '--uri',

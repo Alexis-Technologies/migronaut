@@ -17,6 +17,18 @@ const repoRoot = path.join(__dirname, '..', '..');
  * from an .mjs consumer, so a future change to src/index.js's export style
  * cannot silently break every ESM user.
  */
+/**
+ * The compiler's JS entry, which `node` can run — not node_modules/.bin/tsc: that
+ * one is a shell shim (and a .cmd on Windows). Found through its package.json:
+ * TypeScript 7 closed its `exports` map, so `typescript/bin/tsc` no longer
+ * resolves as a module path.
+ */
+function typescriptEntry() {
+  const manifest = require.resolve('typescript/package.json');
+  const { bin } = require(manifest);
+  return path.join(path.dirname(manifest), typeof bin === 'string' ? bin : bin.tsc);
+}
+
 describe('ESM consumer interop (integration)', () => {
   let dir;
 
@@ -64,9 +76,7 @@ console.log('esm-interop-ok');
   });
 
   describe('the ./bullmq subpath', () => {
-    // The JS entry, not node_modules/.bin/tsc: that one is a shell shim (and a
-    // .cmd on Windows), which `node` cannot run.
-    const tsc = require.resolve('typescript/bin/tsc');
+    const tsc = typescriptEntry();
 
     before(() => {
       writeFileSync(
@@ -184,7 +194,7 @@ export const ok: Kit = true;
   });
 
   describe('the ./versioning subpath', () => {
-    const tsc = require.resolve('typescript/bin/tsc');
+    const tsc = typescriptEntry();
 
     before(() => {
       writeFileSync(
