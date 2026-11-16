@@ -206,7 +206,8 @@ Check these fields are correct (and change none of them unless the user asked �
 - `"files"` — `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`, `versioning.js`,
   `versioning.d.ts`, `migronaut.schema.json`, `bin`, `src`, `README.md`, `CHANGELOG.md` (npm adds
   `LICENSE` and `package.json` itself)
-- `"engines"` — `node >=22.18.0`; CI's test matrix is Node 22 and 24 on Ubuntu and Windows
+- `"engines"` — `node >=22.18.0`; CI's test matrix is Node 22, 24 and 26 (unit tests on Ubuntu and
+  Windows, the coverage-gated suite on Ubuntu)
 - `"dependencies"` — absent; `mongodb` is a peer, `mongoose` an optional peer, and `bullmq`,
   `ioredis` and `@opentelemetry/*` stay devDependencies
 - `"keywords"` — no typos, relevant terms
