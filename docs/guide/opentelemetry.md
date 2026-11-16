@@ -98,7 +98,7 @@ attribute.
 | `migronaut.run.duration` | histogram, `s` | Every run that acquired the lock | `migronaut.run.command`, `migronaut.run.direction`, `error.type` |
 | `migronaut.migration.duration` | histogram, `s` | Every migration executed | `migronaut.migration.direction`, `error.type` |
 | `migronaut.lock.acquire.duration` | histogram, `s` | Every successful lock acquisition — the acquire round trip, not the wait before it | — |
-| `migronaut.lock.wait.duration` | histogram, `s` | Every wait for a held lock (`runMigrations` with `onLockHeld: 'wait'`, a queue job) — one point per wait, however many polls | `migronaut.lock.wait.outcome`: `acquired`, `timeout` or `aborted` |
+| `migronaut.lock.wait.duration` | histogram, `s` | Every wait for a held lock (`runMigrations` with `onLockHeld: 'wait'`, a queue job) — one point per wait, however many polls | `migronaut.lock.wait.outcome`: `acquired`, `timeout`, `aborted` or `failed` (the wait ended in another error — the run got the lock and then failed, or the database went away) |
 | `migronaut.lock.refused` | counter, `{refusal}` | A run refused because the lock was held — one per poll of a waiting caller | — |
 | `migronaut.lock.lost` | counter, `{loss}` | A lock lost mid-run | — |
 | `migronaut.converge.search.wait.duration` | histogram, `s` | Every wait for search index builds (`waitForSearchIndexes`, `--wait-search`) — one point per wait, however many polls | `migronaut.converge.search.wait.outcome`: `ready`, `failed`, `timeout`, `unreadable` or `aborted` |

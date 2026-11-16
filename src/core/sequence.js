@@ -1,4 +1,5 @@
 const fs = require('node:fs/promises');
+const path = require('node:path');
 const { MigrationBlockedError, MigrationFileNotFoundError } = require('../errors/index.js');
 
 /**
@@ -11,6 +12,13 @@ const { MigrationBlockedError, MigrationFileNotFoundError } = require('../errors
 
 /** Declaration files sit next to TypeScript migrations and are never one */
 const DECLARATION_SUFFIXES = ['.d.ts', '.d.mts', '.d.cts'];
+
+/** Whether a symlink in `dir` leads to a regular file — a broken one leads nowhere */
+const linksToFile = (dir, name) =>
+  fs.stat(path.join(dir, name)).then(
+    (stat) => stat.isFile(),
+    () => false,
+  );
 
 /** The migration files in `dir`, sorted ascending — empty when the directory does not exist */
 async function listMigrationFiles(dir, extensions) {
@@ -26,16 +34,23 @@ async function listMigrationFiles(dir, extensions) {
     // A directory named `foo.js`, a dotfile, or a `types.d.ts` sitting next
     // to the migrations is not a migration — including it would hard-fail
     // the whole run with MigrationInvalidExportError.
-    if (!entry.isFile()) continue;
     const file = entry.name;
     if (file.startsWith('.')) continue;
     if (DECLARATION_SUFFIXES.some((suffix) => file.endsWith(suffix))) continue;
+    let named = false;
     for (const ext of extensions) {
       if (file.endsWith(ext)) {
-        matches.push(file);
+        named = true;
         break;
       }
     }
+    if (!named) continue;
+    // A symlink to a file is a migration like any other — `up <name>` runs it
+    // (the loader follows the link), so a bulk run and `status` must see it
+    // too, not skip it without a word. What it leads to decides; that is
+    // asked only of an entry named like a migration.
+    const isFile = entry.isFile() || (entry.isSymbolicLink() && (await linksToFile(dir, file)));
+    if (isFile) matches.push(file);
   }
   return matches.sort();
 }

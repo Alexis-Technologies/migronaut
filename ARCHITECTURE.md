@@ -561,6 +561,9 @@ Each entry: **responsibility · key exports · nuances you must know.**
 ### `src/core/audit.js` — read-only health check
 - **Responsibility:** the `migronaut audit` checks (config, connectivity, transactions, indexes,
   lock, checksum drift, runtime), each independent, rolled up into `{ok, failed, warnings, checks}`.
+  The lock is judged stale by its holder's own TTL (`ttlMs` on the document) and by the server's
+  clock (`MigrationLock.inspectWithAge`, `$$NOW`) — never by the auditor's configuration or host
+  clock, which would call a live run with a longer TTL crashed and advise `unlock`.
 - **Key export:** `runAudit(deps)` — pure orchestration over capabilities the kit injects.
 
 ### `src/core/import-runner.js` — migrate-mongo adoption (impure half)
@@ -882,7 +885,9 @@ lock, and one running slow never reclaims a dead one. String fields in the holde
 the doc back and checks that it is the one it wrote: `owner === ourToken` **and**
 `nonce === ourNonce`. If two processes both reclaim the same stale lock, both pipeline updates
 succeed but only the last writer's document survives; the loser sees a different one and throws
-instead of running concurrently.
+instead of running concurrently. A readback that itself fails takes back what the update may have
+written (`deleteOne` by owner and nonce): the instance never learned it holds the lock, so nothing
+else would renew or release that document before its TTL.
 
 The two fields do different jobs. `owner` is the **run id** — the kit passes it in, so the lock
 document, the changelog records and the log lines of one run carry one value. Its format, and
@@ -917,8 +922,14 @@ and the next has not started. Set `onLockLost: 'warn'` to keep the old warn-and-
 `MigratorKit.stop()` (and the CLI's SIGINT/SIGTERM handler) aborts through the same path with a
 `RunAbortedError` carrying the partial results.
 
+A lost lock is said **once** — one warning, one `lock:lost` — however many timers notice it. A lock
+found reclaimed is final: the heartbeat and the deadline stop, since that document never matches
+again. A deadline that fired on failing renewals is not: the document may still be ours, so the
+heartbeat goes on trying (and under `onLockLost: 'warn'` may hold the lock again).
+
 **Release** — `deleteOne({_id, owner, nonce})`, scoped so we never delete a lock since reclaimed by
-someone else. `forceRelease()` (for `migronaut unlock`) deletes unconditionally by `_id`.
+someone else. `forceRelease()` (for `migronaut unlock`) deletes unconditionally by `_id`, in one
+`findOneAndDelete`: the holder it reports is the document it deleted.
 
 **Early release** — the work function gets a second argument, `control`, whose `release()` gives
 the lock up before the work returns: it stops the heartbeat and the deadline, awaits the renewal in
@@ -963,6 +974,16 @@ cryptic Node error. This is why `createExtension` defaults to `'js'`. The real-w
 verified by [tests/integration/runtime-ts.test.js](tests/integration/runtime-ts.test.js), which spawns
 `bin/migronaut.js` under plain `node` — no build, no loader — since the shipped binary *is* the file
 under test.
+
+**Reloading (`reloadMigrations`).** Node keeps every module it has loaded. A unique query string on
+the import URL forces a fresh evaluation of an ES module — and of an ES module only: a CommonJS
+file (what `migronaut create` scaffolds by default, `.js` and `.ts` alike) is evaluated by the
+CommonJS loader, which caches by filename and never sees the query. So `importUserFile` also drops
+the file's `require.cache` entry — under the path as given and as resolved, since the cache key is
+the real path. Without that, an edited CommonJS migration kept running as the version first loaded
+while the changelog recorded the new file's checksum. The kit reads a file ahead of its run for
+its `requires` (`#peek`, cached by checksum) and runs that same module: one evaluation per version
+of a file, not one per look at it.
 
 ### 6.5 The programmatic API (run.js)
 File: [run.js](src/core/run.js).

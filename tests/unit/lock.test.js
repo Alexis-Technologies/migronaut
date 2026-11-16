@@ -32,6 +32,8 @@ function makeDb() {
       Promise.resolve(held ? { _id: LOCK_ID, ...held, pid: process.pid } : null),
     ),
     deleteOne: mock.fn(() => Promise.resolve({})),
+    // forceRelease(): asked with its metadata, so the document is under `value`.
+    findOneAndDelete: mock.fn(() => Promise.resolve({ value: null, ok: 1 })),
   };
   const db = { collection: () => collection };
   return { db, collection };
@@ -227,20 +229,62 @@ describe('MigrationLock.inspect / forceRelease', () => {
     assert.strictEqual(await lock.inspect(), doc);
   });
 
-  it('should delete and return the existing doc from forceRelease', async () => {
+  it('should delete and return the existing doc from forceRelease, in one operation', async () => {
     const { db, collection } = makeDb();
     const doc = { _id: LOCK_ID, owner: 'abc' };
-    collection.findOne.mock.mockImplementationOnce(() => Promise.resolve(doc));
+    collection.findOneAndDelete.mock.mockImplementationOnce(() =>
+      Promise.resolve({ value: doc, ok: 1 }),
+    );
     const lock = new MigrationLock(db, '_migronaut_locks', 60);
     assert.strictEqual(await lock.forceRelease(), doc);
-    assert.deepStrictEqual(collection.deleteOne.mock.calls[0].arguments, [{ _id: LOCK_ID }]);
+    // Never a read and then a delete: the document reported must be the one
+    // deleted, not a holder that took the lock in between.
+    assert.deepStrictEqual(collection.findOneAndDelete.mock.calls[0].arguments, [
+      { _id: LOCK_ID },
+      { includeResultMetadata: true },
+    ]);
+    assert.strictEqual(collection.findOne.mock.callCount(), 0);
+    assert.strictEqual(collection.deleteOne.mock.callCount(), 0);
   });
 
   it('should return null from forceRelease when no lock exists', async () => {
     const { db, collection } = makeDb();
     const lock = new MigrationLock(db, '_migronaut_locks', 60);
     assert.strictEqual(await lock.forceRelease(), null);
-    assert.deepStrictEqual(collection.deleteOne.mock.calls[0].arguments, [{ _id: LOCK_ID }]);
+    assert.strictEqual(collection.findOneAndDelete.mock.callCount(), 1);
+  });
+
+  it('should take back a lock it may have written when it cannot read it back', async () => {
+    const { db, collection } = makeDb();
+    collection.findOne.mock.mockImplementationOnce(() =>
+      Promise.reject(new Error('socket closed')),
+    );
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await assert.rejects(lock.acquire('run-1'), /socket closed/);
+    // The takeover update went through: without this the document would hold
+    // the lock for no one until its TTL ran out.
+    const [filter] = collection.deleteOne.mock.calls[0].arguments;
+    assert.strictEqual(filter._id, LOCK_ID);
+    assert.strictEqual(filter.owner, 'run-1');
+    assert.strictEqual(typeof filter.nonce, 'string');
+    // And this instance holds nothing: there is nothing for it to renew.
+    assert.strictEqual(await lock.renew(), false);
+  });
+
+  it('should still say the lock is held when the holder cannot be read', async () => {
+    const { db, collection } = makeDb();
+    collection.updateOne.mock.mockImplementationOnce(() =>
+      Promise.reject(Object.assign(new Error('E11000 duplicate key'), { code: 11000 })),
+    );
+    collection.findOne.mock.mockImplementationOnce(() =>
+      Promise.reject(new Error('socket closed')),
+    );
+    const lock = new MigrationLock(db, '_migronaut_locks', 60);
+    await assert.rejects(lock.acquire(), (error) => {
+      assert.ok(error instanceof LockAlreadyHeldError);
+      assert.strictEqual(error.context.holder, undefined);
+      return true;
+    });
   });
 });
 
@@ -506,6 +550,80 @@ describe('runWithLock', () => {
     // Aborted around the deadline (~150ms) — strictly before 1×TTL (200ms)
     // plus scheduling slack.
     assert.ok(Date.now() - started < 280);
+  });
+
+  /** A logger that keeps its warnings */
+  function warningLogger() {
+    const warnings = [];
+    return { ...silentLogger, warnings, warn: (message) => warnings.push(message) };
+  }
+
+  it('should say a reclaimed lock is lost once, and stop renewing what is not its own', async () => {
+    const { db, collection } = makeDb();
+    // 100 ms TTL: a renewal every 50 ms. Every one finds the lock reclaimed.
+    const lock = new MigrationLock(db, '_migronaut_locks', 0.1);
+    // The acquire is a fresh insert (which proves ownership); renewals match nothing.
+    collection.updateOne.mock.mockImplementation((_filter, update) =>
+      Promise.resolve(
+        heldFromUpdate(update) ? { matchedCount: 0, upsertedCount: 1 } : { matchedCount: 0 },
+      ),
+    );
+    const logger = warningLogger();
+    const reasons = [];
+    let renewalsAtLoss;
+    const release = keepEventLoopAlive();
+    try {
+      // onLockLost: 'warn' — the run goes on for six more renewal intervals.
+      await runWithLock(
+        lock,
+        { logger, onLockLost: 'warn', onLockLostEvent: (reason) => reasons.push(reason) },
+        async () => {
+          while (reasons.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+          renewalsAtLoss = collection.updateOne.mock.callCount();
+          await new Promise((resolve) => setTimeout(resolve, 320));
+        },
+      );
+    } finally {
+      release();
+    }
+    // It used to be one warning and one `lock:lost` per heartbeat until the
+    // run ended — and the deadline's on top.
+    assert.deepStrictEqual(reasons, ['another run reclaimed it']);
+    assert.strictEqual(logger.warnings.filter((line) => /Lost the/.test(line)).length, 1);
+    assert.strictEqual(collection.updateOne.mock.callCount(), renewalsAtLoss);
+  });
+
+  it('should keep renewing after the deadline — the lock may still be its own', async () => {
+    const { db, collection } = makeDb();
+    const lock = new MigrationLock(db, '_migronaut_locks', 0.1);
+    let failing = true;
+    collection.updateOne.mock.mockImplementation((_filter, update) => {
+      if (heldFromUpdate(update)) return Promise.resolve({ matchedCount: 0, upsertedCount: 1 });
+      return failing
+        ? Promise.reject(new Error('network blip'))
+        : Promise.resolve({ matchedCount: 1 });
+    });
+    const logger = warningLogger();
+    const reasons = [];
+    let renewalsAtLoss;
+    const release = keepEventLoopAlive();
+    try {
+      await runWithLock(
+        lock,
+        { logger, onLockLost: 'warn', onLockLostEvent: (reason) => reasons.push(reason) },
+        async () => {
+          while (reasons.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+          renewalsAtLoss = collection.updateOne.mock.callCount();
+          // The database is back: renewals go through again.
+          failing = false;
+          await new Promise((resolve) => setTimeout(resolve, 220));
+        },
+      );
+    } finally {
+      release();
+    }
+    assert.deepStrictEqual(reasons, ['no successful renewal within the TTL']);
+    assert.ok(collection.updateOne.mock.callCount() > renewalsAtLoss, 'the heartbeat went on');
   });
 
   it('should report ttlMs and acquisition latency on lock:acquired', async () => {

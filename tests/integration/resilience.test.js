@@ -315,14 +315,28 @@ describe('hook guarantees (integration)', () => {
         },
       },
     });
+    const ends = [];
+    kit.on('run:end', (event) => ends.push(event));
     try {
       await assert.rejects(kit.up(), (error) => {
         assert.ok(error instanceof HookFailedError);
+        // The migration committed before the hook ran: the error says so, and
+        // `run:end` counts it — an empty failed run would be a lie about the
+        // database.
+        assert.deepStrictEqual(
+          error.context.results.map((row) => [row.file, row.status]),
+          [['0001-a.ts', 'applied']],
+        );
         return true;
       });
     } finally {
       await kit.disconnect();
     }
+    assert.strictEqual(ends.length, 1);
+    assert.strictEqual(ends[0].success, false);
+    assert.strictEqual(ends[0].applied, 1);
+    assert.strictEqual(ends[0].total, 1);
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
   });
 
   it('should report success and the applied count to afterAll', async () => {
@@ -405,6 +419,151 @@ describe('hook guarantees (integration)', () => {
     await kit.disconnect();
     // The hook failed before anything ran, so nothing was applied.
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+  });
+});
+
+describe('what a failed run says (integration)', () => {
+  it('should put the typed code on migration:error and run:end', async () => {
+    project.write('0001-a.ts', failingMigration());
+    const kit = migrator();
+    const seen = [];
+    kit.on('migration:error', (event) => seen.push(['migration:error', event.code]));
+    kit.on('run:end', (event) => seen.push(['run:end', event.code, event.success]));
+    try {
+      await assert.rejects(kit.up());
+    } finally {
+      await kit.disconnect();
+    }
+    assert.deepStrictEqual(seen, [
+      ['migration:error', 'MIGRATION_EXECUTION_FAILED'],
+      ['run:end', 'MIGRATION_EXECUTION_FAILED', false],
+    ]);
+  });
+
+  it('should mark a run the lock refused, so it can be told from one that failed', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const holder = new MigrationLock(mongo.db, LOCK_COLLECTION, 60);
+    await holder.acquire();
+    const kit = migrator();
+    const ends = [];
+    kit.on('run:end', (event) => ends.push(event));
+    try {
+      // What a caller waiting for the lock does, attempt after attempt: every
+      // refusal ends a run — as LOCK_ALREADY_HELD, not as a nameless failure.
+      await assert.rejects(kit.up(), LockAlreadyHeldError);
+      await assert.rejects(kit.up(), LockAlreadyHeldError);
+      await holder.release();
+      await kit.up();
+    } finally {
+      await kit.disconnect();
+    }
+    assert.deepStrictEqual(
+      ends.map((event) => [event.success, event.code]),
+      [
+        [false, 'LOCK_ALREADY_HELD'],
+        [false, 'LOCK_ALREADY_HELD'],
+        [true, undefined],
+      ],
+    );
+  });
+
+  it('should say the indexes could not be created, not that it failed to connect', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    // An index of the same key under another name: createIndexes refuses.
+    await mongo.db
+      .collection('_migronaut_migrations')
+      .createIndex({ name: 1 }, { name: 'name_1', unique: true });
+    const kit = migrator();
+    try {
+      await assert.rejects(kit.status(), (error) => {
+        assert.strictEqual(error.code, 'CONNECTION_FAILED');
+        assert.match(error.message, /^Connected to MongoDB, but could not create the indexes/);
+        assert.match(error.message, /ensureIndexes: false/);
+        assert.strictEqual(error.context.phase, 'ensure-indexes');
+        return true;
+      });
+    } finally {
+      await kit.disconnect();
+    }
+    const unmanaged = migrator({ ensureIndexes: false });
+    try {
+      assert.strictEqual((await unmanaged.status()).length, 1);
+    } finally {
+      await unmanaged.disconnect();
+    }
+  });
+
+  it('should open no connection for a connect() that a disconnect() overtook', async () => {
+    const kit = migrator();
+    try {
+      // The config is still loading when the caller gives up (a shutdown):
+      // disconnect() finds nothing to close, and the connection must not be
+      // opened after it — nobody would close that one.
+      const pending = kit.connect();
+      await kit.disconnect();
+      await assert.rejects(pending, (error) => {
+        assert.strictEqual(error.code, 'CONNECTION_FAILED');
+        assert.match(error.message, /Disconnected while connecting/);
+        return true;
+      });
+      // A connect() made after it is its own.
+      await kit.connect();
+      assert.strictEqual((await kit.status()).length, 0);
+    } finally {
+      await kit.disconnect();
+    }
+  });
+
+  it('should refuse a strict dry run over an edited applied file, as the run would', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    const first = migrator();
+    try {
+      await first.up('0001-a.ts');
+    } finally {
+      await first.disconnect();
+    }
+    project.tamper('0001-a.ts');
+    const strict = migrator({ strict: true });
+    try {
+      // The preview used to list 0002-b.ts as pending — a row the real `up`
+      // refuses to apply.
+      await assert.rejects(strict.dryRun('up'), (error) => {
+        assert.strictEqual(error.code, 'CHECKSUM_MISMATCH');
+        assert.strictEqual(error.context.name, '0001-a.ts');
+        return true;
+      });
+      await assert.rejects(strict.up(), { code: 'CHECKSUM_MISMATCH' });
+    } finally {
+      await strict.disconnect();
+    }
+    const lax = migrator();
+    try {
+      assert.deepStrictEqual(
+        (await lax.dryRun('up')).map((row) => row.file),
+        ['0002-b.ts'],
+      );
+    } finally {
+      await lax.disconnect();
+    }
+  });
+
+  it('should evaluate a migration file once per run under reloadMigrations', async () => {
+    delete globalThis.__migronautEvaluations;
+    project.write(
+      '0001-a.ts',
+      `globalThis.__migronautEvaluations = (globalThis.__migronautEvaluations ?? 0) + 1;\n` +
+        insertMigration('things', 'a'),
+    );
+    const kit = migrator({ reloadMigrations: true });
+    try {
+      await kit.up();
+    } finally {
+      await kit.disconnect();
+    }
+    // Read ahead for its `requires`, then run: one module, not two.
+    assert.strictEqual(globalThis.__migronautEvaluations, 1);
+    delete globalThis.__migronautEvaluations;
   });
 });
 

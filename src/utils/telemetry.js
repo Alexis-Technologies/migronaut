@@ -429,9 +429,9 @@ function createTelemetry(telemetry, { dbName } = {}) {
       record(lockAcquireDuration, acquireMs);
     },
     /**
-     * A wait for a held lock ended — `outcome` is `'acquired'`, `'timeout'`
-     * or `'aborted'`. Only waits that happened are recorded: the free-lock
-     * path is `lock.acquire.duration`'s.
+     * A wait for a held lock ended — `outcome` is `'acquired'`, `'timeout'`,
+     * `'aborted'` or `'failed'` (it ended in another error). Only waits that
+     * happened are recorded: the free-lock path is `lock.acquire.duration`'s.
      */
     lockWaited({ waitedMs, outcome }) {
       record(lockWaitDuration, waitedMs, { [ATTRIBUTES.LOCK_WAIT_OUTCOME]: outcome });

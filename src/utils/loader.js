@@ -90,10 +90,22 @@ function tsLoadErrorOrNull(filepath, error) {
  * `reload` a unique query string forces a fresh evaluation. Off by default —
  * it leaks a module per load. A monotonic counter, not Date.now(): two
  * reloads in one millisecond must still get distinct URLs.
+ *
+ * The query string alone reloads ES modules only. A CommonJS file — what
+ * `migronaut create` scaffolds by default — is evaluated by the CommonJS
+ * loader, which caches by filename and never sees the query: the edited file
+ * kept running as the version first loaded, under the new file's checksum.
+ * Its `require.cache` entry is dropped first, under the path as given and as
+ * resolved (the cache key is the real path, behind a symlinked directory too).
+ * Like the query string, this reloads the file itself, not what it requires.
  */
-function importUserFile(filepath, options = {}) {
+async function importUserFile(filepath, options = {}) {
   const url = pathToFileURL(filepath).href;
-  return import(options.reload ? `${url}?migronaut=${++reloadCounter}` : url);
+  if (!options.reload) return import(url);
+  delete require.cache[filepath];
+  const resolved = await fs.realpath(filepath).catch(() => filepath);
+  delete require.cache[resolved];
+  return import(`${url}?migronaut=${++reloadCounter}`);
 }
 
 /**

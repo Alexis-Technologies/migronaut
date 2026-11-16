@@ -192,6 +192,8 @@ kit.on('run:end', (event) => {
   expectType<number | undefined>(event.durationMs);
   // Redacted string, never a raw Error — subscribers may ship it as-is.
   expectType<string | undefined>(event.error);
+  // The typed code: a refused run (LOCK_ALREADY_HELD) told from a failed one.
+  expectType<MigronautErrorCode | undefined>(event.code);
 });
 kit.on('migration:success', (event) => {
   expectType<MigrationEvent>(event);
@@ -202,6 +204,7 @@ kit.on('migration:skipped', (event) => {
 });
 kit.on('migration:error', (event) => {
   expectType<string | undefined>(event.error);
+  expectType<MigronautErrorCode | undefined>(event.code);
 });
 kit.once('lock:lost', (event) => {
   expectType<string | undefined>(event.reason);

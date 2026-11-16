@@ -1664,6 +1664,13 @@ export interface MigrationEvent extends MigronautEventBase {
    * credentials already redacted — safe to ship to metrics/alerting as-is.
    */
   error?: string;
+  /**
+   * The typed code of that failure (on `migration:error` only) — to tell a
+   * timeout (`MIGRATION_TIMEOUT`) from a body that threw
+   * (`MIGRATION_EXECUTION_FAILED`) without reading `error`. Absent for an
+   * error that is not a {@link MigronautError}.
+   */
+  code?: MigronautErrorCode;
   /** Why the migration was skipped (on `migration:skipped` only) */
   reason?: string;
 }
@@ -1690,6 +1697,14 @@ export interface RunEndEvent extends MigronautEventBase {
   total?: number;
   /** Redacted failure message — URI credentials are already masked */
   error?: string;
+  /**
+   * The typed code of the failure. A caller that waits for the lock
+   * (`runMigrations` with `onLockHeld: 'wait'`, a queue job) retries the whole
+   * run, so every refusal ends one as `LOCK_ALREADY_HELD`: filter on it to
+   * tell those from a run that failed. Absent for an error that is not a
+   * {@link MigronautError}.
+   */
+  code?: MigronautErrorCode;
 }
 
 export interface LockEvent extends MigronautEventBase {

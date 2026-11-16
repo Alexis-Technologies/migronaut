@@ -162,6 +162,8 @@ class MigratorKit extends EventEmitter {
   #ownsClient = true;
   /** The connect() in flight, so overlapping callers share one client instead of racing */
   #connecting;
+  /** Bumped by disconnect(): a connect() begun before it opens nothing after it */
+  #connectEpoch = 0;
   /**
    * The config load in flight, so overlapping first callers share one — a
    * config factory may fetch secrets, and must not run twice.
@@ -204,6 +206,8 @@ class MigratorKit extends EventEmitter {
   #topology;
   /** Migration modules read ahead of a run (requires, kind), by checksum */
   #moduleCache = new Map();
+  /** The sequence's files, read once per run — see #sequenceFiles */
+  #runFiles;
 
   constructor(config = {}, options = {}) {
     // An async listener whose promise rejects (a subscriber's insert that
@@ -379,9 +383,18 @@ class MigratorKit extends EventEmitter {
 
   /** Connect to MongoDB and ensure changelog indexes exist */
   async connect() {
+    const epoch = this.#connectEpoch;
     const config = await this.#ensureConfig();
     if (this.#client && this.#db) {
       return;
+    }
+    // disconnect() ran while the config was still loading (a secret manager's
+    // round trip, at shutdown): it found no client to close, so one opened
+    // now would be nobody's — its pool would keep the process alive.
+    if (epoch !== this.#connectEpoch) {
+      throw new ConnectionFailedError('Disconnected while connecting', {
+        cause: 'disconnect() was called before the connection was opened',
+      });
     }
     // A long-lived kit serves overlapping callers (a status probe while a
     // queue job starts). Without this, each would open its own MongoClient
@@ -415,7 +428,20 @@ class MigratorKit extends EventEmitter {
       // every command is a wasted round trip. `ensureIndexes: false` skips it
       // entirely, for deployments where the app user cannot create indexes.
       if (!this.#indexesEnsured && config.ensureIndexes) {
-        await this.#changelog.ensureIndexes(this.#db);
+        try {
+          await this.#changelog.ensureIndexes(this.#db);
+        } catch (error) {
+          // Connected, and then refused: no right to create an index, or one
+          // of the same key under another name. "Failed to connect" would
+          // send the operator to the network for a permissions problem.
+          throw new ConnectionFailedError(
+            `Connected to MongoDB, but could not create the indexes of ` +
+              `${config.migrationsCollection} — create them yourself and set ` +
+              'ensureIndexes: false, or grant createIndex on it',
+            { cause: errorText(error), phase: 'ensure-indexes' },
+            { cause: error },
+          );
+        }
         this.#indexesEnsured = true;
       }
       // "Which database did it actually write to?" is the most common support
@@ -436,6 +462,8 @@ class MigratorKit extends EventEmitter {
       this.#db = undefined;
       this.#changelog = undefined;
       await dangling?.close().catch(() => undefined);
+      // Already says what failed, and it was not the connection.
+      if (error instanceof ConnectionFailedError) throw error;
       throw new ConnectionFailedError(
         'Failed to connect to MongoDB',
         { cause: errorText(error) },
@@ -452,6 +480,8 @@ class MigratorKit extends EventEmitter {
    * everything else using it.
    */
   async disconnect() {
+    // Whatever connect() is still loading its config must not open after this.
+    this.#connectEpoch += 1;
     if (!this.#client) return;
     const client = this.#client;
     const owned = this.#ownsClient;
@@ -601,6 +631,7 @@ class MigratorKit extends EventEmitter {
       this.#abort = undefined;
       this.#runId = undefined;
       this.#runLog = undefined;
+      this.#runFiles = undefined;
     }
   }
 
@@ -886,7 +917,13 @@ class MigratorKit extends EventEmitter {
         { success: succeeded, applied: doneCount, direction },
       ]);
     } catch (hookError) {
-      if (succeeded) throw hookError;
+      if (succeeded) {
+        // Every migration of the run committed: what was applied goes with
+        // the hook's error, as it goes with any other failure — or `--json`
+        // and `run:end` would report an empty run that changed the database.
+        this.#attachResults(hookError, results);
+        throw hookError;
+      }
       this.#logger.warn(
         `⚠ afterAll hook failed after a failed run: ${errorText(hookError)}`,
         this.#fields({ hook: 'afterAll', error: errorText(hookError) }),
@@ -961,9 +998,12 @@ class MigratorKit extends EventEmitter {
       { ...context, ...attemptContext(1) },
       { direction, index, total },
     ]);
-    const loaded = await loadMigrationFile(this.#filepath(name), {
-      reload: config.reloadMigrations,
-    });
+    // The module the requires guard read ahead, when it did (`up`): one
+    // evaluation per version of a file, under `reloadMigrations` too. A file
+    // that is not there has no checksum to cache by — loading it says so.
+    const loaded =
+      (await this.#peek(name)) ??
+      (await loadMigrationFile(this.#filepath(name), { reload: config.reloadMigrations }));
     let migration = loaded;
     if (loaded.kind === 'background') {
       // Indexes cannot be created inside a transaction — the registration may run in one.
@@ -1055,7 +1095,9 @@ class MigratorKit extends EventEmitter {
       const retried = attempts > 1 ? { attempts } : {};
       // errorText, not the raw Error: a driver message can echo the
       // credentialed URI, and event subscribers (Sentry, JSON logs) would
-      // ship it — the same redaction the log line below already gets.
+      // ship it — the same redaction the log line below already gets. The
+      // typed code goes with it: a subscriber tells a timeout from a throw
+      // without reading the text.
       this.#emit('migration:error', {
         migration: name,
         direction,
@@ -1063,6 +1105,7 @@ class MigratorKit extends EventEmitter {
         ...durationField,
         ...retried,
         error: errorText(error),
+        ...(error instanceof MigronautError ? { code: error.code } : {}),
       });
       logger.error(
         `✖ Error    ${name}`,
@@ -1098,9 +1141,17 @@ class MigratorKit extends EventEmitter {
             ...(this.#runId ? { runId: this.#runId } : {}),
             ...failureFields,
           });
-        } catch {
-          // Duplicate key when an 'applied' record exists (forced re-run), or
-          // the database itself is unreachable — the trace is best-effort.
+        } catch (traceError) {
+          // Duplicate key when an 'applied' record exists (forced re-run) is
+          // the expected case, and silent. Anything else — the database itself
+          // is unreachable — is still best-effort, but said: "no failed trace"
+          // must be explainable from the log.
+          if (traceError?.code !== 11000) {
+            logger.debug(
+              `Could not record the failed attempt of ${name}: ${errorText(traceError)}`,
+              this.#fields({ migration: name, error: errorText(traceError) }),
+            );
+          }
         }
       }
       // Carry what already succeeded, so `--json` consumers can tell which
@@ -1271,7 +1322,9 @@ class MigratorKit extends EventEmitter {
       signal,
       execute: async (name, index, results) => {
         const filepath = this.#filepath(name);
-        const checksum = await computeChecksum(filepath);
+        // Through the instance cache: the requires guard asks for it again
+        // right below, and a second read and hash per file is all it cost.
+        const checksum = await this.#cachedChecksum(filepath);
 
         if (appliedNames.has(name)) {
           if (!force) {
@@ -1668,6 +1721,11 @@ class MigratorKit extends EventEmitter {
       // refuses, so the preview must too instead of listing rows it would
       // never apply. A single file is exempt, exactly as in `up`.
       if (!filename) this.#assertOrderIntact(names, applied);
+      // …and the same strict check: a bulk `up` under `strict` refuses the
+      // whole run when an applied file was edited since.
+      if (!filename && this.#config.strict) {
+        await this.#assertNoChecksumDrift(await changelog.getApplied(db));
+      }
     } else {
       // The same selection the real `down` executes — including the
       // irreversible-import refusal, so a preview can never show a rollback
@@ -1775,7 +1833,7 @@ class MigratorKit extends EventEmitter {
       ensureConfig: () => this.#ensureConfig(),
       connect: () => this.connect(),
       getDb: () => this.#requireDb(),
-      inspectLock: () => this.#buildLock().inspect(),
+      inspectLock: () => this.#buildLock().inspectWithAge(),
       status: () => this.status(),
       definitions: () => this.#resolveCollections(),
       background: async () => {
@@ -2279,13 +2337,26 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
+   * The migration files of the sequence, as a Set. Within a run the directory
+   * is read once — a run of a thousand files that each require one would
+   * otherwise list it a thousand times, under the lock; outside a run (a
+   * plan, a status) it is read every time, since a long-lived kit must see a
+   * file a deploy added.
+   */
+  async #sequenceFiles() {
+    if (this.#runId === undefined) return new Set(await this.#listMigrationFiles());
+    this.#runFiles ??= new Set(await this.#listMigrationFiles());
+    return this.#runFiles;
+  }
+
+  /**
    * What a file's `requires` names must be: background migration files of
    * the sequence. The order is the loader's to check (each sorts before the
    * file); whether they are done is the caller's.
    */
   async #assertRequiresAreBackground(name, requires) {
     if (requires.length === 0) return;
-    const sequence = new Set(await this.#listMigrationFiles());
+    const sequence = await this.#sequenceFiles();
     for (const required of requires) {
       if (!sequence.has(required)) {
         throw new MigrationInvalidExportError(
@@ -2656,7 +2727,16 @@ class MigratorKit extends EventEmitter {
    * first, under this run's lock, in inline mode. Empty when it may run.
    */
   async #requiresGuard(name, signal) {
-    const loaded = await this.#peek(name);
+    let loaded;
+    try {
+      loaded = await this.#peek(name);
+    } catch {
+      // A file that does not load requires nothing that can be told. Its
+      // failure is #executeMigration's to report — inside the migration's
+      // span, after beforeEach, with a duration point — not this guard's,
+      // which runs before all of them.
+      return [];
+    }
     if (loaded === null || loaded.kind === 'background') return [];
     const requires = loaded.requires ?? [];
     if (requires.length === 0) return [];

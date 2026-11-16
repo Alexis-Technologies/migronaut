@@ -152,7 +152,46 @@ describe('runAudit (mocked deps)', () => {
     );
     const lock = check(stale, 'lock');
     assert.strictEqual(lock.status, 'warn');
-    assert.match(lock.detail, /past its TTL/);
+    // No TTL on the document (a holder from before 2.1): only this
+    // configuration's is known, and the advice says so.
+    assert.match(lock.detail, /past this configuration's TTL \(60s\)/);
+    assert.match(lock.detail, /make sure it is not before migronaut unlock/);
+  });
+
+  it('should judge a lock by its holder’s TTL, not by the auditor’s', async () => {
+    // A deploy job with a five-minute TTL renews every 150 s: two minutes
+    // after a renewal it is as alive as it gets. The auditor's own TTL (60 s)
+    // used to call it stale and advise `migronaut unlock`.
+    const holder = { pid: 1, host: 'h', executedBy: 'u', ttlMs: 300_000 };
+    const alive = await runAudit(
+      makeDeps({
+        inspectLock: async () => ({ ...holder, lockedAt: new Date(Date.now() - 120_000) }),
+      }),
+    );
+    assert.strictEqual(check(alive, 'lock').status, 'pass');
+    assert.doesNotMatch(check(alive, 'lock').detail, /unlock/);
+
+    const crashed = await runAudit(
+      makeDeps({
+        inspectLock: async () => ({ ...holder, lockedAt: new Date(Date.now() - 301_000) }),
+      }),
+    );
+    const lock = check(crashed, 'lock');
+    assert.strictEqual(lock.status, 'warn');
+    assert.match(lock.detail, /past its TTL \(300s\), likely from a crashed run/);
+  });
+
+  it('should take the lock’s age from the server, whatever this host’s clock says', async () => {
+    // lockedAt is stamped in server time. An auditor whose clock runs ten
+    // minutes fast sees a lock renewed a second ago as ten minutes old.
+    const skewed = new Date(Date.now() - 600_000);
+    const holder = { lockedAt: skewed, pid: 1, host: 'h', executedBy: 'u', ttlMs: 60_000 };
+    const report = await runAudit(
+      makeDeps({ inspectLock: async () => ({ ...holder, ageMs: 1000 }) }),
+    );
+    const lock = check(report, 'lock');
+    assert.strictEqual(lock.status, 'pass');
+    assert.match(lock.detail, /for 1s$/);
   });
 
   it('should warn when the lock cannot be read', async () => {

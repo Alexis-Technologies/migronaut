@@ -11,8 +11,8 @@ const { ATTRIBUTES } = require('../utils/telemetry.js');
  * Built from the kit's own capabilities: `emit` (runId stamped, listeners
  * contained), `telemetry` (a no-op without one), the resolved `logger` and
  * `fields`. All of them are guarded, so nothing recorded here can fail a run.
- * The span itself is opened by the kit — the run span is one of its two wrap
- * sites — and handed over with {@link RunRecorder#spanOpened}.
+ * The span itself is opened by the kit — the run span is one of its three
+ * wrap sites — and handed over with {@link RunRecorder#spanOpened}.
  */
 class RunRecorder {
   #info;
@@ -124,6 +124,11 @@ class RunRecorder {
       // (which can echo the credentialed URI) — errorText is the same
       // chokepoint every log line and result row already goes through.
       ...(failure ? { error: errorText(failure) } : {}),
+      // And its typed code: a caller waiting for the lock retries the whole
+      // run, so every refusal ends one as LOCK_ALREADY_HELD — a subscriber
+      // that alerts on failed runs needs to tell those from a migration that
+      // threw, without parsing the text.
+      ...(failure instanceof MigronautError ? { code: failure.code } : {}),
     });
     // One human rollup after the per-migration lines: total wall-clock time
     // (lock wait and hooks included) is otherwise unobtainable from the

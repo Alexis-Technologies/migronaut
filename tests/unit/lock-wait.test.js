@@ -252,6 +252,33 @@ describe('withLockWait', () => {
     await assert.rejects(pending, RunAbortedError);
     assert.strictEqual(settled[2].outcome, 'aborted');
 
+    // A wait that ends in something else is still a wait that ended: the
+    // lock came free, and the run then failed on its own.
+    let calls = 0;
+    await assert.rejects(
+      withLockWait(
+        async () => {
+          calls += 1;
+          if (calls === 1) throw held();
+          throw new Error('the migration threw');
+        },
+        { ...fast, onSettle },
+      ),
+      /the migration threw/,
+    );
+    assert.strictEqual(settled[3].outcome, 'failed');
+    assert.strictEqual(settled[3].attempts, 2);
+    // …but an error with no wait before it is nobody's wait.
+    await assert.rejects(
+      withLockWait(
+        async () => {
+          throw new Error('at once');
+        },
+        { ...fast, onSettle },
+      ),
+    );
+    assert.strictEqual(settled.length, 4);
+
     // A throwing reporter changes nothing about the outcome.
     const outcome = await withLockWait(refusedThenFree(1), {
       ...fast,
