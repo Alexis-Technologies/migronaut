@@ -17,7 +17,7 @@ no release workflow, no provenance, no publish automation — and this skill nev
 propose release automation, size budgets, `pnpm audit` in CI, dependabot or other governance
 ceremony; the user has declined all of it.
 
-Releases so far: 1.0.0, 2.0.0 – 2.4.0 (tags `vX.Y.Z`). A feature lands on its own branch, carries a
+Releases so far: 1.0.0, 2.0.0 – 2.5.0 (tags `vX.Y.Z`). A feature lands on its own branch, carries a
 `## vX.Y.Z — unreleased` CHANGELOG section while it is built, and ends in a release commit on that
 branch; the branch is squash-merged into `main`.
 

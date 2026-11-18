@@ -369,6 +369,7 @@ export interface SyncJobResult {
    * `ConvergeResult.fingerprint`) — a schedule's circuit breaker, like `held`
    * for a migration. A changed definition changes the plan and resumes it;
    * so does an explicit `enqueueConverge()` that goes through.
+   * @experimental New in 2.5
    */
   convergeHeld?: {
     reason: string;

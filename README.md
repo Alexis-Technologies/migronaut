@@ -1037,18 +1037,20 @@ Apple M3 Max, Node v24.14.1:
 
 | Scenario | ops/sec |
 |---|--------:|
-| `computeChecksum` — small migration file (~1 KB) | ~16,000 |
+| `computeChecksum` — small migration file (~1 KB) | ~17,000 |
 | `computeChecksum` — large migration file (~100 KB) |  ~8,000 |
 | `loadMigrationFile` — CommonJS default export | ~60,000 |
 | `loadMigrationFile` — ESM named exports | ~60,000 |
 | `loadMigrationFile` — TypeScript (native type-stripping) | ~60,000 |
-| `Changelog.getAll` — 1,000 records |     ~20 |
-| `Changelog.getAppliedNames` — 1,000 records |     ~30 |
-| `Changelog.getLastBatch` — 1,000 records |    ~200 |
-| `Changelog.markApplied` — idempotent upsert |    ~150 |
-| `Changelog.markReverted` — update existing applied record |    ~150 |
+| `Changelog.getAll` — 1,000 records |     ~17 |
+| `Changelog.getAppliedNames` — 1,000 records |     ~45 |
+| `Changelog.getLastBatch` — 1,000 records |  ~9,000 |
+| `Changelog.markApplied` — idempotent upsert |    ~160 |
+| `Changelog.markReverted` — update existing applied record |    ~160 |
 | `MigrationLock.acquire + release` — uncontended round trip |     ~80 |
-| `MigrationLock.renew` — heartbeat update |    ~150 |
+| `MigrationLock.renew` — heartbeat update |    ~170 |
+| `MigratorKit.status()` — 100 applied records |    ~670 |
+| `MigratorKit.up()` — 100 pending files, end-to-end | ~1.3 s per run |
 
 Numbers vary by hardware and Node version — treat them as relative guidance, not absolutes. The
 harness exists primarily to catch performance regressions between releases.

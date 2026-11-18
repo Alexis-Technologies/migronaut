@@ -3,12 +3,34 @@
 All notable changes to this project will be documented in this file.
 Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
 
-## Unreleased
+## v2.5.0 — 2026-11-18
 
-A hardening pass over 2.4: no new feature, and no change for a project that does none of the
-things listed under "Changed behaviour".
+A hardening release: what a review of the whole codebase found — security, resilience and
+observability fixes across the core, background migrations, declared collections and the queue
+adapter — and a test suite that now runs on the newest `mongodb`, `mongoose` and TypeScript majors
+(and still on `mongodb` 6 in CI). No new feature, and nothing to change for a project that does none
+of the things listed under **Changed**: a few inputs that used to be misread are refused now —
+check them if you script the CLI or pass options from an environment variable or a JSON body. The
+new fields on converge, queue and background results are experimental, like the APIs they extend.
 
-### Changed behaviour
+### Added
+
+- **`code` on `migration:error` and `run:end`** — the failure's typed error code. A run the lock
+  refused ends with `code: 'LOCK_ALREADY_HELD'`, so a subscriber waiting for the lock can tell its
+  refusals from a run that failed.
+- **`fingerprint` on a converge result and its history entry** — a digest of everything the plan
+  would change or refuse; a failure that repeats the newest history entry is counted on it
+  (`repeats`, `lastAt`) instead of appended.
+- **`background:throttle` with `reason: 'lag'`** (and the `migronaut.background.throttled` metric)
+  while lanes wait for a lagging secondary — with a warning once it has lasted a minute. A lane
+  whose slice ends meanwhile gives its slot back, so a pause or a cancel is not held up by the
+  secondary.
+- **`degraded: 'sample-timeout'` on a background dry run** whose sample could not be drawn in 30 s
+  and was replaced by the first documents.
+- **`migronaut.lock.wait.outcome: failed`** — a wait for the lock that ended in another error.
+- **`convergeHeld` on a sync tick's result** — see **Changed**.
+
+### Changed
 
 - **The CLI exits 6 (`CONFIG_INVALID`) on a command line that does not parse** — an unknown flag
   or command, a missing value or argument, no command at all — as the reference has always said.
@@ -34,23 +56,6 @@ things listed under "Changed behaviour".
 - **A throttle hook's pause and a `retryOnConflict` backoff are capped at one hour.** A timer
   past 2³¹−1 ms (or `Infinity`) fires after 1 ms in Node, so "back off a lot" used to mean "do
   not wait at all".
-
-### Added
-
-- **`code` on `migration:error` and `run:end`** — the failure's typed error code. A run the lock
-  refused ends with `code: 'LOCK_ALREADY_HELD'`, so a subscriber waiting for the lock can tell its
-  refusals from a run that failed.
-- **`fingerprint` on a converge result and its history entry** — a digest of everything the plan
-  would change or refuse; a failure that repeats the newest history entry is counted on it
-  (`repeats`, `lastAt`) instead of appended.
-- **`background:throttle` with `reason: 'lag'`** (and the `migronaut.background.throttled` metric)
-  while lanes wait for a lagging secondary — with a warning once it has lasted a minute. A lane
-  whose slice ends meanwhile gives its slot back, so a pause or a cancel is not held up by the
-  secondary.
-- **`degraded: 'sample-timeout'` on a background dry run** whose sample could not be drawn in 30 s
-  and was replaced by the first documents.
-- **`migronaut.lock.wait.outcome: failed`** — a wait for the lock that ended in another error.
-- **`MigrationLock` reads its age in server time** (`inspectWithAge`), which `audit` uses.
 
 ### Fixed
 
@@ -108,6 +113,14 @@ things listed under "Changed behaviour".
   `forceRelease` could report one holder and delete another; a failed lock readback left the
   document behind until its TTL. `$schema` in a generated JSON config was called unrecognized.
 
+### Documentation
+
+- SECURITY.md lists the supported version again, and says where the values of a duplicate-key
+  error are masked and where they are not. CONTRIBUTING.md, ARCHITECTURE.md and CLAUDE.md are back
+  in step with three entry points, four opt-in suites and the current test count.
+- New troubleshooting entries: `BSONVersionError` (a driver and a Mongoose of different majors)
+  and Node types under TypeScript 6+.
+
 ### Tooling
 
 - **The suite runs on the newest majors**: `mongodb` 7, `mongoose` 9, TypeScript 7 (and `bullmq`
@@ -119,14 +132,6 @@ things listed under "Changed behaviour".
 - **Guard tests for the conventions that had none** — no `console.*`, no bare `Error`, no tracer
   call outside `utils/telemetry.js` — and the existing ones cover `versioning.d.ts`, `ioredis` and
   subpath imports.
-
-### Documentation
-
-- SECURITY.md lists the supported version again, and says where the values of a duplicate-key
-  error are masked and where they are not. CONTRIBUTING.md, ARCHITECTURE.md and CLAUDE.md are back
-  in step with three entry points, four opt-in suites and the current test count.
-- New troubleshooting entries: `BSONVersionError` (a driver and a Mongoose of different majors)
-  and Node types under TypeScript 6+.
 
 ## v2.4.0 — 2026-10-07
 

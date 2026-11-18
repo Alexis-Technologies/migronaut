@@ -1080,15 +1080,22 @@ export interface ConvergeHistoryEntry {
   changed: number;
   /** The rows that changed, failed or refused the run — each with its collection and `from` / `to` */
   actions: Array<ConvergeAction & { collection: string }>;
-  /** The plan the run started from, in one word — see {@link ConvergeResult.fingerprint} */
+  /**
+   * The plan the run started from, in one word — see {@link ConvergeResult.fingerprint}
+   * @experimental New in 2.5
+   */
   fingerprint?: string;
   /**
    * How many more times this failure happened: the same plan, refused or
    * failed with the same error, is counted here instead of appended — a
    * schedule that converges cannot fill the history with one failure.
+   * @experimental New in 2.5
    */
   repeats?: number;
-  /** When it last happened (with `repeats`) */
+  /**
+   * When it last happened (with `repeats`)
+   * @experimental New in 2.5
+   */
   lastAt?: Date;
   unstable?: ConvergeUnstable[];
   /**
@@ -1168,6 +1175,7 @@ export interface ConvergeResult {
    * target, name, action, reason) — absent when it asks for nothing. Two
    * plans with the same fingerprint ask the same of the database: a repeated
    * failure is told from a new one by it.
+   * @experimental New in 2.5
    */
   fingerprint?: string;
   unstable?: ConvergeUnstable[];
@@ -1686,6 +1694,7 @@ export interface MigrationEvent extends MigronautEventBase {
    * timeout (`MIGRATION_TIMEOUT`) from a body that threw
    * (`MIGRATION_EXECUTION_FAILED`) without reading `error`. Absent for an
    * error that is not a {@link MigronautError}.
+   * New in 2.5
    */
   code?: MigronautErrorCode;
   /** Why the migration was skipped (on `migration:skipped` only) */
@@ -1720,6 +1729,7 @@ export interface RunEndEvent extends MigronautEventBase {
    * run, so every refusal ends one as `LOCK_ALREADY_HELD`: filter on it to
    * tell those from a run that failed. Absent for an error that is not a
    * {@link MigronautError}.
+   * New in 2.5
    */
   code?: MigronautErrorCode;
 }
@@ -2665,7 +2675,10 @@ export type BackgroundDryRun =
       migration: string;
       direction: 'forward' | 'revert';
       method: 'sample' | 'first';
-      /** The sample ran out of time: these are the first documents by `_id` instead */
+      /**
+       * The sample ran out of time: these are the first documents by `_id` instead
+       * @experimental New in 2.5
+       */
       degraded?: 'sample-timeout';
       requested: number;
       found: number;
