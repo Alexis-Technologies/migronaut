@@ -107,11 +107,11 @@ await kit.up();
 | Event | Payload |
 |---|---|
 | `run:start` | `{ runId, command, direction? }` |
-| `run:end` | `{ runId, command, direction?, success, durationMs, applied?, reverted?, total?, error? }` |
+| `run:end` | `{ runId, command, direction?, success, durationMs, applied?, reverted?, total?, error?, code? }` |
 | `migration:start` | `{ runId, migration, direction, batch? }` |
 | `migration:success` | `{ runId, migration, direction, batch?, durationMs, attempts? }` — `attempts` when the driver retried the transaction and the body ran again |
 | `migration:skipped` | `{ runId, migration, direction, reason }` |
-| `migration:error` | `{ runId, migration, direction, batch?, durationMs?, attempts?, error }` |
+| `migration:error` | `{ runId, migration, direction, batch?, durationMs?, attempts?, error, code? }` |
 | `migration:log` | `{ kind, runId, migration?, direction, batch?, attempt?, jobId?, groupId?, requestedBy?, reason?, level, msg, data, at, seq, truncated? }` — a `ctx.logger` call marked `userland: true` ([Migration Logs](/guide/migration-logs)); `kind: 'background'` from a background migration |
 | `lock:acquired` | `{ runId, owner, ttlMs, acquireMs }` — or `{ runId, owner, skipped: true }` under `--no-lock` |
 | `lock:released` | `{ runId, owner, early? }` — `early: true` when a converge gave the lock up to wait for search index builds; the run goes on |
@@ -123,7 +123,13 @@ await kit.up();
 
 `command` is `'up'`, `'down'`, `'redo'`, `'baseline'`, `'import'` or `'converge'`. The counts on `run:end` are
 present when the run produced a result list — on the failure path too, counted from what was
-applied before it failed. `error` is a message with URI credentials already redacted.
+applied before it failed. `error` is a message with URI credentials already redacted, and `code`
+the failure's [error code](/reference/error-codes) (absent for an error that is not migronaut's).
+
+A run that never got the lock is a run that ended, too: a caller that waits for the lock
+(`runMigrations` with `onLockHeld: 'wait'`, a queue job) retries the whole run, so every refusal
+emits `run:start` and a `run:end` with `success: false` and `code: 'LOCK_ALREADY_HELD'`. An alert on
+failed runs should leave that code out.
 
 `runId` is the same value on every event of a run, on the lock document, and on
 each changelog record that run writes — so logs, metrics and the database can be

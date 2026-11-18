@@ -1,3 +1,12 @@
+const {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} = require('node:fs');
+const { tmpdir } = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
@@ -59,6 +68,78 @@ describe('loadMigrationFile', () => {
       loadMigrationFile(path.join(fixtures, 'throws-on-import.cjs')),
       /boom at import time/,
     );
+  });
+});
+
+describe('loadMigrationFile — reload', () => {
+  const body = (label) => `async function up() { return '${label}'; }\nasync function down() {}\n`;
+  const sources = {
+    // CommonJS: what `migronaut create` scaffolds, for .js and .ts alike.
+    'reload.js': (label) => `${body(label)}module.exports = { up, down };\n`,
+    'reload.cjs': (label) => `${body(label)}module.exports = { up, down };\n`,
+    'reload.ts': (label) => `${body(label)}module.exports = { up, down };\n`,
+    'reload.mjs': (label) => `${body(label)}export { up, down };\n`,
+  };
+
+  for (const [file, source] of Object.entries(sources)) {
+    it(`should run the edited version of ${file}, not the one first loaded`, async (t) => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'migronaut-reload-'));
+      t.after(() => rmSync(dir, { recursive: true, force: true }));
+      const filepath = path.join(dir, file);
+      writeFileSync(filepath, source('first'));
+      const first = await loadMigrationFile(filepath, { reload: true });
+      assert.strictEqual(await first.up(), 'first');
+      writeFileSync(filepath, source('edited'));
+      // The query string alone reloaded ES modules only: a CommonJS file kept
+      // running as 'first' — and was recorded under the edited file's checksum.
+      const edited = await loadMigrationFile(filepath, { reload: true });
+      assert.strictEqual(await edited.up(), 'edited');
+    });
+  }
+
+  it('should keep the version first loaded without reload — the module cache, as documented', async (t) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'migronaut-reload-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const filepath = path.join(dir, 'cached.js');
+    writeFileSync(filepath, sources['reload.js']('first'));
+    assert.strictEqual(await (await loadMigrationFile(filepath)).up(), 'first');
+    writeFileSync(filepath, sources['reload.js']('edited'));
+    assert.strictEqual(await (await loadMigrationFile(filepath)).up(), 'first');
+  });
+
+  it('should reload a CommonJS file reached through a symlinked directory', async (t) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'migronaut-reload-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    mkdirSync(path.join(dir, 'real'));
+    // A junction on Windows, which needs no privilege; a symlink elsewhere.
+    symlinkSync(path.join(dir, 'real'), path.join(dir, 'link'), 'junction');
+    const filepath = path.join(dir, 'link', 'linked.js');
+    writeFileSync(filepath, sources['reload.js']('first'));
+    assert.strictEqual(await (await loadMigrationFile(filepath, { reload: true })).up(), 'first');
+    writeFileSync(filepath, sources['reload.js']('edited'));
+    assert.strictEqual(await (await loadMigrationFile(filepath, { reload: true })).up(), 'edited');
+  });
+
+  it('should reload a file whose link spells its target another way', async (t) => {
+    // The module loader caches a file under its real path as Node's own
+    // resolver spells it — the JavaScript realpath, which keeps the spelling a
+    // link holds — while the native one asks the OS, which may spell it
+    // otherwise: a Windows 8.3 name expanded (C:\Users\RUNNER~1 on CI), another
+    // case on a case-insensitive disk. Asked of the native one, the reload
+    // dropped a key the cache did not have, and the edited file never ran.
+    const dir = mkdtempSync(path.join(tmpdir(), 'migronaut-reload-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    mkdirSync(path.join(dir, 'real'));
+    if (!existsSync(path.join(dir, 'REAL'))) {
+      t.skip('a case-sensitive file system: no second spelling of a path');
+      return;
+    }
+    symlinkSync(path.join(dir, 'REAL'), path.join(dir, 'link'), 'junction');
+    const filepath = path.join(dir, 'link', 'spelled.js');
+    writeFileSync(filepath, sources['reload.js']('first'));
+    assert.strictEqual(await (await loadMigrationFile(filepath, { reload: true })).up(), 'first');
+    writeFileSync(filepath, sources['reload.js']('edited'));
+    assert.strictEqual(await (await loadMigrationFile(filepath, { reload: true })).up(), 'edited');
   });
 });
 

@@ -123,7 +123,8 @@ function waitBudget(lockWaitTimeoutMs, error) {
  * sleep, for callers that report progress. `isTransient(error)` widens what is
  * waited out beyond a held lock (the queue's "an earlier job is still in
  * flight"); `onSettle({ waitedMs, attempts, outcome })` fires once when a wait
- * that happened ends — `'acquired'`, `'timeout'` or `'aborted'`.
+ * that happened ends — `'acquired'`, `'timeout'`, `'aborted'` or `'failed'`
+ * (in an error that is not a held lock).
  */
 async function withLockWait(attempt, options = {}) {
   const {
@@ -170,6 +171,10 @@ async function withLockWait(attempt, options = {}) {
       return { result, waited, waitedMs: total, attempts };
     } catch (error) {
       if (onLockHeld !== 'wait' || !isTransient(error)) {
+        // A wait that ended in something else — the lock came free and the
+        // run then failed, or the database went away — is still a wait that
+        // ended: its duration is measured like any other.
+        settle('failed');
         throw error;
       }
       firstRefusalAt ??= Date.now();

@@ -26,6 +26,21 @@ const CONFIG_CHECK_INTERVAL_MS = 60_000;
 /** How long to wait between two looks at a lag that is too high */
 const LAG_WAIT_MS = 1_000;
 
+/** How long lanes wait for a secondary before it is said aloud, and how often after that */
+const LAG_WARN_AFTER_MS = 60_000;
+const LAG_WARN_EVERY_MS = 300_000;
+
+/** How often a lag wait is reported (the event, the metric), at most, per process and migration */
+const LAG_REPORT_INTERVAL_MS = 10_000;
+
+/**
+ * The longest pause a throttle hook gets in one go. A timer past 2³¹−1 ms —
+ * or `Infinity` — is not a long wait in Node: it fires after 1 ms, so a hook
+ * that meant "back off a lot" would switch the throttle off. The hook is
+ * asked again before every batch, so an hour at a time loses nothing.
+ */
+const MAX_HOOK_PAUSE_MS = 3_600_000;
+
 /** Errors that mean "no replication status here" — not a replica set member */
 const NO_REPLICATION = new Set([
   59, // CommandNotFound (mongos)
@@ -94,10 +109,24 @@ function excludedMembers(config) {
 
 /**
  * A throttle for one lane. `options`: `{ spec, db, logger, name, now?,
- * sleep?, signal? }`. `beforeBatch(ctx)` waits as the rules say; it rejects
- * only when `signal` aborts.
+ * sleep?, signal?, lagWaits? }`. `beforeBatch(ctx)` waits as the rules say;
+ * it rejects only when `signal` aborts, and resolves to `{ expired: true }`
+ * when a lagging secondary outlasted the slice (`ctx.deadline`).
+ *
+ * `lagWaits` is the process's memory of the waits in progress, per migration
+ * (`Map<name, { since, warnedAt, reportedAt }>`): a wait goes on across the
+ * slices and the lanes of a process, and is said once for all of them.
  */
-function createThrottle({ spec, db, logger, name, now = Date.now, wait = sleep, warned }) {
+function createThrottle({
+  spec,
+  db,
+  logger,
+  name,
+  now = Date.now,
+  wait = sleep,
+  warned,
+  lagWaits = new Map(),
+}) {
   const maxLag = spec.maxReplicationLagMs;
   let lagEnabled = maxLag !== false && typeof db?.admin === 'function';
   let lastLagCheck = -Infinity;
@@ -122,8 +151,37 @@ function createThrottle({ spec, db, logger, name, now = Date.now, wait = sleep, 
     return replicationLagMs(await admin.command({ replSetGetStatus: 1 }), excluded);
   }
 
-  async function waitForLag(signal) {
-    if (!lagEnabled || now() - lastLagCheck < LAG_CHECK_INTERVAL_MS) return;
+  /**
+   * A lag wait made visible: an event and a metric point at most every 10 s
+   * (`onLag`), and a warning once it has lasted a minute, then every five —
+   * a lane that holds its lease and writes nothing looks healthy to every
+   * other check there is.
+   */
+  function reportLag(lag, onLag) {
+    const at = now();
+    let entry = lagWaits.get(name);
+    if (entry === undefined) {
+      entry = { since: at, warnedAt: -Infinity, reportedAt: -Infinity };
+      lagWaits.set(name, entry);
+    }
+    const waitedMs = at - entry.since;
+    if (at - entry.reportedAt >= LAG_REPORT_INTERVAL_MS) {
+      entry.reportedAt = at;
+      onLag?.({ reason: 'lag', lagMs: lag, waitedMs });
+    }
+    if (waitedMs >= LAG_WARN_AFTER_MS && at - entry.warnedAt >= LAG_WARN_EVERY_MS) {
+      entry.warnedAt = at;
+      logger.warn(
+        `⚠ ${name}: a secondary lags ${lag}ms (maxReplicationLagMs ${maxLag}) — its lanes ` +
+          `have been waiting for ${Math.round(waitedMs / 1000)}s and write nothing meanwhile`,
+        { background: name, lagMs: lag, waitedMs },
+      );
+    }
+  }
+
+  /** Wait while a secondary lags too far; resolves to whether the slice ran out meanwhile */
+  async function waitForLag(signal, { deadline, onLag } = {}) {
+    if (!lagEnabled || now() - lastLagCheck < LAG_CHECK_INTERVAL_MS) return false;
     for (;;) {
       lastLagCheck = now();
       let lag;
@@ -143,15 +201,23 @@ function createThrottle({ spec, db, logger, name, now = Date.now, wait = sleep, 
             background: name,
           });
         }
-        return;
+        return false;
       }
-      if (lag <= maxLag) return;
+      if (lag <= maxLag) {
+        lagWaits.delete(name);
+        return false;
+      }
       lagged = true;
       logger.debug(`Replication lag ${lag}ms > ${maxLag}ms — waiting`, {
         background: name,
         lagMs: lag,
       });
+      reportLag(lag, onLag);
       await wait(LAG_WAIT_MS, signal);
+      // The slice is over: the lane gives its slot back and reads its
+      // controls again, instead of holding both through a lag of hours — a
+      // pause or a cancel would otherwise wait for the secondary too.
+      if (deadline !== undefined && now() >= deadline) return true;
     }
   }
 
@@ -162,8 +228,20 @@ function createThrottle({ spec, db, logger, name, now = Date.now, wait = sleep, 
       lagged = false;
       return was;
     },
-    /** Everything a lane waits for before reading its next batch */
-    async beforeBatch({ signal, generation, partition, batchSize, extraPauseMs = 0 }) {
+    /**
+     * Everything a lane waits for before reading its next batch. `deadline`
+     * (the slice's, epoch ms) ends a wait for a lagging secondary —
+     * `{ expired: true }`; `onLag(change)` hears of that wait.
+     */
+    async beforeBatch({
+      signal,
+      generation,
+      partition,
+      batchSize,
+      extraPauseMs = 0,
+      deadline,
+      onLag,
+    }) {
       const pause = (first ? 0 : spec.pauseMs) + extraPauseMs;
       if (pause > 0) await wait(pause, signal);
       first = false;
@@ -176,9 +254,11 @@ function createThrottle({ spec, db, logger, name, now = Date.now, wait = sleep, 
           batchSize,
           signal,
         });
-        if (typeof extra === 'number' && extra > 0) await wait(extra, signal);
+        if (typeof extra === 'number' && extra > 0) {
+          await wait(Math.min(extra, MAX_HOOK_PAUSE_MS), signal);
+        }
       }
-      await waitForLag(signal);
+      return { expired: await waitForLag(signal, { deadline, onLag }) };
     },
   };
 }
@@ -259,6 +339,9 @@ const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 module.exports = {
   LAG_CHECK_INTERVAL_MS,
+  LAG_WARN_AFTER_MS,
+  LAG_WARN_EVERY_MS,
+  MAX_HOOK_PAUSE_MS,
   THROTTLE_REPORT_INTERVAL_MS,
   createAdaptive,
   createThrottle,

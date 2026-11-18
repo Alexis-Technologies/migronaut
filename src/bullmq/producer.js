@@ -12,11 +12,13 @@ const {
   BACKGROUND_FORBIDDEN_JOB_OPTIONS,
   FORBIDDEN_JOB_OPTIONS,
   JOB_NAMES,
+  KNOWN_OPTIONS,
   buildBackgroundJob,
   buildConvergeJob,
   buildMigrationJob,
   isObjectLike,
   migrationJobOptions,
+  warnUnknownOptions,
 } = require('./jobs.js');
 const { waitForGroup } = require('./wait.js');
 
@@ -134,6 +136,7 @@ async function resolveConverge(kit, { converge, filename, to }) {
  * a dry run finds the database out of step.
  */
 async function planUpJobs(kit, options = {}) {
+  warnUnknownOptions(kit, 'enqueueUp', options, KNOWN_OPTIONS.up);
   const { filename, to, force = false, ordered = true, jobOptions } = options;
   if (filename !== undefined) assertMigrationName(filename);
   if (to !== undefined) assertMigrationName(to);
@@ -254,6 +257,7 @@ async function assertTopOfStack(kit, migrations) {
  * ordered plan is put in revert order — newest applied first.
  */
 async function planDownJobs(kit, options = {}) {
+  warnUnknownOptions(kit, 'enqueueDown', options, KNOWN_OPTIONS.down);
   const { filename, steps, batch, to, ordered = true, jobOptions } = options;
   if (filename !== undefined) assertMigrationName(filename);
   if (to !== undefined) assertMigrationName(to);
@@ -318,8 +322,15 @@ async function foreignJobs(queue, ids, groupId) {
  */
 function makeWait(queue, group, { queueEvents, getQueueEvents } = {}) {
   const waitsForSomething = group.jobs.length > 0 || group.converge !== undefined;
-  return (waitOptions = {}) =>
-    waitForGroup({
+  // Async on purpose: whatever goes wrong before the wait starts — the facade
+  // is closed and lends no QueueEvents any more, the options are not an
+  // object — is a rejection, as the returned promise says, never a throw that
+  // passes `wait().catch(…)` by.
+  return async (waitOptions = {}) => {
+    if (!isObjectLike(waitOptions)) {
+      throw new ConfigInvalidError('wait options must be an object');
+    }
+    return waitForGroup({
       queue,
       queueEvents:
         waitOptions.queueEvents ??
@@ -328,6 +339,7 @@ function makeWait(queue, group, { queueEvents, getQueueEvents } = {}) {
       ...group,
       timeoutMs: waitOptions.timeoutMs,
     });
+  };
 }
 
 function assertQueue(queue) {
@@ -422,6 +434,7 @@ async function enqueueConverge(queue, kit, options = {}, internals = {}) {
   if (!isObjectLike(options)) {
     throw new ConfigInvalidError('enqueueConverge options must be an object');
   }
+  warnUnknownOptions(kit, 'enqueueConverge', options, KNOWN_OPTIONS.converge);
   const { ordered, jobOptions, queueEvents } = options;
   if (ordered !== undefined) assertBoolean(ordered, 'ordered');
   assertJobOptions(jobOptions);

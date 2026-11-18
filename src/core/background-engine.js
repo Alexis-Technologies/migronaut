@@ -4,7 +4,7 @@ const {
   LockLostError,
 } = require('../errors/index.js');
 const { canonical, isPlainObject } = require('../utils/canonical.js');
-const { documentErrorText } = require('../utils/error.js');
+const { documentErrorText, isTransientTransaction } = require('../utils/error.js');
 const {
   cloneDocument,
   occFilter,
@@ -572,12 +572,6 @@ const MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
 /** Errors that mean "the batch took too long or grew too big" — halve it and retry */
 const TIME_OR_SIZE = new Set([50, 262, 290, 334, 10334, 17419]);
 
-const isTransientTransaction = (error) =>
-  error?.hasErrorLabel?.('TransientTransactionError') === true ||
-  error?.code === 112 ||
-  error?.code === 251 ||
-  error?.code === 24;
-
 const isUnknownCommit = (error) =>
   error?.hasErrorLabel?.('UnknownTransactionCommitResult') === true;
 
@@ -661,7 +655,14 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
               attempt: transactions,
             })
           : { migrated: 0, skipped: 0, conflicts: 0, retried: 0, errors: [], left: [] };
-      const errors = [...excluded.values()];
+      // Only the failed documents this transaction read: one excluded while
+      // the batch was larger lies past it now, and is met again by the batch
+      // that reaches it — recorded here too, it was counted once per commit.
+      const errors = [];
+      for (const doc of docs) {
+        const entry = excluded.get(idKey(doc._id));
+        if (entry !== undefined) errors.push(entry);
+      }
       result.errors = errors;
       const { badIds, docErrors, left } = errorsOf(errors);
       const next =
@@ -712,10 +713,18 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
           continue;
         }
         if (conflict) {
-          // Alone and still in the way: past it — the next pass takes it.
+          // Alone and still in the way: past it — the next pass takes it. A
+          // draining range with too many stepped over is done here (`null`):
+          // closed like any other, or the partition would stay open with no
+          // cursor and be worked again from its start.
           const next = job.partitioner.past(cursor, [doc], { left: [doc._id] });
           const counts = { scanned: 1, conflicts: 1, batches: 1, txnRetries };
-          await store.checkpoint(lease, { cursor: next, counters: counts });
+          await store.checkpoint(lease, {
+            cursor: next ?? cursor,
+            counters: counts,
+            done: next === null,
+          });
+          ctx.onTransactionRetries?.(txnRetries);
           return {
             result: { migrated: 0, skipped: 0, conflicts: 1, retried: 0, errors: [] },
             next,
@@ -769,14 +778,20 @@ async function processPartition(job, ctx) {
     const stop = controlOutcome(control, job, partition);
     if (stop) return { outcome: stop, counters };
     const adaptive = ctx.adaptive;
-    const batchSize = adaptive?.batchSize() ?? spec.batchSize;
-    await throttle.beforeBatch({
+    // Never past the author's batchSize, whatever a controller learned under
+    // another one.
+    const batchSize = Math.min(adaptive?.batchSize() ?? spec.batchSize, spec.batchSize);
+    const waited = await throttle.beforeBatch({
       signal,
       generation: job.generation,
       partition: String(partition._id),
       batchSize,
       extraPauseMs: adaptive?.pauseMs() ?? 0,
+      deadline: ctx.deadline,
+      onLag: ctx.onThrottle,
     });
+    // A secondary lagged for the rest of the slice: nothing was read.
+    if (waited?.expired) return { outcome: 'yielded', counters, cursor };
     const started = now();
     let next;
     let batchCounts;

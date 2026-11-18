@@ -541,6 +541,40 @@ describe('telemetry — metrics (integration)', () => {
     assert.strictEqual(migrationSpans()[0].attributes['error.type'], 'HOOK_FAILED');
   });
 
+  it('should time a migration whose file does not load, inside its own span', async () => {
+    // The requires guard reads a file ahead of its run: a file that does not
+    // load used to throw from there — before the span, before beforeEach,
+    // with no duration point at all.
+    project.write('0001-a.ts', probedMigration('a'));
+    // No down(): the file loads as a module and is refused as a migration.
+    project.write('0002-broken.ts', 'export async function up() {}\n');
+    const hooked = [];
+    const kit = migrator({ hooks: { beforeEach: (name) => hooked.push(name) } });
+    try {
+      await assert.rejects(kit.up(), (error) => {
+        assert.strictEqual(error.code, 'MIGRATION_INVALID_EXPORT');
+        // What landed before it is still reported.
+        assert.deepStrictEqual(
+          error.context.results.map((row) => [row.file, row.status]),
+          [['0001-a.ts', 'applied']],
+        );
+        return true;
+      });
+    } finally {
+      await kit.disconnect();
+    }
+    assert.deepStrictEqual(hooked, ['0001-a.ts', '0002-broken.ts']);
+    const spans = migrationSpans();
+    assert.strictEqual(spans.length, 2);
+    assert.strictEqual(spans[1].attributes['migronaut.migration.name'], '0002-broken.ts');
+    assert.strictEqual(spans[1].attributes['error.type'], 'MIGRATION_INVALID_EXPORT');
+    const points = (await metrics.collect())['migronaut.migration.duration'];
+    assert.deepStrictEqual(points.map((point) => point.attributes['error.type'] ?? 'ok').sort(), [
+      'MIGRATION_INVALID_EXPORT',
+      'ok',
+    ]);
+  });
+
   it('should work with a meter and no tracer, and the other way round', async () => {
     project.write('0001-a.ts', probedMigration('a'));
     const metered = migrator({ telemetry: { meter: metrics.meter } });

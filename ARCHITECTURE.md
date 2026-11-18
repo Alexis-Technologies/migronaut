@@ -7,7 +7,7 @@
 > exists, how data flows through it, and every non-obvious nuance you need to make a safe change.
 >
 
-**Snapshot at time of writing:** v2.4.0 · Node ≥ 22.18 (engines; native TS type stripping is
+**Snapshot at time of writing:** v2.5.0 · Node ≥ 22.18 (engines; native TS type stripping is
 always available) · runtime deps: **none** — `package.json` has no `dependencies` key; `.env`
 loading, ANSI colors, the spinner, the arg parser, the table renderer and config validation are
 all hand-rolled in `src/` · peer deps: `mongodb`, optional `mongoose` · BullMQ (the optional queue
@@ -561,6 +561,9 @@ Each entry: **responsibility · key exports · nuances you must know.**
 ### `src/core/audit.js` — read-only health check
 - **Responsibility:** the `migronaut audit` checks (config, connectivity, transactions, indexes,
   lock, checksum drift, runtime), each independent, rolled up into `{ok, failed, warnings, checks}`.
+  The lock is judged stale by its holder's own TTL (`ttlMs` on the document) and by the server's
+  clock (`MigrationLock.inspectWithAge`, `$$NOW`) — never by the auditor's configuration or host
+  clock, which would call a live run with a longer TTL crashed and advise `unlock`.
 - **Key export:** `runAudit(deps)` — pure orchestration over capabilities the kit injects.
 
 ### `src/core/import-runner.js` — migrate-mongo adoption (impure half)
@@ -718,7 +721,8 @@ repository write by the same rules.
 Six small modules behind the `./bullmq` subpath; see [§6.6](#66-the-queue-adapter-bullmq) for
 the design.
 - **`jobs.js`** — the contract shared by producer and worker: job names
-  (`up`/`down`/`sync`/`converge`), the versioned data shape, `parseJobData` (validation of
+  (`up`/`down`/`sync`/`converge`, and `background`/`background-lane`/`background-verify` on the
+  background queue), the versioned data shape, `parseJobData` (validation of
   *untrusted* payloads), `dedupId` / `convergeDedupId`, the job and scheduler templates.
 - **`producer.js`** — `planUpJobs`/`planDownJobs` (the plan *is* `kit.dryRun`, so it can never
   disagree with a run), `enqueueUp`/`enqueueDown` (one atomic `addBulk`, returns the group
@@ -806,16 +810,20 @@ the design.
   boolean/value/negatable (`--no-x` seeds `true` — unless `--x` is declared too, which makes the
   pair tri-state, as in commander) options with camelCase keys and short aliases,
   required `<x>` / optional `[x]` positionals, `optsWithGlobals()`, generated `--help`/`--version`.
-  Global options are recognized both before and after the command name; parse errors go to stderr
-  with `process.exitCode = 1` — it never calls `process.exit()`. Deliberately unsupported (unused):
-  combined short flags (`-fy`), variadic arguments. `util.parseArgs` was rejected: absent on
-  Node 18.0–18.2, no `--no-x` before 22.4, no subcommands/help.
+  Global options are recognized both before and after the command name. A parse error goes to
+  stderr with `process.exitCode = 1` — unless the program set `onUsageError(handler)`, which the
+  CLI does (`index.js`): there a command line that does not parse is `CONFIG_INVALID` — exit 6, and
+  one JSON document on stdout under `--json` (`reportUsageError` in shared.js). A value on a flag
+  that takes none (`--yes=false`) is a parse error, not the flag. It never calls
+  `process.exit()`. Deliberately unsupported (unused): combined short flags (`-fy`), variadic
+  arguments. `util.parseArgs` was rejected: no `--no-x` before 22.4, no subcommands/help.
 - **shared.js** — the CLI's workhorse:
   - `defineCommand(program, spec)` — the envelope every data command registers through:
     `optsWithGlobals`, presentation-only `preflight`, `withMigrator`, JSON-vs-`render` routing,
     and `after` for exit-code logic. Command files stay pure declaration because of it.
   - `withMigrator(opts, fn, {spinner, json})` — constructs `MigratorKit`, drives the spinner,
-    routes output for `--json`, runs `fn`, **always disconnects**, maps errors to exit code 1.
+    routes output for `--json`, runs `fn`, **always disconnects**, maps errors to their exit code
+    (`EXIT_CODES` by error code; 1 for an error that is not migronaut's).
     `fn` gets `{ logger, json, opts, spinner, stopRequested }` — the last two for a command that
     reads, asks, then acts (`converge`): a signal during the prompt makes `migrator.stop()` a
     no-op, so the command checks `stopRequested()` itself.
@@ -825,8 +833,8 @@ the design.
 - **spinner.js** — minimal spinner with the `start(text)`/`stop()` surface, writing to stderr;
   a complete no-op when the stream isn't a TTY, so piped/CI output never sees control sequences.
 - **table.js** — hand-rolled box-drawing renderers; column widths are computed ANSI-aware via
-  `stripAnsi` so colored cells never skew alignment (no wcwidth — CJK/emoji cells would mis-align;
-  migration names are ASCII).
+  `stripAnsi` so colored cells never skew alignment, and wide characters (CJK, emoji —
+  `WIDE_RANGES`) count as two columns.
 - **commands/*.js** — one `registerX(program)` per command. They parse flags, do presentation-only
   pre-flight checks, then call `withMigrator`. Look at [up.js](src/cli/commands/up.js) as the
   canonical example (force/yes/json pre-flight rules + delegation).
@@ -882,7 +890,9 @@ lock, and one running slow never reclaims a dead one. String fields in the holde
 the doc back and checks that it is the one it wrote: `owner === ourToken` **and**
 `nonce === ourNonce`. If two processes both reclaim the same stale lock, both pipeline updates
 succeed but only the last writer's document survives; the loser sees a different one and throws
-instead of running concurrently.
+instead of running concurrently. A readback that itself fails takes back what the update may have
+written (`deleteOne` by owner and nonce): the instance never learned it holds the lock, so nothing
+else would renew or release that document before its TTL.
 
 The two fields do different jobs. `owner` is the **run id** — the kit passes it in, so the lock
 document, the changelog records and the log lines of one run carry one value. Its format, and
@@ -917,8 +927,14 @@ and the next has not started. Set `onLockLost: 'warn'` to keep the old warn-and-
 `MigratorKit.stop()` (and the CLI's SIGINT/SIGTERM handler) aborts through the same path with a
 `RunAbortedError` carrying the partial results.
 
+A lost lock is said **once** — one warning, one `lock:lost` — however many timers notice it. A lock
+found reclaimed is final: the heartbeat and the deadline stop, since that document never matches
+again. A deadline that fired on failing renewals is not: the document may still be ours, so the
+heartbeat goes on trying (and under `onLockLost: 'warn'` may hold the lock again).
+
 **Release** — `deleteOne({_id, owner, nonce})`, scoped so we never delete a lock since reclaimed by
-someone else. `forceRelease()` (for `migronaut unlock`) deletes unconditionally by `_id`.
+someone else. `forceRelease()` (for `migronaut unlock`) deletes unconditionally by `_id`, in one
+`findOneAndDelete`: the holder it reports is the document it deleted.
 
 **Early release** — the work function gets a second argument, `control`, whose `release()` gives
 the lock up before the work returns: it stops the heartbeat and the deadline, awaits the renewal in
@@ -963,6 +979,19 @@ cryptic Node error. This is why `createExtension` defaults to `'js'`. The real-w
 verified by [tests/integration/runtime-ts.test.js](tests/integration/runtime-ts.test.js), which spawns
 `bin/migronaut.js` under plain `node` — no build, no loader — since the shipped binary *is* the file
 under test.
+
+**Reloading (`reloadMigrations`).** Node keeps every module it has loaded. A unique query string on
+the import URL forces a fresh evaluation of an ES module — and of an ES module only: a CommonJS
+file (what `migronaut create` scaffolds by default, `.js` and `.ts` alike) is evaluated by the
+CommonJS loader, which caches by filename and never sees the query. So `importUserFile` also drops
+the file's `require.cache` entry — under the path as given and as resolved, since the cache key is
+the real path. Resolved with `realpathSync`, the JavaScript implementation Node's resolver itself
+calls, never the native one (`fs.promises.realpath`): behind a link the OS may spell the same file
+another way — a Windows 8.3 name expanded (`C:\Users\RUNNER~1` on CI), another case on a
+case-insensitive disk — and that is not the key the cache holds. Without that, an edited CommonJS migration kept running as the version first loaded
+while the changelog recorded the new file's checksum. The kit reads a file ahead of its run for
+its `requires` (`#peek`, cached by checksum) and runs that same module: one evaluation per version
+of a file, not one per look at it.
 
 ### 6.5 The programmatic API (run.js)
 File: [run.js](src/core/run.js).
@@ -1361,10 +1390,16 @@ fenced checkpoint is its last write, so a lane that lost its lease cannot commit
 retry loop (transient errors, commit-unknown, time/size limits → a smaller batch), and lets the
 transform write elsewhere through `ctx.session`.
 
-**Pacing.** `pauseMs` and the `throttle` hook before each batch, replication lag
-(`replSetGetStatus`, quietly off without the privilege), and the AIMD controller per process and
-shard: slow or overloaded writes halve the batch, then double the pause; healthy ones grow it back
-— never past the author's `batchSize`.
+**Pacing.** `pauseMs` and the `throttle` hook before each batch (a pause of at most an hour at a
+time — a longer timer fires at once in Node), replication lag (`replSetGetStatus`, quietly off
+without the privilege), and the AIMD controller per process and shard: slow or overloaded writes
+halve the batch, then double the pause; healthy ones grow it back — never past the author's
+`batchSize` (a controller is made anew when its settings change: a repin that lowers `batchSize`
+reaches a runner that has been up for days). A wait for a lagging secondary is not silent: it is
+`background:throttle` with `reason: 'lag'` and a metric point (at most every 10 s per process and
+migration), a warning once it has lasted a minute and then every five (`lagWaits`, the process's
+memory of the wait across its slices and lanes), and it ends with the slice — the lane yields, so
+its slot is free and its controls are read again.
 
 **Drift.** After `completed`, an old pod can still write the old shape. Three lines of defence: the
 validator once `min` is raised (converge refuses to raise it over old documents); the `requires`
@@ -1395,6 +1430,18 @@ stepped over by id). Writes carry the shard key; a transform that changes it is 
 (`shard-key-changed`). A plan records the collection's epoch (uuid, key): resharded since, the
 pass is re-split. Without the privilege, or without that index, the collection stays on `_id`
 ranges ("untargeted"), said once per process.
+
+A plan also records which partitioner split it, and only that one works it (`planMismatch`): the
+partitioner is chosen from what is live — the indexes, the shard key, `backgroundShardAware` — so
+it can change under a pass, most often because the operator did what the "untargeted" warning
+asks and converged the shard-aware index in. A lane that meets a plan of the other partitioner
+returns `stale` before it claims anything, and the coordinator re-splits the same pass, as after
+a reshard. (An `_id` range has no bounds for the shard-aware reads; a key range is "everything"
+to the `_id` ones.) Two readings are never taken for an answer: a topology that could not be read
+(a `hello` lost to an election) leaves a shard-aware plan shard-aware, and a list of indexes that
+could not be read is an error for the step to retry, not "no index". A slice that fails drops
+what was cached about its collection (indexes, shard key), so a hint on an index dropped since
+fails once, not until the cache runs out.
 
 **On a sharded cluster: what the probes established.** The shard-aware side rests on what a
 mongos and the `config` database actually do — so those assumptions were probed on a real cluster
@@ -1580,6 +1627,27 @@ The high-impact ones for code changes:
   migration's `'failed'` trace carries the checksum of the file still on disk (`markFailed` records
   it) — a circuit breaker, since re-running a half-applied migration on every tick is the worst
   retry policy. A changed file, or an explicit `enqueueUp(name)`, resumes it.
+- **A tick holds a converge that failed on the same plan.** A converge result carries a
+  `fingerprint` — a digest of every row the plan would change or refuse — and so does its history
+  entry. When the newest entry is a failure with the fingerprint of the tick's own dry run, the
+  tick adds no converge job (`convergeHeld`): a conflict that needs `rebuildUnique`, or data to fix
+  first, is not settled by a failed job, a lock taken and a history entry per tick. The history
+  counts a failure that repeats on the entry it repeats (`repeats`, `lastAt`), so a schedule of
+  converge jobs cannot fill it either. Not a time-out: it is held until the plan changes or a
+  converge asked for explicitly goes through.
+- **An option nobody reads is warned about, once — not refused**, on `enqueueUp`, `enqueueDown`,
+  `enqueueConverge`, `schedule`, `createMigrationQueue` and `createMigrationProcessor`
+  (`KNOWN_OPTIONS`, `warnUnknownOptions`): these calls always took a wider object.
+  `enqueueBackground` and `createBackgroundProcessor` refuse one, as they always have. A *job's*
+  unknown field is still refused (see above) — that is untrusted input, this is the caller's code.
+- **A job does not wait for Redis to take its log rows.** They are best-effort; a job that is done
+  settles after `JOB_WRITE_WAIT_MS` (5 s) without them, since with Redis away they never settle
+  and the job, the line behind it and a graceful close would wait as long as the outage lasts.
+- **`close({ force: true })` on top of a `close()` under way stops waiting** (after
+  `FORCE_CLOSE_GRACE_MS`) instead of returning the pending promise. It cannot turn that close into
+  a forced one — BullMQ answers a second `close()` with the first — so it only ends the wait.
+- **A worker's `prefix` is the queue's**, whatever `workerOptions` or `startWorker()` say: placed
+  after them, like `concurrency: 1`.
 - **`generateId` is called with no arguments, and must be synchronous.** No "purpose" argument
   (`'run'`/`'group'`) is passed on purpose: `ulid(seedTime)` and `nanoid(size)` would read it as
   their own first parameter, and passing third-party generators as they are is the point. Async is
@@ -1608,6 +1676,12 @@ The high-impact ones for code changes:
 - **`createMigrationQueue` takes BullMQ's telemetry as `bullmq.telemetry`, not a top-level
   option** — `telemetry` at the top would read as the kit's own (`config.telemetry`), which is a
   different object with a different job.
+- **A conversion to unique that cannot be rolled back says so.** `collMod prepareUnique` then
+  `unique`; duplicates fail the second and the first is taken back off. If that fails too, the
+  error carries `prepareUniqueLeft` instead of claiming the index was left as it was, and the
+  comparison treats a live `prepareUnique: true` on a declaration that is not unique as a diff to
+  take off in place — otherwise the leftover would be invisible for good (`unique` is false on
+  both sides).
 - **A unique index is never rebuilt unasked.** A rebuild that drops a unique index and builds a
   unique one back plans as a `conflict` unless `converge({ rebuildUnique: true })`
   (`--rebuild-unique`): the constraint is gone until the build ends, and a duplicate written in
@@ -1698,10 +1772,29 @@ The high-impact ones for code changes:
   both protect a rolling deploy and a rollback.
 - **The shard-key guard compares numbers by value.** A `Long 5` that becomes an `int 5` routes the
   same; anything it cannot prove equal counts as a change.
+- **Errors speak the server's words where driver 7 put its own over them.** From 7.x the driver
+  replaces any refused write of code 20 (IllegalOperation) with "This MongoDB deployment does not
+  support retryable writes. Please add retryWrites=false…" — no code, the server's error under
+  `originalError` (6.x did so only on a retried write). `serverErrorOf` (utils/error.js) reads
+  through it: `errorText` prints the server's message, and `isTransactionsUnsupported` judges by
+  the server's error — told by the driver's alone, a standalone server refusing a transaction was
+  `MIGRATION_EXECUTION_FAILED` with advice that does not apply. The sharded suite's probe for a
+  refused shard-key change reads the same way.
+- **A plan is worked by the partitioner that made it, or re-split.** A change of
+  `backgroundShardAware` (or of the indexes) in the middle of a rolling deploy therefore re-splits
+  the pass once per side that takes a coordinator step — it settles when the deploy does, and a
+  replan is not a new pass.
+- **A dry run's sample can be the first documents.** `$match` then `$sample` reads and sorts every
+  matched document, so a large match is sampled collection-first and every read is time-boxed;
+  out of time, the first `n` by `_id` stand in and the report says `degraded: 'sample-timeout'`.
+  An explicit `first` is not time-boxed: it is the caller's choice, and deterministic.
 - **A shard-aware read may reach two shards.** The mongos takes a `$lt` bound as inclusive when it
   picks shards, and a partition ends where its run of chunks does (§6.8).
 - **The live watcher opens its stream before it probes.** The other order leaves a window where a
   write is neither probed nor streamed.
+- **A drift event follows the write it reports** — `upgraded` after the rewrite, `reopened` after
+  the state was reopened (a reopening that fails is `reported`). A subscriber may read the status
+  on the event and act on it.
 - **`ctx.background` is frozen and carries the lane.** `runId` is the lane's (or the watcher's)
   owner — the runId of its `background:*` events — taken from the deps' explicit `runId` (the
   watcher's deps override `owner` with a string). `attempt` counts transactions where the engine
@@ -1775,8 +1868,9 @@ The high-impact ones for code changes:
 - **Gotcha:** Node caches dynamic `import()` by path. A test that rewrites the *same* migration
   filename mid-run will re-load the *cached* module. Use a new filename, or assert via a read-only
   path (`pendingMigrations`), when you need "changed file" behavior.
-- **Type coverage:** the public type surface ([index.d.ts](index.d.ts), [bullmq.d.ts](bullmq.d.ts))
-  is checked separately by `tsd` against [tests/types/](tests/types/) — `pnpm run test:types`.
+- **Type coverage:** the public type surface ([index.d.ts](index.d.ts), [bullmq.d.ts](bullmq.d.ts),
+  [versioning.d.ts](versioning.d.ts)) is checked separately by `tsd` against
+  [tests/types/](tests/types/) — `pnpm run test:types`.
   This is a type-assertion pass over hand-written types, not a build/typecheck step.
   `bullmq.test-d.ts` also asserts that the *real* BullMQ classes satisfy the structural
   `BullMQ*Like` types — the one place that claim is checked, since the declaration file itself
@@ -1801,11 +1895,11 @@ The high-impact ones for code changes:
 
 Useful commands:
 ```bash
-pnpm test                                  # unit + integration (~1200 tests)
+pnpm test                                  # unit + integration (~2550 tests)
 node --test tests/integration/up.test.js   # one file (boots its own replica set)
 pnpm run test:coverage                     # full suite under c8, gated at 90/90/90
-pnpm run test:types                        # tsd — index.d.ts + bullmq.d.ts vs tests/types/*.test-d.ts
-pnpm run check:dts                         # tsc --noEmit --strict over both .d.ts files alone
+pnpm run test:types                        # tsd — the three .d.ts files vs tests/types/*.test-d.ts
+pnpm run check:dts                         # tsc --noEmit --strict over the three .d.ts files alone
 # opt-in: the adapter scenarios against the real bullmq + Redis (CI runs this)
 docker run --rm -d -p 6379:6379 redis:7-alpine
 MIGRONAUT_TEST_REDIS_URL=redis://127.0.0.1:6379 node --test tests/integration/bullmq-redis.test.js
@@ -1828,8 +1922,8 @@ MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admi
   (`pnpm run test:types`) against [tests/types/](tests/types/), and `pnpm run check:dts` compiles
   the three files in one program.
 - **Lint/format:** `pnpm run lint` (`oxlint src bin scripts tests bench examples`), `pnpm run format`
-  (`oxfmt` to fix formatting), `pnpm run format:check` (`oxfmt --check`, no writes). The two root
-  shims (`index.js`, `bullmq.js`) are one-line re-exports and are not in the globs.
+  (`oxfmt` to fix formatting), `pnpm run format:check` (`oxfmt --check`, no writes). The three root
+  shims (`index.js`, `bullmq.js`, `versioning.js`) are one-line re-exports and are not in the globs.
 - **Bundle-size report (informational only):** `pnpm run size` runs `scripts/size.js`, which uses
   esbuild to report library, CLI and queue-adapter bundle size — it does not produce a published
   artifact. `bullmq` is deliberately *not* marked external there: the adapter never imports it, so
@@ -1840,9 +1934,9 @@ MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admi
   throwaway in-memory MongoDB replica set for the run. Not run in CI; results are hand-copied
   into the README's Benchmarks section before releases.
 - **Published artifact:** exactly what `files` in [package.json](package.json) lists —
-  `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`, `migronaut.schema.json`, `bin`, `src`,
-  `README.md`, `CHANGELOG.md`. The `exports` map exposes two entry points (`.` and `./bullmq`) and
-  nothing else. `docs/`, `blog/`, `examples/` and this `ARCHITECTURE.md` live in the repo but are
+  `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`, `versioning.js`, `versioning.d.ts`,
+  `migronaut.schema.json`, `bin`, `src`, `README.md`, `CHANGELOG.md`. The `exports` map exposes
+  three entry points (`.`, `./bullmq` and `./versioning`) and nothing else. `docs/`, `blog/`, `examples/` and this `ARCHITECTURE.md` live in the repo but are
   **never** shipped to npm.
 - **Release:** manual — bump `version` in `package.json`, write the dated entry in `CHANGELOG.md`
   by hand, commit and tag, then `pnpm run release` (= `pnpm publish`). `prepublishOnly` re-runs

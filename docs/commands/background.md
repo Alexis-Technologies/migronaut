@@ -180,7 +180,7 @@ is refused and reported, even when the code caught the error. See
 
 | Option | Description |
 |---|---|
-| `--sample <n>` | A random sample of n matching documents (1–1000, default 5) |
+| `--sample <n>` | A random sample of n matching documents (1–1000, default 5). Out of time (30 s), the first n by `_id` instead — the output says so |
 | `--first <n>` | The first n matching documents by `_id`, instead of a sample (1–1000) |
 | `--validate` | Through the real write path, in the always-aborted sandbox |
 | `--revert` | The way back (its `revert` or `revertStep`) |

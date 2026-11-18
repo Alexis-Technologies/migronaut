@@ -68,6 +68,62 @@ describe('assertJobOptions', () => {
   }
 });
 
+describe('options nobody reads', () => {
+  /** A kit that plans nothing, and keeps the warnings it is given */
+  function warnedKit() {
+    const warnings = [];
+    const kit = stubKit({ dryRun: mock.fn(async () => []) });
+    kit.logger = { ...kit.logger, warn: (message, fields) => warnings.push([message, fields]) };
+    return { kit, warnings };
+  }
+
+  it('should say an unknown option once — and still do what was asked without it', async () => {
+    const { kit, warnings } = warnedKit();
+    // A typo of `to`: everything pending is planned, as before — but no
+    // longer without a word.
+    const plan = await planUpJobs(kit, { too: '0002-b.js' });
+    assert.deepStrictEqual(plan.migrations, []);
+    assert.strictEqual(warnings.length, 1);
+    assert.strictEqual(warnings[0][0], '⚠ enqueueUp: "too" is not an option here — ignored');
+    assert.deepStrictEqual(warnings[0][1], { where: 'enqueueUp', option: 'too' });
+    await planUpJobs(kit, { too: '0002-b.js' });
+    assert.strictEqual(warnings.length, 1, 'said once per kit, not on every call');
+    await planDownJobs(kit, { step: 3 });
+    assert.strictEqual(warnings[1][0], '⚠ enqueueDown: "step" is not an option here — ignored');
+  });
+
+  it('should say nothing of the options it reads, or of a key that asks for nothing', async () => {
+    const { kit, warnings } = warnedKit();
+    await planUpJobs(kit, {
+      filename: '0001-a.js',
+      force: true,
+      ordered: false,
+      requestedBy: 'ci',
+      reason: 'INC-1',
+      jobOptions: { removeOnComplete: true },
+      unknownButUnset: undefined,
+    });
+    await planUpJobs(kit, { to: '0002-b.js', converge: false });
+    await planDownJobs(kit, { filename: '0001-a.js', ordered: true, requestedBy: 'ci' });
+    await planDownJobs(kit, { steps: 2 });
+    await planDownJobs(kit, { batch: 3 });
+    await planDownJobs(kit, { to: '0001-a.js', reason: 'r', jobOptions: {} });
+    assert.deepStrictEqual(warnings, []);
+  });
+
+  it('should say an unknown option of enqueueConverge, and of nothing it knows', async () => {
+    const { kit, warnings } = warnedKit();
+    const queue = new FakeQueue('migronaut', { connection: createFakeConnection() });
+    await enqueueConverge(queue, kit, { ordered: false, requestedBy: 'ci', reason: 'r' });
+    assert.deepStrictEqual(warnings, []);
+    await enqueueConverge(queue, kit, { prune: true });
+    assert.strictEqual(
+      warnings[0][0],
+      '⚠ enqueueConverge: "prune" is not an option here — ignored',
+    );
+  });
+});
+
 describe('planUpJobs', () => {
   it('should plan every pending file, in order, under one peeked batch', async () => {
     const kit = stubKit({
@@ -488,6 +544,30 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
       const queueEvents = new FakeQueueEvents('m', { connection });
       return { connection, queue, queueEvents };
     }
+
+    it('should reject, never throw, whatever goes wrong before the wait starts', async () => {
+      const { queue } = harness();
+      const closed = new ConfigInvalidError('The migration queue is closed');
+      const group = await enqueueUp(
+        queue,
+        pendingKit(),
+        {},
+        {
+          // What the facade lends, once it is closed.
+          getQueueEvents: () => {
+            throw closed;
+          },
+        },
+      );
+      // `wait()` promised a promise: a throw would pass `.catch()` by.
+      for (const call of [() => group.wait(), () => group.wait(null), () => group.wait('soon')]) {
+        let pending;
+        assert.doesNotThrow(() => {
+          pending = call();
+        });
+        await assert.rejects(pending, ConfigInvalidError);
+      }
+    });
 
     it('should need QueueEvents from somewhere', async () => {
       const { queue } = harness();

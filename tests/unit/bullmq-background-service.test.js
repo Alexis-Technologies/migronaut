@@ -148,6 +148,22 @@ describe('createMigrationQueue background option', () => {
     assert.strictEqual(worker.closed, true);
   });
 
+  it("should keep the background worker on its queue's prefix, and say a stalled job", async () => {
+    const kit = backgroundKit();
+    const lines = [];
+    kit.logger = { ...kit.logger, warn: (message, fields) => lines.push([message, fields]) };
+    const { mq } = make({ kit, prefix: 'app', background: { workerOptions: { prefix: 'stray' } } });
+    const worker = await mq.startBackgroundWorker({ autorun: false, prefix: 'other' });
+    assert.strictEqual(worker.opts.prefix, 'app');
+    // A lane whose worker died: said like a stalled migration job is.
+    worker.emit('stalled', '42', 'active');
+    assert.deepStrictEqual(lines.at(-1), [
+      '⚠ Background job stalled (42) — it will be re-run',
+      { queue: 'migronaut-background', jobId: '42' },
+    ]);
+    await mq.close();
+  });
+
   it('should keep a drift-watch schedule set with schedule(), unless an interval is given', async () => {
     const { mq } = make();
     await mq.schedule({ job: 'background-verify', pattern: '0 3 * * *' });

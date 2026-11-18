@@ -10,8 +10,14 @@ const {
   transformAll,
   transformContext,
 } = require('./background-engine.js');
-const { idRangePartitioner } = require('./background-partition.js');
+const {
+  MAX_TIME_EXPIRED,
+  SAMPLE_TIMEOUT_MS,
+  idRangePartitioner,
+  sampleRequest,
+} = require('./background-partition.js');
 const { runSandbox } = require('./background-sandbox.js');
+const { withShardKey } = require('./background-shard.js');
 const { toRelaxedEjson } = require('./bson-peer.js');
 const { backgroundLogs } = require('./migration-logger.js');
 const { READ_OPTIONS } = require('./server-info.js');
@@ -59,14 +65,28 @@ function sampleSize({ sample, first }) {
  */
 const dryLogs = (logger) => backgroundLogs({ sink: logger, dryRun: true });
 
+/**
+ * The partitioner a dry run judges a transformation by: on a sharded
+ * collection whose key can be read, the one that guards it — a real run
+ * refuses a transformation that changes the shard key (`shard-key-changed`),
+ * and a preview that said nothing of it would promise what `up` cannot do.
+ */
+async function dryPartitioner(deps, collection) {
+  if (typeof deps.shardKeyOf !== 'function' || (await deps.topology()) !== 'sharded') {
+    return idRangePartitioner;
+  }
+  const sharding = await deps.shardKeyOf(collection);
+  return sharding ? withShardKey(idRangePartitioner, sharding.key) : idRangePartitioner;
+}
+
 /** The job a dry run works with — no partition, no lease */
-function dryJob(name, loaded, direction, logger) {
+function dryJob(name, loaded, direction, logger, partitioner) {
   return {
     name,
     spec: loaded.spec,
     fns: loaded.fns,
     direction,
-    partitioner: idRangePartitioner,
+    partitioner,
     generation: 0,
     partitionId: 'dry-run',
     match: matchOf(loaded.spec, direction),
@@ -82,6 +102,46 @@ function dryJob(name, loaded, direction, logger) {
 function shardedCheck(deps) {
   return async (name) =>
     (await deps.topology()) === 'sharded' && Boolean(await deps.shardKeyOf?.(name));
+}
+
+/** A match of this many documents or more is sampled collection-first — see sampleDocuments */
+const MATCH_FIRST_CAP = 20_000;
+
+/** The first `n` matched documents by `_id` */
+const firstDocuments = (collection, match, n, extra = {}) =>
+  collection.find(match, { sort: { _id: 1 }, limit: n, ...extra, ...READ_OPTIONS }).toArray();
+
+/**
+ * `n` matched documents at random, at a cost that follows `n` rather than the
+ * collection. `$match` then `$sample` reads every matched document and sorts
+ * them all at random: fine for thousands, a scan and a sort of a production
+ * collection when most of it still holds the old shape — which is when a dry
+ * run is asked for. Past `MATCH_FIRST_CAP` matches the collection is sampled
+ * first (a random cursor, oversampled by how little of it matches) and
+ * filtered after, the way the partitioner plans; a sample that came back
+ * short is taken match-first after all. Every read is time-boxed: out of
+ * time, the first `n` by `_id` stand in — `{ docs, degraded }`.
+ */
+async function sampleDocuments(collection, match, n) {
+  const options = { maxTimeMS: SAMPLE_TIMEOUT_MS, ...READ_OPTIONS };
+  const matchFirst = () =>
+    collection.aggregate([{ $match: match }, { $sample: { size: n } }], options).toArray();
+  try {
+    const count = await collection.countDocuments(match, { limit: MATCH_FIRST_CAP, ...options });
+    if (count < MATCH_FIRST_CAP) return { docs: await matchFirst() };
+    const total = Math.max(count, await collection.estimatedDocumentCount());
+    const size = sampleRequest(n, count / total, total);
+    const docs = await collection
+      .aggregate([{ $sample: { size } }, { $match: match }, { $limit: n }], options)
+      .toArray();
+    return { docs: docs.length < n ? await matchFirst() : docs };
+  } catch (error) {
+    if (error?.code !== MAX_TIME_EXPIRED) throw error;
+    return {
+      docs: await firstDocuments(collection, match, n, { maxTimeMS: SAMPLE_TIMEOUT_MS }),
+      degraded: 'sample-timeout',
+    };
+  }
 }
 
 /**
@@ -101,19 +161,20 @@ async function previewSample(deps, name, loaded, options = {}) {
     throw new ConfigInvalidError(`${name} declares no revert`, { migration: name });
   }
   const n = sampleSize(options);
-  const job = dryJob(name, loaded, direction, deps.logger);
+  const partitioner = await dryPartitioner(deps, spec.collection);
+  const job = dryJob(name, loaded, direction, deps.logger, partitioner);
   const collection = deps.db.collection(spec.collection);
-  const docs =
+  const { docs, degraded } =
     options.first !== undefined
-      ? await collection.find(job.match, { sort: { _id: 1 }, limit: n, ...READ_OPTIONS }).toArray()
-      : await collection
-          .aggregate([{ $match: job.match }, { $sample: { size: n } }], READ_OPTIONS)
-          .toArray();
+      ? { docs: await firstDocuments(collection, job.match, n) }
+      : await sampleDocuments(collection, job.match, n);
   const base = {
     mode: 'declarative',
     migration: name,
     direction,
-    method: options.first !== undefined ? 'first' : 'sample',
+    // A sample that ran out of time is the first documents instead, and says so.
+    method: options.first !== undefined || degraded !== undefined ? 'first' : 'sample',
+    ...(degraded !== undefined ? { degraded } : {}),
     requested: n,
     found: docs.length,
   };
@@ -135,8 +196,12 @@ async function transformRows(job, docs) {
   const rows = [];
   for (const { doc, next, error } of transformed) {
     const row = { _id: ejson(doc._id), before: ejson(doc) };
+    // What the write path would refuse before it wrote: a changed shard key.
+    const refused = error === undefined ? job.partitioner.checkTransform(doc, next) : null;
     if (error !== undefined) {
       row.error = errorText(error);
+    } else if (refused) {
+      row.error = refused.message;
     } else {
       try {
         const update = stampedDiff(doc, next, job.spec, { to: target });
@@ -372,4 +437,11 @@ async function previewSteps(deps, name, loaded, options = {}) {
   };
 }
 
-module.exports = { MAX_SAMPLE, MAX_STEPS, previewSample, previewSteps };
+module.exports = {
+  MATCH_FIRST_CAP,
+  MAX_SAMPLE,
+  MAX_STEPS,
+  previewSample,
+  previewSteps,
+  sampleDocuments,
+};

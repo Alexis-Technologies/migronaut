@@ -315,7 +315,12 @@ describe(
             .collection('rekey')
             .updateOne({ _id: doc._id, sk: 900 }, { $set: { sk: 20 } }),
           (error) => {
-            assert.ok([72, 20].includes(error.code), `code ${error.code}: ${error.message}`);
+            // Driver 7 puts an error of its own over a refusal of code 20
+            // ("…does not support retryable writes", no code) and keeps the
+            // server's under `originalError`; 6.x threw the server's.
+            const refusal = error.originalError ?? error;
+            assert.ok([72, 20].includes(refusal.code), `code ${refusal.code}: ${refusal.message}`);
+            assert.match(refusal.message, /shard key/i);
             return true;
           },
         );
@@ -555,6 +560,53 @@ describe(
       assert.strictEqual(status.status, 'failed');
       assert.strictEqual(await db.collection('bg_rekey').countDocuments({ region: 'moved' }), 0);
       assert.match(status.lastError, /changes the shard key \(region\)/);
+    });
+
+    it('should re-split the pass when the shard-aware index is converged in mid-pass', async () => {
+      const regions = ['ap', 'eu', 'sa', 'us'];
+      await sharded(
+        'bg_resplit',
+        { region: 1 },
+        {
+          docs: docs(1200, (i) => ({ region: regions[i % 4] })),
+          splits: [{ region: 'eu' }, { region: 'sa' }, { region: 'us' }],
+          moveFrom: { region: 'sa' },
+        },
+      );
+      // The version index, without the shard key: the pass is split by _id,
+      // and migronaut says the collection is not shard-aware.
+      await db.collection('bg_resplit').createIndex({ __v: 1, _id: 1 });
+      const NAME = '0006-bg-resplit.js';
+      const first = kitWith(undefined);
+      project.write(NAME, backgroundSpec('bg_resplit'));
+      await first.up();
+      assert.strictEqual((await first.coordinateBackground(NAME)).next, 'process');
+      const planned = await first.backgroundStatus(NAME);
+      assert.strictEqual(planned.sharding.mode, 'untargeted');
+      assert.strictEqual((await first.runBackgroundSlice(NAME, { sliceMs: 1 })).outcome, 'yielded');
+
+      // The operator does what that warning asks: declares versioning and
+      // converges — the index that carries the shard key appears mid-pass.
+      const second = kitWith([{ name: 'bg_resplit', versioning: { current: 2, min: 1 } }]);
+      await second.converge();
+
+      // A process that sees the new index (a fresh one here; any one, within
+      // half a minute) reads the collection along the shard key from now on.
+      // It used to work the _id plan with it — a TypeError per slice, until
+      // the partitions and then the migration failed.
+      const status = await second.runBackground(NAME, { concurrency: 4 });
+      assert.strictEqual(status.status, 'completed');
+      assert.strictEqual(status.pass, 1, 'a replan is not a new pass');
+      assert.ok(status.generation > planned.generation, 'the same pass, split again');
+      assert.strictEqual(status.sharding.mode, 'chunks');
+      assert.strictEqual(status.lastError, undefined);
+      for (const partition of await second.backgroundPartitions(NAME)) {
+        assert.strictEqual(partition.scope.kind, 'key-range');
+      }
+      assert.strictEqual(
+        await db.collection('bg_resplit').countDocuments({ __v: 2, done: true }),
+        1200,
+      );
     });
 
     it('should stay untargeted for a user who may not read config, and still finish', async () => {

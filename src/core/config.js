@@ -235,6 +235,8 @@ const KNOWN_CONFIG_KEYS = new Set([
   'client',
   'generateId',
   'telemetry',
+  // What `init --format json` writes at the top of the file, for editors.
+  '$schema',
 ]);
 for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
 
@@ -490,6 +492,15 @@ async function discoverConfigFile(cwd) {
   return null;
 }
 
+/** What loadConfigFile answers for a factory that failed in a lenient run — never a config value */
+const LENIENT_FAILURE = Symbol('lenient-failure');
+
+/** What a config file came to, in a word — `object` is the one shape that is a config */
+function shapeOf(value) {
+  if (value === null) return 'null';
+  return Array.isArray(value) ? 'array' : typeof value;
+}
+
 /**
  * Load and return the config object exported by a config file.
  *
@@ -537,7 +548,7 @@ async function loadConfigFile(filepath, lenient = false) {
         // The caller does not need the connection (e.g. `create`), so a failing
         // secret-manager round trip degrades to "no values from this file"
         // rather than stopping an otherwise offline command.
-        return null;
+        return LENIENT_FAILURE;
       }
       throw new ConfigInvalidError(
         'Config factory function failed to resolve',
@@ -599,15 +610,27 @@ async function loadConfig(options = {}) {
     if (options.configPath && !(await pathExists(configFilePath))) {
       throw new ConfigInvalidError('Config file not found', { path: configFilePath });
     }
-    const fileConfig = await loadConfigFile(configFilePath, options.lenient ?? false);
-    // null means a lenient run whose factory failed — nothing usable from the
-    // file, so fall through to env vars, flags and defaults.
-    if (fileConfig === null) {
+    const lenient = options.lenient ?? false;
+    const fileConfig = await loadConfigFile(configFilePath, lenient);
+    // What the file (or its factory) came to must be an object of options. A
+    // factory with a forgotten `return` used to end in a TypeError from the
+    // merge, a JSON `null` in "could not resolve", and a string or an array
+    // in keys named '0', '1', … merged in.
+    const usable = fileConfig !== LENIENT_FAILURE && shapeOf(fileConfig) === 'object';
+    if (!usable && fileConfig !== LENIENT_FAILURE && !lenient) {
+      throw new ConfigInvalidError(
+        'Config file must export an object, or a function that returns one',
+        { path: configFilePath, exported: shapeOf(fileConfig) },
+      );
+    }
+    if (usable) {
+      mergeDefined(merged, fileConfig);
+    } else {
+      // A lenient run (the caller needs no connection): nothing usable from
+      // the file, so fall through to env vars, flags and defaults.
       effectiveLogger(options.flags?.logger).warn(
         `⚠ Could not resolve ${path.basename(configFilePath)} — continuing without it`,
       );
-    } else {
-      mergeDefined(merged, fileConfig);
     }
   }
 
@@ -659,13 +682,27 @@ async function loadConfig(options = {}) {
   // debug level. Live instances (client, mongoose, hooks, logger, telemetry)
   // and the generateId function are elided: they are not serializable and
   // redactDeep rightly refuses to clone them. Declared collections show as
-  // names only — validators can run to hundreds of lines.
+  // names only — validators can run to hundreds of lines. clientOptions shows
+  // as its option names only: it is where secrets that are not URI-shaped
+  // live (`auth.password`, a TLS key passphrase, KMS credentials), and
+  // redactDeep masks strings by their shape, never by the key they sit under.
   {
-    const { client, mongoose, hooks, logger, generateId, telemetry, collections, ...rest } = config;
+    const {
+      client,
+      mongoose,
+      hooks,
+      logger,
+      generateId,
+      telemetry,
+      collections,
+      clientOptions,
+      ...rest
+    } = config;
     effectiveLogger(config.logger).debug(
       `Resolved config (source: ${configFilePath ? path.basename(configFilePath) : 'env/flags/defaults'})`,
       redactDeep({
         ...rest,
+        ...(clientOptions ? { clientOptions: Object.keys(clientOptions) } : {}),
         ...(collections ? { collections: collections.map((definition) => definition.name) } : {}),
         ...(client ? { client: '[injected]' } : {}),
         ...(mongoose ? { mongoose: '[injected]' } : {}),

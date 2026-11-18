@@ -377,6 +377,11 @@ declare const heldSync: SyncJobResult;
 expectType<string[] | undefined>(heldSync.waiting?.waitsFor);
 expectError(heldSync.held?.waitsFor);
 expectType<{ enqueued: number } | undefined>(heldSync.background);
+// A converge held like a migration is — a field of its own: `converge` stays the job added.
+expectType<string | undefined>(heldSync.convergeHeld?.reason);
+expectType<Date | undefined>(heldSync.convergeHeld?.failedAt);
+expectType<string | undefined>(heldSync.convergeHeld?.error);
+expectType<{ jobId: string; deduplicated: boolean } | undefined>(heldSync.converge);
 declare const registeringUp: MigrationJobResult;
 expectType<{ migration: string; jobId: string }[] | undefined>(registeringUp.background);
 declare const cutPlan: MigrationPlan;

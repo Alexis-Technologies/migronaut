@@ -102,7 +102,13 @@ nearest `package.json`, so files they create never trigger this.
 ## "Transaction numbers are only allowed on a replica set"
 
 **Why:** you set `useTransaction` but your MongoDB is a standalone server. Transactions require a
-replica set or sharded cluster.
+replica set or sharded cluster. Migronaut reports it as `TRANSACTIONS_UNSUPPORTED` (exit 15).
+
+From version 7 the driver words this refusal differently — *"This MongoDB deployment does not
+support retryable writes. Please add retryWrites=false to your connection string."* — which is
+advice for another problem: adding `retryWrites=false` does not make a standalone server run a
+transaction. Migronaut shows what the server said instead, here and for any other write the
+driver rewords this way.
 
 **Fix:**
 - Run a single-node replica set locally, or use a managed cluster (Atlas) which already is one.
@@ -219,6 +225,24 @@ plain `readWrite` covers creating and dropping indexes only.
 
 **Fix:** grant `dbAdmin` on the database to the user converge runs as, or converge from a
 deploy step that has it.
+
+## "BSONVersionError: Unsupported BSON version"
+
+**Why:** two majors of the MongoDB driver are loaded, and a value made by one reached the other.
+The usual pair is Mongoose with its own driver (Mongoose 8 → `mongodb` 6, Mongoose 9 → `mongodb`
+7) next to a `mongodb` of another major installed for migronaut.
+
+**Fix:** hand migronaut Mongoose's own client (`client: mongoose.connection.getClient()` — see
+[Using Mongoose](/guide/mongoose#inject-your-instance)), or install the matching pair.
+
+## Types: "Cannot find name 'node:events'" or "Cannot find namespace 'NodeJS'"
+
+**Why:** TypeScript 6 and later no longer include `@types/node` on their own, and migronaut's
+declarations (like the driver's) describe a Node.js API.
+
+**Fix:** install `@types/node` and list it: `"types": ["node"]` in your `tsconfig.json`. The
+driver's declarations also need a `lib` with explicit resource management (`"lib": ["esnext"]`,
+or a `target` that includes it).
 
 ## Still stuck?
 

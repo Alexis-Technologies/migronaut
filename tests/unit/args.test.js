@@ -241,6 +241,63 @@ describe('Command error handling', () => {
     assert.ok(errors.join('').includes("option '--steps <n>' argument missing"));
   });
 
+  it('should refuse a value given to an option that takes none', async () => {
+    // `--yes=false` used to drop the value and set the flag: consent to a
+    // destructive action, read from a line that said no.
+    for (const [token, option] of [
+      ['--yes=false', '--yes'],
+      ['--force=0', '--force'],
+      ['--no-lock=false', '--no-lock'],
+      ['--dry-run=', '--dry-run'],
+    ]) {
+      const errors = [];
+      mock.method(process.stderr, 'write', (chunk) => {
+        errors.push(chunk);
+        return true;
+      });
+      let called = false;
+      await parse(
+        buildFixture(() => (called = true)),
+        ['up', token],
+      );
+      assert.strictEqual(called, false, token);
+      assert.strictEqual(process.exitCode, 1, token);
+      assert.ok(errors.join('').includes(`option '${option}' does not take a value`), token);
+      mock.restoreAll();
+      process.exitCode = undefined;
+    }
+  });
+
+  it('should hand a parse error to onUsageError instead of writing it', async () => {
+    const stderr = mock.method(process.stderr, 'write', () => true);
+    const seen = [];
+    const program = buildFixture(() => {}).onUsageError((message, help) =>
+      seen.push({ message, help }),
+    );
+    await parse(program, ['up', '--bogus']);
+    await parse(program, ['up', '--yes=false']);
+    await parse(program, ['dry-run']);
+    await parse(program, []);
+    assert.deepStrictEqual(
+      seen.map((entry) => entry.message),
+      [
+        "unknown option '--bogus'",
+        "option '--yes' does not take a value",
+        "missing required argument 'direction'",
+        'no command given',
+      ],
+    );
+    // Only "no command" comes with the help to show in its place.
+    assert.deepStrictEqual(
+      seen.map((entry) => typeof entry.help),
+      ['undefined', 'undefined', 'undefined', 'string'],
+    );
+    assert.ok(seen[3].help.includes('Usage: fixture [options] [command]'));
+    // The handler owns the outcome: nothing written, no exit code set.
+    assert.strictEqual(stderr.mock.callCount(), 0);
+    assert.strictEqual(process.exitCode, undefined);
+  });
+
   it('should throw on an unsupported option spec at registration time', () => {
     const program = new Command();
     assert.throws(() => program.option('!!bad!!'), TypeError);

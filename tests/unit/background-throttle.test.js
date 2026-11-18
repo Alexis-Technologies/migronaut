@@ -5,6 +5,7 @@ const {
   excludedMembers,
   replicationLagMs,
   sleep,
+  MAX_HOOK_PAUSE_MS,
 } = require('../../src/core/background-throttle.js');
 
 const at = (ms) => new Date(ms);
@@ -77,6 +78,41 @@ describe('replication lag', () => {
   });
 });
 
+describe('adaptiveFor — the controller a process keeps per migration and group', () => {
+  const { adaptiveFor } = require('../../src/core/background.js');
+  const settings = { targetLatencyMs: 100, minBatchSize: 10, maxBatchSize: 500, maxPauseMs: 5000 };
+  const partition = { group: 'shard-a' };
+
+  it('should share one controller between the lanes of a migration and group', () => {
+    const deps = { adaptiveCache: new Map() };
+    const first = adaptiveFor(deps, 'm.js', partition, settings);
+    assert.strictEqual(adaptiveFor(deps, 'm.js', partition, { ...settings }), first);
+    assert.notStrictEqual(adaptiveFor(deps, 'm.js', { group: 'shard-b' }, settings), first);
+    assert.notStrictEqual(adaptiveFor(deps, 'other.js', partition, settings), first);
+  });
+
+  it('should follow settings that changed, keeping what was learned within the new bounds', () => {
+    const deps = { adaptiveCache: new Map() };
+    const before = adaptiveFor(deps, 'm.js', partition, settings);
+    assert.strictEqual(before.batchSize(), 500);
+    // A repin that lowers batchSize: a runner up for days must not go on
+    // writing batches of 500.
+    const lowered = { ...settings, maxBatchSize: 50 };
+    const after = adaptiveFor(deps, 'm.js', partition, lowered);
+    assert.notStrictEqual(after, before);
+    assert.strictEqual(after.batchSize(), 50);
+    assert.strictEqual(adaptiveFor(deps, 'm.js', partition, lowered), after);
+  });
+
+  it('should start a new process where the partition says the last one stopped', () => {
+    const saved = { group: 'shard-a', throttle: { batchSize: 40, pauseMs: 200 } };
+    const controller = adaptiveFor({ adaptiveCache: new Map() }, 'm.js', saved, settings);
+    assert.deepStrictEqual(controller.state(), { batchSize: 40, pauseMs: 200 });
+    // No cache (a caller that keeps none): a controller of its own each time.
+    assert.notStrictEqual(adaptiveFor({}, 'm.js', saved, settings), controller);
+  });
+});
+
 describe('createThrottle', () => {
   const spec = { pauseMs: 100, maxReplicationLagMs: 2000 };
 
@@ -106,6 +142,31 @@ describe('createThrottle', () => {
     assert.strictEqual(calls[0].collection, 'orders');
   });
 
+  it('should cap what the hook asks for — a timer past 2^31 ms would fire at once', async () => {
+    for (const [asked, waited] of [
+      [Infinity, [MAX_HOOK_PAUSE_MS]],
+      [3e9, [MAX_HOOK_PAUSE_MS]],
+      [MAX_HOOK_PAUSE_MS + 1, [MAX_HOOK_PAUSE_MS]],
+      [250, [250]],
+      // Not a pause at all: nothing is waited.
+      [Number.NaN, []],
+      [-5, []],
+      ['2000', []],
+    ]) {
+      const time = fakeTime();
+      const throttle = createThrottle({
+        spec: { pauseMs: 0, maxReplicationLagMs: false, throttle: () => asked },
+        db: {},
+        logger: logger(),
+        name: 'm.js',
+        now: time.now,
+        wait: time.wait,
+      });
+      await throttle.beforeBatch({ generation: 1, partition: 'p', batchSize: 10 });
+      assert.deepStrictEqual(time.waits, waited, String(asked));
+    }
+  });
+
   it('should wait while a secondary lags too far, reading at most every 5 s', async () => {
     const time = fakeTime();
     const lags = [5000, 3000, 1000, 1000];
@@ -132,6 +193,99 @@ describe('createThrottle', () => {
     assert.deepStrictEqual(time.waits, [1000, 1000]);
     await throttle.beforeBatch({});
     assert.strictEqual(reads, 3, 'not read again within 5 s');
+  });
+
+  /** A replica set whose one secondary lags `lagMs()` behind */
+  const laggingDb = (lagMs) => ({
+    admin: () => ({
+      command: async (command) =>
+        command.replSetGetConfig
+          ? { config: { members: [] } }
+          : status([['s:1', 100_000 - lagMs()]]),
+    }),
+  });
+
+  it('should make a long lag wait visible: an event every 10 s, a warning after a minute', async () => {
+    const time = fakeTime();
+    const log = logger();
+    const lagWaits = new Map();
+    const changes = [];
+    // Lagging for 400 s, then caught up.
+    const throttle = createThrottle({
+      spec,
+      db: laggingDb(() => (time.now() < 400_000 ? 9000 : 0)),
+      logger: log,
+      name: 'm.js',
+      now: time.now,
+      wait: time.wait,
+      lagWaits,
+    });
+    const waited = await throttle.beforeBatch({ onLag: (change) => changes.push(change) });
+    assert.deepStrictEqual(waited, { expired: false });
+    assert.strictEqual(time.now(), 400_000);
+    // The first reading, then at most one every 10 s.
+    assert.strictEqual(changes.length, 40);
+    assert.deepStrictEqual(changes[0], { reason: 'lag', lagMs: 9000, waitedMs: 0 });
+    assert.deepStrictEqual(changes[1], { reason: 'lag', lagMs: 9000, waitedMs: 10_000 });
+    // Said aloud a minute in, then every five: at 60 s and at 360 s.
+    const warnings = log.lines.filter(([level]) => level === 'warn');
+    assert.strictEqual(warnings.length, 2);
+    assert.match(warnings[0][1], /m\.js: a secondary lags 9000ms .* waiting for 60s/);
+    assert.match(warnings[1][1], /waiting for 360s/);
+    // Caught up: the wait is forgotten, and the next one starts from zero.
+    assert.strictEqual(lagWaits.size, 0);
+  });
+
+  it('should end a lag wait when the slice does, after waiting at least once', async () => {
+    const time = fakeTime();
+    const changes = [];
+    const throttle = createThrottle({
+      spec,
+      db: laggingDb(() => 9000),
+      logger: logger(),
+      name: 'm.js',
+      now: time.now,
+      wait: time.wait,
+    });
+    // A deadline already passed still waits once: a slice of 1 ms must not
+    // turn a lag into a loop of claims.
+    const waited = await throttle.beforeBatch({
+      deadline: 0,
+      onLag: (change) => changes.push(change),
+    });
+    assert.deepStrictEqual(waited, { expired: true });
+    assert.deepStrictEqual(time.waits, [1000]);
+    assert.strictEqual(changes.length, 1);
+  });
+
+  it('should go on with one wait across the slices and lanes of a process', async () => {
+    const time = fakeTime();
+    const log = logger();
+    const lagWaits = new Map();
+    const changes = [];
+    const lane = () =>
+      createThrottle({
+        spec: { ...spec, pauseMs: 0 },
+        db: laggingDb(() => 9000),
+        logger: log,
+        name: 'm.js',
+        now: time.now,
+        wait: time.wait,
+        lagWaits,
+      });
+    // Slices of 30 s, each with a throttle of its own, as a lane makes them.
+    for (let slice = 0; slice < 3; slice++) {
+      const waited = await lane().beforeBatch({
+        deadline: time.now() + 30_000,
+        onLag: (change) => changes.push(change),
+      });
+      assert.deepStrictEqual(waited, { expired: true });
+    }
+    assert.strictEqual(time.now(), 90_000);
+    // Not one report per slice, and the minute is counted over all of them.
+    assert.strictEqual(changes.length, 9);
+    assert.strictEqual(changes.at(-1).waitedMs, 80_000);
+    assert.strictEqual(log.lines.filter(([level]) => level === 'warn').length, 1);
   });
 
   it('should warn once without the rights, and go quiet where there is no replica set', async () => {

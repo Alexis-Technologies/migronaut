@@ -192,6 +192,8 @@ kit.on('run:end', (event) => {
   expectType<number | undefined>(event.durationMs);
   // Redacted string, never a raw Error — subscribers may ship it as-is.
   expectType<string | undefined>(event.error);
+  // The typed code: a refused run (LOCK_ALREADY_HELD) told from a failed one.
+  expectType<MigronautErrorCode | undefined>(event.code);
 });
 kit.on('migration:success', (event) => {
   expectType<MigrationEvent>(event);
@@ -202,6 +204,7 @@ kit.on('migration:skipped', (event) => {
 });
 kit.on('migration:error', (event) => {
   expectType<string | undefined>(event.error);
+  expectType<MigronautErrorCode | undefined>(event.code);
 });
 kit.once('lock:lost', (event) => {
   expectType<string | undefined>(event.reason);
@@ -573,6 +576,13 @@ expectType<Promise<RunResult[]>>(kit.up(undefined, { converge: false }));
 declare const converged: ConvergeResult;
 expectType<boolean>(converged.inSync);
 expectType<number>(converged.changed);
+// The plan in one word — on the result, and on the history entry of its run.
+expectType<string | undefined>(converged.fingerprint);
+const [lastConverge] = await kit.convergeHistory({ limit: 1 });
+expectType<string | undefined>(lastConverge.fingerprint);
+// A failure that repeats is counted on the entry it repeats.
+expectType<number | undefined>(lastConverge.repeats);
+expectType<Date | undefined>(lastConverge.lastAt);
 const firstAction = converged.collections[0].actions[0];
 expectType<'collection' | 'validator' | 'index' | 'searchIndex'>(firstAction.target);
 expectType<'planned' | 'applied' | 'failed' | 'skipped'>(firstAction.status);
@@ -721,6 +731,12 @@ expectType<Promise<'poll' | 'stream' | 'both'>>(kit.driftMode());
 const backgroundState = await kit.backgroundStatus('0001-orders.js');
 expectType<string | undefined>(backgroundState?.previous?.registration);
 expectType<number | undefined>(backgroundState?.previous?.totals.migrated);
+// A sample that ran out of time is the first documents instead, and says so.
+const backgroundPreview = await kit.dryRunBackground('0001-orders.js', { sample: 5 });
+if (backgroundPreview.mode === 'declarative') {
+  expectType<'sample' | 'first'>(backgroundPreview.method);
+  expectType<'sample-timeout' | undefined>(backgroundPreview.degraded);
+}
 
 // ─── Background migrations: ctx.background carries the lane ──────────────────
 

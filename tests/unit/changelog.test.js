@@ -154,6 +154,30 @@ describe('Changelog (mocked DB)', () => {
     assert.strictEqual(update.$set.name, undefined);
     assert.deepStrictEqual(update.$currentDate, { failedAt: true });
     assert.deepStrictEqual(options, { upsert: true });
+    // Nobody named for this attempt: what an earlier apply said must not
+    // read as this attempt's.
+    assert.deepStrictEqual(update.$unset, { requestedBy: '', reason: '' });
+  });
+
+  it('markFailed should keep the requester it is given, and clear only what it is not', async () => {
+    const { db, collection } = makeDb();
+    const changelog = new Changelog('_migronaut_migrations');
+    await changelog.markFailed(db, { name: 'a.ts', error: 'boom', requestedBy: 'ci' });
+    await changelog.markFailed(db, {
+      name: 'a.ts',
+      error: 'boom',
+      requestedBy: 'ci',
+      reason: 'INC-1',
+    });
+    const [first, second] = collection.updateOne.mock.calls.map((call) => call.arguments[1]);
+    assert.strictEqual(first.$set.requestedBy, 'ci');
+    assert.deepStrictEqual(first.$unset, { reason: '' });
+    // A path may not be set and unset at once: nothing to clear, no $unset.
+    assert.strictEqual(second.$unset, undefined);
+    // The revert fields are history, not this attempt's: never cleared here.
+    for (const update of [first, second]) {
+      assert.strictEqual(update.$unset?.revertedAt, undefined);
+    }
   });
 
   it('markReverted should pass the session through when given one', async () => {

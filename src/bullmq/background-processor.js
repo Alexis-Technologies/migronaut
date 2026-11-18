@@ -1,8 +1,15 @@
 const { MigratorKit } = require('../core/migrator.js');
 const { ConfigInvalidError, MigronautError, RunAbortedError } = require('../errors/index.js');
+const { settledWithin } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { redactOutbound } = require('../utils/redact.js');
-const { JOB_NAMES, buildLaneJob, isObjectLike, parseBackgroundJobData } = require('./jobs.js');
+const {
+  JOB_NAMES,
+  JOB_WRITE_WAIT_MS,
+  buildLaneJob,
+  isObjectLike,
+  parseBackgroundJobData,
+} = require('./jobs.js');
 const {
   DEFAULT_USERLAND_LOG_ROWS,
   UNRECOVERABLE_ERROR_NAME,
@@ -147,8 +154,9 @@ function resolveBackgroundProcessorOptions(options) {
  * Build the function a BullMQ Worker on the background queue runs. Declared
  * with exactly three parameters, so BullMQ hands it the cancellation signal.
  */
-function createBackgroundProcessor(options = {}) {
+function createBackgroundProcessor(options = {}, internals = {}) {
   const settings = resolveBackgroundProcessorOptions(options);
+  const writeWaitMs = internals.writeWaitMs ?? JOB_WRITE_WAIT_MS;
   const { kit: injectedKit, config, kitOptions, queue, jobOptions } = options;
   const ownsKit = injectedKit === undefined;
   const kit = injectedKit ?? new MigratorKit(config ?? {}, kitOptions);
@@ -163,23 +171,27 @@ function createBackgroundProcessor(options = {}) {
    */
   const lanes = new Map();
 
-  /** A log row on the job — never allowed to fail it */
-  async function log(job, row) {
+  /**
+   * A best-effort write to the job: never allowed to fail it, and never
+   * waited for longer than `writeWaitMs` — with Redis away it would not
+   * settle at all, and a lane must not hold its lease for a log row.
+   */
+  async function write(action) {
+    let pending;
     try {
-      await job.log?.(redactOutbound(row));
+      pending = Promise.resolve(action());
     } catch {
       // Redis is the job's problem, not the background migration's.
+      return;
     }
+    await settledWithin(pending, writeWaitMs);
   }
 
-  /** The job's progress, for a dashboard — never allowed to fail it either */
-  async function progress(job, value) {
-    try {
-      await job.updateProgress?.(value);
-    } catch {
-      // As above.
-    }
-  }
+  /** A log row on the job */
+  const log = (job, row) => write(() => job.log?.(redactOutbound(row)));
+
+  /** The job's progress, for a dashboard */
+  const progress = (job, value) => write(() => job.updateProgress?.(value));
 
   /**
    * Continue this job later: its data updated first (when `data` is given),
@@ -254,6 +266,7 @@ function createBackgroundProcessor(options = {}) {
       if (lane.dropped > 0) {
         laneLog(lane, userlandOverflowRow(lane.dropped, settings.userlandLogRows));
       }
+      // Each write is bounded on its own (`write`), so this drain is too.
       await Promise.allSettled([...lane.writes]);
     }
   }
@@ -500,6 +513,9 @@ function createBackgroundProcessor(options = {}) {
           error.name = UNRECOVERABLE_ERROR_NAME;
         }
         prepareErrorForQueue(error);
+        // On the job itself, as a migration job says it: someone reading the
+        // queue's dashboard sees why without the worker's log.
+        await log(job, `✖ ${errorText(error)}`);
       }
       throw error;
     } finally {

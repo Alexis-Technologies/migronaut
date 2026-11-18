@@ -560,7 +560,8 @@ every batch, a lane waits for each of these in turn:
 
 1. **`pauseMs`**, the fixed pause between batches.
 2. **Your `throttle(ctx)` hook.** It gets `{ name, collection, generation, partition, batchSize,
-   signal }`, and a number it returns is an extra pause in ms:
+   signal }`, and a number it returns is an extra pause in ms (an hour at most — it is asked again
+   before the next batch):
 
    ```js
    throttle: async () => ((await isPeakHour()) ? 2000 : 0),
@@ -570,7 +571,10 @@ every batch, a lane waits for each of these in turn:
    `maxReplicationLagMs`. The lag is read with `replSetGetStatus` at most every 5 s, and hidden and
    delayed members are left out. Reading it needs the `clusterMonitor` role. Without the role,
    migronaut warns once and stops waiting for secondaries. On a standalone server or behind a
-   mongos it is quietly off.
+   mongos it is quietly off. A wait is reported as `background:throttle` with `reason: 'lag'` (at
+   most every 10 s per process) and warned about once it has lasted a minute, then every five. A
+   lane whose slice ends while it waits gives its slot back, so a pause or a cancel is not held
+   up by the secondary.
 
 **The adaptive throttle** (`adaptive: true`, the default) sizes batches by how long their writes
 take, additive increase and multiplicative decrease:
@@ -602,7 +606,9 @@ migronaut background dry-run 20261004120000-orders-shipping.js --revert     # th
 - **On a sample** (`--sample n`, 1–1000, default 5, or `--first n`), each document comes back as
   it is (`before`), as it would be written (`after`), and with the update that would write it
   (`change`), or with the error it would fail with. Only the transformation runs, so this works on
-  any server.
+  any server. On a sharded collection a transformation that changes the shard key fails here as it
+  would in the real run. A sample that cannot be drawn in 30 seconds becomes the first documents
+  by `_id`, and the result says so (`degraded: 'sample-timeout'`).
 - **With `--validate`**, each document goes through the real write path: the diff, the guarded
   write and the side writes. That happens inside a **sandbox**, a transaction that is always
   aborted. What comes back is what the server would have stored, what the validator or a unique
@@ -886,7 +892,7 @@ instead), and one that comes from a lane or a coordinator step carries that lane
 | `background:slice:start` / `background:slice:end` | A lane claimed / released a partition (`partition`, `slot`; `outcome`, `counters`) |
 | `background:batch` | A batch was written (`counters`, `latencyMs`, `batchSize`, `group` on a sharded collection) |
 | `background:lease:lost` | A lane lost its lease |
-| `background:throttle` | The adaptive throttle changed (`reason`: `slow`, `overload`, `recover`) |
+| `background:throttle` | The adaptive throttle changed (`reason`: `slow`, `overload`, `recover`), or lanes wait for a lagging secondary (`reason`: `lag`, with `lagMs` and `waitedMs`) |
 | `background:control` | A control was applied (`action`, `from`, `to`) — or an unlock (`action: 'unlock'`, `lock`, `leases`) |
 | `background:completed` / `background:failed` | It ended (`totals`, `passes` / `error`) |
 | `background:drift` | Old shapes after completion (`collection`, `source`: `poll`, `stream` or `requires`; `action`: `reopened`, `reported`, `upgraded` or `failed`) |

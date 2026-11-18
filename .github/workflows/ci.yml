@@ -49,13 +49,15 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test:types
-      # Compiles index.d.ts and bullmq.d.ts on their own — the hand-written
-      # type surface has no other compiler pass over it.
+      # Compiles index.d.ts, bullmq.d.ts and versioning.d.ts on their own — the
+      # hand-written type surface has no other compiler pass over it.
       - run: pnpm run check:dts
 
   # The engines floor (>=22.18) and Windows path handling both need real
   # coverage; the unit suite is what runs everywhere, since
-  # mongodb-memory-server's replica-set startup is slow on Windows.
+  # mongodb-memory-server's replica-set startup is slow on Windows. The floor
+  # is named exactly: `22` alone is the newest 22.x, which would let an API
+  # added after 22.18 through (the `test` job below runs that newest 22.x).
   unit:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -63,7 +65,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node-version: [22, 24, 26]
+        node-version: ['22.18.0', 24, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -121,6 +123,30 @@ jobs:
           path: coverage/lcov.info
           retention-days: 14
 
+  # The peer range starts at mongodb 5 and everything above runs on the newest
+  # major the lockfile pins: this job keeps the major before it under test,
+  # with the Mongoose line that ships it. Nothing here is saved — the two
+  # packages are swapped in this job's checkout only.
+  compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Cache the MongoDB binary
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MONGOMS_DOWNLOAD_DIR }}
+          key: mongodb-${{ runner.os }}-${{ env.MONGOMS_VERSION }}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm add -D mongodb@^6 mongoose@^8
+      - run: pnpm run test:unit
+      - run: pnpm run test:integration
+
   docs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -140,7 +166,7 @@ jobs:
   ci-success:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [lint, types, unit, test, docs]
+    needs: [lint, types, unit, test, compat, docs]
     if: always()
     steps:
       - name: Fail when any needed job failed or was cancelled

@@ -98,14 +98,14 @@ attribute.
 | `migronaut.run.duration` | histogram, `s` | Every run that acquired the lock | `migronaut.run.command`, `migronaut.run.direction`, `error.type` |
 | `migronaut.migration.duration` | histogram, `s` | Every migration executed | `migronaut.migration.direction`, `error.type` |
 | `migronaut.lock.acquire.duration` | histogram, `s` | Every successful lock acquisition — the acquire round trip, not the wait before it | — |
-| `migronaut.lock.wait.duration` | histogram, `s` | Every wait for a held lock (`runMigrations` with `onLockHeld: 'wait'`, a queue job) — one point per wait, however many polls | `migronaut.lock.wait.outcome`: `acquired`, `timeout` or `aborted` |
+| `migronaut.lock.wait.duration` | histogram, `s` | Every wait for a held lock (`runMigrations` with `onLockHeld: 'wait'`, a queue job) — one point per wait, however many polls | `migronaut.lock.wait.outcome`: `acquired`, `timeout`, `aborted` or `failed` (the wait ended in another error — the run got the lock and then failed, or the database went away) |
 | `migronaut.lock.refused` | counter, `{refusal}` | A run refused because the lock was held — one per poll of a waiting caller | — |
 | `migronaut.lock.lost` | counter, `{loss}` | A lock lost mid-run | — |
 | `migronaut.converge.search.wait.duration` | histogram, `s` | Every wait for search index builds (`waitForSearchIndexes`, `--wait-search`) — one point per wait, however many polls | `migronaut.converge.search.wait.outcome`: `ready`, `failed`, `timeout`, `unreadable` or `aborted` |
 | `migronaut.background.documents` | counter, `{document}` | Documents a background migration slice handled | `migronaut.background.name`, `migronaut.background.result`: `migrated`, `skipped`, `conflict` or `failed` |
 | `migronaut.background.slice.duration` | histogram, `s` | Every background migration slice | `migronaut.background.name`, `migronaut.background.outcome`, `error.type` |
 | `migronaut.background.batch.write.duration` | histogram, `s` | Every batch a background migration writes — what the adaptive throttle reacts to | `migronaut.background.name`, `migronaut.background.shard` (sharded collections) |
-| `migronaut.background.throttled` | counter, `{change}` | A change of the adaptive throttle, at most every 10 s per lane | `migronaut.background.name`, `migronaut.background.reason`: `slow`, `overload` or `recover` |
+| `migronaut.background.throttled` | counter, `{change}` | A change of the adaptive throttle, at most every 10 s per lane — or lanes waiting for a lagging secondary, at most every 10 s per process | `migronaut.background.name`, `migronaut.background.reason`: `slow`, `overload`, `recover` or `lag` |
 | `migronaut.background.drift.detected` | counter, `{finding}` | Old-shape documents found after a background migration completed | `migronaut.background.name` |
 | `migronaut.background.transaction.retried` | counter, `{retry}` | A transactional background batch retried | `migronaut.background.name`, `migronaut.background.reason` |
 | `migronaut.background.leases.reclaimed` | counter, `{lease}` | Partition leases taken from a lane that stopped renewing | `migronaut.background.name` |

@@ -40,6 +40,18 @@ describe('runMigrations option validation', () => {
   }
 });
 
+describe('runMigrations noLock validation', () => {
+  for (const value of ['false', 0, null]) {
+    it(`should reject ${JSON.stringify(value)} as noLock before connecting`, async () => {
+      await assert.rejects(runMigrations(config, { noLock: value }), (error) => {
+        assert.ok(error instanceof ConfigInvalidError);
+        assert.strictEqual(error.message, 'noLock must be a boolean');
+        return true;
+      });
+    });
+  }
+});
+
 describe('runMigrations onKit validation', () => {
   it('should reject a non-function onKit before connecting', async () => {
     await assert.rejects(runMigrations(config, { onKit: 'listen' }), (error) => {

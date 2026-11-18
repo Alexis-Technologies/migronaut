@@ -540,7 +540,9 @@ otherwise it warns and skips. To intentionally re-run an edited, already-applied
 `list`, `dry-run`, `import`, `create`, `audit`, `lock`, `unlock`) to get a single JSON document on **stdout** — all
 human logs and the spinner are redirected to stderr, so the stream is safe to pipe into `jq` or parse
 in a script. On failure the command prints `{ "error": { "code": "...", "message": "..." } }` to
-stdout and exits `1`.
+stdout and exits with that error's own code (`EXIT_CODES`: 3 for a held lock, 6 for bad
+configuration or flags — a command line that does not parse included — 7 for a migration that
+threw, …; 1 for anything unclassified).
 
 ```bash
 # Apply pending migrations and capture the result in CI
@@ -1035,18 +1037,20 @@ Apple M3 Max, Node v24.14.1:
 
 | Scenario | ops/sec |
 |---|--------:|
-| `computeChecksum` — small migration file (~1 KB) | ~16,000 |
+| `computeChecksum` — small migration file (~1 KB) | ~17,000 |
 | `computeChecksum` — large migration file (~100 KB) |  ~8,000 |
 | `loadMigrationFile` — CommonJS default export | ~60,000 |
 | `loadMigrationFile` — ESM named exports | ~60,000 |
 | `loadMigrationFile` — TypeScript (native type-stripping) | ~60,000 |
-| `Changelog.getAll` — 1,000 records |     ~20 |
-| `Changelog.getAppliedNames` — 1,000 records |     ~30 |
-| `Changelog.getLastBatch` — 1,000 records |    ~200 |
-| `Changelog.markApplied` — idempotent upsert |    ~150 |
-| `Changelog.markReverted` — update existing applied record |    ~150 |
+| `Changelog.getAll` — 1,000 records |     ~17 |
+| `Changelog.getAppliedNames` — 1,000 records |     ~45 |
+| `Changelog.getLastBatch` — 1,000 records |  ~9,000 |
+| `Changelog.markApplied` — idempotent upsert |    ~160 |
+| `Changelog.markReverted` — update existing applied record |    ~160 |
 | `MigrationLock.acquire + release` — uncontended round trip |     ~80 |
-| `MigrationLock.renew` — heartbeat update |    ~150 |
+| `MigrationLock.renew` — heartbeat update |    ~170 |
+| `MigratorKit.status()` — 100 applied records |    ~670 |
+| `MigratorKit.up()` — 100 pending files, end-to-end | ~1.3 s per run |
 
 Numbers vary by hardware and Node version — treat them as relative guidance, not absolutes. The
 harness exists primarily to catch performance regressions between releases.

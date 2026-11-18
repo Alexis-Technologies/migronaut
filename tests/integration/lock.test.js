@@ -29,6 +29,26 @@ describe('MigrationLock (integration)', () => {
     assert.strictEqual(doc?.pid, process.pid);
   });
 
+  it('should read the lock with its age in server time, and null when there is none', async () => {
+    const lock = new MigrationLock(mongo.db, COLLECTION, 60);
+    assert.strictEqual(await lock.inspectWithAge(), null);
+    await lock.acquire('run-1');
+    const doc = await lock.inspectWithAge();
+    assert.strictEqual(doc.owner, 'run-1');
+    assert.strictEqual(doc.ttlMs, 60_000);
+    // Just taken: a fraction of a second old by the server's own clock.
+    assert.ok(Number(doc.ageMs) >= 0 && Number(doc.ageMs) < 5000, `ageMs ${doc.ageMs}`);
+  });
+
+  it('should force-release in one operation, returning the document it deleted', async () => {
+    const lock = new MigrationLock(mongo.db, COLLECTION, 60);
+    assert.strictEqual(await lock.forceRelease(), null);
+    await lock.acquire('run-1');
+    const removed = await new MigrationLock(mongo.db, COLLECTION, 60).forceRelease();
+    assert.strictEqual(removed.owner, 'run-1');
+    assert.strictEqual(await lock.inspect(), null);
+  });
+
   it('should throw LockAlreadyHeldError when a lock is held within TTL', async () => {
     const first = new MigrationLock(mongo.db, COLLECTION, 60);
     await first.acquire();

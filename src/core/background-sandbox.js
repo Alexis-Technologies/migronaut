@@ -5,7 +5,7 @@ const {
   TransactionsUnsupportedError,
 } = require('../errors/index.js');
 const { isPlainObject } = require('../utils/canonical.js');
-const { errorText } = require('../utils/error.js');
+const { errorText, isTransientTransaction } = require('../utils/error.js');
 const { toRelaxedEjson } = require('./bson-peer.js');
 
 /**
@@ -92,9 +92,6 @@ const MAX_FILTER_BYTES = 2048;
 const MAX_IMAGE_BYTES = 64 * 1024;
 
 const ATTEMPTS = 3;
-
-const isTransient = (error) =>
-  error?.hasErrorLabel?.('TransientTransactionError') === true || error?.code === 112;
 
 /** A value as relaxed EJSON, cut to `bytes` of JSON */
 function snapshot(value, bytes) {
@@ -192,7 +189,7 @@ async function runOnce(options, fn, attempt) {
   } catch (error) {
     if (state.failed !== undefined) {
       report.abortedBy = errorText(state.failed);
-    } else if (isTransient(error)) {
+    } else if (isTransientTransaction(error)) {
       report.retry = true;
     }
     report.ok = false;
@@ -552,7 +549,7 @@ function writeOp(state, raw, method, args) {
     } catch (error) {
       // A write error aborts the transaction on the server: nothing after it
       // can run. A transient one (a write conflict) runs the whole sandbox again.
-      if (!isTransient(error)) state.failed = error;
+      if (!isTransientTransaction(error)) state.failed = error;
       record(state, { collection: name, method, error: errorText(error) });
       throw error;
     }

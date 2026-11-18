@@ -1,3 +1,4 @@
+const { realpathSync } = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -90,10 +91,31 @@ function tsLoadErrorOrNull(filepath, error) {
  * `reload` a unique query string forces a fresh evaluation. Off by default —
  * it leaks a module per load. A monotonic counter, not Date.now(): two
  * reloads in one millisecond must still get distinct URLs.
+ *
+ * The query string alone reloads ES modules only. A CommonJS file — what
+ * `migronaut create` scaffolds by default — is evaluated by the CommonJS
+ * loader, which caches by filename and never sees the query: the edited file
+ * kept running as the version first loaded, under the new file's checksum.
+ * Its `require.cache` entry is dropped first, under the path as given and as
+ * Node's resolver spells its real path. That is `realpathSync` — the
+ * JavaScript implementation the module loader itself calls — and not the
+ * native one (`fs.promises.realpath`): asked of the OS, a path behind a link
+ * can come back spelled another way (a Windows 8.3 name expanded, another
+ * case on a case-insensitive disk), which is not the key the cache holds.
+ * Like the query string, this reloads the file itself, not what it requires.
  */
-function importUserFile(filepath, options = {}) {
+async function importUserFile(filepath, options = {}) {
   const url = pathToFileURL(filepath).href;
-  return import(options.reload ? `${url}?migronaut=${++reloadCounter}` : url);
+  if (!options.reload) return import(url);
+  delete require.cache[filepath];
+  let resolved;
+  try {
+    resolved = realpathSync(filepath);
+  } catch {
+    // Not there (yet): the import reports it.
+  }
+  if (resolved !== undefined) delete require.cache[resolved];
+  return import(`${url}?migronaut=${++reloadCounter}`);
 }
 
 /**

@@ -104,6 +104,59 @@ describe('createMigrationProcessor', () => {
     }
   });
 
+  it('should say an option it does not read, and nothing of the ones it does', () => {
+    const warnings = [];
+    const kit = stubKit();
+    kit.logger = { ...kit.logger, warn: (message) => warnings.push(message) };
+    createMigrationProcessor({
+      kit,
+      ordered: false,
+      lockWait: fastWait,
+      jobOptions: { removeOnComplete: true },
+      allow: { unordered: true },
+      userlandLogRows: 5,
+      concurrency: 4,
+    });
+    assert.deepStrictEqual(warnings, [
+      '⚠ createMigrationProcessor: "concurrency" is not an option here — ignored',
+    ]);
+  });
+
+  describe('writes to a Redis that is away', () => {
+    /** A job whose log rows and progress updates never settle — commands queued for good */
+    function stuckJob() {
+      const job = upJob();
+      job.log = mock.fn(() => new Promise(() => {}));
+      job.updateProgress = mock.fn(() => new Promise(() => {}));
+      return job;
+    }
+
+    it('should settle a finished job without them, and let the next one through', async () => {
+      const kit = stubKit();
+      const processor = createMigrationProcessor({ kit }, { writeWaitMs: 20 });
+      const startedAt = Date.now();
+      // The migration is applied in MongoDB: waiting for its log rows used to
+      // park this job — and every job behind it, and a graceful close — for
+      // as long as Redis stayed away.
+      const result = await processor(stuckJob());
+      assert.strictEqual(result.status, 'applied');
+      assert.ok(Date.now() - startedAt < 2000);
+      assert.strictEqual((await processor(upJob())).status, 'applied');
+      await processor.close();
+    });
+
+    it('should fail a failed job with its own error, not hang on reporting it', async () => {
+      const kit = stubKit({
+        up: mock.fn(async () => {
+          throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {});
+        }),
+      });
+      const processor = createMigrationProcessor({ kit }, { writeWaitMs: 20 });
+      await assert.rejects(processor(stuckJob()), MigrationExecutionFailedError);
+      await processor.close();
+    });
+  });
+
   describe('up and down jobs', () => {
     it('should apply one migration under the group batch, guarded, and report it', async () => {
       const kit = stubKit();

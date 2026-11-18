@@ -14,10 +14,6 @@ const { insertMigration, makeProject } = require('../helpers/project.js');
 const repoRoot = path.join(__dirname, '..', '..');
 const bin = path.join(repoRoot, 'bin', 'migronaut.js');
 
-// The supported Node range (engines >= 22.18) always strips types; feature
-// detection guards the rare case of a run under --no-experimental-strip-types.
-const nodeStripsTypes = Boolean(process.features.typescript);
-
 /** Run the CLI under the current (plain) Node */
 function runBin(args, cwd) {
   return new Promise((resolve, reject) => {
@@ -80,7 +76,10 @@ describe('shipped CLI under plain node (no build, no loader)', () => {
     assert.strictEqual(await mongo.db.collection('rt_js').countDocuments(), 1);
   });
 
-  it('should apply a .ts migration', { skip: !nodeStripsTypes }, async () => {
+  // No skip for a Node run with type stripping disabled: the supported range
+  // (engines >= 22.18) strips types, and most of the suite writes its
+  // migrations as .ts — such a run fails long before it gets here.
+  it('should apply a .ts migration', async () => {
     project.write('0002-ts.ts', tsMigration);
     const result = await runBin(args(['up', '0002-ts.ts']), project.dir);
     assert.strictEqual(result.code, 0);

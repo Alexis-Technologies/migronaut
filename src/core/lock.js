@@ -157,7 +157,9 @@ class MigrationLock {
     } catch (error) {
       if (isDuplicateKeyError(error)) {
         // Two processes raced the very first insert; the loser lands here.
-        const holder = await collection.findOne({ _id: this.#id });
+        // The holder is only said in the error: a read that fails must not
+        // turn "the lock is held" into a driver error.
+        const holder = await collection.findOne({ _id: this.#id }).catch(() => null);
         throw new LockAlreadyHeldError(`${sentence(this.#label)} is already held`, {
           holder: toLockInfo(holder) ?? undefined,
           ttlMs: this.ttlMs,
@@ -181,7 +183,16 @@ class MigrationLock {
     // writer's document wins; either way the loser reads a different one here
     // and backs off instead of running concurrently. The nonce is what makes
     // that hold when both carry the same owner token.
-    const current = await collection.findOne({ _id: this.#id });
+    let current;
+    try {
+      current = await collection.findOne({ _id: this.#id });
+    } catch (error) {
+      // The update above may have been ours. Left as it is, the document
+      // would hold the lock for no one — this instance never learned it owns
+      // it, so nothing would renew or release it — until its TTL ran out.
+      await collection.deleteOne({ _id: this.#id, owner, nonce }).catch(() => undefined);
+      throw error;
+    }
     if (!current || current.owner !== owner || current.nonce !== nonce) {
       throw new LockAlreadyHeldError(`${sentence(this.#label)} is already held`, {
         holder: toLockInfo(current) ?? undefined,
@@ -216,15 +227,36 @@ class MigrationLock {
   }
 
   /**
+   * The lock document with `ageMs`: how long ago it was last renewed, by the
+   * server's clock — the one `lockedAt` was stamped with. For a reader that
+   * judges staleness: its own clock against another host's stamp is the very
+   * comparison acquire() avoids.
+   */
+  async inspectWithAge() {
+    const [doc] = await this.#db
+      .collection(this.#collectionName)
+      .aggregate([
+        { $match: { _id: this.#id } },
+        { $set: { ageMs: { $subtract: ['$$NOW', '$lockedAt'] } } },
+      ])
+      .toArray();
+    return doc ?? null;
+  }
+
+  /**
    * Force-delete the lock regardless of who holds it, returning the document
    * that was removed (or null if none). Used by `migronaut unlock` to clear a lock
    * left behind by a crashed run — bypasses the owner scoping of {@link release}.
    */
   async forceRelease() {
-    const collection = this.#db.collection(this.#collectionName);
-    const existing = await collection.findOne({ _id: this.#id });
-    await collection.deleteOne({ _id: this.#id });
-    return existing;
+    // One operation: read first and delete after, and the document reported
+    // could be one run's while the one deleted is another's that took the
+    // lock in between. With its metadata, so every supported driver answers
+    // in the same shape (5.x has no other).
+    const result = await this.#db
+      .collection(this.#collectionName)
+      .findOneAndDelete({ _id: this.#id }, { includeResultMetadata: true });
+    return result?.value ?? null;
   }
 
   /**
@@ -304,7 +336,13 @@ async function runWithLock(lock, options, fn) {
   options.onLockAcquired?.({ ttlMs: lock.ttlMs, acquireMs: Date.now() - acquireStart });
 
   const abortOnLoss = (options.onLockLost ?? 'abort') === 'abort';
+  // One lock is lost once, however many timers notice: the heartbeat finds it
+  // reclaimed on every tick from then on, and the deadline may fire on top.
+  // A run of an hour would say so — and emit `lock:lost` — a hundred times.
+  let lost = false;
   const loseLock = (reason) => {
+    if (lost) return;
+    lost = true;
     // The most alert-worthy line this module emits — structured fields so a
     // JSON sink can trigger on it without parsing the human string.
     options.logger.warn(`⚠ Lost the ${label} mid-run (${reason})`, {
@@ -360,9 +398,14 @@ async function runWithLock(lock, options, fn) {
       .then((held) => {
         consecutiveFailures = 0;
         // A renewal that finds no matching document means someone else owns the
-        // lock now — unrecoverable, so it aborts on the first occurrence.
+        // lock now — unrecoverable, so it aborts on the first occurrence. And
+        // final: that document never matches again, so there is nothing left
+        // to renew. (A deadline that fired on failing renewals is different —
+        // the document may still be ours, and the heartbeat goes on trying.)
         if (!held && !stopped) {
           loseLock('another run reclaimed it');
+          clearInterval(heartbeat);
+          clearTimeout(deadline);
           return;
         }
         armDeadline();

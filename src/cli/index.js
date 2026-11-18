@@ -14,6 +14,7 @@ const { registerRedo } = require('./commands/redo.js');
 const { registerStatus } = require('./commands/status.js');
 const { registerUnlock } = require('./commands/unlock.js');
 const { registerUp } = require('./commands/up.js');
+const { reportUsageError } = require('./shared.js');
 
 /** Build the root commander program with all commands and global flags */
 function buildProgram() {
@@ -80,8 +81,14 @@ async function run(argv) {
     delete process.env.MIGRONAUT_FORCE_COLOR;
     process.env.MIGRONAUT_NO_COLOR = '1';
   }
+  // Read from the tokens, like --no-color: a command line that does not parse
+  // has no parsed options to ask.
+  const json = flagTokens.includes('--json');
+  const program = buildProgram().onUsageError((message, help) =>
+    reportUsageError(message, { json, help }),
+  );
   try {
-    await buildProgram().parseAsync(argv);
+    await program.parseAsync(argv);
   } finally {
     // A programmatic embedder calling run() twice must not inherit this
     // invocation's flag as ambient state.

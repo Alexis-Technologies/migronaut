@@ -2,6 +2,7 @@ const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { assertLockWaitOptions, withLockWait } = require('./lock-wait.js');
 const { MigratorKit, RECORD_LOCK_WAIT } = require('./migrator.js');
+const { assertRunFlags } = require('./options.js');
 
 /**
  * Run all pending migrations and return a summary — the blessed one-call entry
@@ -51,6 +52,7 @@ async function runMigrations(config = {}, options = {}) {
     ...kitOptions
   } = options;
 
+  assertRunFlags(options);
   if (onKit !== undefined && typeof onKit !== 'function') {
     throw new ConfigInvalidError('onKit must be a function', { onKit: typeof onKit });
   }

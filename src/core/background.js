@@ -22,7 +22,8 @@ const { TERMINAL, matchHash, transition } = require('./background-spec.js');
 const { MAX_BAD_IDS, STATE_SCHEMA } = require('./background-store.js');
 const { createAdaptive, createThrottle, sleep } = require('./background-throttle.js');
 const { runWithLock } = require('./lock.js');
-const { READ_OPTIONS } = require('./server-info.js');
+const { NAMESPACE_NOT_FOUND, READ_OPTIONS } = require('./server-info.js');
+const { isUnauthorized } = require('./shard-info.js');
 const { shardedVersionIndexKey } = require('./versioning-spec.js');
 
 /**
@@ -32,9 +33,10 @@ const { shardedVersionIndexKey } = require('./versioning-spec.js');
  *
  * Pure orchestration over what the kit injects (`deps`):
  * `{ db, client, store, logger, fields, emit, lockFor(name), load(name),
- * ttlMs, now?, adaptiveCache?, warned? }` — `load(name)` resolves the
- * migration file to `{ spec, fns, checksum }`; `lockFor(name)` is the
- * coordinator's `MigrationLock` (`background:<name>`), held only for one step.
+ * ttlMs, now?, adaptiveCache?, indexCache?, shardKeyCache?, lagWaits?, warned? }` —
+ * `load(name)` resolves the migration file to `{ spec, fns, checksum }`;
+ * `lockFor(name)` is the coordinator's `MigrationLock` (`background:<name>`),
+ * held only for one step.
  *
  * Every step is idempotent and starts from what MongoDB says, so any number
  * of coordinators and lanes, in any number of processes, may run at once:
@@ -72,21 +74,44 @@ const retrySoon = (deps, reason) => ({
   retryAfterMs: Math.max(1, Math.floor(deps.ttlMs / 2)),
 });
 
-/** The keys of a collection's indexes — none for one that does not exist yet */
+/**
+ * The keys of a collection's indexes — none for one that does not exist yet,
+ * or whose indexes this user may not list. Any other failure is thrown: "the
+ * list could not be read" must not pass for "there is no index", or one blip
+ * would have a lane give up the version index — and its partitioner with it.
+ */
 async function indexKeys(deps, collection) {
   const cache = deps.indexCache;
   const hit = cache?.get(collection);
   const now = Date.now();
   if (hit !== undefined && now - hit.at < INDEX_CACHE_MS) return hit.keys;
+  let indexes;
   try {
-    const indexes = await deps.db.collection(collection).listIndexes(READ_OPTIONS).toArray();
-    const keys = [];
-    for (const index of indexes) keys.push(index.key);
-    cache?.set(collection, { at: now, keys });
-    return keys;
-  } catch {
-    return [];
+    indexes = await deps.db.collection(collection).listIndexes(READ_OPTIONS).toArray();
+  } catch (error) {
+    if (error?.code === NAMESPACE_NOT_FOUND || isUnauthorized(error)) return [];
+    throw error;
   }
+  const keys = [];
+  for (const index of indexes) keys.push(index.key);
+  cache?.set(collection, { at: now, keys });
+  return keys;
+}
+
+/**
+ * A collection's shard key as `deps.shardKeyOf` reads it — reused like its
+ * index keys (`deps.shardKeyCache`): every slice, every coordinator step and
+ * every watcher job asks, and each answer is a read of `config.collections`
+ * through the mongos. A reshard is noticed within the same half minute.
+ */
+async function shardKeyOf(deps, collection) {
+  const cache = deps.shardKeyCache;
+  const hit = cache?.get(collection);
+  const now = Date.now();
+  if (hit !== undefined && now - hit.at < INDEX_CACHE_MS) return hit.sharding;
+  const sharding = await deps.shardKeyOf(collection);
+  cache?.set(collection, { at: now, sharding });
+  return sharding;
 }
 
 /** Whether a live index key is `wanted` — same fields, same order, same directions or `hashed` */
@@ -180,7 +205,7 @@ async function jobFor(deps, name, state, { direction } = {}) {
     fns: loaded.fns,
     direction: dir === 'revert' ? 'revert' : 'forward',
     match,
-    ...(await partitionerFor(deps, spec, dir)),
+    ...(await partitionerFor(deps, spec, dir, state.plan?.partitioner)),
     logger: deps.logger,
     // For ctx.background and ctx.logger: the lane working it and its queue job
     // (with its group when a run drives it inline).
@@ -198,8 +223,14 @@ async function jobFor(deps, name, state, { direction } = {}) {
  * everywhere else — `untargeted` when the collection is sharded but that is
  * all that is known, said once per process. `backgroundShardAware: 'off'`
  * keeps every collection on `_id`.
+ *
+ * `planned` is the partitioner the plan in force was made with. A topology
+ * that could not be read (a `hello` lost to an election) is no answer: a
+ * plan along the shard key says the collection is sharded, and is believed —
+ * taking "unknown" for "not sharded" would hand its key ranges to the `_id`
+ * partitioner, which reads a key range as "everything".
  */
-async function partitionerFor(deps, spec, direction) {
+async function partitionerFor(deps, spec, direction, planned) {
   const keys = spec.mode === 'step' ? [] : await indexKeys(deps, spec.collection);
   const byId = async (mode) => ({
     partitioner: idRangePartitioner,
@@ -209,8 +240,10 @@ async function partitionerFor(deps, spec, direction) {
   if (spec.mode === 'step' || deps.shardAware === 'off' || deps.shardKeyOf === undefined) {
     return byId('off');
   }
-  if ((await deps.topology?.()) !== 'sharded') return byId('off');
-  const sharding = await deps.shardKeyOf(spec.collection);
+  const topology = await deps.topology?.();
+  const sharded = topology === 'sharded' || (topology === undefined && planned === 'shard');
+  if (!sharded) return byId('off');
+  const sharding = await shardKeyOf(deps, spec.collection);
   if (sharding === null) return byId('off');
   const where = { background: spec.collection, collection: spec.collection };
   if (sharding === undefined) {
@@ -253,6 +286,35 @@ async function partitionerFor(deps, spec, direction) {
     sharding: { mode: 'shard', key: sharding.key },
   };
 }
+
+/** The partitioner a job would plan with now, as a plan records it */
+const partitionerOf = (job) => (job.spec.mode === 'step' ? 'step' : job.partitioner.id);
+
+/**
+ * Why a plan cannot be worked by this job any more, or `undefined`:
+ * - `partitioner` — it was split by the other partitioner. The version index
+ *   that carries the shard key appeared (or went) since, the shard key became
+ *   readable (or stopped being), or `backgroundShardAware` changed. Its scopes
+ *   are the other one's: a key range means nothing to the `_id` partitioner,
+ *   and an `_id` range has no bounds for the shard-aware one;
+ * - `epoch` — the collection was resharded, or its key refined.
+ *
+ * Either way the same pass is split again — safe: the version filter skips
+ * what is done. A plan that names no partitioner is taken as it is.
+ */
+function planMismatch(job, plan) {
+  if (plan === undefined) return undefined;
+  if (plan.partitioner !== undefined && plan.partitioner !== partitionerOf(job)) {
+    return 'partitioner';
+  }
+  return job.partitioner.stale?.(plan.epoch) ? 'epoch' : undefined;
+}
+
+/** What a replan says, by what set the plan aside */
+const REPLAN_REASONS = {
+  partitioner: 'its plan was split another way than this collection is read now',
+  epoch: 'it was resharded since its plan',
+};
 
 /** The shard-aware facts a plan records, for status: how it split, by which key, into how many groups */
 function shardingOf(job, plan) {
@@ -385,12 +447,13 @@ async function coordinatePass(deps, name, initial, { signal }) {
 
   for (let guard = 0; guard < job.spec.maxPasses + 2; guard++) {
     if (signal?.aborted) return retrySoon(deps, 'stopping');
-    // Resharded (or its key refined) since this plan: its ranges mean nothing
-    // now — re-split the same pass (safe: the version filter skips what is done).
-    if (state.phase === 'process' && job.partitioner.stale?.(state.plan?.epoch)) {
+    // The plan's ranges mean nothing to this job (planMismatch): re-split the
+    // same pass.
+    const mismatch = state.phase === 'process' ? planMismatch(job, state.plan) : undefined;
+    if (mismatch !== undefined) {
       deps.logger.warn(
-        `⚠ ${name}: ${job.spec.collection} was resharded since its plan — replanning`,
-        deps.fields({ background: name }),
+        `⚠ ${name}: ${job.spec.collection} — ${REPLAN_REASONS[mismatch]} — replanning`,
+        deps.fields({ background: name, replan: mismatch }),
       );
       state =
         (await store.cas(
@@ -754,8 +817,9 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
   let job;
   try {
     job = await jobFor(deps, name, state);
-    // A plan made before a reshard: the coordinator must re-split first.
-    if (job.partitioner.stale?.(state.plan.epoch)) return { outcome: 'stale', counters: {} };
+    // A plan this job cannot work (made before a reshard, or by the other
+    // partitioner): the coordinator must re-split first.
+    if (planMismatch(job, state.plan) !== undefined) return { outcome: 'stale', counters: {} };
     await assertTransactions(deps, name, job.spec);
   } catch (error) {
     // Before any claim (the file changed or is gone, the deployment cannot
@@ -774,6 +838,7 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
     logger: deps.logger,
     name,
     warned: deps.warned,
+    ...(deps.lagWaits ? { lagWaits: deps.lagWaits } : {}),
   });
   let worked = false;
   for (;;) {
@@ -886,6 +951,11 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
         });
         return { outcome: 'stopped', counters };
       }
+      // The slice may have failed on what was cached — a hint on an index a
+      // converge dropped since: the next one reads the indexes again instead
+      // of failing the same way until the cache runs out.
+      deps.indexCache?.delete(job.spec.collection);
+      deps.shardKeyCache?.delete(job.spec.collection);
       const partitionFailed = await store
         .failSlice(lease, {
           error: documentErrorText(error),
@@ -936,15 +1006,24 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
   }
 }
 
-/** The process's AIMD controller for one background migration and group — shared by its lanes */
+/**
+ * The process's AIMD controller for one background migration and group —
+ * shared by its lanes, and kept for as long as its settings are the ones it
+ * was made with. A repin that lowers `batchSize` (the batches were too big)
+ * must reach a runner that has been up for days: the controller is made
+ * anew, from what the old one had learned, within the new bounds.
+ */
 function adaptiveFor(deps, name, partition, settings) {
   const cache = deps.adaptiveCache;
   const key = `${name}:${partition.group ?? ''}`;
-  if (cache?.has(key)) return cache.get(key);
-  const controller = createAdaptive(settings, {
-    ...(partition.throttle ? { initial: partition.throttle } : {}),
-  });
-  cache?.set(key, controller);
+  const signature =
+    `${settings.targetLatencyMs}:${settings.minBatchSize}:` +
+    `${settings.maxBatchSize}:${settings.maxPauseMs}`;
+  const cached = cache?.get(key);
+  if (cached?.signature === signature) return cached.controller;
+  const initial = cached?.controller.state() ?? partition.throttle;
+  const controller = createAdaptive(settings, initial ? { initial } : {});
+  cache?.set(key, { signature, controller });
   return controller;
 }
 
@@ -1115,7 +1194,9 @@ module.exports = {
   failedError,
   finalize,
   jobFor,
+  adaptiveFor,
   partitionerFor,
+  planMismatch,
   probeHint,
   repin,
   requiresStatus,

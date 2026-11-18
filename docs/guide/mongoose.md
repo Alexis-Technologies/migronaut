@@ -41,6 +41,16 @@ Two things happen here:
   (`mongoose.connection.getClient()`), so both run on one pool. Ownership stays with you:
   `disconnect()` never closes an injected client.
 
+::: warning Keep the driver and Mongoose on matching majors
+Mongoose ships its own copy of the driver: Mongoose 8 runs on `mongodb` 6, Mongoose 9 on
+`mongodb` 7. If the `mongodb` you installed for migronaut is of another major, a value made by one
+— an `ObjectId` from a model, say — is refused by the other with
+`BSONVersionError: Unsupported BSON version`. Injecting `mongoose.connection.getClient()` as
+`client`, as above, avoids it: migronaut then talks through Mongoose's own driver. Otherwise
+install the pair that belongs together (`mongodb@6` with `mongoose@8`, `mongodb@7` with
+`mongoose@9`). Migronaut is tested on both pairs.
+:::
+
 ## Use models in a migration
 
 Import your application's models, or define a throwaway schema inline:

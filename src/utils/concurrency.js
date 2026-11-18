@@ -29,4 +29,29 @@ async function mapLimit(items, limit, fn) {
   return results;
 }
 
-module.exports = { mapLimit };
+/**
+ * Wait for `promise` to settle — fulfilled or rejected, it does not matter
+ * which — for at most `ms`. Resolves to whether it did; never rejects.
+ *
+ * For a wait that must not outlast its use: a best-effort write to a service
+ * that is away (a job's log row, with a Redis that queues commands without a
+ * limit) would otherwise hold whatever comes after it for as long as the
+ * outage lasts. The promise itself goes on; only the wait ends.
+ */
+async function settledWithin(promise, ms) {
+  let timer;
+  const expired = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  const settled = Promise.resolve(promise).then(
+    () => true,
+    () => true,
+  );
+  try {
+    return await Promise.race([settled, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+module.exports = { mapLimit, settledWithin };

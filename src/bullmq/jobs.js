@@ -520,6 +520,100 @@ function buildConvergeJob({ groupId, ordered, after, jobOptions, requestedBy, re
  * mints one per tick forever — `every: 60_000` alone is 1,440 jobs a day, in
  * a Redis that usually runs with `noeviction`.
  */
+/** What was already said about options nobody reads, per kit — once, not on every call */
+const saidUnknown = new WeakMap();
+
+/**
+ * Say which keys of `options` nobody reads at `where`. A warning, not a
+ * refusal: these calls have always taken a wider object, and code that passes
+ * one must keep working — but a typo no longer passes in silence.
+ * `enqueueUp(undefined, { too: '0002-b.js' })` still enqueues everything
+ * pending; it now says that `too` is not an option. (`enqueueBackground` and
+ * the background processor refuse an unknown key outright, as they always
+ * have.) A key whose value is `undefined` asks for nothing and is not said.
+ */
+function warnUnknownOptions(kit, where, options, known) {
+  if (!isObjectLike(options) || typeof kit?.logger?.warn !== 'function') return;
+  for (const key of Object.keys(options)) {
+    if (known.has(key) || options[key] === undefined) continue;
+    let said = saidUnknown.get(kit);
+    if (said === undefined) {
+      said = new Set();
+      saidUnknown.set(kit, said);
+    }
+    const id = `${where}:${key}`;
+    if (said.has(id)) continue;
+    said.add(id);
+    kit.logger.warn(
+      `⚠ ${where}: ${JSON.stringify(key).slice(0, 80)} is not an option here — ignored`,
+      { where, option: key.slice(0, 80) },
+    );
+  }
+}
+
+/** The options each entry point reads — what warnUnknownOptions measures a call against */
+const KNOWN_OPTIONS = Object.freeze({
+  up: new Set([
+    'filename',
+    'to',
+    'force',
+    'ordered',
+    'converge',
+    'requestedBy',
+    'reason',
+    'jobOptions',
+  ]),
+  down: new Set([
+    'filename',
+    'batch',
+    'steps',
+    'to',
+    'ordered',
+    'requestedBy',
+    'reason',
+    'jobOptions',
+  ]),
+  converge: new Set(['ordered', 'requestedBy', 'reason', 'jobOptions', 'queueEvents']),
+  schedule: new Set(['job', 'every', 'pattern', 'tz', 'to', 'id']),
+  queue: new Set([
+    'config',
+    'kit',
+    'kitOptions',
+    'bullmq',
+    'connection',
+    'queueName',
+    'prefix',
+    'jobOptions',
+    'workerOptions',
+    'globalConcurrency',
+    'lockWait',
+    'allow',
+    'background',
+    'userlandLogRows',
+  ]),
+  processor: new Set([
+    'config',
+    'kit',
+    'kitOptions',
+    'queue',
+    'lockWait',
+    'ordered',
+    'jobOptions',
+    'allow',
+    'userlandLogRows',
+    'background',
+  ]),
+});
+
+/**
+ * How long a job waits for its own log rows and progress updates before it
+ * settles without them. They are best-effort, and with Redis away they do not
+ * settle at all (BullMQ's connections queue commands without a limit): a job
+ * that waited for them would hold the jobs behind it — and a graceful close —
+ * for as long as the outage lasts, with its migration long since committed.
+ */
+const JOB_WRITE_WAIT_MS = 5_000;
+
 const TICK_RETENTION = Object.freeze({
   removeOnComplete: Object.freeze({ count: 100 }),
   removeOnFail: Object.freeze({ count: 500 }),
@@ -678,6 +772,8 @@ module.exports = {
   JOB_NAMES,
   MIN_JOB_DATA_VERSION,
   MIGRATION_JOB_OPTIONS,
+  JOB_WRITE_WAIT_MS,
+  KNOWN_OPTIONS,
   TICK_RETENTION,
   MAX_LANES,
   assertAllowed,
@@ -698,4 +794,5 @@ module.exports = {
   parseJobData,
   permissionsNeeded,
   resolveAllow,
+  warnUnknownOptions,
 };

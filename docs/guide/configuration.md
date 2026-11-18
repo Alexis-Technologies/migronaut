@@ -100,7 +100,7 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `clientOptions` | `MongoClientOptions` | — | Driver options: TLS, AWS IAM / X.509 auth, proxies, pool sizing |
 | `client` | `MongoClient` | — | An already-connected client to reuse; migronaut never closes it |
 | `timeoutMs` | `number` | — | Stop the run when one migration exceeds this (best-effort) |
-| `reloadMigrations` | `boolean` | `false` | Bypass the ESM module cache (long-lived processes only) — for migrations and collection definition files alike |
+| `reloadMigrations` | `boolean` | `false` | Bypass Node's module cache — for ES modules and CommonJS files alike — so a long-lived process runs a file as it is on disk now (migrations and collection definition files; the file itself, not what it imports) |
 | `collections` | `CollectionDefinition[]` | — | [Declared collections](/guide/collections): indexes and validators as an end state, applied by `converge` |
 | `collectionsDir` | `string` | — | Directory of collection definition files, one per collection. Opt-in: nothing is read unless it is set |
 | `convergeAfterUp` | `boolean` | `false` | End every bulk `up` — no file, no `to` — by converging the declared collections, under the same lock |

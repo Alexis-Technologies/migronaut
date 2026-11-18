@@ -99,7 +99,7 @@ like `tsx`) — not on anything migronaut itself compiles.
 | `chalk` | [src/utils/colors.js](src/utils/colors.js) — `MIGRONAUT_FORCE_COLOR` > `MIGRONAUT_NO_COLOR` > `FORCE_COLOR` > `NO_COLOR` > `TERM=dumb` > `isTTY` detection, `stripAnsi` |
 | `ora` | [src/cli/spinner.js](src/cli/spinner.js) — `start(text)`/`stop()`, complete no-op off-TTY |
 | `commander` | [src/cli/args.js](src/cli/args.js) — commander-compatible subset (subcommands, `--no-x`, short aliases, camelCase, help/version); no combined short flags (`-fy`) |
-| `cli-table3` | [src/cli/table.js](src/cli/table.js) — box-drawing renderer, ANSI-aware widths (no wcwidth/CJK) |
+| `cli-table3` | [src/cli/table.js](src/cli/table.js) — box-drawing renderer, ANSI-aware widths, wide characters (CJK, emoji) counted as two columns |
 | `zod` | `validateConfig` in [src/core/config.js](src/core/config.js) — table-driven `CONFIG_KEYS`, same `{path, message}` issues |
 
 **Never add a runtime dependency.** Third-party integrations are injected by the user instead:
@@ -113,7 +113,7 @@ draws the docs' `mermaid` code fences in the browser — none of it ships to npm
 
 **BullMQ is injected too — it is not even a peer.** The queue adapter takes the caller's classes
 (`createMigrationQueue({ bullmq: { Queue, Worker, QueueEvents } })`); nothing under `src/` may
-`require('bullmq')` (a unit test greps for it) and neither `.d.ts` may import it — `bullmq.d.ts`
+`require('bullmq')` (a unit test greps for it) and no `.d.ts` may import it — `bullmq.d.ts`
 describes it structurally (`BullMQQueueLike`, …), as `MongooseLike` does for mongoose. `bullmq`
 and `ioredis` are devDependencies only: for the type tests and the opt-in real-Redis suite.
 
@@ -136,7 +136,7 @@ redacted status message plus `error.type`, and there are exactly three wrap site
 events cannot provide), and the background spans handed to `background.js` through its deps —
 `migronaut.background.slice` (one lease held) and `migronaut.background.coordinate` (one
 coordinator step), each opened only once the lease or the coordinator lock is held. Nothing under `src/` or `bin/` may `require` an `@opentelemetry/*` package or
-`bullmq-otel`, and neither `.d.ts` may import one (a unit test greps for it); the types are
+`bullmq-otel`, and no `.d.ts` may import one (a unit test greps for it); the types are
 structural (`MigronautTracer`, `MigronautMeter`, …). BullMQ's own telemetry object rides in with the
 classes — `bullmq: { Queue, Worker, telemetry }` — and is passed through untouched.
 `@opentelemetry/api`, `@opentelemetry/sdk-trace-node`, `@opentelemetry/sdk-metrics`,
@@ -218,13 +218,13 @@ When adding new code, follow the right-hand column — there should be no more `
 pnpm run lint              # oxlint src bin scripts tests bench examples
 pnpm run format              # oxfmt src bin scripts tests bench examples
 pnpm run format:check          # oxfmt --check src bin scripts tests bench examples
-pnpm test                        # test:unit then test:integration (~1200 tests)
+pnpm test                        # test:unit then test:integration (~2550 tests)
 pnpm run test:unit                 # unit only — fast, no MongoDB
 pnpm run test:integration            # integration only, serial (--test-concurrency=1)
 node --test tests/integration/up.test.js   # single file
 pnpm run test:coverage             # node --test under c8, gated at 90/90/90
 pnpm run test:types                  # tsd — checks index.d.ts, bullmq.d.ts and versioning.d.ts against tests/types/*.test-d.ts
-pnpm run check:dts                     # tsc --noEmit --strict over the three .d.ts files on their own
+pnpm run check:dts                     # tsc --noEmit --strict (--types node --lib esnext) over the three .d.ts files on their own
 node bin/migronaut.js --help           # run the CLI directly — no build, ever
 pnpm run size                            # esbuild bundle-size report (library, CLI, queue adapter), no publish artifact
 # The real-BullMQ suite is opt-in (CI runs it; everything else needs no Redis):
@@ -246,7 +246,15 @@ pnpm run docs:dev                        # vitepress dev docs
 `prepublishOnly` runs lint + format:check + test:coverage + test:types + check:dts — treat that as
 the pre-merge gate. There is no `build` script and nothing to run before testing or publishing;
 `files` in `package.json` ships `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`,
-`versioning.js`, `versioning.d.ts`, `migronaut.schema.json`, `bin/`, and `src/` as-is.
+`versioning.js`, `versioning.d.ts`, `migronaut.schema.json`, `bin/`, and `src/` as-is, with
+`README.md` and `CHANGELOG.md`.
+
+The devDependencies sit on the newest majors the peer range admits (`mongodb` 7, `mongoose` 9,
+`typescript` 7): that is what the gate runs on. CI's `compat` job swaps in `mongodb@6` with
+`mongoose@8` and runs both test tiers again — a driver and a Mongoose of different majors do not
+mix (each refuses the other's BSON types), so they are swapped as a pair. TypeScript 7 no longer
+includes `@types/node` or a lib with `AsyncDisposable` by default, which is why `check:dts` names
+both. The `unit` job names the engines floor exactly (`22.18.0`); `22` alone is the newest 22.x.
 
 ## Conventions (enforced by oxlint/oxfmt + review)
 
@@ -278,7 +286,7 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
   transactions work).
 - `node:test` uses `before`/`after`, not `beforeAll`/`afterAll` (those are Vitest/Jest names —
   don't reintroduce them).
-- Silence the logger (`logger: null`) in tests. No committed `.only`/`.skip` — with three
+- Silence the logger (`logger: null`) in tests. No committed `.only`/`.skip` — with four
   sanctioned exceptions, all environment-capability skips with a reason, not disabled tests:
   `tests/integration/bullmq-redis.test.js` when `MIGRONAUT_TEST_REDIS_URL` is unset (CI sets it),
   `tests/integration/search-atlas.test.js` when `MIGRONAUT_TEST_ATLAS_URI` is unset (CI never
@@ -286,7 +294,12 @@ the pre-merge gate. There is no `build` script and nothing to run before testing
   planner; the unit fake carries the coverage, but only a real `mongot` proves the fixed point),
   and `tests/integration/sharded.test.js` when `MIGRONAUT_TEST_SHARDED_URI` is unset (CI never
   does — run it by hand after changing the shard-aware code; its `[probe]` cases pin what
-  ARCHITECTURE §6.8 says a mongos does).
+  ARCHITECTURE §6.8 says a mongos does), and the symlink case of `tests/unit/sequence.test.js`
+  where the OS will not create a file symlink (Windows without the privilege — CI's runners have
+  it).
+- An integration test that expects a rejection disconnects its kit in a `finally`: an assertion
+  that fails inside `assert.rejects` otherwise leaves the client open, and the file hangs instead
+  of failing.
 - The queue adapter is tested against `tests/helpers/fake-bullmq.js`, an in-memory double — that
   is where its coverage comes from, so the gate passes with no Redis. The scenarios live once, in
   `tests/helpers/bullmq-scenarios.js`, and run against both the fake and (in the opt-in file) the
@@ -408,13 +421,37 @@ run id**, never by `current` alone, mirror at most `userlandLogRows` per job (a 
 and seal a job before its last flush; lanes an `up` drives inline (`backgroundInline`) carry the
 run's `jobId` **and `groupId`** — the group is what tells them from a background queue's lanes,
 whose ids may repeat a migration job's — but no parent run id; the kit is an
-`EventEmitter` with `captureRejections`, so a rejecting `async` listener is a debug line. Names
+`EventEmitter` with `captureRejections`, so a rejecting `async` listener is a debug line. From the
+2.4 review: E11000 `dup key` values are masked in background state, queue jobs, telemetry and
+`migration:log`, and left **as they are** in `migration:error`, `run:end`, `--json` rows and the
+changelog's `failed` trace — the owner's decision (SECURITY.md says which channel does what);
+`markFailed` clears the requester of an earlier apply but keeps the revert fields (it is still
+reverted); a file that does not load gets a migration span and a duration point, not a
+`migration:error` or a `failed` trace (it never did); a run the lock refused still emits
+`run:start`/`run:end` — the queue processor reads its run id there — and is told apart by
+`code: 'LOCK_ALREADY_HELD'`; a lost lock is said once, and its heartbeat goes on only after a
+*deadline* loss (the document may still be ours); `reloadMigrations` drops the file's
+`require.cache` entry as well as adding the query string (the query alone reloads ES modules
+only); the CLI exits 6 on a command line that does not parse and refuses `--flag=value` on a flag
+that takes none, while `args.js` on its own still exits 1 (the CLI takes parse errors over with
+`onUsageError`); an option nobody reads is **warned about, not refused**, on the queue's entry
+points (`enqueueBackground` refuses, as before); a tick's held converge is `convergeHeld`, a
+field of its own (`converge` stays the job that was added), and is held until the plan's
+`fingerprint` changes, not for a time; a job settles without its log rows after 5 s
+(`JOB_WRITE_WAIT_MS`), and `close({ force: true })` on top of a `close()` under way only stops
+waiting; a background plan is worked by the partitioner that split it or re-split (`planMismatch`),
+and a lane waiting for a lagging secondary yields at its slice's deadline; a throttle hook's pause
+and a retry backoff are capped at an hour; driver 7 words any refused write of code 20 as "This
+MongoDB deployment does not support retryable writes…" with no code and the server's error under
+`originalError` — `serverErrorOf` reads through it (`errorText`, `isTransactionsUnsupported`), so
+do not match on that message or on the outer `code`. Names
 already taken, so not to reuse for anything else: `sync` (the queue job), `ensureIndexes` and the
 audit check `indexes` (the changelog's own indexes), the audit check `search`, `schema`
 (`migronaut.schema.json`), the queue jobs `background`, `background-lane` and
 `background-verify` (and the scheduler `migronaut-background-verify`), the audit check
 `background`, the collections `_migronaut_background`, `_migronaut_background_partitions` and
 `_migronaut_background_watch`, the lock ids `background:*` and `watch:*`, the event
-`migration:log`, the log-field marker `userland`, `ctx.run`, the run option `job` and the queue
-option `userlandLogRows`.
+`migration:log`, the log-field marker `userland`, `ctx.run`, the run option `job`, the queue
+option `userlandLogRows`, the sync result field `convergeHeld`, the converge fields `fingerprint`,
+`repeats` and `lastAt`, the event field `code`, and the throttle reason `lag`.
 Don't "fix" these without checking the doc first.

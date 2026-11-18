@@ -130,10 +130,18 @@ describe('live drift watcher (integration)', () => {
 
   it('should hand a document it cannot upgrade back to the lanes', async () => {
     const { kit, drift } = await watched();
+    // What a subscriber that acts on the event finds, read the moment it
+    // fires: the event follows the write it reports. Emitted first, it was
+    // read as `completed` — now and then here, and always by this listener.
+    const atEvent = [];
+    kit.on('background:drift', (event) => {
+      if (event.action === 'reopened') atEvent.push(kit.backgroundStatus(NAME));
+    });
     // An edited file (a deploy in progress): the watcher cannot load the migration.
     project.write(NAME, spec({ extra: 'batchSize: 7,' }));
     await orders().insertOne({ __v: 1, __rev: 0, late: true });
     await until('the hand-back', () => drift.some((event) => event.action === 'reopened'));
+    assert.strictEqual((await atEvent[0]).status, 'running');
     assert.strictEqual((await kit.backgroundStatus(NAME)).status, 'running');
   });
 

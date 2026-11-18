@@ -36,6 +36,12 @@ of them — including a `FORCE_COLOR` exported by your CI runner.
 Combined short flags are not supported: write `-f -y`, not `-fy`.
 :::
 
+::: tip Flags that take no value
+A flag is on when it is there. `--yes=false` or `--no-lock=0` is refused (exit 6) rather than read
+as the flag itself: leave the flag out instead. Like every failure, a command line that does not
+parse is one JSON document on stdout under `--json`.
+:::
+
 ## Running migrations
 
 | Command | Description |
@@ -153,7 +159,7 @@ working unchanged. The full map is also exported from the package root as
 | `3` | `LOCK_ALREADY_HELD` — another run holds the lock |
 | `4` | `CHECKSUM_MISMATCH` — an applied file was edited (with `--strict`) |
 | `5` | `CONNECTION_FAILED` — could not reach MongoDB |
-| `6` | `CONFIG_INVALID` — bad configuration or flags |
+| `6` | `CONFIG_INVALID` — bad configuration or flags, a command line that does not parse included |
 | `7` | `MIGRATION_EXECUTION_FAILED` — a migration threw |
 | `8` | `MIGRATION_FILE_NOT_FOUND` |
 | `9` | `NOT_APPLIED` — nothing to revert under that name |

@@ -502,7 +502,13 @@ function defineBullMQScenarios(harness) {
     await holdLock();
     const group = await mq.enqueueUp();
     await mq.startWorker();
-    setTimeout(() => releaseLock().catch(() => undefined), 150);
+    // Released once the job says it waits — not after a pause the worker may
+    // or may not beat to the job (on a real Redis it sometimes did not, and
+    // the job then never waited at all).
+    await eventually(async () =>
+      (await harness.logsOf(mq.queue, group.jobs[0].id)).some((row) => /waiting/.test(row)),
+    );
+    await releaseLock();
 
     const { results } = await group.wait({ timeoutMs: 10_000 });
     assert.strictEqual(results[0].status, 'applied');
@@ -1006,6 +1012,69 @@ export async function down() {}
 
     const settledDown = await mq.enqueueUp();
     assert.strictEqual(settledDown.converge, null, 'in step: no job at all');
+  });
+
+  it('should hold a converge that failed on the same plan, tick after tick', async () => {
+    // A unique index that only a rebuild brings to its declaration: a conflict
+    // an operator has to settle (`rebuildUnique`) — no retry will.
+    const things = harness.mongo().db.collection('things');
+    await things.createIndex({ marker: 1 }, { unique: true, sparse: true });
+    const mq = createQueue({
+      config: {
+        collections: [{ name: 'things', indexes: [{ key: { marker: 1 }, unique: true }] }],
+        convergeAfterUp: true,
+      },
+    });
+    await mq.startWorker();
+    const tick = async () => {
+      const job = await mq.queue.add('sync', { v: 1, kind: 'sync' }, { attempts: 1 });
+      const [view] = await settled(mq, [job.id]);
+      return view.returnvalue;
+    };
+
+    const first = await tick();
+    assert.ok(first.converge, 'the first tick asks for a converge');
+    assert.ok(!('convergeHeld' in first));
+    const [refused] = await settled(mq, [first.converge.jobId]);
+    assert.strictEqual(refused.state, 'failed');
+    assert.strictEqual(refused.progress.code, 'CONVERGE_FAILED');
+    // A job a tick adds is kept like the tick: a schedule can add many.
+    const live = await mq.queue.getJob(first.converge.jobId);
+    assert.deepStrictEqual(live.opts.removeOnComplete, { count: 100 });
+    assert.deepStrictEqual(live.opts.removeOnFail, { count: 500 });
+
+    // The same plan, the same refusal waiting to happen: no job, tick after
+    // tick — it used to be one failed job and one history entry per tick.
+    for (let i = 0; i < 2; i++) {
+      const held = await tick();
+      assert.ok(!('converge' in held), 'no converge job');
+      assert.strictEqual(held.convergeHeld.reason, 'failed, and the plan has not changed since');
+      assert.match(held.convergeHeld.error, /conflict/i);
+      assert.ok(held.convergeHeld.failedAt);
+    }
+    const history = await mq.kit.convergeHistory();
+    assert.strictEqual(history.length, 1);
+    assert.strictEqual(history[0].success, false);
+    assert.strictEqual(typeof history[0].fingerprint, 'string');
+
+    // Asked for explicitly, it runs — and fails the same way: counted on the
+    // entry it repeats, not added to the history.
+    const explicit = await mq.enqueueConverge();
+    await assert.rejects(explicit.wait({ timeoutMs: 10_000 }), QueueJobFailedError);
+    const repeated = await mq.kit.convergeHistory();
+    assert.strictEqual(repeated.length, 1);
+    assert.strictEqual(repeated[0].repeats, 1);
+    assert.ok(repeated[0].lastAt >= repeated[0].finishedAt);
+
+    // The conflict is settled (here: the index is gone, so the plan is to
+    // create it): another plan, and the next tick asks again.
+    await things.dropIndex('marker_1');
+    const resumed = await tick();
+    assert.ok(resumed.converge, 'a changed plan is enqueued again');
+    const [applied] = await settled(mq, [resumed.converge.jobId]);
+    assert.strictEqual(applied.state, 'completed');
+    assert.deepStrictEqual(await indexNames(), ['marker_1']);
+    assert.strictEqual((await tick()).upToDate, true);
   });
 
   it('should not converge after a group that stops short of the head', async () => {

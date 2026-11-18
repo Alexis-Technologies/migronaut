@@ -1,6 +1,6 @@
 const { MigronautError } = require('../errors/index.js');
 const { errorWithCause } = require('./error.js');
-const { redactOutbound } = require('./redact.js');
+const { redactWithin } = require('./redact.js');
 
 /**
  * OpenTelemetry's `SpanStatusCode.ERROR`. Spelled as a number because the enum
@@ -142,8 +142,8 @@ function errorType(error) {
  */
 function failureText(error) {
   // A span goes to a third-party backend: no data values, and a bounded size.
-  const text = redactOutbound(errorWithCause(error));
-  return text.length > MAX_STATUS_MESSAGE_LENGTH
+  const { text, cut } = redactWithin(errorWithCause(error), MAX_STATUS_MESSAGE_LENGTH);
+  return cut || text.length > MAX_STATUS_MESSAGE_LENGTH
     ? `${text.slice(0, MAX_STATUS_MESSAGE_LENGTH - 1)}…`
     : text;
 }
@@ -372,7 +372,7 @@ function createTelemetry(telemetry, { dbName } = {}) {
   );
   const backgroundThrottle = counter(
     METRICS.BACKGROUND_THROTTLE,
-    'Adaptive throttle changes of background migrations, by reason',
+    'Throttle changes and lag waits of background migrations, by reason',
     '{change}',
   );
   const backgroundDrift = counter(
@@ -429,9 +429,9 @@ function createTelemetry(telemetry, { dbName } = {}) {
       record(lockAcquireDuration, acquireMs);
     },
     /**
-     * A wait for a held lock ended — `outcome` is `'acquired'`, `'timeout'`
-     * or `'aborted'`. Only waits that happened are recorded: the free-lock
-     * path is `lock.acquire.duration`'s.
+     * A wait for a held lock ended — `outcome` is `'acquired'`, `'timeout'`,
+     * `'aborted'` or `'failed'` (it ended in another error). Only waits that
+     * happened are recorded: the free-lock path is `lock.acquire.duration`'s.
      */
     lockWaited({ waitedMs, outcome }) {
       record(lockWaitDuration, waitedMs, { [ATTRIBUTES.LOCK_WAIT_OUTCOME]: outcome });

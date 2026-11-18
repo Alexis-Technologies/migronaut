@@ -6,11 +6,71 @@ const { isPlainObject } = require('./canonical.js');
  * connection URI in several parse errors, so every captured message must pass
  * through here before it can be printed or serialized.
  *
- * Regex-based, not `new URL()`: multi-host mongodb URIs fail WHATWG parsing,
+ * A scan of the text, not `new URL()`: multi-host mongodb URIs fail WHATWG parsing,
  * and the URI may sit anywhere inside a larger message (unlike
  * `maskUriCredentials` in template.js, which is anchored to a whole-string URI).
+ *
+ * Found from each `://` outwards, not by one pattern tried at every position:
+ * that pattern (`scheme://user:secret@`, the scheme unbounded) was retried
+ * from every character of a long run of scheme characters — quadratic, and
+ * 400 KB of letters held the event loop for two minutes, heartbeat timers
+ * included. This walk reads each character a bounded number of times.
  */
-const URI_CREDENTIALS = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:@/\s]*):([^@/\s]+)@/g;
+
+/** `user:secret@` right after a `://` — sticky, so it is tried there and nowhere else */
+const USERINFO = /([^:@/\s]*):[^@/\s]+@/y;
+
+/** The same cut short: a text that ends inside the secret, its `@` past the cut */
+const CUT_USERINFO = /([^:@/\s]*):[^@/\s]+$/y;
+
+const isLetter = (code) => (code >= 97 && code <= 122) || (code >= 65 && code <= 90);
+
+/** A character a URI scheme may hold after its first letter: a letter, a digit, `+`, `-`, `.` */
+const isSchemeChar = (code) =>
+  isLetter(code) || (code >= 48 && code <= 57) || code === 43 || code === 45 || code === 46;
+
+/** Whether a scheme ends right before `at` — a letter, then scheme characters only */
+function schemeEndsAt(text, at) {
+  for (let i = at - 1; i >= 0; i--) {
+    const code = text.charCodeAt(i);
+    if (isLetter(code)) return true;
+    if (!isSchemeChar(code)) return false;
+  }
+  return false;
+}
+
+/**
+ * Mask the secret of every `scheme://user:secret@` in `text` (an empty
+ * username still hides the password). With `cut`, a secret the text ends
+ * inside is masked too: its `@` was past the cut.
+ */
+function maskCredentials(text, cut = false) {
+  let at = text.indexOf('://');
+  if (at === -1) return text;
+  let masked = '';
+  let from = 0;
+  while (at !== -1) {
+    const start = at + 3;
+    let next = start;
+    if (schemeEndsAt(text, at)) {
+      USERINFO.lastIndex = start;
+      let match = USERINFO.exec(text);
+      let tail = '@';
+      if (match === null && cut) {
+        CUT_USERINFO.lastIndex = start;
+        match = CUT_USERINFO.exec(text);
+        tail = '';
+      }
+      if (match !== null) {
+        next = start + match[0].length;
+        masked += `${text.slice(from, start)}${match[1]}:****${tail}`;
+        from = next;
+      }
+    }
+    at = text.indexOf('://', next);
+  }
+  return from === 0 ? text : masked + text.slice(from);
+}
 
 /**
  * Query parameters whose value is a secret. The userinfo form is not the only
@@ -36,8 +96,7 @@ const SENSITIVE_PROP_KEY = /TOKEN|SECRET|PASSWORD/i;
  */
 function redactUris(text) {
   if (typeof text !== 'string') return text;
-  return text
-    .replace(URI_CREDENTIALS, '$1$2:****@')
+  return maskCredentials(text)
     .replace(URI_QUERY_SECRETS, '$1****')
     .replace(AUTH_MECHANISM_PROPS, (_match, prefix, value) => {
       const pairs = value.split(',');
@@ -69,6 +128,31 @@ const DUPLICATE_KEY_VALUES = /(dup key: )\{[^\n]*\}/g;
 function redactOutbound(text) {
   if (typeof text !== 'string') return text;
   return redactUris(text).replace(DUPLICATE_KEY_VALUES, '$1{ <redacted> }');
+}
+
+/**
+ * A duplicate key whose closing brace was past a cut: the pattern above
+ * would stop at an inner brace and leave the rest, so the unfinished tail of
+ * the last line is masked as a whole.
+ */
+const CUT_DUPLICATE_KEY_VALUES = /(dup key: )\{[^\n]*$/;
+
+/**
+ * {@link redactOutbound} for a text that is kept only up to `limit`
+ * characters: redaction reads no more than twice that, so its cost follows
+ * what is kept, not what a migration happened to pass in (a megabyte of
+ * base64 in a log field, a thousand fields of it). Returns the masked text —
+ * not yet cut to `limit`, since masking changes its length — and `cut`:
+ * whether the input was longer than what was read.
+ */
+function redactWithin(text, limit) {
+  const cut = text.length > limit * 2;
+  if (!cut) return { text: redactOutbound(text), cut };
+  const head = maskCredentials(text.slice(0, limit * 2), true).replace(
+    CUT_DUPLICATE_KEY_VALUES,
+    '$1{ <redacted> }',
+  );
+  return { text: redactOutbound(head), cut };
 }
 
 /**
@@ -175,8 +259,8 @@ function redactBounded(value, { omit } = {}) {
     if (typeof item === 'string') {
       // Outbound, like the event's message: an error's text copied into a
       // field (`{ error: err.message }`) loses the values it quotes too.
-      const text = redactOutbound(item);
-      if (text.length <= BOUNDS.string) return text;
+      const { text, cut } = redactWithin(item, BOUNDS.string);
+      if (!cut && text.length <= BOUNDS.string) return text;
       truncated = true;
       return `${text.slice(0, BOUNDS.string)}…`;
     }
@@ -226,4 +310,11 @@ function redactBounded(value, { omit } = {}) {
   return { value: result, truncated };
 }
 
-module.exports = { BOUNDS, redactBounded, redactDeep, redactOutbound, redactUris };
+module.exports = {
+  BOUNDS,
+  redactBounded,
+  redactDeep,
+  redactOutbound,
+  redactUris,
+  redactWithin,
+};

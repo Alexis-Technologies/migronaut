@@ -762,6 +762,31 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(rows[0].file, '0001-a.ts');
   });
 
+  it('should exit 6 on a command line that does not parse, as the reference says', async () => {
+    for (const args of [['up', '--bogus'], ['sideways'], ['up', '--steps'], []]) {
+      const result = await runCli(args);
+      assert.strictEqual(result.code, 6, args.join(' '));
+      assert.strictEqual(result.stdout, '', args.join(' '));
+    }
+  });
+
+  it('should refuse a value on a flag that takes none, before anything runs', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    // `--no-lock=false` used to mean --no-lock, and `--yes=false` yes.
+    const result = await runCli(baseArgs(['up', '--no-lock=false']));
+    assert.strictEqual(result.code, 6);
+    assert.match(result.stderr, /option '--no-lock' does not take a value/);
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+  });
+
+  it('should report a parse error as one JSON document under --json', async () => {
+    const result = await runCli(['--json', 'unlock', '--yes=false']);
+    assert.strictEqual(result.code, 6);
+    assert.deepStrictEqual(JSON.parse(result.stdout), {
+      error: { code: 'CONFIG_INVALID', message: "option '--yes' does not take a value" },
+    });
+  });
+
   it('should show only the last N rows with status --limit', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     project.write('0002-b.ts', insertMigration('things', 'b'));
@@ -1077,8 +1102,9 @@ describe('migronaut CLI — quiet mode and output safety (integration)', () => {
     assert.strictEqual(json.code, 5);
     assert.ok(!json.stdout.includes(secret));
     assert.ok(!json.stderr.includes(secret));
-    // The username may remain; the password must be masked.
-    assert.ok(json.stdout.includes('****'));
+    // Where the driver echoes the URI in its parse error (6.x does, 7.x no
+    // longer), the username may remain; the password must be masked.
+    if (json.stdout.includes('ci-user')) assert.ok(json.stdout.includes('****'));
 
     const verbose = await runCli([
       '--uri',

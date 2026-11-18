@@ -364,15 +364,21 @@ class Changelog {
    * collides on the unique `name` index, and the caller swallows that. Every
    * read path filters on `status: 'applied'`, so a `'failed'` record never
    * changes what runs; the next successful apply overwrites it (and clears
-   * `failedAt`/`error`).
+   * `failedAt`/`error`). An attempt that names no `requestedBy`/`reason`
+   * clears the ones a previous apply left.
    */
   async markFailed(db, record) {
     const { name, ...fields } = record;
-    await this.#coll(db).updateOne(
-      { name, status: { $ne: 'applied' } },
-      { $set: { ...fields, status: 'failed' }, $currentDate: { failedAt: true } },
-      { upsert: true },
-    );
+    // Who asked for this attempt, and why — or nobody said: then an earlier
+    // apply's answer (the record of a reverted migration keeps it) must not
+    // read as this attempt's. The revert fields stay: it is still reverted.
+    const update = { $set: { ...fields, status: 'failed' }, $currentDate: { failedAt: true } };
+    for (const key of ['requestedBy', 'reason']) {
+      if (fields[key] === undefined) (update.$unset ??= {})[key] = '';
+    }
+    await this.#coll(db).updateOne({ name, status: { $ne: 'applied' } }, update, {
+      upsert: true,
+    });
   }
 }
 

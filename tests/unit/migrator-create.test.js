@@ -1,4 +1,4 @@
-const { existsSync, readFileSync } = require('node:fs');
+const { copyFileSync, existsSync, readFileSync } = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { afterEach, describe, it } = require('node:test');
@@ -56,5 +56,21 @@ describe('MigratorKit.create (in-process)', () => {
   it('should fall back to config.templatePath when no option is given', async () => {
     const filepath = await migrator({ templatePath: customTemplate }).create('config templated');
     assert.ok(readFileSync(filepath, 'utf8').includes('CUSTOM TEMPLATE'));
+  });
+
+  it("should read a relative template against the kit's cwd, like its migrations directory", async () => {
+    project = makeProject();
+    copyFileSync(customTemplate, path.join(project.dir, 'house-style.js'));
+    // A kit that works on a project elsewhere than where the process started:
+    // the template used to be looked for under process.cwd().
+    const kit = new MigratorKit(
+      { migrationsDir: 'migrations', templatePath: './house-style.js', logger: null },
+      { cwd: project.dir },
+    );
+    const filepath = await kit.create('relative template');
+    assert.strictEqual(path.dirname(filepath), path.join(project.dir, 'migrations'));
+    assert.ok(readFileSync(filepath, 'utf8').includes('CUSTOM TEMPLATE'));
+    const again = await kit.create('relative option', { template: 'house-style.js' });
+    assert.ok(readFileSync(again, 'utf8').includes('CUSTOM TEMPLATE'));
   });
 });

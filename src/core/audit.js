@@ -86,19 +86,34 @@ async function runAudit(deps) {
     record('indexes', 'warn', `Could not read indexes: ${errorText(error)}`);
   }
 
-  // 5. Lock. A held lock is not itself a problem — a stale one is.
+  // 5. Lock. A held lock is not itself a problem — a stale one is. Stale by
+  //    the holder's own TTL and the server's clock: a run with a five-minute
+  //    TTL renews every 150 s, and an auditor judging it by its own 60 s (or
+  //    by a clock a minute off) would call a live run crashed — and advise
+  //    the `unlock` that lets a second run in beside it.
   try {
-    const holder = toLockInfo(await deps.inspectLock());
+    const doc = await deps.inspectLock();
+    const holder = toLockInfo(doc);
     if (!holder) {
       record('lock', 'pass', 'No lock held');
     } else {
-      const ageSeconds = Math.round((Date.now() - holder.lockedAt.getTime()) / 1000);
-      const stale = ageSeconds > config.lockTTLSeconds;
+      const ageMs = Number.isFinite(Number(doc.ageMs))
+        ? Number(doc.ageMs)
+        : Date.now() - holder.lockedAt.getTime();
+      const ageSeconds = Math.round(ageMs / 1000);
+      const ttlMs = holder.ttlMs ?? config.lockTTLSeconds * 1000;
+      const stale = ageMs > ttlMs;
+      // A holder from a release that wrote no TTL: only this configuration's
+      // is known, and it may not be the holder's.
+      const advice =
+        holder.ttlMs === undefined
+          ? ` — past this configuration's TTL (${ttlMs / 1000}s); if its run uses a longer ` +
+            'one it may be alive — make sure it is not before migronaut unlock'
+          : ` — past its TTL (${ttlMs / 1000}s), likely from a crashed run (migronaut unlock)`;
       record(
         'lock',
         stale ? 'warn' : 'pass',
-        `Held by pid ${holder.pid} on ${holder.host} for ${ageSeconds}s` +
-          (stale ? ' — past its TTL, likely from a crashed run (migronaut unlock)' : ''),
+        `Held by pid ${holder.pid} on ${holder.host} for ${ageSeconds}s${stale ? advice : ''}`,
       );
     }
   } catch (error) {

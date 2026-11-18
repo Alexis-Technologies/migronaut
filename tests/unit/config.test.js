@@ -382,6 +382,50 @@ describe('loadConfig', () => {
     assert.deepStrictEqual(dump.fields.collections, ['users']);
   });
 
+  it('should show clientOptions as option names only — its values can be secrets', async () => {
+    const lines = [];
+    const logger = {
+      debug: (msg, fields) => lines.push({ msg, fields }),
+      info() {},
+      warn() {},
+      error() {},
+    };
+    // None of these is URI-shaped, so redaction by shape alone would keep them.
+    const clientOptions = {
+      auth: { username: 'app', password: 'S3CRET-PASSWORD' },
+      tlsCertificateKeyFilePassword: 'S3CRET-PASSPHRASE',
+      proxyPassword: 'S3CRET-PROXY',
+      autoEncryption: { kmsProviders: { aws: { secretAccessKey: 'S3CRET-KMS' } } },
+    };
+    const config = await loadConfig({
+      cwd: tmp,
+      flags: { uri: 'mongodb://x:27017', dbName: 'x', logger, clientOptions },
+    });
+    // The config itself is untouched: the driver still gets the real options.
+    assert.strictEqual(config.clientOptions, clientOptions);
+    const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+    assert.deepStrictEqual(dump.fields.clientOptions, [
+      'auth',
+      'tlsCertificateKeyFilePassword',
+      'proxyPassword',
+      'autoEncryption',
+    ]);
+    for (const line of lines) assert.ok(!JSON.stringify(line).includes('S3CRET'));
+  });
+
+  it('should leave clientOptions out of the debug dump when none is configured', async () => {
+    const lines = [];
+    const logger = {
+      debug: (msg, fields) => lines.push({ msg, fields }),
+      info() {},
+      warn() {},
+      error() {},
+    };
+    await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x', logger } });
+    const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+    assert.ok(!('clientOptions' in dump.fields));
+  });
+
   it('should not let a JSON config poison the prototype via __proto__', async () => {
     writeFileSync(
       path.join(tmp, 'migronaut.config.json'),
@@ -402,6 +446,70 @@ describe('loadConfig', () => {
     const config = await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://legit:27017' } });
     assert.strictEqual(config.dbName, 'shop');
     assert.strictEqual(typeof config.constructor, 'function');
+  });
+
+  it('should refuse a config file that does not come to an object', async () => {
+    const cases = [
+      // A factory with a forgotten `return` — it used to end in a TypeError.
+      [
+        'migronaut.config.js',
+        'module.exports = async () => {\n  ({ dbName: "x" });\n};\n',
+        'undefined',
+      ],
+      ['migronaut.config.js', 'module.exports = () => null;\n', 'null'],
+      ['migronaut.config.js', 'module.exports = () => "mongodb://x:27017";\n', 'string'],
+      ['migronaut.config.js', 'module.exports = () => [{ dbName: "x" }];\n', 'array'],
+      ['migronaut.config.json', 'null', 'null'],
+      ['migronaut.config.json', '[]', 'array'],
+      ['migronaut.config.json', '"mongodb://x:27017"', 'string'],
+    ];
+    for (const [file, source, exported] of cases) {
+      const dir = mkdtempSync(path.join(tmpdir(), 'migronaut-config-shape-'));
+      try {
+        writeFileSync(path.join(dir, file), source);
+        await assert.rejects(
+          loadConfig({ cwd: dir, flags: { uri: 'mongodb://legit:27017', dbName: 'db' } }),
+          (error) => {
+            assert.ok(error instanceof ConfigInvalidError, source);
+            assert.match(error.message, /must export an object/);
+            assert.strictEqual(error.context.exported, exported, source);
+            return true;
+          },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('should go on without such a file in a lenient run, saying so', async () => {
+    writeFileSync(path.join(tmp, 'migronaut.config.js'), 'module.exports = () => undefined;\n');
+    const warnings = [];
+    const logger = { debug() {}, info() {}, warn: (msg) => warnings.push(msg), error() {} };
+    const config = await loadConfig({
+      cwd: tmp,
+      lenient: true,
+      requireDb: false,
+      flags: { logger },
+    });
+    assert.strictEqual(config.migrationsDir, './migrations');
+    assert.strictEqual(warnings.length, 1);
+    assert.match(warnings[0], /Could not resolve migronaut\.config\.js/);
+  });
+
+  it('should know the $schema key that init --format json writes', async () => {
+    writeFileSync(
+      path.join(tmp, 'migronaut.config.json'),
+      JSON.stringify({
+        $schema: 'https://migronaut.vercel.app/migronaut.schema.json',
+        uri: 'mongodb://x:27017',
+        dbName: 'shop',
+      }),
+    );
+    const lines = [];
+    const logger = { debug: (msg) => lines.push(msg), info() {}, warn() {}, error() {} };
+    await loadConfig({ cwd: tmp, flags: { logger } });
+    assert.ok(!lines.some((line) => line.startsWith('Unrecognized config key')));
   });
 
   it('should resolve a synchronous function (factory) config file', async () => {

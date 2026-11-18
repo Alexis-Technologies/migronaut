@@ -16,7 +16,7 @@ const {
   valueAt,
   withShardKey,
 } = require('../../src/core/background-shard.js');
-const { partitionerFor, probeHint } = require('../../src/core/background.js');
+const { partitionerFor, planMismatch, probeHint } = require('../../src/core/background.js');
 
 const MIN = new MinKey();
 const MAX = new MaxKey();
@@ -495,6 +495,46 @@ describe('targeted writes and the shard-key guard', () => {
   });
 });
 
+describe('planMismatch — whether a job can work a plan', () => {
+  const idJob = { spec: { mode: 'declarative' }, partitioner: idRangePartitioner };
+  const shardJob = (epoch) => ({
+    spec: { mode: 'declarative' },
+    partitioner: createShardPartitioner({
+      key: { region: 1 },
+      field: '__v',
+      source: 1,
+      readChunks: async () => [],
+      epoch,
+    }),
+  });
+  const epoch = { uuid: 'u1', key: { region: 1 } };
+
+  it('should take a plan made by the same partitioner', () => {
+    assert.strictEqual(planMismatch(idJob, { partitioner: 'id' }), undefined);
+    assert.strictEqual(planMismatch(shardJob(epoch), { partitioner: 'shard', epoch }), undefined);
+    const step = { spec: { mode: 'step' }, partitioner: idRangePartitioner };
+    assert.strictEqual(planMismatch(step, { partitioner: 'step' }), undefined);
+  });
+
+  it('should refuse a plan made by the other one, whichever way round', () => {
+    // An _id plan has no epoch: the shard partitioner alone would call it
+    // fresh, and read its ranges as key bounds.
+    assert.strictEqual(shardJob(epoch).partitioner.stale(undefined), false);
+    assert.strictEqual(planMismatch(shardJob(epoch), { partitioner: 'id' }), 'partitioner');
+    assert.strictEqual(planMismatch(idJob, { partitioner: 'shard', epoch }), 'partitioner');
+  });
+
+  it('should refuse a plan made before a reshard', () => {
+    const resharded = shardJob({ uuid: 'u2', key: { region: 1 } });
+    assert.strictEqual(planMismatch(resharded, { partitioner: 'shard', epoch }), 'epoch');
+  });
+
+  it('should take no plan, and a plan that names no partitioner, as they are', () => {
+    assert.strictEqual(planMismatch(idJob, undefined), undefined);
+    assert.strictEqual(planMismatch(idJob, { token: 't' }), undefined);
+  });
+});
+
 describe('partitionerFor — which partitioner a collection gets', () => {
   const spec = { collection: 'orders', field: '__v', from: 1, to: 2, mode: 'declarative' };
   function deps(overrides = {}) {
@@ -560,6 +600,66 @@ describe('partitionerFor — which partitioner a collection gets', () => {
     assert.strictEqual(query(forward).options.min.__v, 1);
     const back = await partitionerFor(d, spec, 'revert');
     assert.strictEqual(query(back).options.min.__v, 2);
+  });
+
+  it('should not take a topology it could not read for "not sharded"', async () => {
+    const d = deps({
+      indexes: [{ key: { __v: 1, region: 1, _id: 1 } }],
+      topology: async () => undefined,
+    });
+    // Nothing planned yet, or planned by _id: stay on _id, as before.
+    for (const planned of [undefined, 'id']) {
+      const chosen = await partitionerFor(d, spec, 'forward', planned);
+      assert.strictEqual(chosen.partitioner, idRangePartitioner, String(planned));
+    }
+    // A plan along the shard key is the evidence: the collection is sharded.
+    const chosen = await partitionerFor(d, spec, 'forward', 'shard');
+    assert.strictEqual(chosen.partitioner.id, 'shard');
+    // A topology that was read decides, whatever the plan says.
+    const replicaSet = deps({ topology: async () => 'replicaSet' });
+    const settled = await partitionerFor(replicaSet, spec, 'forward', 'shard');
+    assert.strictEqual(settled.partitioner, idRangePartitioner);
+  });
+
+  it('should throw when the indexes could not be listed, not read it as "no index"', async () => {
+    const failing = (error) =>
+      deps({
+        db: {
+          collection: () => ({
+            listIndexes: () => ({ toArray: () => Promise.reject(error) }),
+          }),
+        },
+      });
+    const blip = Object.assign(new Error('connection reset'), { code: 6 });
+    await assert.rejects(partitionerFor(failing(blip), spec, 'forward'), /connection reset/);
+    // A collection that is not there yet, or indexes this user may not list:
+    // no index, said once — never an error.
+    for (const code of [26, 13]) {
+      const d = failing(Object.assign(new Error('refused'), { code }));
+      const chosen = await partitionerFor(d, spec, 'forward');
+      assert.strictEqual(chosen.partitioner.id, 'id', String(code));
+      assert.strictEqual(chosen.hint, undefined, String(code));
+    }
+  });
+
+  it('should not cache a list of indexes it could not read', async () => {
+    let fail = true;
+    const d = deps({
+      indexCache: new Map(),
+      db: {
+        collection: () => ({
+          listIndexes: () => ({
+            toArray: async () => {
+              if (fail) throw Object.assign(new Error('blip'), { code: 6 });
+              return [{ key: { __v: 1, region: 1, _id: 1 } }];
+            },
+          }),
+        }),
+      },
+    });
+    await assert.rejects(partitionerFor(d, spec, 'forward'), /blip/);
+    fail = false;
+    assert.strictEqual((await partitionerFor(d, spec, 'forward')).partitioner.id, 'shard');
   });
 
   it('should hint a drift probe at the version index, or one led by the version field', async () => {

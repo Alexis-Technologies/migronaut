@@ -306,6 +306,24 @@ describe('compareIndex — differences', () => {
     assert.deepStrictEqual(result.inPlace, {});
   });
 
+  it('should take a leftover prepareUnique off in place — unless the declaration is unique', () => {
+    // What a conversion to unique leaves when it fails and its rollback does
+    // too: `unique` is false on both sides, and the index refuses duplicates.
+    const leftover = { key: { a: 1 }, name: 'a_1', prepareUnique: true };
+    assert.deepStrictEqual(compare({ key: { a: 1 } }, leftover), {
+      diffs: ['prepareUnique'],
+      inPlace: { prepareUnique: false },
+      rebuild: false,
+    });
+    // On the way to unique it is where the conversion starts: not a diff of its own.
+    assert.deepStrictEqual(compare({ key: { a: 1 }, unique: true }, leftover).diffs, ['unique']);
+    // Taken off, or never there: nothing to say.
+    assert.deepStrictEqual(
+      compare({ key: { a: 1 } }, { ...leftover, prepareUnique: false }).diffs,
+      [],
+    );
+  });
+
   it('should change a TTL in place when both sides have one', () => {
     const result = compare(
       { key: { t: 1 }, expireAfterSeconds: 60 },

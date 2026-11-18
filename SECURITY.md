@@ -6,8 +6,8 @@ Only the latest published version receives fixes.
 
 | Version | Supported |
 |---|---|
-| 2.1.x | ✅ |
-| < 2.1 | ❌ |
+| 2.5.x | ✅ |
+| < 2.5 | ❌ |
 
 ## Reporting a vulnerability
 
@@ -53,6 +53,18 @@ Some things are working as intended, and are not vulnerabilities:
   rejected (`QUEUE_JOB_INVALID`) before anything runs. A job also cannot
   re-run an applied migration (`force`) or skip the order guard unless the
   worker's `allow` option says so — both are off by default.
+
+- **A duplicate-key error quotes the duplicate value, and not every channel masks it.**
+  MongoDB's E11000 message ends with the offending key's values — `dup key: { email:
+  "a@example.com" }`. Migronaut masks them wherever text leaves the process for a third party or
+  is kept about the application's data: a background migration's state and document errors, queue
+  jobs (`failedReason`, log rows, return values), span status messages, and `migration:log`. It
+  leaves them **as they are** in an ordinary migration's own failure: the error it throws, the
+  `✖ Error` log line, the `migration:error` and `run:end` events, `--json` rows, and the `failed`
+  trace in the changelog — that is what the author debugs a failing migration with. Connection
+  credentials are masked in all of them. If those values are sensitive for you, mask them where
+  you forward the events (`redactOutbound`-style: everything from `dup key: {` to the end of the
+  line), and treat the changelog collection as holding them.
 
 Things that *are* in scope: leaking connection credentials into output, files,
 error context or queue jobs; executing code from a source that should be data (a migration

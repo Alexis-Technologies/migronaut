@@ -11,6 +11,9 @@ const packageJson = JSON.parse(readRepoFile('package.json'));
 const stripComments = (source) =>
   source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
+/** The hand-written declaration files, one per entry point */
+const DECLARATION_FILES = ['index.d.ts', 'bullmq.d.ts', 'versioning.d.ts'];
+
 /** Every `.js` file under `dir`, repo-relative — the tree the "nothing in src may…" rules walk */
 function sourceFiles(dir) {
   const files = [];
@@ -166,19 +169,35 @@ describe('bullmq subpath', () => {
     // The rule that keeps the package zero-dependency, made executable: one
     // `require('bullmq')` would make the adapter crash for anyone who relies on
     // injection alone, and would pin a BullMQ version for everyone else.
-    const pattern = /require\(\s*['"]bullmq['"]\s*\)|from\s+['"]bullmq['"]|import\(\s*['"]bullmq/;
-    const offenders = sourceFiles('src').filter((file) =>
+    // Its Redis client is the caller's too, and a subpath (`bullmq/dist/…`)
+    // is the package all the same.
+    const pattern = /(?:require\(|from|import\()\s*['"](?:bullmq|ioredis)(?:\/[^'"]*)?['"]/;
+    const offenders = [...sourceFiles('src'), ...sourceFiles('bin')].filter((file) =>
       pattern.test(stripComments(readRepoFile(file))),
     );
     assert.deepStrictEqual(offenders, []);
+    for (const sample of [
+      "require('bullmq')",
+      'require("bullmq")',
+      "require('bullmq/dist/esm/classes')",
+      "await import('bullmq')",
+      "import { Queue } from 'bullmq'",
+      "require('ioredis')",
+    ]) {
+      assert.ok(pattern.test(sample), `the guard must catch ${sample}`);
+    }
+    assert.ok(!pattern.test("require('./bullmq-like.js')"));
   });
 
-  it('should not import bullmq from either declaration file', () => {
+  it('should not import bullmq from any declaration file', () => {
     // Structural BullMQ*Like types stand in for it, as MongooseLike does for
-    // mongoose — a hard import would break both files for users without bullmq.
-    for (const file of ['bullmq.d.ts', 'index.d.ts']) {
+    // mongoose — a hard import would break the file for users without bullmq.
+    for (const file of DECLARATION_FILES) {
       const code = stripComments(readRepoFile(file));
-      assert.ok(!/from ['"]bullmq['"]/.test(code), `${file} must not import bullmq`);
+      assert.ok(
+        !/(?:from|import\()\s*['"](?:bullmq|ioredis)(?:\/[^'"]*)?['"]/.test(code),
+        `${file} must not import bullmq`,
+      );
     }
     assert.ok(readRepoFile('bullmq.d.ts').includes('interface BullMQQueueLike'));
     // The dependency arrow points one way: the subpath builds on the root.
@@ -206,11 +225,11 @@ describe('bullmq subpath', () => {
   });
 });
 
-/** Every `require('…')` target in a source file */
+/** Every `require('…')` — or dynamic `import('…')` — target in a source file */
 const requiresOf = (file) =>
-  [...stripComments(readRepoFile(file)).matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map(
-    (match) => match[1],
-  );
+  [
+    ...stripComments(readRepoFile(file)).matchAll(/(?:require|import)\(\s*['"]([^'"]+)['"]\s*\)/g),
+  ].map((match) => match[1]);
 
 describe('bullmq adapter layering', () => {
   it('should require the kit and the lock wait of the core, never a mechanism module', () => {
@@ -335,7 +354,10 @@ describe('peer dependencies', () => {
     for (const file of sourceFiles('src')) {
       for (const target of [
         ...stripComments(readRepoFile(file)).matchAll(
-          /(?:require\(|import\()\s*['"](mongodb|mongoose|bson)['"]/g,
+          // A subpath (`mongodb/lib/…`) is the package all the same. No
+          // `from`: the source is CommonJS, and an error message that says
+          // "BSONRegExp from 'bson'" is not an import.
+          /(?:require\(|import\()\s*['"](mongodb|mongoose|bson)(?:\/[^'"]*)?['"]/g,
         ),
       ].map((match) => match[1])) {
         if (target !== 'mongodb' || !allowed.has(file)) offenders.push(`${file}: ${target}`);
@@ -367,10 +389,10 @@ describe('OpenTelemetry', () => {
     assert.deepStrictEqual(offenders, []);
   });
 
-  it('should not import one from either declaration file', () => {
+  it('should not import one from any declaration file', () => {
     // Structural MigronautTracer / MigronautMeter stand in, as MongooseLike
     // does for mongoose.
-    for (const file of ['index.d.ts', 'bullmq.d.ts']) {
+    for (const file of DECLARATION_FILES) {
       assert.ok(!imports.test(stripComments(readRepoFile(file))), `${file} must not import it`);
     }
     const dts = readRepoFile('index.d.ts');
@@ -396,6 +418,64 @@ describe('identifier minting', () => {
       /randomUUID|randomBytes|getRandomValues/.test(stripComments(readRepoFile(file))),
     );
     assert.deepStrictEqual(minters, ['src/utils/id.js']);
+  });
+});
+
+describe('conventions that only review used to hold', () => {
+  const shipped = [...sourceFiles('src'), ...sourceFiles('bin')];
+  /** The files of `files` whose code (comments apart) matches `pattern`, minus the sanctioned ones */
+  const offendersOf = (pattern, sanctioned = new Set()) => {
+    const offenders = [];
+    for (const file of shipped) {
+      if (!sanctioned.has(file) && pattern.test(stripComments(readRepoFile(file)))) {
+        offenders.push(file);
+      }
+    }
+    return offenders;
+  };
+
+  it('should never write to the console — the injected logger is the only voice', () => {
+    // A `console.log` in a mechanism module is output no `logger: null`, no
+    // `--json` and no pino sink can route or silence.
+    assert.deepStrictEqual(offendersOf(/\bconsole\s*\.\s*\w+/), []);
+  });
+
+  it('should never throw a bare Error — every throw carries a typed code', () => {
+    const sanctioned = new Set([
+      // Text of the user's scaffold, not migronaut's code.
+      'src/utils/template.js',
+      // A malformed flag definition: a bug in migronaut's own command table,
+      // thrown at registration, never at a user.
+      'src/cli/args.js',
+    ]);
+    assert.deepStrictEqual(
+      offendersOf(
+        /throw\s+new\s+(?:Error|TypeError|RangeError|SyntaxError|ReferenceError)\b/,
+        sanctioned,
+      ),
+      [],
+    );
+  });
+
+  it('should call a tracer, a span or an instrument in utils/telemetry.js only', () => {
+    // Every such call goes through that module's one guard: telemetry must
+    // never break a run, and an exception recorded raw would skip redaction.
+    const calls =
+      /\.(?:startActiveSpan|startSpan|recordException|setStatus|setAttributes?|createCounter|createHistogram|createUpDownCounter|createObservable\w*)\s*\(/;
+    assert.deepStrictEqual(offendersOf(calls, new Set(['src/utils/telemetry.js'])), []);
+    assert.ok(calls.test(readRepoFile('src/utils/telemetry.js')), 'the guard must see real calls');
+  });
+
+  it('should name the published minor as the supported one in SECURITY.md', () => {
+    // "Only the latest published version receives fixes": the table said
+    // 2.1.x for three minors.
+    const [major, minor] = packageJson.version.split('.');
+    const security = readRepoFile('SECURITY.md');
+    assert.ok(
+      security.includes(`| ${major}.${minor}.x | ✅ |`),
+      `SECURITY.md must list ${major}.${minor}.x as supported`,
+    );
+    assert.ok(security.includes(`| < ${major}.${minor} | ❌ |`));
   });
 });
 
