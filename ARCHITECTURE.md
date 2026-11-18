@@ -985,7 +985,10 @@ the import URL forces a fresh evaluation of an ES module — and of an ES module
 file (what `migronaut create` scaffolds by default, `.js` and `.ts` alike) is evaluated by the
 CommonJS loader, which caches by filename and never sees the query. So `importUserFile` also drops
 the file's `require.cache` entry — under the path as given and as resolved, since the cache key is
-the real path. Without that, an edited CommonJS migration kept running as the version first loaded
+the real path. Resolved with `realpathSync`, the JavaScript implementation Node's resolver itself
+calls, never the native one (`fs.promises.realpath`): behind a link the OS may spell the same file
+another way — a Windows 8.3 name expanded (`C:\Users\RUNNER~1` on CI), another case on a
+case-insensitive disk — and that is not the key the cache holds. Without that, an edited CommonJS migration kept running as the version first loaded
 while the changelog recorded the new file's checksum. The kit reads a file ahead of its run for
 its `requires` (`#peek`, cached by checksum) and runs that same module: one evaluation per version
 of a file, not one per look at it.

@@ -1,4 +1,11 @@
-const { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } = require('node:fs');
+const {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
@@ -107,6 +114,28 @@ describe('loadMigrationFile — reload', () => {
     // A junction on Windows, which needs no privilege; a symlink elsewhere.
     symlinkSync(path.join(dir, 'real'), path.join(dir, 'link'), 'junction');
     const filepath = path.join(dir, 'link', 'linked.js');
+    writeFileSync(filepath, sources['reload.js']('first'));
+    assert.strictEqual(await (await loadMigrationFile(filepath, { reload: true })).up(), 'first');
+    writeFileSync(filepath, sources['reload.js']('edited'));
+    assert.strictEqual(await (await loadMigrationFile(filepath, { reload: true })).up(), 'edited');
+  });
+
+  it('should reload a file whose link spells its target another way', async (t) => {
+    // The module loader caches a file under its real path as Node's own
+    // resolver spells it — the JavaScript realpath, which keeps the spelling a
+    // link holds — while the native one asks the OS, which may spell it
+    // otherwise: a Windows 8.3 name expanded (C:\Users\RUNNER~1 on CI), another
+    // case on a case-insensitive disk. Asked of the native one, the reload
+    // dropped a key the cache did not have, and the edited file never ran.
+    const dir = mkdtempSync(path.join(tmpdir(), 'migronaut-reload-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    mkdirSync(path.join(dir, 'real'));
+    if (!existsSync(path.join(dir, 'REAL'))) {
+      t.skip('a case-sensitive file system: no second spelling of a path');
+      return;
+    }
+    symlinkSync(path.join(dir, 'REAL'), path.join(dir, 'link'), 'junction');
+    const filepath = path.join(dir, 'link', 'spelled.js');
     writeFileSync(filepath, sources['reload.js']('first'));
     assert.strictEqual(await (await loadMigrationFile(filepath, { reload: true })).up(), 'first');
     writeFileSync(filepath, sources['reload.js']('edited'));
