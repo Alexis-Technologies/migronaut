@@ -80,7 +80,7 @@ const backgroundInfo = (job, attempt) => {
   return Object.freeze({
     name: job.name,
     generation: job.generation,
-    partition: String(job.partitionId ?? ''),
+    partition: `${job.partitionId ?? ''}`,
     ...(job.runId !== undefined ? { runId: job.runId } : {}),
     ...(job.jobId !== undefined ? { jobId: job.jobId } : {}),
     ...(job.groupId !== undefined ? { groupId: job.groupId } : {}),
@@ -119,9 +119,10 @@ const docError = (doc, error, reason) => ({
  */
 const transformAll = async (job, docs, ctx) => {
   const { one, many } = directionOf(job.spec, job.fns, job.direction);
-  const results = new Array(docs.length);
+  const results = [];
   if (typeof many === 'function') {
-    const copies = docs.map((doc) => cloneDocument(doc));
+    const copies = [];
+    for (let i = 0; i < docs.length; i++) copies.push(cloneDocument(docs[i]));
     const out = await many(copies, ctx);
     if (!Array.isArray(out) || out.length !== docs.length) {
       throw new BackgroundFailedError(
@@ -130,19 +131,20 @@ const transformAll = async (job, docs, ctx) => {
       );
     }
     for (let i = 0; i < docs.length; i++) {
-      results[i] =
-        out[i] instanceof Error ? { doc: docs[i], error: out[i] } : { doc: docs[i], next: out[i] };
+      results.push(
+        out[i] instanceof Error ? { doc: docs[i], error: out[i] } : { doc: docs[i], next: out[i] },
+      );
     }
     return results;
   }
   for (let i = 0; i < docs.length; i++) {
     try {
-      results[i] = { doc: docs[i], next: await one(cloneDocument(docs[i]), ctx) };
+      results.push({ doc: docs[i], next: await one(cloneDocument(docs[i]), ctx) });
     } catch (error) {
       // A side write that hit a transient transaction error is the batch's,
       // not the document's: the whole transaction is retried.
       if (isTransientTransaction(error)) throw error;
-      results[i] = { doc: docs[i], error };
+      results.push({ doc: docs[i], error });
     }
   }
   return results;
@@ -168,7 +170,7 @@ const buildOps = (job, transformed) => {
       errors.push(docError(doc, refused.message ?? refused.reason, refused.reason));
       continue;
     }
-    let update;
+    let update = null;
     try {
       update = stampedDiff(doc, next, job.spec, { to: target });
     } catch (stampError) {
@@ -179,7 +181,7 @@ const buildOps = (job, transformed) => {
       updateOne: {
         filter: {
           ...occFilter(doc, job.spec, { from: source }),
-          ...(partitioner?.writeFilter?.(doc) ?? {}),
+          ...partitioner?.writeFilter?.(doc),
         },
         update,
       },
@@ -187,6 +189,22 @@ const buildOps = (job, transformed) => {
     owners.push(doc);
   }
   return { ops, owners, errors };
+};
+
+/**
+ * Inside a transaction the transaction's write concern is the one that
+ * counts; in the sandbox (`bare`) the proxy supplies the session.
+ */
+const bulkOptions = (bare, session, writeConcern) => {
+  if (bare) return { ordered: false };
+  if (session) return { ordered: false, session };
+  return { ordered: false, writeConcern };
+};
+
+/** A driver's `writeErrors`: a list, one error, or none */
+const listOf = (raw) => {
+  if (Array.isArray(raw)) return raw;
+  return raw ? [raw] : [];
 };
 
 /**
@@ -198,16 +216,10 @@ const writeOps = async (collection, ops, { writeConcern, session, bare = false }
   const failed = new Map();
   if (ops.length === 0) return { matched: 0, failed };
   try {
-    // Inside a transaction the transaction's write concern is the one that
-    // counts; in the sandbox (`bare`) the proxy supplies the session.
-    const result = await collection.bulkWrite(ops, {
-      ordered: false,
-      ...(bare ? {} : session ? { session } : { writeConcern }),
-    });
+    const result = await collection.bulkWrite(ops, bulkOptions(bare, session, writeConcern));
     return { matched: result.matchedCount, failed };
   } catch (error) {
-    const raw = error?.writeErrors;
-    const writeErrors = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const writeErrors = listOf(error?.writeErrors);
     if (writeErrors.length === 0 || error.err !== undefined) throw error;
     if (error.result?.getWriteConcernError?.()) throw error;
     for (const writeError of writeErrors) {
@@ -264,20 +276,24 @@ const applyBatch = async (
     // Strict (a transaction): one bad document aborts the batch, to be retried
     // without it — its side writes must not commit with the others.
     if (strict && errors.length > 0) throw documentError(errors[0]);
-    counts.errors.push(...errors);
+    for (let i = 0; i < errors.length; i++) counts.errors.push(errors[i]);
     const { matched, failed } = await writeOps(collection, ops, {
       writeConcern: spec.writeConcern,
       session,
       bare,
     });
     if (strict && failed.size > 0) {
-      const [[index, writeError]] = failed;
+      const first = failed.entries().next().value;
+      const writeError = first[1];
       throw documentError(
-        docError(owners[index], writeError.errmsg ?? writeError.message, 'write'),
+        docError(owners[first[0]], writeError.errmsg ?? writeError.message, 'write'),
       );
     }
-    for (const [index, writeError] of failed) {
-      counts.errors.push(docError(owners[index], writeError.errmsg ?? writeError.message, 'write'));
+    for (const entry of failed) {
+      const writeError = entry[1];
+      counts.errors.push(
+        docError(owners[entry[0]], writeError.errmsg ?? writeError.message, 'write'),
+      );
     }
     const written = ops.length - failed.size;
     if (matched === written) {
@@ -428,7 +444,10 @@ const since = (now, start) => now() - start;
 
 /** Add `from` into `into`, key by key */
 const addCounters = (into, from) => {
-  for (const [key, value] of Object.entries(from)) {
+  const keys = Object.keys(from);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const value = from[key];
     if (typeof value === 'number') into[key] = (into[key] ?? 0) + value;
   }
 };
@@ -527,7 +546,7 @@ const plainBatch = async (job, ctx, cursor, batchSize) => {
   });
   const docs = await db.collection(job.spec.collection).find(query.filter, query.options).toArray();
   const writeStarted = now();
-  let result;
+  let result = null;
   try {
     result = await applyBatch(job, docs, { db });
   } catch (error) {
@@ -707,7 +726,7 @@ const transactionalBatch = async (job, ctx, cursor, batchSize) => {
       txnRetries += 1;
       ctx.txn.clean = 0;
       if (size === 1 && docs.length === 1) {
-        const [doc] = docs;
+        const doc = docs[0];
         if (timeOrSize) {
           excluded.set(idKey(doc._id), docError(doc, error, 'transaction'));
           continue;
@@ -784,7 +803,7 @@ const processPartition = async (job, ctx) => {
     const waited = await throttle.beforeBatch({
       signal,
       generation: job.generation,
-      partition: String(partition._id),
+      partition: `${partition._id}`,
       batchSize,
       extraPauseMs: adaptive?.pauseMs() ?? 0,
       deadline: ctx.deadline,
@@ -793,8 +812,8 @@ const processPartition = async (job, ctx) => {
     // A secondary lagged for the rest of the slice: nothing was read.
     if (waited?.expired) return { outcome: 'yielded', counters, cursor };
     const started = now();
-    let next;
-    let batchCounts;
+    let next = null;
+    let batchCounts = null;
     if (spec.mode === 'step') {
       const stepped = await runStep(job, ctx, cursor);
       next = stepped.next;

@@ -90,7 +90,7 @@ const verify = async (deps, { onDrift = 'reopen', collections, streaming } = {})
       result.skipped += 1;
       continue;
     }
-    let found;
+    let found = null;
     try {
       found = await probeOldShape(deps, state, hint);
     } catch (error) {

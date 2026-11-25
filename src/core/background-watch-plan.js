@@ -105,8 +105,8 @@ const tokenDue = (lastSavedAt, now, checkpointMs, { force = false } = {}) => {
 const watchView = (states, collection) => {
   const edges = new Map();
   const byName = new Map();
-  let target;
-  let suspended;
+  let target = undefined;
+  let suspended = undefined;
   for (const state of states) {
     byName.set(state._id, state);
     const spec = state.spec;

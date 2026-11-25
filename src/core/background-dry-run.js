@@ -219,9 +219,16 @@ const transformRows = async (job, docs) => {
 /** `doc` with a stamped operator update applied, top-level only — a preview, not the server */
 const applyLocally = (doc, update) => {
   const out = cloneDocument(doc);
-  for (const [key, value] of Object.entries(update.$set ?? {})) out[key] = value;
+  const set = update.$set ?? {};
+  const setKeys = Object.keys(set);
+  for (let i = 0; i < setKeys.length; i++) out[setKeys[i]] = set[setKeys[i]];
   for (const key of Object.keys(update.$unset ?? {})) delete out[key];
-  for (const [key, value] of Object.entries(update.$inc ?? {})) out[key] = (out[key] ?? 0) + value;
+  const inc = update.$inc ?? {};
+  const incKeys = Object.keys(inc);
+  for (let i = 0; i < incKeys.length; i++) {
+    const key = incKeys[i];
+    out[key] = (out[key] ?? 0) + inc[key];
+  }
   return out;
 };
 
@@ -285,7 +292,7 @@ const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
             },
           });
           const row = { _id: ejson(doc._id), before: ejson(doc) };
-          const [failure] = result.errors;
+          const failure = result.errors[0];
           if (failure !== undefined) {
             row.error = failure.error;
             row.validation = 'failed';
@@ -306,8 +313,8 @@ const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
       },
     );
     attempts += report.attempts;
-    ops.push(...report.ops);
-    refusals.push(...report.refusals);
+    for (let i = 0; i < report.ops.length; i++) ops.push(report.ops[i]);
+    for (let i = 0; i < report.refusals.length; i++) refusals.push(report.refusals[i]);
     for (const document of report.documents) {
       if (document.collection !== job.spec.collection) sideEffects.push(document);
     }
@@ -327,7 +334,8 @@ const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
     }
     remaining = remaining.slice(Math.max(1, done));
   }
-  const documents = docs.map((doc) => rows.get(idKey(doc._id)));
+  const documents = [];
+  for (let i = 0; i < docs.length; i++) documents.push(rows.get(idKey(docs[i]._id)));
   return {
     validated: true,
     aborted: true,
@@ -407,7 +415,7 @@ const previewSteps = async (deps, name, loaded, options = {}) => {
           }),
           mongoose: handles.mongoose,
         };
-        let result;
+        let result = null;
         try {
           result = readStepResult(await fn(ctx));
         } catch (error) {

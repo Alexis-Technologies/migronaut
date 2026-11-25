@@ -85,7 +85,7 @@ const indexKeys = async (deps, collection) => {
   const hit = cache?.get(collection);
   const now = Date.now();
   if (hit !== undefined && now - hit.at < INDEX_CACHE_MS) return hit.keys;
-  let indexes;
+  let indexes = null;
   try {
     indexes = await deps.db.collection(collection).listIndexes(READ_OPTIONS).toArray();
   } catch (error) {
@@ -116,18 +116,22 @@ const shardKeyOf = async (deps, collection) => {
 
 /** Whether a live index key is `wanted` — same fields, same order, same directions or `hashed` */
 const sameIndexKey = (live, wanted) => {
-  const a = Object.entries(live);
-  const b = Object.entries(wanted);
+  const a = Object.keys(live);
+  const b = Object.keys(wanted);
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
-    if (a[i][0] !== b[i][0]) return false;
-    const [x, y] = [a[i][1], b[i][1]];
+    if (a[i] !== b[i]) return false;
+    const x = live[a[i]];
+    const y = wanted[b[i]];
     if (x === 'hashed' || y === 'hashed' ? x !== y : Number(x) !== Number(y)) return false;
   }
   return true;
 };
 
-const hasIndex = (keys, wanted) => keys.some((key) => sameIndexKey(key, wanted));
+const hasIndex = (keys, wanted) => {
+  for (let i = 0; i < keys.length; i++) if (sameIndexKey(keys[i], wanted)) return true;
+  return false;
+};
 
 /**
  * What a drift probe hints: the version index — or, on a sharded collection,
@@ -139,8 +143,8 @@ const probeHint = async (deps, spec) => {
   const exact = versionIndexKey(spec);
   if (hasIndex(keys, exact)) return exact;
   for (const key of keys) {
-    const [first] = Object.entries(key);
-    if (first !== undefined && first[0] === spec.field && Number(first[1]) === 1) return key;
+    const first = Object.keys(key)[0];
+    if (first !== undefined && first === spec.field && Number(key[first]) === 1) return key;
   }
   return versionHint(deps, spec, keys);
 };
@@ -196,7 +200,7 @@ const jobFor = async (deps, name, state, { direction } = {}) => {
       { migration: name, background: true, expected: state.checksum, actual: loaded.checksum },
     );
   }
-  const spec = { ...loaded.spec, ...(state.spec ?? {}) };
+  const spec = { ...loaded.spec, ...state.spec };
   const dir = direction ?? state.direction ?? 'forward';
   const match = spec.mode === 'step' ? undefined : excludeBadIds(matchOf(spec, dir), state.badIds);
   return {
@@ -401,7 +405,7 @@ const coordinateStep = async (deps, name, { signal, driver }) => {
   // is not the latest bows out — a newer one took over (two chains started
   // at once each get their own), or it was registered again since. A round
   // the kit never handed out (forged in Redis) is never written.
-  let round;
+  let round = -1;
   if (driver.kind === 'bullmq') {
     const current = state.round;
     if (driver.round === undefined) round = (current ?? 0) + 1;
@@ -414,17 +418,17 @@ const coordinateStep = async (deps, name, { signal, driver }) => {
       ...(driver.ref !== undefined ? { ref: driver.ref } : {}),
       at: new Date(),
     },
-    ...(round !== undefined ? { round } : {}),
+    ...(round !== -1 ? { round } : {}),
   });
   const answer = await coordinatePass(deps, name, state, { signal });
-  return round !== undefined ? { ...answer, round } : answer;
+  return round !== -1 ? { ...answer, round } : answer;
 };
 
 /** The rest of a coordinator step, once its driver is recorded */
 const coordinatePass = async (deps, name, initial, { signal }) => {
   const { store } = deps;
   let state = initial;
-  let job;
+  let job = null;
   try {
     job = await jobFor(deps, name, state);
   } catch (error) {
@@ -519,7 +523,7 @@ const coordinatePass = async (deps, name, initial, { signal }) => {
 const planPass = async (deps, job, state, hash, { newPass = true } = {}) => {
   const { store } = deps;
   const spec = job.spec;
-  let plan;
+  let plan = null;
   if (spec.mode === 'step') {
     plan = { method: 'step', estimate: 0, partitions: [{ scope: { kind: 'step' } }] };
   } else {
@@ -597,7 +601,11 @@ const finalize = async (deps, job, state) => {
   if ((state.rolledGeneration ?? 0) < generation) {
     const rolled = await store.generationTotals(name, generation);
     const inc = {};
-    for (const [key, value] of Object.entries(rolled?.totals ?? {})) {
+    const totals = rolled?.totals ?? {};
+    const keys = Object.keys(totals);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const value = totals[key];
       if (typeof value === 'number' && key !== 'failedPartitions' && value !== 0) {
         inc[`totals.${key}`] = value;
       }
@@ -791,6 +799,12 @@ const tryUnblock = async (deps, state) => {
 
 // ─── A lane's slice ───────────────────────────────────────────────────────────
 
+/** How a slice that threw ended: its lease lost, the lane stopped, or an error */
+const thrownOutcome = (lost, stopped) => {
+  if (lost) return 'lost';
+  return stopped ? 'stopped' : 'error';
+};
+
 /**
  * One slice of a lane: claim a partition (and its slot), work it until the
  * slice ends, release — then claim another while time is left. Resolves to
@@ -814,7 +828,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
   // A newer release's state (an old pod mid-deploy): its plan may hold scopes
   // this one cannot read. The coordinator waits; so does the lane.
   if (state.schema > STATE_SCHEMA) return { outcome: 'stale', counters: {} };
-  let job;
+  let job = null;
   try {
     job = await jobFor(deps, name, state);
     // A plan this job cannot work (made before a reshard, or by the other
@@ -871,7 +885,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
     deps.emit('background:slice:start', {
       migration: name,
       generation: state.generation,
-      partition: String(partition._id),
+      partition: `${partition._id}`,
       slot: partition.lease.slot,
     });
     const runLease = () =>
@@ -905,7 +919,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
             });
             deps.emit('background:batch', {
               migration: name,
-              partition: String(partition._id),
+              partition: `${partition._id}`,
               ...(partition.group !== undefined ? { group: partition.group } : {}),
               ...info,
             });
@@ -922,7 +936,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
           },
         });
       });
-    let result;
+    let result = null;
     const sliceStarted = now();
     try {
       // One span per lease held — it exists only once the claim succeeded.
@@ -936,17 +950,17 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
       deps.telemetry?.backgroundSliceEnded({
         name,
         durationMs: now() - sliceStarted,
-        outcome: lost ? 'lost' : stopped ? 'stopped' : 'error',
+        outcome: thrownOutcome(lost, stopped),
         ...(stopped ? {} : { error }),
       });
       if (lost) {
-        deps.emit('background:lease:lost', { migration: name, partition: String(partition._id) });
+        deps.emit('background:lease:lost', { migration: name, partition: `${partition._id}` });
         return { outcome: 'lost', counters };
       }
       if (stopped) {
         deps.emit('background:slice:end', {
           migration: name,
-          partition: String(partition._id),
+          partition: `${partition._id}`,
           outcome: 'stopped',
         });
         return { outcome: 'stopped', counters };
@@ -971,7 +985,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
         });
       deps.emit('background:slice:end', {
         migration: name,
-        partition: String(partition._id),
+        partition: `${partition._id}`,
         outcome: 'error',
         error: documentErrorText(error),
       });
@@ -990,7 +1004,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
     await store.set(name, { lastProgressAt: new Date() });
     deps.emit('background:slice:end', {
       migration: name,
-      partition: String(partition._id),
+      partition: `${partition._id}`,
       outcome: result.outcome,
       counters: result.counters,
     });

@@ -47,8 +47,10 @@ class BackgroundWatchStore {
   async save(collection, owner, { fields = {}, counters = {}, unset = [] } = {}) {
     const update = { $set: { ...fields, updatedAt: new Date() } };
     const inc = {};
-    for (const [key, value] of Object.entries(counters)) {
-      if (value !== 0) inc[`counters.${key}`] = value;
+    const keys = Object.keys(counters);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      if (counters[key] !== 0) inc[`counters.${key}`] = counters[key];
     }
     if (Object.keys(inc).length > 0) update.$inc = inc;
     if (unset.length > 0) {

@@ -75,14 +75,22 @@ const usesServerJs = (value) => {
     return false;
   }
   if (!isPlainObject(value)) return false;
-  for (const [key, item] of Object.entries(value)) {
-    if (SERVER_JS.has(key) || usesServerJs(item)) return true;
+  const keys = Object.keys(value);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (SERVER_JS.has(key) || usesServerJs(value[key])) return true;
   }
   return false;
 };
 
+/** The `[key, min, max]` row of `key` in a settings table */
+const settingRow = (table, key) => {
+  for (let i = 0; i < table.length; i++) if (table[i][0] === key) return table[i];
+  return undefined;
+};
+
 /** The longest slice — for a caller that overrides the spec's (a runner, the CLI, a test) too */
-const [, , MAX_SLICE_MS] = INTEGER_SETTINGS.find(([key]) => key === 'sliceMs');
+const MAX_SLICE_MS = settingRow(INTEGER_SETTINGS, 'sliceMs')[2];
 
 /**
  * A caller's `sliceMs`: a positive integer up to the spec's maximum. A slice
@@ -118,16 +126,16 @@ const ADAPTIVE_SETTINGS = [
   ['maxPauseMs', 0, 3_600_000],
 ];
 
-const SETTING_KEYS = [
-  'description',
-  ...INTEGER_SETTINGS.map(([key]) => key),
+const SETTING_KEYS = ['description'];
+for (let i = 0; i < INTEGER_SETTINGS.length; i++) SETTING_KEYS.push(INTEGER_SETTINGS[i][0]);
+SETTING_KEYS.push(
   'writeConcern',
   'maxReplicationLagMs',
   'throttle',
   'partitions',
   'transaction',
   'adaptive',
-];
+);
 
 const DECLARATIVE_KEYS = new Set([
   ...SETTING_KEYS,
@@ -169,20 +177,27 @@ const MAX_CHECKPOINT_BYTES = 64 * 1024;
 const inRange = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 
 const rangeIssues = (value, table, base, report) => {
-  for (const [key, min, max] of table) {
+  for (let i = 0; i < table.length; i++) {
+    const key = table[i][0];
+    const min = table[i][1];
+    const max = table[i][2];
     if (value[key] !== undefined && !inRange(value[key], min, max)) {
       report(`${base}${key}`, `must be an integer from ${min} to ${max}`);
     }
   }
 };
 
+/** The keys of a settings table */
+const namesOf = (table) => {
+  const names = new Set();
+  for (let i = 0; i < table.length; i++) names.add(table[i][0]);
+  return names;
+};
+
 const objectSettingIssues = (value, key, table, report) => {
   if (value === undefined || typeof value === 'boolean') return;
-  if (!isPlainObject(value)) {
-    report(key, 'must be a boolean or an object');
-    return;
-  }
-  const known = new Set(table.map(([name]) => name));
+  if (!isPlainObject(value)) return void report(key, 'must be a boolean or an object');
+  const known = namesOf(table);
   for (const name of Object.keys(value)) {
     if (!known.has(name)) report(`${key}.${name}`, `is not one of the ${key} settings`);
   }
@@ -207,7 +222,7 @@ const settingIssues = (spec, report) => {
     if (!isPlainObject(spec.partitions)) {
       report('partitions', 'must be an object');
     } else {
-      const known = new Set(PARTITION_SETTINGS.map(([name]) => name));
+      const known = namesOf(PARTITION_SETTINGS);
       for (const name of Object.keys(spec.partitions)) {
         if (!known.has(name)) report(`partitions.${name}`, 'is not one of the partitions settings');
       }
@@ -216,12 +231,12 @@ const settingIssues = (spec, report) => {
   }
   objectSettingIssues(spec.transaction, 'transaction', TRANSACTION_SETTINGS, report);
   objectSettingIssues(spec.adaptive, 'adaptive', ADAPTIVE_SETTINGS, report);
-  if (
+  const inverted =
     isPlainObject(spec.adaptive) &&
     Number.isSafeInteger(spec.adaptive.minBatchSize) &&
     Number.isSafeInteger(spec.adaptive.maxBatchSize) &&
-    spec.adaptive.minBatchSize > spec.adaptive.maxBatchSize
-  ) {
+    spec.adaptive.minBatchSize > spec.adaptive.maxBatchSize;
+  if (inverted) {
     report('adaptive.minBatchSize', 'must not exceed adaptive.maxBatchSize');
   }
 };
@@ -555,11 +570,12 @@ const ID_BRACKETS = Object.freeze([
   { name: 'maxKey', aliases: ['maxKey'], splittable: false },
 ]);
 
-const BRACKETS_BY_NAME = new Map(ID_BRACKETS.map((bracket) => [bracket.name, bracket]));
+const BRACKETS_BY_NAME = new Map();
 
 /** `$type` names (as `$type` reports them) → their bracket */
 const BRACKET_OF_TYPE = new Map();
 for (const bracket of ID_BRACKETS) {
+  BRACKETS_BY_NAME.set(bracket.name, bracket);
   for (const alias of bracket.aliases) BRACKET_OF_TYPE.set(alias, bracket.name);
 }
 

@@ -54,14 +54,8 @@ const jitter = (ms) => Math.round(ms * (0.5 + Math.random() / 2));
 /** Sleep `ms`, cut short (rejecting with the reason) when `signal` aborts */
 const sleep = (ms, signal) => {
   return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    if (ms <= 0) {
-      resolve();
-      return;
-    }
+    if (signal?.aborted) return void reject(signal.reason);
+    if (ms <= 0) return void resolve();
     const onAbort = () => {
       clearTimeout(timer);
       reject(signal.reason);
@@ -81,7 +75,7 @@ const sleep = (ms, signal) => {
  */
 const replicationLagMs = (status, excluded) => {
   const members = Array.isArray(status?.members) ? status.members : [];
-  let primary;
+  let primary = null;
   for (const member of members) {
     if (member.stateStr === 'PRIMARY') primary = member;
   }
@@ -184,7 +178,7 @@ const createThrottle = ({
     if (!lagEnabled || now() - lastLagCheck < LAG_CHECK_INTERVAL_MS) return false;
     for (;;) {
       lastLagCheck = now();
-      let lag;
+      let lag = 0;
       try {
         lag = await currentLag();
       } catch (error) {
@@ -293,7 +287,7 @@ const createAdaptive = (settings, { initial, now = Date.now } = {}) => {
   let warm = initial !== undefined;
   let lastDecrease = -Infinity;
   let lastReport = -Infinity;
-  let pendingReason;
+  let pendingReason = '';
 
   return {
     batchSize: () => size,
@@ -310,7 +304,7 @@ const createAdaptive = (settings, { initial, now = Date.now } = {}) => {
         return undefined;
       }
       const slow = latencyMs > targetLatencyMs;
-      let reason;
+      let reason = '';
       if (overloaded || slow) {
         // Once per round trip: the batch that saw the last decrease does not count twice.
         if (now() - lastDecrease < Math.max(latencyMs, 1)) return undefined;
@@ -323,13 +317,12 @@ const createAdaptive = (settings, { initial, now = Date.now } = {}) => {
         if (pause > 0) pause = Math.floor(pause / 2);
         else size = Math.min(maxBatchSize, size + increase);
       }
-      if (reason === undefined) return undefined;
-      pendingReason =
-        pendingReason === 'recover' || pendingReason === undefined ? reason : pendingReason;
+      if (reason === '') return undefined;
+      pendingReason = pendingReason === 'recover' || pendingReason === '' ? reason : pendingReason;
       if (now() - lastReport < THROTTLE_REPORT_INTERVAL_MS) return undefined;
       lastReport = now();
       const report = { reason: pendingReason, batchSize: size, pauseMs: pause };
-      pendingReason = undefined;
+      pendingReason = '';
       return report;
     },
   };

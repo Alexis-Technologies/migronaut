@@ -108,37 +108,42 @@ const sliceBracket = (bracket, ids, parts) => {
   }
   const ranges = [];
   let start = 0;
-  let lower;
+  let previous = null;
   for (const bound of bounds) {
     ranges.push({
       scope: {
         kind: 'id-range',
         bracket,
-        ...(lower !== undefined ? { gte: lower } : {}),
+        ...(previous !== null ? { gte: previous.id } : {}),
         lt: bound.id,
       },
       count: bound.position - start,
     });
-    lower = bound.id;
+    previous = bound;
     start = bound.position;
   }
   ranges.push({
-    scope: { kind: 'id-range', bracket, ...(lower !== undefined ? { gte: lower } : {}) },
+    scope: { kind: 'id-range', bracket, ...(previous !== null ? { gte: previous.id } : {}) },
     count: ids.length - start,
   });
   return ranges;
 };
 
 /** One partition per bracket present, no bounds — the plan when sampling is not worth it */
-const perBracket = (brackets, estimate) =>
-  brackets.map((bracket) => ({
-    scope: { kind: 'id-range', bracket },
-    estimate: Math.round(estimate / brackets.length),
-  }));
+const perBracket = (brackets, estimate) => {
+  const partitions = [];
+  for (let i = 0; i < brackets.length; i++) {
+    partitions.push({
+      scope: { kind: 'id-range', bracket: brackets[i] },
+      estimate: Math.round(estimate / brackets.length),
+    });
+  }
+  return partitions;
+};
 
 /** Largest first: a lane starts on the work that would otherwise finish last */
 const largestFirst = (partitions) => {
-  return partitions.sort((a, b) => b.estimate - a.estimate);
+  return partitions.toSorted((a, b) => b.estimate - a.estimate);
 };
 
 /**
@@ -187,7 +192,7 @@ const planIdRanges = async ({ collection, match, hint, maxParallel, settings, ma
   // little of it matches — but below the share past which `$sample` stops
   // walking a random cursor and scans and sorts every document instead.
   const requested = large ? sampleRequest(size, ratio, total) : size;
-  let sample;
+  let sample = null;
   try {
     sample = await sampleIds(collection, match, {
       size: requested,

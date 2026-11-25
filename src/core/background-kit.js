@@ -147,7 +147,7 @@ const lane = async (host, name, { signal, sliceMs, untilDone, jobOption = {} }) 
   for (;;) {
     if (signal?.aborted) return;
     const owner = host.newId();
-    let slice;
+    let slice = null;
     try {
       slice = await runSlice(host.deps(owner, jobOption), name, { signal, sliceMs, owner });
       failures = 0;
@@ -207,12 +207,10 @@ const withdraw = async (host, name, spec, session) => {
   const state = await store.get(name);
   if (state === null) return withdrawn;
   if (await hasRewritten(store, name, spec)) throw irreversibleBackground(name);
-  if (
+  const removed =
     (state.generation ?? 0) === 0 &&
-    (await store.remove(name, { session, filter: { generation: 0 } }))
-  ) {
-    return withdrawn;
-  }
+    (await store.remove(name, { session, filter: { generation: 0 } }));
+  if (removed) return withdrawn;
   const deps = host.deps();
   const paused = PAUSABLE.has(state.status)
     ? (await control(deps, name, 'pause', { reason: 'down withdraws it' })).applied === 'changed'
@@ -278,7 +276,9 @@ const coordinatorView = (state) => {
 /** How a background migration's plan used the shard key — for its status */
 const shardingView = (sharding) => {
   let hashed = false;
-  for (const value of Object.values(sharding.key ?? {})) if (value === 'hashed') hashed = true;
+  const key = sharding.key ?? {};
+  const fields = Object.keys(key);
+  for (let i = 0; i < fields.length; i++) if (key[fields[i]] === 'hashed') hashed = true;
   return {
     mode: sharding.mode,
     ...(sharding.key !== undefined ? { shardKey: sharding.key, hashed } : {}),
@@ -342,7 +342,7 @@ const stateView = async (store, state) => {
 /** A partition as `backgroundPartitions` shows it — its lease holder, never the token */
 const partitionView = (partition) => {
   return {
-    id: String(partition._id),
+    id: `${partition._id}`,
     generation: partition.generation,
     seq: partition.seq,
     status: partition.status,

@@ -28,6 +28,9 @@ const DEFAULTS = Object.freeze({
 /** The longest a failing migration backs off for */
 const MAX_BACKOFF_MS = 60_000;
 
+/** What `stopOnSignal` does until the runner exists */
+const nothing = () => undefined;
+
 const readOptions = (options) => {
   const concurrency = options.concurrency ?? DEFAULTS.concurrency;
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 64) {
@@ -38,10 +41,10 @@ const readOptions = (options) => {
     throw new ConfigInvalidError('pollIntervalMs must be an integer ≥ 10', { pollIntervalMs });
   }
   const verifyIntervalMs = options.verifyIntervalMs ?? DEFAULTS.verifyIntervalMs;
-  if (
+  const badVerify =
     verifyIntervalMs !== false &&
-    (!Number.isSafeInteger(verifyIntervalMs) || verifyIntervalMs < 100)
-  ) {
+    (!Number.isSafeInteger(verifyIntervalMs) || verifyIntervalMs < 100);
+  if (badVerify) {
     throw new ConfigInvalidError('verifyIntervalMs must be false or an integer ≥ 100', {
       verifyIntervalMs,
     });
@@ -80,7 +83,7 @@ const startBackgroundRunner = (options = {}) => {
   const controller = new AbortController();
   const signal = controller.signal;
   // Set once the runner exists: what its `signal` ends like — see stop().
-  let stopOnSignal = () => undefined;
+  let stopOnSignal = nothing;
   const onOuterAbort = () => {
     controller.abort(options.signal.reason);
     stopOnSignal();
@@ -118,6 +121,7 @@ const startBackgroundRunner = (options = {}) => {
       .then((list) => {
         shared.runnable = list;
         shared.refreshedAt = Date.now();
+        return undefined;
       })
       .finally(() => {
         shared.refreshing = undefined;
@@ -130,7 +134,7 @@ const startBackgroundRunner = (options = {}) => {
     shared.refreshedAt = -Infinity;
   };
 
-  /** The next background migration a lane may take, round-robin, or `undefined` */
+  /** The next background migration a lane may take, round-robin, or `null` */
   const pick = (list) => {
     const now = Date.now();
     for (let i = 0; i < list.length; i++) {
@@ -140,14 +144,14 @@ const startBackgroundRunner = (options = {}) => {
       shared.next = (shared.next + i + 1) % list.length;
       return entry;
     }
-    return undefined;
+    return null;
   };
 
   const backOff = (migration, ms) => shared.backoff.set(migration, Date.now() + jitter(ms));
 
   const lane = async () => {
     while (!signal.aborted) {
-      let entry;
+      let entry = null;
       try {
         entry = pick(await runnable());
       } catch (error) {
@@ -155,7 +159,7 @@ const startBackgroundRunner = (options = {}) => {
         await sleep(pollIntervalMs, signal).catch(() => undefined);
         continue;
       }
-      if (entry === undefined) {
+      if (entry === null) {
         await sleep(pollIntervalMs, signal).catch(() => undefined);
         continue;
       }
@@ -241,11 +245,15 @@ const startBackgroundRunner = (options = {}) => {
   };
 
   const watching = watcher();
-  const work = Promise.all([...Array.from({ length: concurrency }, () => lane()), verifier()]);
-  let stopping;
-  let hosted;
+  const loops = [];
+  for (let i = 0; i < concurrency; i++) loops.push(lane());
+  loops.push(verifier());
+  const work = Promise.all(loops);
+  let stopping = null;
+  let hosted = undefined;
   watching.then((started) => {
     hosted = started;
+    return undefined;
   });
   const runner = {
     kit,
@@ -283,7 +291,7 @@ const startBackgroundRunner = (options = {}) => {
         if (timeoutMs === undefined) {
           await settled;
         } else {
-          let timer;
+          let timer = null;
           const timedOut = await Promise.race([
             settled.then(() => false),
             new Promise((resolve) => {

@@ -95,7 +95,7 @@ const ATTEMPTS = 3;
 
 /** A value as relaxed EJSON, cut to `bytes` of JSON */
 const snapshot = (value, bytes) => {
-  let json;
+  let json = null;
   try {
     json = toRelaxedEjson(value);
   } catch {
@@ -123,14 +123,12 @@ const runSandbox = async (options, fn) => {
     );
   }
   for (let attempt = 1; ; attempt++) {
-    const report = await runOnce(options, fn, attempt);
-    if (!report.retry || attempt >= ATTEMPTS) {
-      delete report.retry;
-      return report;
-    }
+    const { report, retry } = await runOnce(options, fn, attempt);
+    if (!retry || attempt >= ATTEMPTS) return report;
   }
 };
 
+/** One sandbox run: `{ report, retry }` — `retry` when a transient error ended it */
 const runOnce = async (options, fn, attempt) => {
   const { client } = options;
   const deadlineMs = options.deadlineMs ?? DEFAULTS.deadlineMs;
@@ -162,7 +160,8 @@ const runOnce = async (options, fn, attempt) => {
     deadline: Date.now() + deadlineMs,
     failed: undefined,
   };
-  let timer;
+  let retry = false;
+  let timer = null;
   try {
     session.startTransaction({ readConcern: { level: 'snapshot' } });
     const handles = {
@@ -190,7 +189,7 @@ const runOnce = async (options, fn, attempt) => {
     if (state.failed !== undefined) {
       report.abortedBy = errorText(state.failed);
     } else if (isTransientTransaction(error)) {
-      report.retry = true;
+      retry = true;
     }
     report.ok = false;
     report.error = errorText(error);
@@ -207,7 +206,7 @@ const runOnce = async (options, fn, attempt) => {
     await session.abortTransaction().catch(() => undefined);
     await session.endSession().catch(() => undefined);
   }
-  return report;
+  return { report, retry };
 };
 
 const DEADLINE = Symbol('deadline');
@@ -240,11 +239,11 @@ const serialized = (state, work) => {
 const sandboxOptions = (state, method, collection, options) => {
   if (options !== undefined && !isPlainObject(options)) return { session: state.session };
   const out = { ...options };
-  if (
+  const foreignSession =
     out.session !== undefined &&
     out.session !== state.session &&
-    out.session !== state.sessionProxy
-  ) {
+    out.session !== state.sessionProxy;
+  if (foreignSession) {
     throw refuse(state, method, 'it passes another session', collection);
   }
   for (const key of REFUSED_OPTIONS) {
@@ -259,21 +258,26 @@ const sandboxOptions = (state, method, collection, options) => {
   return out;
 };
 
+/** The collection a `$lookup`, `$graphLookup` or `$unionWith` stage reads */
+const stageTarget = (name, spec) => {
+  if (name === '$lookup' || name === '$graphLookup') return spec?.from;
+  if (name === '$unionWith') return spec?.coll ?? spec;
+  return undefined;
+};
+
 /** Refuse a pipeline that writes elsewhere, watches, or reaches a forbidden collection */
 const checkPipeline = (state, method, collection, pipeline) => {
   if (!Array.isArray(pipeline)) return;
   for (const stage of pipeline) {
     if (!isPlainObject(stage)) continue;
-    for (const [name, spec] of Object.entries(stage)) {
+    const names = Object.keys(stage);
+    for (let i = 0; i < names.length; i++) {
+      const name = names[i];
+      const spec = stage[name];
       if (REFUSED_STAGES.has(name)) {
         throw refuse(state, method, `it uses ${name}`, collection);
       }
-      const target =
-        name === '$lookup' || name === '$graphLookup'
-          ? spec?.from
-          : name === '$unionWith'
-            ? (spec?.coll ?? spec)
-            : undefined;
+      const target = stageTarget(name, spec);
       if (typeof target === 'string' && isForbidden(state, target)) {
         throw refuse(state, method, `it reads ${target}`, collection);
       }
@@ -281,7 +285,10 @@ const checkPipeline = (state, method, collection, pipeline) => {
         checkPipeline(state, method, collection, spec?.pipeline);
       }
       if (name === '$facet' && isPlainObject(spec)) {
-        for (const branch of Object.values(spec)) checkPipeline(state, method, collection, branch);
+        const branches = Object.keys(spec);
+        for (let j = 0; j < branches.length; j++) {
+          checkPipeline(state, method, collection, spec[branches[j]]);
+        }
       }
     }
   }
@@ -363,13 +370,19 @@ const captureBefore = async (state, raw, method, args) => {
   }
 };
 
+/** Push every value of a driver result's id map (`{ 0: id, 1: id }`) */
+const pushIds = (ids, map) => {
+  const keys = Object.keys(map);
+  for (let i = 0; i < keys.length; i++) ids.push(map[keys[i]]);
+};
+
 /** After a write: note the ids it created, so their after-images are read too */
 const noteCreated = (state, raw, method, result) => {
   const ids = [];
   if (result?.insertedId !== undefined) ids.push(result.insertedId);
-  if (result?.insertedIds) ids.push(...Object.values(result.insertedIds));
+  if (result?.insertedIds) pushIds(ids, result.insertedIds);
   if (result?.upsertedId !== undefined && result.upsertedId !== null) ids.push(result.upsertedId);
-  if (result?.upsertedIds) ids.push(...Object.values(result.upsertedIds));
+  if (result?.upsertedIds) pushIds(ids, result.upsertedIds);
   if (method.startsWith('findOneAnd') && result?._id !== undefined) ids.push(result._id);
   for (const id of ids) {
     if (state.images.size >= state.maxDocuments) {
@@ -379,6 +392,14 @@ const noteCreated = (state, raw, method, result) => {
     const key = imageKey(raw.collectionName, id);
     if (!state.images.has(key)) state.images.set(key, { collection: raw.collectionName, id, raw });
   }
+};
+
+/** What happened to a document, by its images: `after` is `undefined` when it could not be read */
+const imageOp = (before, after) => {
+  if (before === undefined) return 'insert';
+  if (after === null) return 'delete';
+  if (after === undefined) return 'unknown';
+  return 'update';
 };
 
 /** Read every after-image (still in the transaction) and keep the documents that changed */
@@ -393,20 +414,11 @@ const finishImages = async (state) => {
     }
     const before = image.before;
     if (before !== undefined && after !== undefined && after !== null) {
-      if (
-        JSON.stringify(snapshot(before, Infinity)) === JSON.stringify(snapshot(after, Infinity))
-      ) {
-        continue;
-      }
+      const unchanged =
+        JSON.stringify(snapshot(before, Infinity)) === JSON.stringify(snapshot(after, Infinity));
+      if (unchanged) continue;
     }
-    const op =
-      before === undefined
-        ? 'insert'
-        : after === null
-          ? 'delete'
-          : after === undefined
-            ? 'unknown'
-            : 'update';
+    const op = imageOp(before, after);
     state.report.documents.push({
       collection: image.collection,
       _id: snapshot(image.id, MAX_FILTER_BYTES),

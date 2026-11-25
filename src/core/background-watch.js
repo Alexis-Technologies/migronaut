@@ -64,13 +64,9 @@ const BOUNDS = [
 ];
 
 /** Every option watchBackground takes — anything else is refused, not ignored */
-const OPTION_KEYS = new Set([
-  ...BOUNDS.map(([key]) => key),
-  'upgrade',
-  'collections',
-  'signal',
-  'onError',
-]);
+const OPTION_KEYS = new Set();
+for (let i = 0; i < BOUNDS.length; i++) OPTION_KEYS.add(BOUNDS[i][0]);
+OPTION_KEYS.add('upgrade').add('collections').add('signal').add('onError');
 
 /** Hops one event may take up a chain (v1 → v2 → v3 …) */
 const MAX_HOPS = 16;
@@ -88,7 +84,10 @@ const watchOptions = (options) => {
     }
   }
   const resolved = { ...DEFAULTS };
-  for (const [key, min, max] of BOUNDS) {
+  for (let i = 0; i < BOUNDS.length; i++) {
+    const key = BOUNDS[i][0];
+    const min = BOUNDS[i][1];
+    const max = BOUNDS[i][2];
     const value = options[key];
     if (value === undefined) continue;
     if (!Number.isSafeInteger(value) || value < min || value > max) {
@@ -126,8 +125,8 @@ const watchOptions = (options) => {
 
 /** The background migration that takes a collection to its target — the edge reaching highest */
 const lastEdge = (edges) => {
-  let last;
-  for (const edge of edges.values()) if (last === undefined || edge.to > last.to) last = edge;
+  let last = null;
+  for (const edge of edges.values()) if (last === null || edge.to > last.to) last = edge;
   return last?.name;
 };
 
@@ -164,7 +163,7 @@ const startWatch = (deps, options = {}) => {
   const owner = deps.owner;
   /** collection → { controller, done, state, leading, counters, lastEventAt } */
   const followers = new Map();
-  let unsupported;
+  let unsupported = false;
 
   const report = (error, collection) => {
     try {
@@ -208,7 +207,8 @@ const startWatch = (deps, options = {}) => {
       }
       names.add(spec.collection);
     }
-    const sorted = [...names].sort();
+    const sorted = [...names];
+    sorted.sort();
     if (sorted.length > settings.maxCollections) {
       const left = sorted.length - settings.maxCollections;
       if (!deps.warned?.has('watch:max-collections')) {
@@ -226,14 +226,14 @@ const startWatch = (deps, options = {}) => {
   const supervise = async () => {
     while (!signal.aborted) {
       // A follower found no change streams here at all: nothing to supervise.
-      if (unsupported !== undefined) break;
+      if (unsupported) break;
       try {
         const wanted = wantedCollections(await deps.store.list({}, { projection: STATE_SUMMARY }));
         for (const collection of wanted) {
           if (!followers.has(collection)) startFollower(collection);
         }
-        for (const [collection, follower] of followers) {
-          if (!wanted.has(collection)) follower.controller.abort(stopReason('no longer watched'));
+        for (const entry of followers) {
+          if (!wanted.has(entry[0])) entry[1].controller.abort(stopReason('no longer watched'));
         }
       } catch (error) {
         if (signal.aborted) break;
@@ -265,7 +265,7 @@ const startWatch = (deps, options = {}) => {
   /** Lead the collection when its lock is free; follow (and retry) when it is not */
   const follow = async (collection, followSignal) => {
     while (!followSignal.aborted) {
-      let outcome;
+      let outcome = '';
       try {
         outcome = await runWithLock(
           deps.watchLockFor(collection),
@@ -282,9 +282,8 @@ const startWatch = (deps, options = {}) => {
       }
       if (outcome === 'fallback' || outcome === 'gone') return;
       if (outcome === 'unsupported') {
-        unsupported = outcome;
-        controller.abort(stopReason('change streams are not supported here'));
-        return;
+        unsupported = true;
+        return void controller.abort(stopReason('change streams are not supported here'));
       }
       await sleep(jitter(settings.leaderRetryMs), followSignal).catch(() => undefined);
     }
@@ -347,7 +346,7 @@ const startWatch = (deps, options = {}) => {
       ...(context.token !== undefined ? { resumeAfter: context.token } : {}),
     });
     let token = context.token;
-    let savedAt;
+    let savedAt = -Infinity;
     const jobs = new Map();
     const refreshAt = Date.now() + settings.refreshMs;
     const saveToken = async (force = false) => {
@@ -465,8 +464,7 @@ const startWatch = (deps, options = {}) => {
       }
       const edge = edges.get(versionOf(doc, field));
       if (edge === undefined || !settings.upgrade) {
-        drift(collection, edge?.name ?? lastEdge(edges), 'reported');
-        return;
+        return void drift(collection, edge?.name ?? lastEdge(edges), 'reported');
       }
       let job = jobs.get(edge.name);
       if (job === undefined) {
@@ -524,7 +522,7 @@ const startWatch = (deps, options = {}) => {
     for (let attempt = 0; ; attempt++) {
       const session = deps.client.startSession();
       try {
-        let result;
+        let result = null;
         await session.withTransaction(async () => {
           transactions += 1;
           result = await applyBatch(job, [current], {
@@ -560,10 +558,7 @@ const startWatch = (deps, options = {}) => {
    * what is left), otherwise the drift is reported.
    */
   const handBack = async (collection, migration, reason) => {
-    if (deps.onDrift !== 'reopen') {
-      drift(collection, migration, 'reported');
-      return;
-    }
+    if (deps.onDrift !== 'reopen') return void drift(collection, migration, 'reported');
     // The event follows the write it reports, as everywhere: a subscriber
     // that reads the status on 'reopened' must find it reopened. Said first,
     // it was read as `completed` for the moment the write took — and said
@@ -573,8 +568,7 @@ const startWatch = (deps, options = {}) => {
       await control(deps, migration, 'retry', { reason });
     } catch (error) {
       report(error, collection);
-      drift(collection, migration, 'reported');
-      return;
+      return void drift(collection, migration, 'reported');
     }
     drift(collection, migration, 'reopened');
   };
@@ -585,7 +579,7 @@ const startWatch = (deps, options = {}) => {
   };
 
   const work = supervise();
-  let stopping;
+  let stopping = null;
   return {
     get running() {
       return !signal.aborted;
@@ -593,9 +587,10 @@ const startWatch = (deps, options = {}) => {
     /** What each followed collection's watcher is doing in this process */
     status() {
       const rows = [];
-      for (const [collection, follower] of followers) {
+      for (const entry of followers) {
+        const follower = entry[1];
         rows.push({
-          collection,
+          collection: entry[0],
           state: follower.state ?? 'starting',
           leading: follower.leading,
           counters: { ...follower.counters },

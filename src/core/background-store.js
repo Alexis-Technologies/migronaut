@@ -112,12 +112,17 @@ class BackgroundStore {
    * it first).
    */
   async ensureIndexes() {
-    this.#indexed ??= Promise.all(
-      INDEXES.map(({ on, key, options }) => this.#collection(on).createIndex(key, options)),
-    ).catch((error) => {
-      this.#indexed = undefined;
-      throw error;
-    });
+    if (this.#indexed === undefined) {
+      const created = [];
+      for (let i = 0; i < INDEXES.length; i++) {
+        const { on, key, options } = INDEXES[i];
+        created.push(this.#collection(on).createIndex(key, options));
+      }
+      this.#indexed = Promise.all(created).catch((error) => {
+        this.#indexed = undefined;
+        throw error;
+      });
+    }
     await this.#indexed;
   }
 
@@ -133,10 +138,10 @@ class BackgroundStore {
       const missing = [];
       const present = new Map();
       for (const on of ['state', 'partitions']) {
-        let names = new Set();
+        const names = new Set();
         try {
           const indexes = await this.#collection(on).listIndexes().toArray();
-          names = new Set(indexes.map((index) => index.name));
+          for (let i = 0; i < indexes.length; i++) names.add(indexes[i].name);
         } catch (error) {
           if (error?.code !== NAMESPACE_NOT_FOUND) throw error;
         }
@@ -304,7 +309,8 @@ class BackgroundStore {
         $slice: [{ $concatArrays: [{ $ifNull: ['$history', []] }, [entry]] }, -MAX_HISTORY],
       },
     };
-    for (const [key, value] of Object.entries(fields)) set[key] = literal(value);
+    const keys = Object.keys(fields);
+    for (let i = 0; i < keys.length; i++) set[keys[i]] = literal(fields[keys[i]]);
     return this.cas(name, { status: { $in: from }, ...filter }, [{ $set: set }]);
   }
 
@@ -319,7 +325,8 @@ class BackgroundStore {
       ...(by !== undefined ? { by: literal(by) } : {}),
       ...(reason !== undefined ? { reason: literal(reason) } : {}),
     };
-    for (const [key, value] of Object.entries(details)) entry[key] = literal(value);
+    const keys = Object.keys(details);
+    for (let i = 0; i < keys.length; i++) entry[keys[i]] = literal(details[keys[i]]);
     return this.cas(name, {}, [
       {
         $set: {
@@ -372,22 +379,26 @@ class BackgroundStore {
     const token = randomId();
     const nextGeneration = generation + 1;
     if (partitions.length > 0) {
-      const docs = partitions.map((partition, seq) => ({
-        background: name,
-        generation: nextGeneration,
-        plan: token,
-        seq,
-        scope: partition.scope,
-        status: 'pending',
-        ...(partition.group !== undefined ? { group: partition.group } : {}),
-        estimate: partition.estimate ?? 0,
-        cursor: {},
-        counters: {},
-        claims: 0,
-        reclaims: 0,
-        failures: 0,
-        createdAt: new Date(),
-      }));
+      const docs = [];
+      for (let seq = 0; seq < partitions.length; seq++) {
+        const partition = partitions[seq];
+        docs.push({
+          background: name,
+          generation: nextGeneration,
+          plan: token,
+          seq,
+          scope: partition.scope,
+          status: 'pending',
+          ...(partition.group !== undefined ? { group: partition.group } : {}),
+          estimate: partition.estimate ?? 0,
+          cursor: {},
+          counters: {},
+          claims: 0,
+          reclaims: 0,
+          failures: 0,
+          createdAt: new Date(),
+        });
+      }
       await this.#partitions.insertMany(docs, { ordered: false });
     }
     const state = await this.cas(
@@ -472,7 +483,7 @@ class BackgroundStore {
    * counters summed, the bad ids united, the newest document errors.
    */
   async generationTotals(name, generation) {
-    const [row] = await this.#partitions
+    const rows = await this.#partitions
       .aggregate(
         [
           { $match: { background: name, generation } },
@@ -508,13 +519,14 @@ class BackgroundStore {
         READ_OPTIONS,
       )
       .toArray();
+    const row = rows[0];
     if (row === undefined) return null;
     const { _id: _ignored, badIds, docErrors, lastError, ...rest } = row;
     const totals = { ...rest, ...(lastError?.error ? { lastError: lastError.error } : {}) };
     const ids = [];
-    for (const list of badIds) ids.push(...list);
+    for (const list of badIds) for (let i = 0; i < list.length; i++) ids.push(list[i]);
     const errors = [];
-    for (const list of docErrors) errors.push(...list);
+    for (const list of docErrors) for (let i = 0; i < list.length; i++) errors.push(list[i]);
     return { totals, badIds: ids, docErrors: errors.slice(-MAX_DOC_ERRORS) };
   }
 
@@ -523,7 +535,7 @@ class BackgroundStore {
    * already excluded from later passes) plus this generation's partitions'.
    */
   async countBadIds(name, generation) {
-    const [state, rows] = await Promise.all([
+    const results = await Promise.all([
       this.#states.findOne({ _id: name }, { projection: { badIds: 1 }, ...READ_OPTIONS }),
       this.#partitions
         .aggregate(
@@ -537,6 +549,8 @@ class BackgroundStore {
         )
         .toArray(),
     ]);
+    const state = results[0];
+    const rows = results[1];
     return (state?.badIds?.length ?? 0) + (rows[0]?.n ?? 0);
   }
 
@@ -550,7 +564,7 @@ class BackgroundStore {
   async progress(name) {
     const state = await this.get(name);
     if (state === null) return { migrated: 0, batches: 0 };
-    const [row] = await this.#partitions
+    const rows = await this.#partitions
       .aggregate(
         [
           { $match: { background: name, generation: { $gt: state.rolledGeneration ?? 0 } } },
@@ -565,6 +579,7 @@ class BackgroundStore {
         READ_OPTIONS,
       )
       .toArray();
+    const row = rows[0];
     return {
       migrated: (state.totals?.migrated ?? 0) + (row?.migrated ?? 0),
       batches: (state.totals?.batches ?? 0) + (row?.batches ?? 0),
@@ -624,7 +639,7 @@ class BackgroundStore {
 
   /** How many leases are held — and how many were renewed within their TTL */
   async leases(name) {
-    const [row] = await this.#partitions
+    const rows = await this.#partitions
       .aggregate(
         [
           { $match: { background: name, 'lease.slot': { $exists: true } } },
@@ -647,6 +662,7 @@ class BackgroundStore {
         READ_OPTIONS,
       )
       .toArray();
+    const row = rows[0];
     return { held: row?.held ?? 0, live: row?.live ?? 0 };
   }
 
@@ -710,7 +726,7 @@ class BackgroundStore {
     // Sharded: a group (shard) with every one of its slots held is not claimed from.
     const fullGroups = [];
     if (shardConcurrency !== undefined) {
-      for (const [group, held] of perGroup) if (held >= shardConcurrency) fullGroups.push(group);
+      for (const entry of perGroup) if (entry[1] >= shardConcurrency) fullGroups.push(entry[0]);
     }
     const free = [];
     for (let slot = 0; slot < maxParallel; slot++) if (!occupied.has(slot)) free.push(slot);
@@ -730,7 +746,7 @@ class BackgroundStore {
         renewedAt: '$$NOW',
         claimedAt: '$$NOW',
       };
-      let partition;
+      let partition = null;
       try {
         partition = await this.#claimOne(name, {
           generation,
@@ -864,7 +880,10 @@ class BackgroundStore {
     // row, so a transient error now and then never adds up to a failure.
     const set = { 'lease.renewedAt': '$$NOW', updatedAt: '$$NOW', failures: literal(0) };
     if (cursor !== undefined) set.cursor = literal(cursor);
-    for (const [key, value] of Object.entries(counters)) {
+    const keys = Object.keys(counters);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const value = counters[key];
       if (value) set[`counters.${key}`] = plus(`counters.${key}`, value);
     }
     if (badIds.length > 0) {
@@ -888,7 +907,7 @@ class BackgroundStore {
     if (result.matchedCount !== 1) {
       throw new LockLostError('Lost the partition lease mid-slice', {
         lease: true,
-        partition: String(lease.partitionId),
+        partition: `${lease.partitionId}`,
       });
     }
     // Inside a transaction the renewal lands only with the commit: the caller

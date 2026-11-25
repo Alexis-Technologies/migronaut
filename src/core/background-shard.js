@@ -141,7 +141,7 @@ const sameKeyValue = (a, b) => {
 const numberText = (value) =>
   typeof value === 'bigint' || value?._bsontype === 'Long' || value?._bsontype === 'Decimal128'
     ? value.toString()
-    : String(Number(value));
+    : `${Number(value)}`;
 
 /** Whether a plan's epoch is not the collection's any more — resharded, or its key refined */
 const staleEpoch = (planned, current) => {
@@ -152,9 +152,7 @@ const staleEpoch = (planned, current) => {
 
 /** A uuid's bytes as hex — the same for a `Binary` and a `UUID` of them */
 const bytesOf = (uuid) => {
-  return uuid?.buffer instanceof Uint8Array
-    ? Buffer.from(uuid.buffer).toString('hex')
-    : String(uuid);
+  return uuid?.buffer instanceof Uint8Array ? Buffer.from(uuid.buffer).toString('hex') : `${uuid}`;
 };
 
 /**
@@ -172,7 +170,8 @@ const withShardKey = (partitioner, key) => {
 
 /** The hashed field of a shard key, if it has one */
 const hashedFieldOf = (key) => {
-  for (const [field, value] of Object.entries(key)) if (value === 'hashed') return field;
+  const fields = Object.keys(key);
+  for (let i = 0; i < fields.length; i++) if (key[fields[i]] === 'hashed') return fields[i];
   return undefined;
 };
 
@@ -234,7 +233,8 @@ const hashAt = (value) => {
  * hash, so each slice starts before every document of its first hash.
  */
 const splitHashed = (run, fields, parts) => {
-  const [first, ...rest] = fields;
+  const first = fields[0];
+  const rest = fields.slice(1);
   const lo = hashAt(run.min[first]);
   const hi = hashAt(run.max[first]);
   if (hi - lo < BigInt(parts) * 2n) return [run];
@@ -264,7 +264,7 @@ const splitHashed = (run, fields, parts) => {
  * and `degraded: 'sample-timeout'` when the sample ran out of time.
  */
 const splitSampled = async (collection, match, run, fields, key, parts, { total, share }) => {
-  const [first] = fields;
+  const first = fields[0];
   const lo = run.min[first];
   const hi = run.max[first];
   const condition = {};
@@ -284,7 +284,7 @@ const splitSampled = async (collection, match, run, fields, key, parts, { total,
   const pipeline = sampleFirst
     ? [{ $sample: { size: sampleRequest(size, share, total) } }, { $match: inRun }]
     : [{ $match: inRun }, { $sample: { size } }];
-  let sample;
+  let sample = null;
   try {
     sample = await collection
       .aggregate([...pipeline, { $project: projection }, { $sort: sort }], {
@@ -301,12 +301,12 @@ const splitSampled = async (collection, match, run, fields, key, parts, { total,
   if (sample.length < parts) return { pieces: [run] };
   const slices = [];
   let min = run.min;
-  let previous;
+  let previous = null;
   for (let i = 1; i < parts; i++) {
     const at = sample[Math.floor((i * sample.length) / parts)];
     const max = {};
     for (const field of fields) max[field] = valueAt(at, field);
-    if (previous !== undefined && sameTuple(previous, max, fields)) continue;
+    if (previous !== null && sameTuple(previous, max, fields)) continue;
     slices.push({ ...run, min, max });
     min = max;
     previous = max;
@@ -318,6 +318,12 @@ const splitSampled = async (collection, match, run, fields, key, parts, { total,
 const sameTuple = (a, b, fields) => {
   for (const field of fields) if (!sameValue(a[field], b[field])) return false;
   return true;
+};
+
+/** Why a plan is coarser than asked — `undefined` when it is not */
+const degradedOf = (timedOut, ungrouped) => {
+  if (timedOut) return 'sample-timeout';
+  return ungrouped ? 'ungrouped' : undefined;
 };
 
 /**
@@ -349,7 +355,7 @@ const createShardPartitioner = ({ key, field, source, readChunks, epoch }) => {
    * range would leave out every value MQL compares differently.
    */
   const target = (scope) => {
-    const [first] = fields;
+    const first = fields[0];
     if (first === hashed) return undefined;
     const lo = scope.min[first];
     const hi = scope.max[first];
@@ -432,7 +438,7 @@ const createShardPartitioner = ({ key, field, source, readChunks, epoch }) => {
         });
       }
     }
-    const degraded = timedOut ? 'sample-timeout' : ungrouped ? 'ungrouped' : undefined;
+    const degraded = degradedOf(timedOut, ungrouped);
     return {
       epoch: planned,
       method: grouped ? 'chunks' : 'sampled',
@@ -491,7 +497,14 @@ const createShardPartitioner = ({ key, field, source, readChunks, epoch }) => {
   const past = (cursor, docs, { left } = {}) => {
     const position = cursor?.region ?? 0;
     if (drain) {
-      const stuck = [...(cursor?.stuck ?? []), ...(left ?? docs.map((doc) => doc._id))];
+      const stuck = [];
+      const held = cursor?.stuck ?? [];
+      for (let i = 0; i < held.length; i++) stuck.push(held[i]);
+      if (left === undefined || left === null) {
+        for (let i = 0; i < docs.length; i++) stuck.push(docs[i]._id);
+      } else {
+        for (let i = 0; i < left.length; i++) stuck.push(left[i]);
+      }
       if (stuck.length > MAX_STUCK) {
         return position + 1 < regions.length ? { region: position + 1 } : null;
       }
@@ -521,7 +534,11 @@ const createShardPartitioner = ({ key, field, source, readChunks, epoch }) => {
 /** A sort on an index key — every field ascending as the index stores it */
 const sortOf = (indexKey) => {
   const sort = {};
-  for (const [name, value] of Object.entries(indexKey)) sort[name] = value === -1 ? -1 : 1;
+  const names = Object.keys(indexKey);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    sort[name] = indexKey[name] === -1 ? -1 : 1;
+  }
   return sort;
 };
 

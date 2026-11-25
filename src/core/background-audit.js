@@ -92,10 +92,9 @@ const auditFindings = async (deps, { now = Date.now() } = {}) => {
       }
       if (state.spec?.mode === 'declarative' && state.direction !== 'revert') {
         const hint = await hintOf(state.spec);
-        if (
-          hint !== undefined &&
-          (await probeOldShape(deps, state, hint).catch(() => null)) !== null
-        ) {
+        const reappeared =
+          hint !== undefined && (await probeOldShape(deps, state, hint).catch(() => null)) !== null;
+        if (reappeared) {
           warnings.push(
             `${state.spec.collection} holds old-shape documents again (${name} completed)`,
           );
@@ -128,9 +127,13 @@ const auditFindings = async (deps, { now = Date.now() } = {}) => {
         : `the drift watcher of ${row._id} has had no live leader for ${minutes} min`,
     );
   }
-  const summary = Object.entries(counts)
-    .map(([status, n]) => `${n} ${status}`)
-    .join(', ');
+  const statuses = Object.keys(counts);
+  const parts = [];
+  for (let i = 0; i < statuses.length; i++) {
+    const status = statuses[i];
+    parts.push(`${counts[status]} ${status}`);
+  }
+  const summary = parts.join(', ');
   if (failures.length > 0) return { status: 'fail', detail: [...failures, ...warnings].join('; ') };
   if (warnings.length > 0) return { status: 'warn', detail: warnings.join('; ') };
   return { status: 'pass', detail: `${states.length} background migration(s): ${summary}` };
