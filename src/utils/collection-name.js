@@ -8,7 +8,7 @@
  * validator (core/collections.js) needs it too, and config.js requires that
  * validator — keeping the predicate in config.js would make the two a cycle.
  */
-function isCollectionName(value) {
+const isCollectionName = (value) => {
   return (
     typeof value === 'string' &&
     value.length > 0 &&
@@ -16,6 +16,6 @@ function isCollectionName(value) {
     !value.includes('\0') &&
     !value.startsWith('system.')
   );
-}
+};
 
 module.exports = { isCollectionName };

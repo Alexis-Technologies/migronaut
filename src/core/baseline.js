@@ -20,7 +20,7 @@ const FS_CONCURRENCY = 16;
  * `{db, changelog, logger, fields, filepath, listMigrationFiles, nextBatch,
  * truncateAtTarget, environment, executedBy, runId, assertNotAborted}`.
  */
-async function runBaseline(deps, options, signal) {
+const runBaseline = async (deps, options, signal) => {
   const { db, changelog, logger } = deps;
 
   const files = await deps.listMigrationFiles();
@@ -75,6 +75,6 @@ async function runBaseline(deps, options, signal) {
     deps.fields({ baselined: records.length, skipped, batch }),
   );
   return { baselined: targets, skipped, batch };
-}
+};
 
 module.exports = { runBaseline };

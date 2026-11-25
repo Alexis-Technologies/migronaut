@@ -75,22 +75,22 @@ const TEXT_DEFAULTS = { default_language: 'english', language_override: 'languag
 const INTEGER_LIKE = /^(?:0|[1-9]\d*)$/;
 
 /** Whether `entries` name their fields in exactly the order of `fields` */
-function sameFieldOrder(entries, fields) {
+const sameFieldOrder = (entries, fields) => {
   return entries.every(([field], position) => fields[position] === field);
-}
+};
 
 /** `[field, direction]` pairs, in the order the index uses them */
-function keyEntries(key) {
+const keyEntries = (key) => {
   return key instanceof Map ? [...key.entries()] : Object.entries(key);
-}
+};
 
 /** The name MongoDB (and the driver) gives an index declared without one: `email_1`, `a_1_b_-1` */
-function defaultIndexName(entries) {
+const defaultIndexName = (entries) => {
   return entries.map(([field, direction]) => `${field}_${direction}`).join('_');
-}
+};
 
 /** Issues with an index key — `null` entries when the key is unusable */
-function keyIssues(key, report) {
+const keyIssues = (key, report) => {
   if (!(key instanceof Map) && !isPlainObject(key)) {
     report('must be an object (or a Map) of field → direction');
     return null;
@@ -139,10 +139,10 @@ function keyIssues(key, report) {
     usable = false;
   }
   return usable ? entries : null;
-}
+};
 
 /** Validate one index declaration, returning `{ path, message }` issues (empty when valid) */
-function indexIssues(index, path) {
+const indexIssues = (index, path) => {
   if (!isPlainObject(index)) {
     return [{ path, message: 'must be an index object ({ key, ...options })' }];
   }
@@ -217,7 +217,7 @@ function indexIssues(index, path) {
     }
   }
   return issues;
-}
+};
 
 /**
  * The key as the server stores it, and whether it is a text index — in one
@@ -225,7 +225,7 @@ function indexIssues(index, path) {
  * `_fts: 'text', _ftsx: 1` at the position of the first text field, and move
  * into `weights`.
  */
-function serverKeyOf(entries) {
+const serverKeyOf = (entries) => {
   const out = [];
   let isText = false;
   for (const entry of entries) {
@@ -237,22 +237,22 @@ function serverKeyOf(entries) {
     }
   }
   return { serverKey: isText ? out : entries, isText };
-}
+};
 
 /** Text fields at weight 1, then whatever the declaration weighs differently */
-function textWeights(entries, declared) {
+const textWeights = (entries, declared) => {
   const weights = {};
   for (const [field, direction] of entries) {
     if (direction === TEXT) weights[field] = 1;
   }
   return { ...weights, ...declared };
-}
+};
 
 /**
  * A declaration in comparable form, plus the exact spec to send. Assumes
  * {@link indexIssues} passed.
  */
-function normalizeDeclaredIndex(index) {
+const normalizeDeclaredIndex = (index) => {
   const entries = keyEntries(index.key);
   const { serverKey, isText } = serverKeyOf(entries);
   const name = index.name ?? defaultIndexName(entries);
@@ -276,10 +276,10 @@ function normalizeDeclaredIndex(index) {
     // keeps a Map's order where it would re-read a plain object's.
     spec: { key: new Map(entries), name, ...options },
   };
-}
+};
 
 /** A `listIndexes` document in comparable form */
-function normalizeLiveIndex(raw) {
+const normalizeLiveIndex = (raw) => {
   const entries = Object.entries(raw.key ?? {});
   const options = {};
   for (const option of NORMALIZED_OPTIONS) {
@@ -299,15 +299,15 @@ function normalizeLiveIndex(raw) {
     options,
     raw,
   };
-}
+};
 
 /** Number directions compare by sign — a shell of old stored `1.0`, and Int32/Double wrappers happen */
-function sameDirection(a, b) {
+const sameDirection = (a, b) => {
   if (typeof a === 'string' || typeof b === 'string') return a === b;
   return Math.sign(Number(a)) === Math.sign(Number(b));
-}
+};
 
-function sameKey(declared, live) {
+const sameKey = (declared, live) => {
   const a = declared.serverKey;
   const b = live.serverKey;
   if (a.length !== b.length) return false;
@@ -315,7 +315,7 @@ function sameKey(declared, live) {
     if (a[i][0] !== b[i][0] || !sameDirection(a[i][1], b[i][1])) return false;
   }
   return true;
-}
+};
 
 /**
  * Collation fields whose default is the same for every locale. A declaration
@@ -331,14 +331,14 @@ const UNIVERSAL_COLLATION_DEFAULTS = Object.freeze({
 });
 
 /** A declared collation with the universal defaults filled in */
-function withCollationDefaults(collation) {
+const withCollationDefaults = (collation) => {
   if (collation === undefined || collation.locale === 'simple') return collation;
   const filled = { ...UNIVERSAL_COLLATION_DEFAULTS };
   for (const [field, value] of Object.entries(collation)) {
     if (value !== undefined) filled[field] = value;
   }
   return filled;
-}
+};
 
 /**
  * Whether the live index's collation is what the declaration asks for.
@@ -354,7 +354,7 @@ function withCollationDefaults(collation) {
  *   locale-specific defaults — guessing those here would rebuild forever on
  *   the first locale whose defaults differ from the guess.
  */
-function collationMatches(declared, liveCollation, defaultCollation) {
+const collationMatches = (declared, liveCollation, defaultCollation) => {
   if (declared === undefined) {
     if (defaultCollation === undefined) return liveCollation === undefined;
     return liveCollation !== undefined && deepEqual(liveCollation, defaultCollation);
@@ -367,20 +367,20 @@ function collationMatches(declared, liveCollation, defaultCollation) {
     if (!deepEqual(value, stored)) return false;
   }
   return true;
-}
+};
 
 /**
  * Same key, same partial filter, same collation: the server treats two such
  * indexes as one and refuses the second (IndexOptionsConflict), whatever
  * their names.
  */
-function sameSignature(declared, live, defaultCollation) {
+const sameSignature = (declared, live, defaultCollation) => {
   return (
     sameKey(declared, live) &&
     deepEqual(declared.options.partialFilterExpression, live.options.partialFilterExpression) &&
     collationMatches(declared.options.collation, live.options.collation, defaultCollation)
   );
-}
+};
 
 /**
  * Whether two valid declarations describe one index to the server — the
@@ -390,7 +390,7 @@ function sameSignature(declared, live, defaultCollation) {
  * no collation stay apart, since they differ on a collection with a default
  * collation, which a definition cannot know.
  */
-function sameDeclaredSignature(a, b) {
+const sameDeclaredSignature = (a, b) => {
   return (
     sameKey(a, b) &&
     deepEqual(a.options.partialFilterExpression, b.options.partialFilterExpression) &&
@@ -399,14 +399,14 @@ function sameDeclaredSignature(a, b) {
       withCollationDefaults(b.options.collation),
     )
   );
-}
+};
 
 /**
  * What the server can change in place, by version — `{ major, minor }` from
  * `buildInfo`, or undefined when unknown (then nothing beyond the always-
  * available `hidden` and TTL change).
  */
-function inPlaceCapabilities(version) {
+const inPlaceCapabilities = (version) => {
   const atLeast = (major, minor) =>
     version !== undefined &&
     (version.major > major || (version.major === major && version.minor >= minor));
@@ -419,7 +419,7 @@ function inPlaceCapabilities(version) {
     // collMod expireAfterSeconds on a single-field index that has no TTL yet.
     addTtl: atLeast(5, 1),
   };
-}
+};
 
 /**
  * Compare a declaration with the live index it is paired with.
@@ -430,7 +430,7 @@ function inPlaceCapabilities(version) {
  * {@link inPlaceCapabilities}) also making an index unique and adding a TTL.
  * Everything else needs the index dropped and created again.
  */
-function compareIndex(declared, live, defaultCollation, capabilities = {}) {
+const compareIndex = (declared, live, defaultCollation, capabilities = {}) => {
   const diffs = [];
   const inPlace = {};
   if (!sameKey(declared, live)) diffs.push('key');
@@ -487,17 +487,17 @@ function compareIndex(declared, live, defaultCollation, capabilities = {}) {
   }
   const rebuild = diffs.some((diff) => !(diff in inPlace));
   return { diffs, inPlace: rebuild ? {} : inPlace, rebuild };
-}
+};
 
 /**
  * A live index as a spec `createIndexes` accepts — to put back an index whose
  * replacement failed to build. The server-managed fields are left out; the
  * driver drops anything else it does not know.
  */
-function restoreSpec(raw) {
+const restoreSpec = (raw) => {
   const { v, ns, background, clustered, ...spec } = raw;
   return spec;
-}
+};
 
 module.exports = {
   DIRECTIONS,

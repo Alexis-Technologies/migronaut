@@ -7,7 +7,7 @@ const camelize = (name) => name.replace(/-([a-z0-9])/g, (_, char) => char.toUppe
 const padLabel = (label, width) => label + ' '.repeat(width - label.length);
 
 /** Render one aligned `label  description` section of a help screen */
-function renderSection(title, rows) {
+const renderSection = (title, rows) => {
   if (rows.length === 0) return [];
   let width = 0;
   for (const row of rows) {
@@ -18,7 +18,7 @@ function renderSection(title, rows) {
     lines.push(`  ${padLabel(row[0], width)}  ${row[1]}`);
   }
   return ['', `${title}:`, ...lines];
-}
+};
 
 /**
  * Minimal commander-compatible CLI framework covering exactly the surface the

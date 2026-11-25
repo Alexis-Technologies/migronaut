@@ -9,7 +9,7 @@ const { renderConvergeHistory, renderConvergeTable } = require('../table.js');
  * rebuilt index, a dropped search index, or a validator change on a
  * collection that holds data.
  */
-function actionsToConfirm(plan) {
+const actionsToConfirm = (plan) => {
   const found = [];
   for (const collection of plan.collections) {
     for (const action of collection.actions) {
@@ -19,23 +19,23 @@ function actionsToConfirm(plan) {
     }
   }
   return found;
-}
+};
 
 /** Whether a plan holds a conflict — the run refuses it whatever the answer */
-function hasConflict(plan) {
+const hasConflict = (plan) => {
   return plan.collections.some((collection) =>
     collection.actions.some((action) => action.action === 'conflict'),
   );
-}
+};
 
-function assertNotStopped(stopRequested) {
+const assertNotStopped = (stopRequested) => {
   if (stopRequested()) {
     throw new RunAbortedError('Stopped by signal before anything was changed', { results: [] });
   }
-}
+};
 
 /** Register the `converge` command (declared indexes and validators → the database) */
-function registerConverge(program) {
+const registerConverge = (program) => {
   defineCommand(program, {
     name: 'converge',
     description:
@@ -183,6 +183,6 @@ function registerConverge(program) {
       process.exitCode = EXIT_CODES.COLLECTIONS_DRIFT;
     },
   });
-}
+};
 
 module.exports = { registerConverge };

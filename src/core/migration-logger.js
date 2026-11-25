@@ -25,13 +25,13 @@ const USERLAND = 'userland';
 const MAX_MESSAGE_LENGTH = 2048;
 
 /** A counter, one per run (or lane slice): orders a run's events within one millisecond */
-function sequence() {
+const sequence = () => {
   let next = 0;
   return () => {
     next += 1;
     return next;
   };
-}
+};
 
 /**
  * The run-level correlation of an ordinary run, frozen — `ctx.run` in
@@ -39,27 +39,27 @@ function sequence() {
  * `base` holds the run id and, when the caller gave them, the job and the
  * actor: `{ id, jobId?, groupId?, requestedBy?, reason? }`.
  */
-function runInfo(base, direction) {
+const runInfo = (base, direction) => {
   return Object.freeze({ id: base.id, direction, ...withoutId(base) });
-}
+};
 
 /** `ctx.run` of one attempt of one migration — a new frozen object per attempt */
-function migrationRunInfo(run, { migration, batch, attempt }) {
+const migrationRunInfo = (run, { migration, batch, attempt }) => {
   return Object.freeze({
     ...run,
     migration,
     ...(batch !== undefined ? { batch } : {}),
     attempt,
   });
-}
+};
 
-function withoutId(base) {
+const withoutId = (base) => {
   const rest = {};
   for (const key of Object.keys(base)) {
     if (key !== 'id' && base[key] !== undefined) rest[key] = base[key];
   }
   return rest;
-}
+};
 
 /** Keys of `info` a log line leaves out: who asked and why go to the event only */
 const EVENT_ONLY = new Set(['requestedBy', 'reason']);
@@ -70,7 +70,7 @@ const EVENT_ONLY = new Set(['requestedBy', 'reason']);
  * carries — so the three can never disagree. `id` becomes `runId`, a
  * background `name` becomes `migration`; undefined values are left out.
  */
-function correlationOf(kind, info, direction) {
+const correlationOf = (kind, info, direction) => {
   const event = { kind };
   const line = {};
   const put = (key, value) => {
@@ -92,23 +92,23 @@ function correlationOf(kind, info, direction) {
     }
   }
   return { event, line };
-}
+};
 
 /** A log message as text: an Error by its (redacted) message, anything else stringified */
-function messageText(msg) {
+const messageText = (msg) => {
   if (typeof msg === 'string') return msg;
   if (msg instanceof Error) return errorText(msg);
   return msg === undefined ? '' : String(msg);
-}
+};
 
 /**
  * What a run's loggers have already said about themselves — one debug line
  * each for a call dropped and a call cut to the event's bounds, per run (or
  * lane slice), not per call: `{ dropped, truncated }`.
  */
-function notices() {
+const notices = () => {
   return { dropped: false, truncated: false };
-}
+};
 
 /**
  * A logger bound to one context's correlation.
@@ -124,7 +124,7 @@ function notices() {
  *
  * Pino's own argument order — `(fields, msg)` — is accepted too.
  */
-function createMigrationLogger({
+const createMigrationLogger = ({
   sink,
   kind,
   info,
@@ -133,7 +133,7 @@ function createMigrationLogger({
   nextSeq,
   noticed = notices(),
   dryRun = false,
-}) {
+}) => {
   const { event, line } = correlationOf(kind, info, direction);
   if (dryRun) line.dryRun = true;
   /** The one debug line for `what` (a key of `noticed`) — the call that caused it goes on */
@@ -192,7 +192,7 @@ function createMigrationLogger({
     }
   };
   return { debug: write('debug'), info: write('info'), warn: write('warn'), error: write('error') };
-}
+};
 
 /**
  * The log side of one ordinary run, made when it takes its id — what its
@@ -211,7 +211,7 @@ function createMigrationLogger({
  * across the whole run and a dropped call is said once. A logger keeps them
  * after the run ended (a timed-out body's late call is still numbered).
  */
-function createRunLog({ id, job, actor = {}, sink, emitter }) {
+const createRunLog = ({ id, job, actor = {}, sink, emitter }) => {
   const ref =
     job === undefined
       ? undefined
@@ -241,14 +241,14 @@ function createRunLog({ id, job, actor = {}, sink, emitter }) {
       return { run, logger: logger(run) };
     },
   };
-}
+};
 
 /**
  * `logs(info, direction)` for one background lane slice, live watcher or dry
  * run: a `ctx.logger` per `ctx.background`, all sharing one counter and one
  * set of notices. A dry run's mark every line and emit nothing.
  */
-function backgroundLogs({ sink, emitter, dryRun = false }) {
+const backgroundLogs = ({ sink, emitter, dryRun = false }) => {
   const nextSeq = sequence();
   const noticed = notices();
   return (info, direction) =>
@@ -262,7 +262,7 @@ function backgroundLogs({ sink, emitter, dryRun = false }) {
       noticed,
       dryRun,
     });
-}
+};
 
 module.exports = {
   MAX_MESSAGE_LENGTH,

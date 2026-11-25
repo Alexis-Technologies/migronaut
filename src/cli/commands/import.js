@@ -2,7 +2,7 @@ const { defineCommand } = require('../shared.js');
 const { renderImportTable } = require('../table.js');
 
 /** Register the `import` command (adopt a migrate-mongo changelog) */
-function registerImport(program) {
+const registerImport = (program) => {
   defineCommand(program, {
     name: 'import',
     description: 'Adopt an existing migrate-mongo changelog into the migronaut changelog',
@@ -28,6 +28,6 @@ function registerImport(program) {
       if (result.rows.length > 0) logger.info(renderImportTable(result.rows));
     },
   });
-}
+};
 
 module.exports = { registerImport };

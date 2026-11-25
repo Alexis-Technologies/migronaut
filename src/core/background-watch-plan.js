@@ -31,7 +31,7 @@ const SETTLED = new Set(['completed', 'failed', 'cancelled']);
  * that does not touch the version field matches nothing (`$exists` guards
  * the null test, which would otherwise match every such update).
  */
-function watchPipeline(field, target) {
+const watchPipeline = (field, target) => {
   const full = `fullDocument.${field}`;
   const updated = `updateDescription.updatedFields.${field}`;
   return [
@@ -56,7 +56,7 @@ function watchPipeline(field, target) {
     },
     { $project: { operationType: 1, documentKey: 1, clusterTime: 1 } },
   ];
-}
+};
 
 /**
  * How a stream error is met: `history-lost` (start over from now, after a
@@ -64,31 +64,31 @@ function watchPipeline(field, target) {
  * the polling watch), `unsupported` (no change streams here at all), or
  * `retry` (reopen from the last token, after a backoff).
  */
-function classifyStreamError(error) {
+const classifyStreamError = (error) => {
   const code = error?.code;
   if (HISTORY_LOST.has(code)) return 'history-lost';
   if (code === UNAUTHORIZED) return 'unauthorized';
   if (code === UNSUPPORTED) return 'unsupported';
   if (error?.hasErrorLabel?.('NonResumableChangeStreamError')) return 'history-lost';
   return 'retry';
-}
+};
 
 /** Whether an event ends the stream (the collection dropped or renamed) */
 const isEnding = (event) => ENDING.has(event?.operationType);
 
 /** Milliseconds since the event happened — the stream's lag — or `undefined` without a time */
-function lagOf(event, now) {
+const lagOf = (event, now) => {
   const time = event?.clusterTime;
   if (time === undefined || time === null) return undefined;
   // A BSON Timestamp: seconds in `t` (the high 32 bits), an ordinal in `i`.
   const seconds = time.t;
   return typeof seconds === 'number' ? Math.max(0, now - seconds * 1000) : undefined;
-}
+};
 
 /** Whether a resume token is due: at most every `checkpointMs`, and always when told to */
-function tokenDue(lastSavedAt, now, checkpointMs, { force = false } = {}) {
+const tokenDue = (lastSavedAt, now, checkpointMs, { force = false } = {}) => {
   return force || lastSavedAt === undefined || now - lastSavedAt >= checkpointMs;
-}
+};
 
 /**
  * A leader's view of its collection, in one pass over the states:
@@ -102,7 +102,7 @@ function tokenDue(lastSavedAt, now, checkpointMs, { force = false } = {}) {
  *   yet — the watcher would upgrade straight back what it rewrites;
  * - `byName` — every state, by name.
  */
-function watchView(states, collection) {
+const watchView = (states, collection) => {
   const edges = new Map();
   const byName = new Map();
   let target;
@@ -122,7 +122,7 @@ function watchView(states, collection) {
     if (target === undefined || spec.to > target) target = spec.to;
   }
   return { suspended, edges, target, byName };
-}
+};
 
 module.exports = {
   HISTORY_LOST,

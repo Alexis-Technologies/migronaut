@@ -28,7 +28,7 @@ const DEFAULTS = Object.freeze({
 /** The longest a failing migration backs off for */
 const MAX_BACKOFF_MS = 60_000;
 
-function readOptions(options) {
+const readOptions = (options) => {
   const concurrency = options.concurrency ?? DEFAULTS.concurrency;
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 64) {
     throw new ConfigInvalidError('concurrency must be an integer from 1 to 64', { concurrency });
@@ -64,7 +64,7 @@ function readOptions(options) {
     watchOptions(watch);
   }
   return { concurrency, pollIntervalMs, verifyIntervalMs };
-}
+};
 
 /**
  * Start the runner. `options`: `{ kit | config, kitOptions?, concurrency?,
@@ -73,7 +73,7 @@ function readOptions(options) {
  * has released its lease (at the next batch) and, when the runner made the
  * kit, the kit is disconnected. Aborting `signal` is a `stop()`.
  */
-function startBackgroundRunner(options = {}) {
+const startBackgroundRunner = (options = {}) => {
   const { concurrency, pollIntervalMs, verifyIntervalMs } = readOptions(options);
   const kit = options.kit ?? new MigratorKit(options.config ?? {}, options.kitOptions ?? {});
   const ownsKit = options.kit === undefined;
@@ -111,7 +111,7 @@ function startBackgroundRunner(options = {}) {
   };
 
   /** The runnable list, refreshed at most every poll interval — by one lane at a time */
-  async function runnable() {
+  const runnable = async () => {
     if (Date.now() - shared.refreshedAt < pollIntervalMs) return shared.runnable;
     shared.refreshing ??= kit
       .runnableBackground()
@@ -124,14 +124,14 @@ function startBackgroundRunner(options = {}) {
       });
     await shared.refreshing;
     return shared.runnable;
-  }
+  };
 
   const forget = () => {
     shared.refreshedAt = -Infinity;
   };
 
   /** The next background migration a lane may take, round-robin, or `undefined` */
-  function pick(list) {
+  const pick = (list) => {
     const now = Date.now();
     for (let i = 0; i < list.length; i++) {
       const entry = list[(shared.next + i) % list.length];
@@ -141,11 +141,11 @@ function startBackgroundRunner(options = {}) {
       return entry;
     }
     return undefined;
-  }
+  };
 
   const backOff = (migration, ms) => shared.backoff.set(migration, Date.now() + jitter(ms));
 
-  async function lane() {
+  const lane = async () => {
     while (!signal.aborted) {
       let entry;
       try {
@@ -174,10 +174,10 @@ function startBackgroundRunner(options = {}) {
         shared.active.set(name, shared.active.get(name) - 1);
       }
     }
-  }
+  };
 
   /** One turn on one background migration: a slice, and the coordinator when it is needed */
-  async function turn(name) {
+  const turn = async (name) => {
     const slice = await kit.runBackgroundSlice(name, {
       signal,
       ...(options.sliceMs !== undefined ? { sliceMs: options.sliceMs } : {}),
@@ -204,9 +204,9 @@ function startBackgroundRunner(options = {}) {
         else if (slice.outcome === 'exhausted') backOff(name, pollIntervalMs);
       }
     }
-  }
+  };
 
-  async function verifier() {
+  const verifier = async () => {
     if (verifyIntervalMs === false) return;
     while (!signal.aborted) {
       try {
@@ -221,10 +221,10 @@ function startBackgroundRunner(options = {}) {
         report(error);
       }
     }
-  }
+  };
 
   /** The live drift watcher, when this runner hosts one — it never throws either */
-  async function watcher() {
+  const watcher = async () => {
     let wanted = options.watch;
     try {
       wanted ??= (await kit.driftMode()) !== 'poll';
@@ -238,7 +238,7 @@ function startBackgroundRunner(options = {}) {
       if (!signal.aborted) report(error);
       return undefined;
     }
-  }
+  };
 
   const watching = watcher();
   const work = Promise.all([...Array.from({ length: concurrency }, () => lane()), verifier()]);
@@ -313,6 +313,6 @@ function startBackgroundRunner(options = {}) {
   };
   if (options.signal?.aborted) stopOnSignal();
   return runner;
-}
+};
 
 module.exports = { BACKGROUND_RUNNER_DEFAULTS: DEFAULTS, startBackgroundRunner };

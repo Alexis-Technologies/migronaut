@@ -59,10 +59,10 @@ const VALIDATOR_DEFAULTS = { validationLevel: 'strict', validationAction: 'error
  * search index is updated in place, never rebuilt: the old one serves until
  * the new definition is built).
  */
-function isDestructive(action) {
+const isDestructive = (action) => {
   if (action.target === 'searchIndex') return action.action === 'drop';
   return action.target === 'index' && (action.action === 'drop' || action.action === 'recreate');
-}
+};
 
 /**
  * Whether a row is one the CLI asks to confirm: a destructive index change,
@@ -71,30 +71,30 @@ function isDestructive(action) {
  * application's writes. A validator created with a new collection guards
  * nothing yet.
  */
-function needsConfirmation(action, collectionActions = []) {
+const needsConfirmation = (action, collectionActions = []) => {
   if (isDestructive(action)) return true;
   if (action.target !== 'validator' || !CHANGE_ACTIONS.has(action.action)) return false;
   const created = collectionActions.some(
     (other) => other.target === 'collection' && other.action === 'create',
   );
   return !created;
-}
+};
 
 /**
  * An index as data for a result row (`from` / `to`): plain JSON, the key as
  * an object, without the server-managed `v`/`ns` — what a reader of `--json`
  * or of the converge history needs to see what changed.
  */
-function indexValue(spec) {
+const indexValue = (spec) => {
   const { key, v: _v, ns: _ns, background: _background, ...rest } = spec;
   return { key: key instanceof Map ? Object.fromEntries(key) : { ...key }, ...rest };
-}
+};
 
 const isEmptyValidator = (validator) =>
   validator === null || (typeof validator === 'object' && Object.keys(validator).length === 0);
 
 /** The validator state a definition asks for: `undefined` = unmanaged, `null` = none */
-function desiredValidator(definition) {
+const desiredValidator = (definition) => {
   if (definition.validator === undefined) return undefined;
   if (isEmptyValidator(definition.validator)) return null;
   return {
@@ -102,10 +102,10 @@ function desiredValidator(definition) {
     validationLevel: definition.validationLevel ?? VALIDATOR_DEFAULTS.validationLevel,
     validationAction: definition.validationAction ?? VALIDATOR_DEFAULTS.validationAction,
   };
-}
+};
 
 /** The validator a collection has (`null` = none). Level and action are omitted until set. */
-function liveValidator(options) {
+const liveValidator = (options) => {
   const validator = options?.validator;
   if (validator === undefined || validator === null || isEmptyValidator(validator)) return null;
   return {
@@ -113,9 +113,9 @@ function liveValidator(options) {
     validationLevel: options.validationLevel ?? VALIDATOR_DEFAULTS.validationLevel,
     validationAction: options.validationAction ?? VALIDATOR_DEFAULTS.validationAction,
   };
-}
+};
 
-function planValidator(name, desired, current, row, steps) {
+const planValidator = (name, desired, current, row, steps) => {
   if (desired === null) {
     if (current === null) {
       row({ target: 'validator', name, action: 'unchanged' });
@@ -147,7 +147,7 @@ function planValidator(name, desired, current, row, steps) {
     to: desired,
   });
   steps.push({ op: 'collMod', command: { ...desired }, actions: [action] });
-}
+};
 
 /**
  * The reason a rebuild is refused: it drops a unique index and builds a
@@ -162,16 +162,16 @@ const UNIQUE_REBUILD_REASON =
   '(CLI: --rebuild-unique)';
 
 /** Whether a rebuild would open a window without a uniqueness the declaration keeps */
-function dropsUniqueConstraint(declared, drops) {
+const dropsUniqueConstraint = (declared, drops) => {
   return declared.options.unique === true && drops.some((index) => index.options.unique === true);
-}
+};
 
 /**
  * Whether a live index backs the collection's shard key (its key begins with
  * every shard-key field, in order) — the server refuses to drop it, so prune
  * leaves it alone instead of failing on it last.
  */
-function backsShardKey(index, shardKey) {
+const backsShardKey = (index, shardKey) => {
   if (!shardKey) return false;
   let position = 0;
   for (const field of Object.keys(shardKey)) {
@@ -179,12 +179,12 @@ function backsShardKey(index, shardKey) {
     position += 1;
   }
   return true;
-}
+};
 
 /** `first; second`, or `second` alone when there is no first */
-function joinReasons(first, second) {
+const joinReasons = (first, second) => {
   return first ? `${first}; ${second}` : second;
-}
+};
 
 /** Why the ordinary version index stays on a sharded collection whose version index replaced it */
 const DISPLACED_REASON =
@@ -197,7 +197,7 @@ const DISPLACED_REASON =
  * `_id` (versioning-spec.js). `displaced` names the ordinary version index it
  * replaces, when the two differ.
  */
-function indexesFor(definition, live) {
+const indexesFor = (definition, live) => {
   const indexes = definition.indexes;
   if (indexes === undefined || !definition.versioning || !live.shardKey) return { indexes };
   const sharded = normalizeDeclaredIndex({
@@ -214,7 +214,7 @@ function indexesFor(definition, live) {
     }
   }
   return { indexes: result, displaced };
-}
+};
 
 /**
  * Plan the declared indexes of one collection against its live ones. With
@@ -222,13 +222,13 @@ function indexesFor(definition, live) {
  * collection's own list) the other live indexes are not managed at all: never
  * listed, never dropped — prune does not reach them.
  */
-function planIndexes(
+const planIndexes = (
   declaredIndexes,
   live,
   { prune: pruneOption, rebuildUnique, capabilities, partial = false, displaced },
   row,
   steps,
-) {
+) => {
   const prune = pruneOption && !partial;
   const defaultCollation = live.options?.collation;
   const liveIndexes = [];
@@ -455,7 +455,7 @@ function planIndexes(
       });
     }
   }
-}
+};
 
 /** The way out of a change a search index cannot make in place */
 const NEW_NAME_RECIPE =
@@ -464,22 +464,22 @@ const NEW_NAME_RECIPE =
 /** Why a declared search index is not planned on a server without Atlas Search */
 const SEARCH_UNAVAILABLE_REASON = 'Atlas Search is not available on this server';
 
-function typeChangeReason(from, to) {
+const typeChangeReason = (from, to) => {
   return `the type cannot change in place (${from} → ${to}) — ${NEW_NAME_RECIPE}`;
-}
+};
 
-function autoEmbedReason(changes) {
+const autoEmbedReason = (changes) => {
   return `autoEmbed ${changes.join(', ')} cannot change in place — ${NEW_NAME_RECIPE}`;
-}
+};
 
 /** `mappings.fields.title.norms, storedSource (+2 more)` */
-function diffReason(paths, more) {
+const diffReason = (paths, more) => {
   return `${paths.join(', ')}${more > 0 ? ` (+${more} more)` : ''}`;
-}
+};
 
-function deletingReason(status) {
+const deletingReason = (status) => {
   return `is being deleted on the server (${status}) — converge again once it is gone`;
-}
+};
 
 /**
  * Plan the search indexes of one collection. Submissions (creates, then
@@ -487,7 +487,7 @@ function deletingReason(status) {
  * before the regular index builds (the server builds a search index in the
  * background) and drops last of all.
  */
-function planSearchIndexes(declaredList, live, { prune, search }, row, submit, drops) {
+const planSearchIndexes = (declaredList, live, { prune, search }, row, submit, drops) => {
   if (!search.available) {
     // Nothing to compare with: every declaration is refused, or skipped when
     // the configuration says a server without Search is expected.
@@ -614,7 +614,7 @@ function planSearchIndexes(declaredList, live, { prune, search }, row, submit, d
       });
     }
   }
-}
+};
 
 /**
  * Plan one collection. `definition` is a normalized definition (see
@@ -632,7 +632,7 @@ function planSearchIndexes(declaredList, live, { prune, search }, row, submit, d
  * neighbours merge — the order between creates, modifications, rebuilds and
  * drops is kept as planned.
  */
-function batchCreates(steps) {
+const batchCreates = (steps) => {
   const batched = [];
   for (const step of steps) {
     const last = batched.at(-1);
@@ -646,20 +646,20 @@ function batchCreates(steps) {
     }
   }
   return batched;
-}
+};
 
-function planCollection(definition, live, options = {}) {
+const planCollection = (definition, live, options = {}) => {
   const plan = planCollectionSteps(definition, live, options);
   return { ...plan, steps: batchCreates(plan.steps) };
-}
+};
 
 const SEARCH_AVAILABLE = Object.freeze({ available: true, onUnavailable: 'fail' });
 
-function planCollectionSteps(
+const planCollectionSteps = (
   definition,
   live,
   { prune = false, rebuildUnique = false, capabilities = {}, search = SEARCH_AVAILABLE } = {},
-) {
+) => {
   const name = definition.name;
   const actions = [];
   const steps = [];
@@ -746,7 +746,7 @@ function planCollectionSteps(
   // before the regular index builds; every drop still comes last.
   steps.push(...searchSubmit, ...indexSteps, ...searchDrops);
   return { name, actions, steps };
-}
+};
 
 module.exports = {
   CHANGE_ACTIONS,

@@ -2,7 +2,7 @@ const { ConfigInvalidError } = require('../../errors/index.js');
 const { confirm, defineCommand } = require('../shared.js');
 
 /** Register the `up` command */
-function registerUp(program) {
+const registerUp = (program) => {
   defineCommand(program, {
     name: 'up',
     description: 'Run all pending migrations, or a single named file',
@@ -61,6 +61,6 @@ function registerUp(program) {
     // rows: an array cannot carry the converge result without breaking its
     // consumers (that is what `migronaut converge --json` is for).
   });
-}
+};
 
 module.exports = { registerUp };

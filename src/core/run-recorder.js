@@ -151,7 +151,7 @@ class RunRecorder {
  * pass — `summary` is empty when the run produced no rows (a converge, a
  * failure before the first migration).
  */
-function countRows(rows) {
+const countRows = (rows) => {
   if (!rows) return { summary: {}, skipped: undefined };
   let applied = 0;
   let reverted = 0;
@@ -162,6 +162,6 @@ function countRows(rows) {
     else if (row.status === 'skipped') skipped += 1;
   }
   return { summary: { applied, reverted, total: rows.length }, skipped };
-}
+};
 
 module.exports = { RunRecorder };

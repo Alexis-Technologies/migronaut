@@ -30,21 +30,21 @@ const isSchemeChar = (code) =>
   isLetter(code) || (code >= 48 && code <= 57) || code === 43 || code === 45 || code === 46;
 
 /** Whether a scheme ends right before `at` — a letter, then scheme characters only */
-function schemeEndsAt(text, at) {
+const schemeEndsAt = (text, at) => {
   for (let i = at - 1; i >= 0; i--) {
     const code = text.charCodeAt(i);
     if (isLetter(code)) return true;
     if (!isSchemeChar(code)) return false;
   }
   return false;
-}
+};
 
 /**
  * Mask the secret of every `scheme://user:secret@` in `text` (an empty
  * username still hides the password). With `cut`, a secret the text ends
  * inside is masked too: its `@` was past the cut.
  */
-function maskCredentials(text, cut = false) {
+const maskCredentials = (text, cut = false) => {
   let at = text.indexOf('://');
   if (at === -1) return text;
   let masked = '';
@@ -70,7 +70,7 @@ function maskCredentials(text, cut = false) {
     at = text.indexOf('://', next);
   }
   return from === 0 ? text : masked + text.slice(from);
-}
+};
 
 /**
  * Query parameters whose value is a secret. The userinfo form is not the only
@@ -94,7 +94,7 @@ const SENSITIVE_PROP_KEY = /TOKEN|SECRET|PASSWORD/i;
  * username still hides the password), secret-bearing query parameters, and
  * secret values inside `authMechanismProperties`.
  */
-function redactUris(text) {
+const redactUris = (text) => {
   if (typeof text !== 'string') return text;
   return maskCredentials(text)
     .replace(URI_QUERY_SECRETS, '$1****')
@@ -108,7 +108,7 @@ function redactUris(text) {
       }
       return `${prefix}${pairs.join(',')}`;
     });
-}
+};
 
 /**
  * The document values a server error can quote: an E11000 duplicate-key
@@ -125,10 +125,10 @@ const DUPLICATE_KEY_VALUES = /(dup key: )\{[^\n]*\}/g;
  * masked (as everywhere) and the data values a server error quotes, too.
  * Local log lines keep the values; they are what a developer debugs with.
  */
-function redactOutbound(text) {
+const redactOutbound = (text) => {
   if (typeof text !== 'string') return text;
   return redactUris(text).replace(DUPLICATE_KEY_VALUES, '$1{ <redacted> }');
-}
+};
 
 /**
  * A duplicate key whose closing brace was past a cut: the pattern above
@@ -145,7 +145,7 @@ const CUT_DUPLICATE_KEY_VALUES = /(dup key: )\{[^\n]*$/;
  * not yet cut to `limit`, since masking changes its length — and `cut`:
  * whether the input was longer than what was read.
  */
-function redactWithin(text, limit) {
+const redactWithin = (text, limit) => {
   const cut = text.length > limit * 2;
   if (!cut) return { text: redactOutbound(text), cut };
   const head = maskCredentials(text.slice(0, limit * 2), true).replace(
@@ -153,14 +153,14 @@ function redactWithin(text, limit) {
     '$1{ <redacted> }',
   );
   return { text: redactOutbound(head), cut };
-}
+};
 
 /**
  * Set `key` on a copy as an own property. A plain assignment of `__proto__` —
  * a key `JSON.parse` happily makes — would replace the copy's prototype and
  * lose the key instead.
  */
-function put(target, key, value) {
+const put = (target, key, value) => {
   if (key === '__proto__') {
     Object.defineProperty(target, key, {
       value,
@@ -171,14 +171,14 @@ function put(target, key, value) {
   } else {
     target[key] = value;
   }
-}
+};
 
 /**
  * Redact every string reachable from `value` (plain objects and arrays only —
  * class instances are left alone rather than cloned into broken shapes).
  * Returns a copy; never mutates the input.
  */
-function redactDeep(value) {
+const redactDeep = (value) => {
   if (typeof value === 'string') return redactUris(value);
   if (Array.isArray(value)) {
     const copy = new Array(value.length);
@@ -191,7 +191,7 @@ function redactDeep(value) {
     return copy;
   }
   return value;
-}
+};
 
 /**
  * How much of a value {@link redactBounded} copies: nesting, entries in all,
@@ -206,11 +206,11 @@ const BOUNDS = Object.freeze({ depth: 8, entries: 1000, string: 4096, bytes: 409
 const TRUNCATED = '[truncated]';
 
 /** The size of binary data — a Buffer or another Uint8Array, a BSON Binary — or undefined */
-function byteLength(item) {
+const byteLength = (item) => {
   if (item instanceof Uint8Array) return item.byteLength;
   if (item._bsontype === 'Binary') return item.position;
   return undefined;
-}
+};
 
 /**
  * An Error as data: its name, its message — credentials and the values a
@@ -220,7 +220,7 @@ function byteLength(item) {
  * `errmsg`), and its `message` is not even enumerable, so the error itself
  * would be stored as an empty document.
  */
-function errorData(error) {
+const errorData = (error) => {
   const data = {
     name: String(error.name),
     message: redactOutbound(typeof error.message === 'string' ? error.message : ''),
@@ -228,7 +228,7 @@ function errorData(error) {
   if (typeof error.code === 'number' || typeof error.code === 'string') data.code = error.code;
   if (typeof error.codeName === 'string') data.codeName = error.codeName;
   return data;
-}
+};
 
 /**
  * {@link redactDeep} within {@link BOUNDS}, for data that leaves the process
@@ -243,7 +243,7 @@ function errorData(error) {
  * `omit` names a key left out of the top level only. Returns
  * `{ value, truncated }`; never mutates the input.
  */
-function redactBounded(value, { omit } = {}) {
+const redactBounded = (value, { omit } = {}) => {
   let entries = 0;
   let truncated = false;
   /** One more entry, or false once the budget is spent */
@@ -308,7 +308,7 @@ function redactBounded(value, { omit } = {}) {
   };
   const result = copy(value, 0);
   return { value: result, truncated };
-}
+};
 
 module.exports = {
   BOUNDS,

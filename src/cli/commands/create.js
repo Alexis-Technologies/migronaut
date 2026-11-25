@@ -2,7 +2,7 @@ const { ConfigInvalidError } = require('../../errors/index.js');
 const { defineCommand } = require('../shared.js');
 
 /** Register the `create` command */
-function registerCreate(program) {
+const registerCreate = (program) => {
   defineCommand(program, {
     name: 'create',
     description: 'Create a new migration file',
@@ -30,6 +30,6 @@ function registerCreate(program) {
     },
     // No render: core already logs "✔ Created …" itself.
   });
-}
+};
 
 module.exports = { registerCreate };

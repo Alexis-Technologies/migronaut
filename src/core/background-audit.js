@@ -16,7 +16,7 @@ const STALL_MS = 15 * 60_000;
  * reads the file on disk; `deps.backgroundRecords` the changelog's
  * background records.
  */
-async function auditFindings(deps, { now = Date.now() } = {}) {
+const auditFindings = async (deps, { now = Date.now() } = {}) => {
   const states = await deps.store.list({}, { projection: STATE_SUMMARY });
   const records = await deps.backgroundRecords();
   if (states.length === 0 && records.length === 0) return null;
@@ -134,6 +134,6 @@ async function auditFindings(deps, { now = Date.now() } = {}) {
   if (failures.length > 0) return { status: 'fail', detail: [...failures, ...warnings].join('; ') };
   if (warnings.length > 0) return { status: 'warn', detail: warnings.join('; ') };
   return { status: 'pass', detail: `${states.length} background migration(s): ${summary}` };
-}
+};
 
 module.exports = { auditFindings };

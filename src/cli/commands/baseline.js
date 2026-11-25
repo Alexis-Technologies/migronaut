@@ -2,7 +2,7 @@ const { ConfigInvalidError } = require('../../errors/index.js');
 const { confirm, defineCommand } = require('../shared.js');
 
 /** Register the `baseline` command (adopt an existing database, no prior tool) */
-function registerBaseline(program) {
+const registerBaseline = (program) => {
   defineCommand(program, {
     name: 'baseline',
     description: 'Mark existing migration files as applied without running them',
@@ -40,6 +40,6 @@ function registerBaseline(program) {
       }),
     // No render: core logs the ✔ Baselined summary itself.
   });
-}
+};
 
 module.exports = { registerBaseline };

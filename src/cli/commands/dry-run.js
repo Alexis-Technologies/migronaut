@@ -3,7 +3,7 @@ const { defineCommand } = require('../shared.js');
 const { renderStatusTable } = require('../table.js');
 
 /** Register the `dry-run` command */
-function registerDryRun(program) {
+const registerDryRun = (program) => {
   defineCommand(program, {
     name: 'dry-run',
     description: 'Preview what an up or down would do, without touching the database',
@@ -31,6 +31,6 @@ function registerDryRun(program) {
       if (rows.length > 0) logger.info(renderStatusTable(rows));
     },
   });
-}
+};
 
 module.exports = { registerDryRun };

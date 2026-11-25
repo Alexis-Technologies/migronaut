@@ -94,7 +94,7 @@ const MAX_IMAGE_BYTES = 64 * 1024;
 const ATTEMPTS = 3;
 
 /** A value as relaxed EJSON, cut to `bytes` of JSON */
-function snapshot(value, bytes) {
+const snapshot = (value, bytes) => {
   let json;
   try {
     json = toRelaxedEjson(value);
@@ -103,7 +103,7 @@ function snapshot(value, bytes) {
   }
   const text = JSON.stringify(json);
   return text.length > bytes ? { $truncated: true, size: text.length } : json;
-}
+};
 
 /**
  * Run `fn(handles)` in the sandbox. `options`: `{ client, db, dbName,
@@ -114,7 +114,7 @@ function snapshot(value, bytes) {
  *
  * @throws {TransactionsUnsupportedError} on a standalone server
  */
-async function runSandbox(options, fn) {
+const runSandbox = async (options, fn) => {
   if (options.topology === 'standalone') {
     throw new TransactionsUnsupportedError(
       'A dry run executes in a transaction that is always aborted — it needs a replica set or ' +
@@ -129,9 +129,9 @@ async function runSandbox(options, fn) {
       return report;
     }
   }
-}
+};
 
-async function runOnce(options, fn, attempt) {
+const runOnce = async (options, fn, attempt) => {
   const { client } = options;
   const deadlineMs = options.deadlineMs ?? DEFAULTS.deadlineMs;
   const maxDocuments = options.maxDocuments ?? DEFAULTS.maxDocuments;
@@ -208,19 +208,19 @@ async function runOnce(options, fn, attempt) {
     await session.endSession().catch(() => undefined);
   }
   return report;
-}
+};
 
 const DEADLINE = Symbol('deadline');
 
 /** Refuse `method`: recorded, then thrown */
-function refuse(state, method, reason, collection) {
+const refuse = (state, method, reason, collection) => {
   const entry = { method, reason, ...(collection !== undefined ? { collection } : {}) };
   state.report.refusals.push(entry);
   return new SandboxRefusedError(`The dry run refused ${method}: ${reason}`, entry);
-}
+};
 
 /** Run `work` after every earlier operation — one at a time in one transaction */
-function serialized(state, work) {
+const serialized = (state, work) => {
   const run = state.queue.then(() => {
     if (Date.now() > state.deadline) {
       throw new RunAbortedError('the dry run reached its deadline', { reason: 'deadline' });
@@ -234,10 +234,10 @@ function serialized(state, work) {
   });
   state.queue = run.catch(() => undefined);
   return run;
-}
+};
 
 /** The caller's options, checked and given the sandbox session */
-function sandboxOptions(state, method, collection, options) {
+const sandboxOptions = (state, method, collection, options) => {
   if (options !== undefined && !isPlainObject(options)) return { session: state.session };
   const out = { ...options };
   if (
@@ -257,10 +257,10 @@ function sandboxOptions(state, method, collection, options) {
   }
   out.session = state.session;
   return out;
-}
+};
 
 /** Refuse a pipeline that writes elsewhere, watches, or reaches a forbidden collection */
-function checkPipeline(state, method, collection, pipeline) {
+const checkPipeline = (state, method, collection, pipeline) => {
   if (!Array.isArray(pipeline)) return;
   for (const stage of pipeline) {
     if (!isPlainObject(stage)) continue;
@@ -285,23 +285,23 @@ function checkPipeline(state, method, collection, pipeline) {
       }
     }
   }
-}
+};
 
-function isForbidden(state, name) {
+const isForbidden = (state, name) => {
   return name.startsWith('system.') || state.forbidden.has(name);
-}
+};
 
 /** Record an operation, while there is room */
-function record(state, entry) {
+const record = (state, entry) => {
   if (state.report.ops.length >= state.maxOps) {
     state.report.truncated = true;
     return;
   }
   state.report.ops.push({ seq: ++state.seq, step: state.step, ...entry });
-}
+};
 
 /** What a result says, without its documents */
-function summarize(result) {
+const summarize = (result) => {
   if (result === null || result === undefined) return null;
   if (Array.isArray(result)) return { count: result.length };
   if (typeof result !== 'object') return result;
@@ -320,14 +320,14 @@ function summarize(result) {
   }
   if (Object.keys(summary).length === 0 && '_id' in result) summary.document = true;
   return summary;
-}
+};
 
 // ─── Document images ──────────────────────────────────────────────────────────
 
 const imageKey = (collection, id) => `${collection}\u0000${JSON.stringify(snapshot(id, 1024))}`;
 
 /** Before a write: read (in the transaction) what it may change, while there is room */
-async function captureBefore(state, raw, method, args) {
+const captureBefore = async (state, raw, method, args) => {
   if (state.images.size >= state.maxDocuments) {
     state.report.truncated = state.report.truncated || COLLECTION_WRITES.has(method);
     return;
@@ -361,10 +361,10 @@ async function captureBefore(state, raw, method, args) {
       }
     }
   }
-}
+};
 
 /** After a write: note the ids it created, so their after-images are read too */
-function noteCreated(state, raw, method, result) {
+const noteCreated = (state, raw, method, result) => {
   const ids = [];
   if (result?.insertedId !== undefined) ids.push(result.insertedId);
   if (result?.insertedIds) ids.push(...Object.values(result.insertedIds));
@@ -379,10 +379,10 @@ function noteCreated(state, raw, method, result) {
     const key = imageKey(raw.collectionName, id);
     if (!state.images.has(key)) state.images.set(key, { collection: raw.collectionName, id, raw });
   }
-}
+};
 
 /** Read every after-image (still in the transaction) and keep the documents that changed */
-async function finishImages(state) {
+const finishImages = async (state) => {
   for (const image of state.images.values()) {
     let after = null;
     try {
@@ -415,14 +415,14 @@ async function finishImages(state) {
       ...(after ? { after: snapshot(after, MAX_IMAGE_BYTES) } : {}),
     });
   }
-}
+};
 
 // ─── Proxies ──────────────────────────────────────────────────────────────────
 
 /** Properties every proxy answers without refusing — `then` especially (never thenable) */
 const INERT = new Set(['then', 'constructor', 'toJSON', 'inspect']);
 
-function proxyCollection(state, raw) {
+const proxyCollection = (state, raw) => {
   const name = raw.collectionName;
   return new Proxy(Object.create(null), {
     get(_target, property) {
@@ -459,18 +459,18 @@ function proxyCollection(state, raw) {
       };
     },
   });
-}
+};
 
 /** `fn()` as a promise — a synchronous throw becomes a rejection */
-function settle(fn) {
+const settle = (fn) => {
   try {
     return Promise.resolve(fn());
   } catch (error) {
     return Promise.reject(error);
   }
-}
+};
 
-function readOp(state, raw, method, args) {
+const readOp = (state, raw, method, args) => {
   const name = raw.collectionName;
   if (method === 'aggregate') checkPipeline(state, method, name, args[0]);
   if (method === 'find' || method === 'aggregate') {
@@ -506,7 +506,7 @@ function readOp(state, raw, method, args) {
       throw error;
     }
   });
-}
+};
 
 /** Where a write method takes its options */
 const OPTIONS_AT = {
@@ -523,7 +523,7 @@ const OPTIONS_AT = {
   bulkWrite: 1,
 };
 
-function writeOp(state, raw, method, args) {
+const writeOp = (state, raw, method, args) => {
   const name = raw.collectionName;
   if (isForbidden(state, name)) throw refuse(state, method, `${name} is migronaut's own`, name);
   const call = [...args];
@@ -554,9 +554,9 @@ function writeOp(state, raw, method, args) {
       throw error;
     }
   });
-}
+};
 
-function proxyCursor(state, cursor) {
+const proxyCursor = (state, cursor) => {
   state.cursors.add(cursor);
   let closed = false;
   const finish = () => {
@@ -615,9 +615,9 @@ function proxyCursor(state, cursor) {
     },
   });
   return proxy;
-}
+};
 
-function proxyDb(state, db) {
+const proxyDb = (state, db) => {
   return new Proxy(Object.create(null), {
     get(_target, property) {
       if (typeof property === 'symbol' || INERT.has(property)) return undefined;
@@ -646,9 +646,9 @@ function proxyDb(state, db) {
       };
     },
   });
-}
+};
 
-function proxyClient(state) {
+const proxyClient = (state) => {
   const { db } = state.options;
   return new Proxy(Object.create(null), {
     get(_target, property) {
@@ -666,9 +666,9 @@ function proxyClient(state) {
       };
     },
   });
-}
+};
 
-function proxySession(state) {
+const proxySession = (state) => {
   return new Proxy(Object.create(null), {
     get(_target, property) {
       if (typeof property === 'symbol' || INERT.has(property)) return undefined;
@@ -679,17 +679,17 @@ function proxySession(state) {
       };
     },
   });
-}
+};
 
 /** What a dry run's `ctx.mongoose` is: nothing usable — models bypass the session */
-function refusedMongoose(state) {
+const refusedMongoose = (state) => {
   return new Proxy(Object.create(null), {
     get(_target, property) {
       if (typeof property === 'symbol' || INERT.has(property)) return undefined;
       throw refuse(state, `mongoose.${property}`, 'models do not join the dry-run transaction');
     },
   });
-}
+};
 
 module.exports = {
   REFUSED_STAGES,

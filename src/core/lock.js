@@ -18,9 +18,9 @@ const LOCK_LABEL = 'migration lock';
 const sentence = (label) => label.charAt(0).toUpperCase() + label.slice(1);
 
 /** Returns true when an error is a MongoDB duplicate-key error (code 11000) */
-function isDuplicateKeyError(error) {
+const isDuplicateKeyError = (error) => {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 11000;
-}
+};
 
 /**
  * Map a raw lock document to the public LockInfo shape. The `nonce` — what
@@ -30,7 +30,7 @@ function isDuplicateKeyError(error) {
  * when one is stuck. `ttlMs` is the holder's own TTL, which paces its
  * heartbeat (written since 2.1; absent from an older holder's document).
  */
-function toLockInfo(doc) {
+const toLockInfo = (doc) => {
   if (!doc) return null;
   return {
     lockedAt: doc.lockedAt,
@@ -40,7 +40,7 @@ function toLockInfo(doc) {
     ...(typeof doc.owner === 'string' ? { runId: doc.owner } : {}),
     ...(typeof doc.ttlMs === 'number' ? { ttlMs: doc.ttlMs } : {}),
   };
-}
+};
 
 /**
  * MongoDB-native distributed lock backed by a single document, using an atomic
@@ -309,7 +309,7 @@ class MigrationLock {
  * When `noLock` is true, acquisition is skipped and a loud warning is emitted —
  * intended for local development only.
  */
-async function runWithLock(lock, options, fn) {
+const runWithLock = async (lock, options, fn) => {
   const controller = new AbortController();
   // Any object with acquire/renew/release/ttlMs is a lock here — a partition
   // lease included; `label` names it in the messages.
@@ -502,6 +502,6 @@ async function runWithLock(lock, options, fn) {
 
   if (failed) throw runError;
   return result;
-}
+};
 
 module.exports = { LOCK_ID, LOCK_LABEL, MigrationLock, runWithLock, toLockInfo };

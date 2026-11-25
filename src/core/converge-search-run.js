@@ -30,13 +30,13 @@ const { READ_CONCURRENCY, READ_OPTIONS } = require('./server-info.js');
 const SEARCH_SETTLE_DELAYS_MS = [250, 500, 1000];
 
 /** Sleep `ms` — less, when `signal` aborts: the caller's next abort check says why */
-async function pause(ms, signal) {
+const pause = async (ms, signal) => {
   try {
     await sleepFor(ms, undefined, signal ? { signal } : undefined);
   } catch (error) {
     if (error?.name !== 'AbortError') throw error;
   }
-}
+};
 
 /**
  * A row's entry in the result's `notReady` — a declared search index that
@@ -44,12 +44,12 @@ async function pause(ms, signal) {
  * stale or failed) — or undefined. Asked of every row by the report's one
  * pass over them.
  */
-function notReadyEntry(collection, action) {
+const notReadyEntry = (collection, action) => {
   if (action.target !== 'searchIndex' || action.build === undefined) return undefined;
   if (!SERVED_ACTIONS.has(action.action)) return undefined;
   if (searchBuildState(action.build) === 'serving') return undefined;
   return { collection, name: action.name, ...action.build };
-}
+};
 
 /**
  * The run's word on Search, when search indexes are declared: whether the
@@ -57,14 +57,14 @@ function notReadyEntry(collection, action) {
  * not serving yet (`notReady`, gathered by the report), and how a wait for
  * them ended (`wait`).
  */
-function searchSummary(search, notReady) {
+const searchSummary = (search, notReady) => {
   return {
     available: search.available,
     ...(search.evidence !== undefined ? { evidence: search.evidence } : {}),
     notReady,
     ...(search.wait !== undefined ? { wait: search.wait } : {}),
   };
-}
+};
 
 /**
  * One line naming every search index whose server-reported options the
@@ -72,7 +72,7 @@ function searchSummary(search, notReady) {
  * the plans were reviewed) — the declarations do not set them, and migronaut
  * knows no default for them (a newer mongot's). Not a problem; worth knowing.
  */
-function warnIgnored(deps, found) {
+const warnIgnored = (deps, found) => {
   if (found.length === 0) return;
   deps.logger.warn(
     `⚠ The server reports search index options the declarations do not set, with no default ` +
@@ -80,14 +80,14 @@ function warnIgnored(deps, found) {
       'manage them',
     deps.fields({ searchIndexes: found.length }),
   );
-}
+};
 
 /**
  * A search index read that failed for a reason other than "no Search here",
  * in the phase it happened in: `'plan'` (nothing written yet), `'replan'`,
  * `'apply'` (the verify phase after a collection's steps) or `'wait'`.
  */
-function searchReadFailure(error, collection, phase) {
+const searchReadFailure = (error, collection, phase) => {
   if (error instanceof MigronautError) return error;
   const mongoCode = typeof error?.code === 'number' ? error.code : undefined;
   const hint = searchHint(error);
@@ -105,7 +105,7 @@ function searchReadFailure(error, collection, phase) {
     },
     { cause: error },
   );
-}
+};
 
 /**
  * The search half of the read phase: whether the server has Atlas Search
@@ -113,7 +113,7 @@ function searchReadFailure(error, collection, phase) {
  * every existing collection that declares some. Collections that declare
  * none are never asked — a run without `searchIndexes` makes no search call.
  */
-async function readSearch(deps, server, definitions, live, search) {
+const readSearch = async (deps, server, definitions, live, search) => {
   // One pass: the declaring collections that exist as regular ones (a view or
   // a time-series collection is refused by the planner anyway), and the first
   // declaring one that does not exist yet — the probe's fallback.
@@ -165,18 +165,18 @@ async function readSearch(deps, server, definitions, live, search) {
       'plan',
     );
   });
-}
+};
 
-async function readSearchIndexes(deps, name, phase) {
+const readSearchIndexes = async (deps, name, phase) => {
   try {
     return await listSearchIndexes(deps.db, name, READ_OPTIONS);
   } catch (error) {
     throw searchReadFailure(error, name, phase);
   }
-}
+};
 
 /** In skip mode, one line for every declared search index the run will not touch */
-function warnSkipping(deps, definitions, search) {
+const warnSkipping = (deps, definitions, search) => {
   if (search.onUnavailable !== 'skip') return;
   let count = 0;
   for (const definition of definitions) count += definition.searchIndexes?.length ?? 0;
@@ -186,10 +186,10 @@ function warnSkipping(deps, definitions, search) {
       "index(es) (onSearchUnavailable: 'skip')",
     deps.fields({ skipped: count }),
   );
-}
+};
 
 /** The build state each search index row now has, from the verify phase's read */
-function refreshBuilds(rows, fresh) {
+const refreshBuilds = (rows, fresh) => {
   const builds = new Map();
   for (const action of fresh) {
     if (action.target === 'searchIndex' && action.build !== undefined) {
@@ -199,7 +199,7 @@ function refreshBuilds(rows, fresh) {
   for (const row of rows) {
     if (row.target === 'searchIndex' && builds.has(row.name)) row.build = builds.get(row.name);
   }
-}
+};
 
 /** How often a wait for search indexes says it is still waiting */
 const WAIT_PROGRESS_MS = 30_000;
@@ -211,7 +211,7 @@ const WAIT_PROGRESS_MS = 30_000;
  * and whether this run created or changed it (`touched`): a FAILED or STALE
  * index the run did not touch does not hold the wait (see awaitSearchIndexes).
  */
-function waitTargets(run) {
+const waitTargets = (run) => {
   const { definitions, plans, result } = run;
   const targets = [];
   for (const [position, definition] of definitions.entries()) {
@@ -239,10 +239,10 @@ function waitTargets(run) {
     }
   }
   return targets;
-}
+};
 
 /** `movies.default (BUILDING), shows.plot (FAILED: …)` */
-function describeNotReady(notReady) {
+const describeNotReady = (notReady) => {
   return notReady
     .map((index) => {
       const state = searchBuildState(index);
@@ -254,15 +254,15 @@ function describeNotReady(notReady) {
       );
     })
     .join(', ');
-}
+};
 
 /** Why a wait ran out, and what to do — a STALE index will not get there by waiting longer */
-function timeoutAdvice(notReady) {
+const timeoutAdvice = (notReady) => {
   if (notReady.every((index) => searchBuildState(index) === 'stale')) {
     return 'a STALE index is queryable but no longer replicating from the collection — see troubleshooting';
   }
   return 'the server goes on building; converge again to wait more, or raise searchIndexWaitTimeoutMs';
-}
+};
 
 /**
  * The wait phase (`waitForSearchIndexes`): after every collection's steps,
@@ -273,7 +273,7 @@ function timeoutAdvice(notReady) {
  * build. The run itself goes on until the wait ends; an abort (a stop) ends
  * the wait between polls, and cuts the pause before the next one short.
  */
-async function waitPhase(run, signal) {
+const waitPhase = async (run, signal) => {
   const { deps, result, search, wait } = run;
   if (!wait.enabled || !search.declared || !search.available) return;
   const targets = waitTargets(run);
@@ -350,10 +350,10 @@ async function waitPhase(run, signal) {
       ...(notReady.length > 0 ? { notReady } : {}),
     });
   }
-}
+};
 
 /** A wait that ended: its closing lines — or, unless every index is ready, the error */
-function settleWait(deps, targets, outcome, wait, result) {
+const settleWait = (deps, targets, outcome, wait, result) => {
   if (outcome.preexisting.length > 0) {
     deps.logger.info(
       `• Not waiting for ${outcome.preexisting.length} search index(es) this run did not ` +
@@ -384,10 +384,10 @@ function settleWait(deps, targets, outcome, wait, result) {
       converge: result,
     },
   );
-}
+};
 
 /** Closing lines about search indexes that do not serve their declaration yet */
-function reportNotReady(deps, result) {
+const reportNotReady = (deps, result) => {
   // One pass sorts them: the building ones into one line, the stale and the
   // failed into a warning each — said after that line.
   const building = [];
@@ -424,7 +424,7 @@ function reportNotReady(deps, result) {
       deps.fields({ collection: index.collection, searchIndex: index.name }),
     );
   }
-}
+};
 
 module.exports = {
   SEARCH_SETTLE_DELAYS_MS,

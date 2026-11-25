@@ -8,19 +8,19 @@ const { mapLimit } = require('../utils/concurrency.js');
 const CHECKSUM_CONCURRENCY = 16;
 
 /** Returns true when a value looks like a usable migrate-mongo changelog doc */
-function isMigrateMongoDoc(value) {
+const isMigrateMongoDoc = (value) => {
   return (
     typeof value === 'object' &&
     value !== null &&
     typeof value.fileName === 'string' &&
     value.fileName.length > 0
   );
-}
+};
 
 /** Apply-order sort key for a doc — its run timestamp, falling back to apply time */
-function orderKey(doc) {
+const orderKey = (doc) => {
   return doc.migrationBlock ?? new Date(doc.appliedAt).getTime();
-}
+};
 
 /**
  * Map migrate-mongo changelog docs into migronaut MigrationRecords.
@@ -32,7 +32,7 @@ function orderKey(doc) {
  * are forward-only (migronaut refuses to `down` them), so a shared batch would only
  * produce confusing duplicate batch ids with no rollback benefit.
  */
-async function mapMigrateMongoDocs(docs, options) {
+const mapMigrateMongoDocs = async (docs, options) => {
   const offset = options.batchOffset ?? 0;
   const sorted = [...docs].sort((a, b) => {
     const delta = orderKey(a) - orderKey(b);
@@ -62,6 +62,6 @@ async function mapMigrateMongoDocs(docs, options) {
     });
   }
   return records;
-}
+};
 
 module.exports = { isMigrateMongoDoc, mapMigrateMongoDocs };

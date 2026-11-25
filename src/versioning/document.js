@@ -33,7 +33,7 @@ const {
  *
  * @throws {ConfigInvalidError} on an invalid name, or both naming one field
  */
-function resolveFieldNames({ field, revisionField, revision } = {}) {
+const resolveFieldNames = ({ field, revisionField, revision } = {}) => {
   const versionName = field ?? VERSIONING_DEFAULTS.field;
   const revisionName =
     revision === false ? null : (revisionField ?? VERSIONING_DEFAULTS.revisionField);
@@ -49,14 +49,14 @@ function resolveFieldNames({ field, revisionField, revision } = {}) {
     throw new ConfigInvalidError('field and revisionField must differ', { key: 'revisionField' });
   }
   return { field: versionName, revisionField: revisionName };
-}
+};
 
 /** A document's count field: 0 when missing or `null`, `null` when not a non-negative integer */
-function countOf(doc, field) {
+const countOf = (doc, field) => {
   if (!isPlainObject(doc)) return null;
   const value = doc[field];
   return value === undefined || value === null ? 0 : toCount(value);
-}
+};
 
 /** The shape version of `doc` — 0 when the field is missing, `null` when it is not a count */
 const versionOf = (doc, field = VERSIONING_DEFAULTS.field) => countOf(doc, field);
@@ -71,21 +71,21 @@ const revisionOf = (doc, revisionField = VERSIONING_DEFAULTS.revisionField) =>
  * document) is refused: its fields are not its own properties, and a silent
  * `false` would read as "an old shape".
  */
-function isVersion(doc, version, { field = VERSIONING_DEFAULTS.field } = {}) {
+const isVersion = (doc, version, { field = VERSIONING_DEFAULTS.field } = {}) => {
   if (doc === null || doc === undefined) return false;
   assertPlainDocument(doc);
   return versionOf(doc, field) === version;
-}
+};
 
 /** A plain document, or a ConfigInvalidError that says how to get one */
-function assertPlainDocument(doc) {
+const assertPlainDocument = (doc) => {
   if (!isPlainObject(doc)) {
     throw new ConfigInvalidError(
       'A plain document is expected — read it with .lean(), or call .toObject() on a Mongoose ' +
         'document',
     );
   }
-}
+};
 
 /**
  * The revision field alone, validated (`__rev` by default) — for a write
@@ -93,38 +93,38 @@ function assertPlainDocument(doc) {
  * caller naming only its revision field (`__v`, as a Mongoose app may keep
  * it) is not refused over a version field it never touches.
  */
-function resolveRevisionField(revisionField) {
+const resolveRevisionField = (revisionField) => {
   const name = revisionField ?? VERSIONING_DEFAULTS.revisionField;
   const issue = fieldNameIssue(name);
   if (issue) throw new ConfigInvalidError(`revisionField ${issue}`, { key: 'revisionField' });
   return name;
-}
+};
 
 /** The revision after one more write */
 const nextRevision = (revision) => (toCount(revision) ?? 0) + 1;
 
-function assertCount(value, what) {
+const assertCount = (value, what) => {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new ConfigInvalidError(`${what} must be an integer ≥ 0`, { [what]: value });
   }
-}
+};
 
 /** `{ [field]: n }`, or — for 0 — a match on the field being 0, `null` or missing */
-function countFilter(field, value) {
+const countFilter = (field, value) => {
   return value === 0 ? { [field]: { $in: [null, 0] } } : { [field]: value };
-}
+};
 
 /** Documents at exactly `version` (0 = no version field) */
-function versionFilter(names, version) {
+const versionFilter = (names, version) => {
   assertCount(version, 'version');
   return countFilter(names.field, version);
-}
+};
 
 /** Documents at exactly `revision` (0 = no revision field) */
-function revisionFilter(names, revision) {
+const revisionFilter = (names, revision) => {
   assertCount(revision, 'revision');
   return countFilter(names.revisionField, revision);
-}
+};
 
 /**
  * Documents below `version`: missing or `null` fields, smaller numbers, and
@@ -132,10 +132,10 @@ function revisionFilter(names, revision) {
  * either). One `$not` range — two intervals of one index scan — rather than
  * an `$or`. `null` for version 0: nothing is below it.
  */
-function belowVersionFilter(names, version) {
+const belowVersionFilter = (names, version) => {
   assertCount(version, 'version');
   return version === 0 ? null : { [names.field]: { $not: { $gte: version } } };
-}
+};
 
 /** The key of the index every version-filtered scan uses */
 const versionIndexKey = (names) => ({ [names.field]: 1, _id: 1 });
@@ -146,7 +146,7 @@ const versionIndexKey = (names) => ({ [names.field]: 1, _id: 1 });
  * revisions — the exact revision. A concurrent write moves the revision (or
  * the version), so the rewrite then matches nothing instead of losing it.
  */
-function occFilter(prev, names, { from } = {}) {
+const occFilter = (prev, names, { from } = {}) => {
   const version = from ?? versionOf(prev, names.field);
   const filter = { _id: prev._id };
   // A value that is not a count is matched as it is stored — `$eq`, so a
@@ -159,23 +159,23 @@ function occFilter(prev, names, { from } = {}) {
     else Object.assign(filter, countFilter(names.revisionField, revision));
   }
   return filter;
-}
+};
 
 /** Why `key` cannot be written as a top-level field with `$set`, or `null` */
-function topLevelKeyIssue(key) {
+const topLevelKeyIssue = (key) => {
   if (key.length === 0) return 'an empty field name';
   if (key.startsWith('$')) return `a field name starting with '$' ("${key}")`;
   if (key.includes('.')) return `a field name with a dot ("${key}")`;
   if (key.includes('\0')) return 'a field name with NUL';
   return null;
-}
+};
 
-function invalidShape(detail, extra) {
+const invalidShape = (detail, extra) => {
   return new ShapeVersionError(`The transformation returned ${detail}`, {
     reason: 'invalid',
     ...extra,
   });
-}
+};
 
 const hasKeys = (object) => {
   for (const key in object) if (Object.hasOwn(object, key)) return true;
@@ -198,7 +198,7 @@ const hasKeys = (object) => {
  * @throws {ShapeVersionError} (`reason: 'invalid'`) when `next` is not a
  *   document, changes `_id`, or names a field `$set` cannot write
  */
-function stampedDiff(prev, next, names, { to }) {
+const stampedDiff = (prev, next, names, { to }) => {
   if (!isPlainObject(next)) throw invalidShape('something that is not a document');
   assertCount(to, 'to');
   const { field, revisionField } = names;
@@ -230,16 +230,16 @@ function stampedDiff(prev, next, names, { to }) {
   if (hasKeys($unset)) update.$unset = $unset;
   if (revisionField !== null) update.$inc = { [revisionField]: 1 };
   return update;
-}
+};
 
-function refuseTouch(fields, name, role) {
+const refuseTouch = (fields, name, role) => {
   if (name !== null && fields.has(name)) {
     throw new ConfigInvalidError(
       `The update must not write the ${role} field "${name}" — migronaut sets it`,
       { field: name },
     );
   }
-}
+};
 
 /**
  * Stamp an update the caller wrote: the version set to `to` (left alone when
@@ -251,7 +251,7 @@ function refuseTouch(fields, name, role) {
  * @throws {ConfigInvalidError} on a replacement, or an update that writes a
  *   system field itself
  */
-function stampedUpdate(names, { to, update }) {
+const stampedUpdate = (names, { to, update }) => {
   const { field, revisionField } = names;
   if (to !== undefined) assertCount(to, 'to');
   if (!Array.isArray(update) && !isPlainObject(update)) {
@@ -284,14 +284,14 @@ function stampedUpdate(names, { to, update }) {
   else if (to !== undefined) out.$set = { ...update.$set, [field]: to };
   if (revisionField !== null) out.$inc = { ...update.$inc, [revisionField]: 1 };
   return out;
-}
+};
 
 /**
  * `doc` with its version set to `version` and its revision to 0 — each only
  * when the document does not carry it yet, so stamping is idempotent and a
  * document someone already stamped keeps its fields.
  */
-function stampDocument(doc, names, version) {
+const stampDocument = (doc, names, version) => {
   if (!isPlainObject(doc)) throw new ConfigInvalidError('Only a plain document can be stamped');
   assertCount(version, 'version');
   const out = { ...doc };
@@ -300,7 +300,7 @@ function stampDocument(doc, names, version) {
     out[names.revisionField] = 0;
   }
   return out;
-}
+};
 
 module.exports = {
   assertPlainDocument,

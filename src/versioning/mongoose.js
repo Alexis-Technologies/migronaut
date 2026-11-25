@@ -26,20 +26,20 @@ const { isPlainObject, topField, unwrapDefinition } = require('./internal.js');
 
 const UPDATE_HOOKS = ['updateOne', 'updateMany', 'findOneAndUpdate'];
 
-function assertSchema(schema) {
+const assertSchema = (schema) => {
   for (const method of ['set', 'get', 'add', 'path', 'pre']) {
     if (typeof schema?.[method] !== 'function') {
       throw new ConfigInvalidError('versioningPlugin takes a Mongoose schema');
     }
   }
-}
+};
 
 /**
  * The top-level fields a Mongoose update writes. Plain keys are `$set` paths
  * to Mongoose (it wraps them at cast time), and the `$setOnInsert` of the
  * version key that Mongoose itself adds to every upsert is not the caller's.
  */
-function updatedFields(update, revisionField) {
+const updatedFields = (update, revisionField) => {
   const fields = new Set();
   for (const [key, spec] of Object.entries(update)) {
     if (!key.startsWith('$')) {
@@ -54,10 +54,10 @@ function updatedFields(update, revisionField) {
     }
   }
   return fields;
-}
+};
 
 /** The plugin over already-resolved versioning — `defineShapes().plugin()` passes its own */
-function applyVersioningPlugin(schema, versioning) {
+const applyVersioningPlugin = (schema, versioning) => {
   assertSchema(schema);
   const { current, field, revisionField } = versioning;
   const existing = schema.path(field);
@@ -78,9 +78,9 @@ function applyVersioningPlugin(schema, versioning) {
   }
   if (!existing) schema.add({ [field]: { type: Number } });
 
-  function stamp() {
+  const stamp = function () {
     if (this.isNew && this.get(field) == null) this.set(field, current);
-  }
+  };
   // Validation may be skipped (`validateBeforeSave: false`): stamp on save too.
   schema.pre('validate', stamp);
   schema.pre('save', stamp);
@@ -128,7 +128,7 @@ function applyVersioningPlugin(schema, versioning) {
     }
     this.setUpdate(next);
   });
-}
+};
 
 /**
  * The plugin, for `schema.plugin(versioningPlugin, definition)`: the second
@@ -137,7 +137,7 @@ function applyVersioningPlugin(schema, versioning) {
  * @throws {ConfigInvalidError} on a non-schema, invalid versioning, or a
  *   version field the schema already gives a default
  */
-function versioningPlugin(schema, definitionOrModule) {
+const versioningPlugin = (schema, definitionOrModule) => {
   const definition = unwrapDefinition(definitionOrModule);
   if (!isPlainObject(definition)) {
     throw new ConfigInvalidError(
@@ -146,6 +146,6 @@ function versioningPlugin(schema, definitionOrModule) {
   }
   const source = isPlainObject(definition.versioning) ? definition.versioning : definition;
   applyVersioningPlugin(schema, resolveVersioning(source));
-}
+};
 
 module.exports = { applyVersioningPlugin, versioningPlugin };

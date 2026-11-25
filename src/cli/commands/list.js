@@ -2,7 +2,7 @@ const { defineCommand } = require('../shared.js');
 const { renderRowsOrEmpty } = require('../table.js');
 
 /** Register the `list` command */
-function registerList(program) {
+const registerList = (program) => {
   defineCommand(program, {
     name: 'list',
     description: 'List migrations, optionally filtered by status',
@@ -14,6 +14,6 @@ function registerList(program) {
       migrator.list(opts.pending ? 'pending' : opts.applied ? 'applied' : 'all'),
     render: renderRowsOrEmpty,
   });
-}
+};
 
 module.exports = { registerList };

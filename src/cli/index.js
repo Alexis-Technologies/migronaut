@@ -17,7 +17,7 @@ const { registerUp } = require('./commands/up.js');
 const { reportUsageError } = require('./shared.js');
 
 /** Build the root commander program with all commands and global flags */
-function buildProgram() {
+const buildProgram = () => {
   const program = new Command();
 
   program
@@ -56,10 +56,10 @@ function buildProgram() {
   registerUnlock(program);
 
   return program;
-}
+};
 
 /** Parse argv and execute the matching command */
-async function run(argv) {
+const run = async (argv) => {
   // Checked before parsing: color is decided the first time anything renders,
   // which can precede the command action that would otherwise read the flag.
   // Tokens after a `--` terminator are positionals, never flags.
@@ -99,6 +99,6 @@ async function run(argv) {
       }
     }
   }
-}
+};
 
 module.exports = { run };

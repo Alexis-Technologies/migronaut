@@ -3,7 +3,7 @@ const { confirm, defineCommand, emitJson } = require('../shared.js');
 const { lockedAtText } = require('./lock.js');
 
 /** Register the `unlock` command (force-release a stuck migration lock) */
-function registerUnlock(program) {
+const registerUnlock = (program) => {
   defineCommand(program, {
     name: 'unlock',
     description: 'Force-release a stuck migration lock left behind by a crashed run',
@@ -48,6 +48,6 @@ function registerUnlock(program) {
       return undefined;
     },
   });
-}
+};
 
 module.exports = { registerUnlock };

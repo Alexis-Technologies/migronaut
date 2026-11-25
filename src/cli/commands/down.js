@@ -1,7 +1,7 @@
 const { defineCommand } = require('../shared.js');
 
 /** Register the `down` command */
-function registerDown(program) {
+const registerDown = (program) => {
   defineCommand(program, {
     name: 'down',
     description:
@@ -27,6 +27,6 @@ function registerDown(program) {
       }),
     // No render: core logs every ↩ Reverted line itself.
   });
-}
+};
 
 module.exports = { registerDown };

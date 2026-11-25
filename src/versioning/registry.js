@@ -23,7 +23,7 @@ const { createUpcaster } = require('./upcaster.js');
  */
 
 /** `[name, definition]` pairs from a `{ name: definition }` map or a definition list */
-function entriesOf(definitions) {
+const entriesOf = (definitions) => {
   if (Array.isArray(definitions)) {
     const entries = [];
     for (const [position, item] of definitions.entries()) {
@@ -52,15 +52,16 @@ function entriesOf(definitions) {
     entries.push([name, resolved]);
   }
   return entries;
-}
+};
 
 /**
  * Called without arguments — `defineShapes<Shapes>()(definitions)` — it
  * returns itself: TypeScript then takes the shape map from the first call
  * and infers the definitions from the second. Nothing changes at run time.
  */
-function defineShapes(definitions) {
-  if (arguments.length === 0) return (defs) => defineShapes(defs);
+const defineShapes = (...args) => {
+  if (args.length === 0) return (defs) => defineShapes(defs);
+  const definitions = args[0];
   const registry = new Map();
   for (const [name, definition] of entriesOf(definitions)) {
     if (registry.has(name)) {
@@ -182,6 +183,6 @@ function defineShapes(definitions) {
       return out;
     },
   });
-}
+};
 
 module.exports = { defineShapes };

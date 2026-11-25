@@ -39,7 +39,7 @@ const { assertRunFlags } = require('./options.js');
  * if (!upToDate) console.log(`Applied ${applied.length} migration(s)`);
  * ```
  */
-async function runMigrations(config = {}, options = {}) {
+const runMigrations = async (config = {}, options = {}) => {
   const {
     noLock,
     onBackgroundPending,
@@ -129,7 +129,7 @@ async function runMigrations(config = {}, options = {}) {
     signal?.removeEventListener('abort', onAbort);
     await kit.disconnect().catch(() => undefined);
   }
-}
+};
 
 /**
  * Return the migrations that have not yet been applied — a connection-managed
@@ -147,7 +147,7 @@ async function runMigrations(config = {}, options = {}) {
  * }
  * ```
  */
-async function pendingMigrations(config = {}, options = {}) {
+const pendingMigrations = async (config = {}, options = {}) => {
   const kit = new MigratorKit(config, options);
   try {
     await kit.connect();
@@ -155,6 +155,6 @@ async function pendingMigrations(config = {}, options = {}) {
   } finally {
     await kit.disconnect().catch(() => undefined);
   }
-}
+};
 
 module.exports = { runMigrations, pendingMigrations };

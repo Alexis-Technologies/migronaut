@@ -49,7 +49,7 @@ const DOCUMENT_ERRORS = new Set([
 const idKey = (id) => JSON.stringify(canonical(id));
 
 /** What one direction of a background migration reads, writes and calls */
-function directionOf(spec, fns, direction) {
+const directionOf = (spec, fns, direction) => {
   const forward = direction !== 'revert';
   return {
     source: forward ? spec.from : spec.to,
@@ -57,18 +57,18 @@ function directionOf(spec, fns, direction) {
     one: forward ? fns.migrate : fns.revert,
     many: forward ? fns.migrateBatch : fns.revertBatch,
   };
-}
+};
 
 /** The documents a background migration (still) has to rewrite, in one direction */
-function matchOf(spec, direction) {
+const matchOf = (spec, direction) => {
   const source = direction === 'revert' ? spec.to : spec.from;
   return { ...spec.filter, ...versionFilter(spec, source) };
-}
+};
 
 /** `match` without the documents that failed — left out of later passes and of the final count */
-function excludeBadIds(match, badIds = []) {
+const excludeBadIds = (match, badIds = []) => {
   return badIds.length > 0 ? { $and: [match, { _id: { $nin: badIds } }] } : match;
-}
+};
 
 /**
  * `ctx.background`: which background migration, generation and partition —
@@ -76,7 +76,7 @@ function excludeBadIds(match, badIds = []) {
  * the queue job working it (and its group, when a run drives it inline) and
  * the transaction attempt. Frozen, like an ordinary migration's `ctx.run`.
  */
-function backgroundInfo(job, attempt) {
+const backgroundInfo = (job, attempt) => {
   return Object.freeze({
     name: job.name,
     generation: job.generation,
@@ -86,7 +86,7 @@ function backgroundInfo(job, attempt) {
     ...(job.groupId !== undefined ? { groupId: job.groupId } : {}),
     attempt,
   });
-}
+};
 
 /**
  * What a transformation sees besides the document. `attempt` counts the
@@ -94,7 +94,7 @@ function backgroundInfo(job, attempt) {
  * user's code again — and is 1 everywhere else. `job.logs` binds a logger to
  * `ctx.background`; a job without it (a test's) gets the plain logger.
  */
-function transformContext(job, extra = {}, attempt = 1) {
+const transformContext = (job, extra = {}, attempt = 1) => {
   const direction = job.direction ?? 'forward';
   const background = backgroundInfo(job, attempt);
   return {
@@ -104,7 +104,7 @@ function transformContext(job, extra = {}, attempt = 1) {
     background,
     ...extra,
   };
-}
+};
 
 const docError = (doc, error, reason) => ({
   id: doc._id,
@@ -117,7 +117,7 @@ const docError = (doc, error, reason) => ({
  * aligned. A batch transformation that throws, or returns the wrong number
  * of results, fails the slice — it cannot say which document was at fault.
  */
-async function transformAll(job, docs, ctx) {
+const transformAll = async (job, docs, ctx) => {
   const { one, many } = directionOf(job.spec, job.fns, job.direction);
   const results = new Array(docs.length);
   if (typeof many === 'function') {
@@ -146,13 +146,13 @@ async function transformAll(job, docs, ctx) {
     }
   }
   return results;
-}
+};
 
 /**
  * The guarded operations for transformed documents: `{ ops, owners, errors }`
  * — `owners[i]` the document behind `ops[i]`.
  */
-function buildOps(job, transformed) {
+const buildOps = (job, transformed) => {
   const { source, target } = directionOf(job.spec, job.fns, job.direction);
   const partitioner = job.partitioner;
   const ops = [];
@@ -187,14 +187,14 @@ function buildOps(job, transformed) {
     owners.push(doc);
   }
   return { ops, owners, errors };
-}
+};
 
 /**
  * Write `ops`: `{ matched, failed: Map<index, writeError> }`. Only errors of
  * single documents (a duplicate key, the validator) are taken apart; a write
  * concern error, or anything else, fails the batch — and the slice.
  */
-async function writeOps(collection, ops, { writeConcern, session, bare = false }) {
+const writeOps = async (collection, ops, { writeConcern, session, bare = false }) => {
   const failed = new Map();
   if (ops.length === 0) return { matched: 0, failed };
   try {
@@ -216,14 +216,14 @@ async function writeOps(collection, ops, { writeConcern, session, bare = false }
     }
     return { matched: error.result?.matchedCount ?? 0, failed };
   }
-}
+};
 
 /**
  * A filter for these documents: by `_id` — and, on a sharded collection,
  * each with its shard key (an `$or` of the write filters), so the mongos
  * reads them from their own shards instead of asking every one.
  */
-function byIds(docs, partitioner) {
+const byIds = (docs, partitioner) => {
   const ids = [];
   const branches = [];
   let keyed = false;
@@ -234,7 +234,7 @@ function byIds(docs, partitioner) {
     branches.push({ _id: doc._id, ...key });
   }
   return keyed ? { $or: branches } : { _id: { $in: ids } };
-}
+};
 
 /**
  * Transform and write one batch, retrying documents a concurrent write moved
@@ -246,11 +246,11 @@ function byIds(docs, partitioner) {
  * every write joins it (the transactional mode, the sandbox) and a document
  * a concurrent write moved aborts the batch instead (`abortOnConflict`).
  */
-async function applyBatch(
+const applyBatch = async (
   job,
   docs,
   { db, session, ctxExtra, abortOnConflict = false, strict = false, bare = false, attempt } = {},
-) {
+) => {
   const spec = job.spec;
   const collection = db.collection(spec.collection);
   const { source, target } = directionOf(spec, job.fns, job.direction);
@@ -344,25 +344,25 @@ async function applyBatch(
     pending = retry;
   }
   return counts;
-}
+};
 
 /** A document that fails a strict (transactional) batch — caught by transactionalBatch */
-function documentError(entry) {
+const documentError = (entry) => {
   return new BackgroundFailedError(`A document failed: ${entry.error}`, {
     reason: 'document',
     document: entry,
   });
-}
+};
 
 /**
  * The context of a `step` background migration: the database and client
  * (and, in a transaction or a dry run, the session), its last checkpoint,
  * and the deadline it should return by.
  */
-function buildStepContext(
+const buildStepContext = (
   job,
   { db, client, session, checkpoint, deadline, dryRun, attempt } = {},
-) {
+) => {
   return {
     ...transformContext(job, {}, attempt),
     db,
@@ -372,10 +372,10 @@ function buildStepContext(
     ...(session ? { session } : {}),
     ...(dryRun ? { dryRun: true } : {}),
   };
-}
+};
 
 /** A step's result, validated: `{ checkpoint, done, processed?, migrated?, total? }` */
-function readStepResult(result) {
+const readStepResult = (result) => {
   if (!isPlainObject(result) || typeof result.done !== 'boolean') {
     throw new BackgroundFailedError('step() must return { checkpoint, done } — done a boolean');
   }
@@ -395,14 +395,14 @@ function readStepResult(result) {
     counters,
     ...(Number.isSafeInteger(result.total) ? { total: result.total } : {}),
   };
-}
+};
 
 /**
  * How every transaction of a background migration starts: a snapshot read
  * on the primary, the spec's write concern (majority by default), and the
  * spec's time limit on the commit.
  */
-function transactionOptions(spec) {
+const transactionOptions = (spec) => {
   return {
     readConcern: { level: 'snapshot' },
     writeConcern: spec.writeConcern ?? { w: 'majority' },
@@ -411,34 +411,34 @@ function transactionOptions(spec) {
       ? { maxCommitTimeMS: spec.transaction.timeoutMs }
       : {}),
   };
-}
+};
 
 /** A write that failed for want of capacity, not for a fault of the data */
-function isOverload(error) {
+const isOverload = (error) => {
   if (error?.err !== undefined || error?.writeConcernError !== undefined) return true;
   if (error?.result?.getWriteConcernError?.()) return true;
   if (error?.hasErrorLabel?.('TransientTransactionError') === true) return true;
   if (error?.hasErrorLabel?.('RetryableWriteError') === true) return true;
   // MaxTimeMSExpired, ExceededTimeLimit.
   return error?.code === 50 || error?.code === 262;
-}
+};
 
 /** Elapsed milliseconds from `start`, by the injected clock */
 const since = (now, start) => now() - start;
 
 /** Add `from` into `into`, key by key */
-function addCounters(into, from) {
+const addCounters = (into, from) => {
   for (const [key, value] of Object.entries(from)) {
     if (typeof value === 'number') into[key] = (into[key] ?? 0) + value;
   }
-}
+};
 
 /**
  * One call of a step migration and its checkpoint — in one transaction when
  * the spec asks for it (the step's writes take `ctx.session` and commit with
  * the checkpoint; a transient error runs the step again, up to `maxRetries`).
  */
-async function runStep(job, ctx, cursor) {
+const runStep = async (job, ctx, cursor) => {
   const { store, lease, db, client, signal } = ctx;
   const fn = job.direction === 'revert' ? job.fns.revertStep : job.fns.step;
   const save = async (result, session) => {
@@ -478,10 +478,10 @@ async function runStep(job, ctx, cursor) {
       await session.endSession().catch(() => undefined);
     }
   }
-}
+};
 
 /** The counters of one written batch */
-function countsOf(docs, result, extra = {}) {
+const countsOf = (docs, result, extra = {}) => {
   return {
     scanned: docs.length,
     migrated: result.migrated,
@@ -492,13 +492,13 @@ function countsOf(docs, result, extra = {}) {
     batches: 1,
     ...extra,
   };
-}
+};
 
 /**
  * A batch's failed documents, in one pass: their ids (`badIds`, and on the
  * `left` list a draining partition steps over) and their error entries.
  */
-function errorsOf(errors, left = []) {
+const errorsOf = (errors, left = []) => {
   const badIds = [];
   const docErrors = [];
   const at = new Date();
@@ -508,7 +508,7 @@ function errorsOf(errors, left = []) {
     docErrors.push({ error, reason, at });
   }
   return { badIds, docErrors, left };
-}
+};
 
 /**
  * One batch without a transaction: read, transform, write, then the fenced
@@ -516,7 +516,7 @@ function errorsOf(errors, left = []) {
  * batch, which the version filter makes a no-op. The adaptive throttle judges
  * the write.
  */
-async function plainBatch(job, ctx, cursor, batchSize) {
+const plainBatch = async (job, ctx, cursor, batchSize) => {
   const { store, lease, partition, db, throttle } = ctx;
   const now = ctx.now ?? Date.now;
   const adaptive = ctx.adaptive;
@@ -554,7 +554,7 @@ async function plainBatch(job, ctx, cursor, batchSize) {
     ...(adaptive ? { throttle: adaptive.state() } : {}),
   });
   return { result, next, counts };
-}
+};
 
 /** A transaction's retry backoff: full jitter, up to 50 ms · 2ⁿ, never past 2 s */
 const TXN_BACKOFF_BASE_MS = 50;
@@ -576,16 +576,16 @@ const isUnknownCommit = (error) =>
   error?.hasErrorLabel?.('UnknownTransactionCommitResult') === true;
 
 /** The leading documents of `docs` whose BSON fits in `bytes` — at least one */
-function fitting(docs, bytes) {
+const fitting = (docs, bytes) => {
   let total = 0;
   for (let i = 0; i < docs.length; i++) {
     total += bsonSize(docs[i]);
     if (total > bytes && i > 0) return docs.slice(0, i);
   }
   return docs;
-}
+};
 
-async function commit(session) {
+const commit = async (session) => {
   for (let attempt = 0; ; attempt++) {
     try {
       await session.commitTransaction();
@@ -595,7 +595,7 @@ async function commit(session) {
       if (!isUnknownCommit(error) || attempt >= 2) throw error;
     }
   }
-}
+};
 
 /**
  * One batch in a transaction: the read (snapshot), the transformations —
@@ -613,7 +613,7 @@ async function commit(session) {
  * skipped (the next pass takes it) and one too big or too slow is a document
  * error. Clean batches grow back ×1.5.
  */
-async function transactionalBatch(job, ctx, cursor, batchSize) {
+const transactionalBatch = async (job, ctx, cursor, batchSize) => {
   const { store, lease, partition, db, client, signal } = ctx;
   const spec = job.spec;
   const { timeoutMs, maxRetries } = spec.transaction;
@@ -748,7 +748,7 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
       await session.endSession().catch(() => undefined);
     }
   }
-}
+};
 
 /**
  * Work one partition until it is done, the slice's deadline passes, a
@@ -763,7 +763,7 @@ async function transactionalBatch(job, ctx, cursor, batchSize) {
  * `stale` (another plan took over) or `stopped` (the signal). A lost lease
  * throws LockLostError; a failure of the slice itself throws.
  */
-async function processPartition(job, ctx) {
+const processPartition = async (job, ctx) => {
   const { store, partition, signal, throttle, readControl } = ctx;
   const now = ctx.now ?? Date.now;
   const spec = job.spec;
@@ -830,10 +830,10 @@ async function processPartition(job, ctx) {
     if (next === null) return { outcome: 'exhausted', counters };
     cursor = next;
   }
-}
+};
 
 /** What the state's controls mean for a lane on this partition — `undefined`: go on */
-function controlOutcome(control, job, partition) {
+const controlOutcome = (control, job, partition) => {
   if (control === null) return 'cancelled';
   if (control.status === 'paused') return 'paused';
   if (control.status === 'cancelled') return 'cancelled';
@@ -843,7 +843,7 @@ function controlOutcome(control, job, partition) {
     return 'stale';
   }
   return undefined;
-}
+};
 
 module.exports = {
   DOCUMENT_ERRORS,

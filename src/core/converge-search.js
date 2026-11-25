@@ -58,14 +58,14 @@ const VECTOR_UPDATE_HINT =
   'index under a new name, converge, then remove the old declaration and converge with prune';
 
 /** Whether an error from a search command means the server has no Atlas Search */
-function isSearchUnavailable(error) {
+const isSearchUnavailable = (error) => {
   if (SEARCH_UNAVAILABLE_CODES.has(error?.code)) return true;
   if (error?.codeName === 'SearchNotEnabled') return true;
   return SEARCH_UNAVAILABLE_MESSAGE.test(errorText(error));
-}
+};
 
 /** What usually fixes the server error behind a failed search index command */
-function searchHint(error) {
+const searchHint = (error) => {
   if (isSearchUnavailable(error)) return SEARCH_UNAVAILABLE_HINT;
   const text = errorText(error);
   if (NEEDS_TYPE.test(text)) return VECTOR_UPDATE_HINT;
@@ -88,10 +88,10 @@ function searchHint(error) {
     );
   }
   return undefined;
-}
+};
 
 /** A collection's search indexes, as `$listSearchIndexes` reports them — none for a missing one */
-async function listSearchIndexes(db, collection, readOptions) {
+const listSearchIndexes = async (db, collection, readOptions) => {
   try {
     return await db
       .collection(collection)
@@ -101,15 +101,15 @@ async function listSearchIndexes(db, collection, readOptions) {
     if (error?.code === NAMESPACE_NOT_FOUND) return [];
     throw error;
   }
-}
+};
 
 /** Whether `version` (`{ major, minor, patch? }`) is at least `major.minor.patch` */
-function atLeast(version, major, minor, patch) {
+const atLeast = (version, major, minor, patch) => {
   if (version === undefined) return false;
   if (version.major !== major) return version.major > major;
   if (version.minor !== minor) return version.minor > minor;
   return (version.patch ?? 0) >= patch;
-}
+};
 
 /**
  * Whether the server is wired to a search index manager — the setting every
@@ -117,7 +117,7 @@ function atLeast(version, major, minor, patch) {
  * restricts `getParameter`); `false` for an empty setting, or a server that
  * has no such setting at all.
  */
-async function searchManagement(db) {
+const searchManagement = async (db) => {
   if (typeof db.admin !== 'function') return undefined;
   try {
     const reply = await db
@@ -130,7 +130,7 @@ async function searchManagement(db) {
     const unknown = error?.code === INVALID_OPTIONS || /no option found/i.test(errorText(error));
     return unknown ? false : undefined;
   }
-}
+};
 
 /**
  * Whether the server has Atlas Search, asked by listing the search indexes of
@@ -145,7 +145,7 @@ async function searchManagement(db) {
  *   server's search index manager setting decides — or, where the server
  *   will not say, Search is assumed and a refusal at apply time reports it.
  */
-async function probeSearch(db, server, { collection, readOptions }) {
+const probeSearch = async (db, server, { collection, readOptions }) => {
   const { version } = server;
   if (version !== undefined && version.major < 6) {
     return {
@@ -176,14 +176,14 @@ async function probeSearch(db, server, { collection, readOptions }) {
     };
   }
   return { available: true, evidence: managed ? 'parameter' : 'assumed', listed };
-}
+};
 
 /**
  * Update a search index in place. A self-managed `mongot` needs the type of a
  * vector index restated, where Atlas infers it (and the documented command
  * has no type) — so it is sent once more with the type, only on that error.
  */
-async function updateSearchIndex(db, collection, step) {
+const updateSearchIndex = async (db, collection, step) => {
   const command = { updateSearchIndex: collection, name: step.name, definition: step.definition };
   try {
     await db.command(command);
@@ -200,10 +200,10 @@ async function updateSearchIndex(db, collection, step) {
       throw retryError;
     }
   }
-}
+};
 
 /** Drop a search index — already gone (or its collection) is the state this step wanted */
-async function dropSearchIndex(db, collection, name) {
+const dropSearchIndex = async (db, collection, name) => {
   try {
     await db.command({ dropSearchIndex: collection, name });
   } catch (error) {
@@ -211,7 +211,7 @@ async function dropSearchIndex(db, collection, name) {
     if (/not found|does not exist/i.test(errorText(error))) return;
     throw error;
   }
-}
+};
 
 /** The search index step ops converge.js hands over */
 const SEARCH_STEPS = new Set(['createSearchIndexes', 'updateSearchIndex', 'dropSearchIndex']);
@@ -221,7 +221,7 @@ const SEARCH_STEPS = new Set(['createSearchIndexes', 'updateSearchIndex', 'dropS
  * a created or updated index builds in the background, so this returns in
  * moments whatever the size of the collection.
  */
-async function runSearchStep(db, collection, step) {
+const runSearchStep = async (db, collection, step) => {
   if (step.op === 'createSearchIndexes') {
     await db.command({ createSearchIndexes: collection, indexes: step.specs });
   } else if (step.op === 'updateSearchIndex') {
@@ -229,7 +229,7 @@ async function runSearchStep(db, collection, step) {
   } else {
     await dropSearchIndex(db, collection, step.name);
   }
-}
+};
 
 /** Search index lists read at once while waiting — one per collection */
 const WAIT_READ_CONCURRENCY = 8;
@@ -258,7 +258,7 @@ const TRANSIENT_LABELS = ['ResetPool', 'RetryableWriteError', 'PoolRequstedRetry
  * shutting down — rather than an answer: the error itself, or what it wraps.
  * Duck-typed on the driver's error names, codes and labels.
  */
-function isTransientError(error) {
+const isTransientError = (error) => {
   for (let current = error, depth = 0; current && depth < 3; depth += 1) {
     if (TRANSIENT_NAMES.has(current.name) || TRANSIENT_CODES.has(current.code)) return true;
     if (
@@ -270,18 +270,18 @@ function isTransientError(error) {
     current = current.cause;
   }
   return false;
-}
+};
 
 /**
  * The pause before the next poll: from a second, half as long again each
  * time, never more than ten seconds — nor more than the budget has left.
  */
-function nextPollDelay(attempt, remainingMs) {
+const nextPollDelay = (attempt, remainingMs) => {
   return Math.max(0, Math.round(Math.min(1000 * 1.5 ** attempt, 10_000, remainingMs)));
-}
+};
 
 /** Every target collection's search indexes, read once: `"collection\0name"` → live index */
-async function readAll(collections, read) {
+const readAll = async (collections, read) => {
   const live = new Map();
   await mapLimit(collections, WAIT_READ_CONCURRENCY, async (collection) => {
     for (const raw of await read(collection)) {
@@ -290,7 +290,7 @@ async function readAll(collections, read) {
     }
   });
   return live;
-}
+};
 
 /**
  * Poll until every target serves its latest definition (READY, queryable,
@@ -317,7 +317,7 @@ async function readAll(collections, read) {
  * waitedMs }`, `notReady` holding `{ collection, name, ...build }` (the
  * failed ones first — and, on `'failed'`, in `failed` too).
  */
-async function awaitSearchIndexes({
+const awaitSearchIndexes = async ({
   targets,
   read,
   timeoutMs,
@@ -326,7 +326,7 @@ async function awaitSearchIndexes({
   beforePoll = () => undefined,
   onPoll = () => undefined,
   onReadError = () => undefined,
-}) {
+}) => {
   const startedAt = now();
   // Each collection once, in the order the targets name them.
   const seen = new Set();
@@ -388,7 +388,7 @@ async function awaitSearchIndexes({
     if (remainingMs <= 0) return { outcome: 'timeout', notReady, preexisting, waitedMs };
     await sleep(nextPollDelay(attempt, remainingMs));
   }
-}
+};
 
 module.exports = {
   SEARCH_STEPS,

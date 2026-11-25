@@ -27,14 +27,14 @@ const bsonType = (value) =>
     ? value._bsontype
     : undefined;
 
-function canonicalNumber(number) {
+const canonicalNumber = (number) => {
   if (Number.isNaN(number)) return { $number: 'NaN' };
   if (!Number.isFinite(number)) return { $number: number > 0 ? 'Infinity' : '-Infinity' };
   // -0 and 0 are the same BSON value for every purpose a validator has.
   return number === 0 ? 0 : number;
-}
+};
 
-function canonicalBson(type, value) {
+const canonicalBson = (type, value) => {
   if (type === 'Int32' || type === 'Double') return canonicalNumber(Number(value.valueOf()));
   if (type === 'Long') {
     const number = value.toNumber();
@@ -47,11 +47,11 @@ function canonicalBson(type, value) {
   // stable and type-tagged, which is all equality needs.
   const json = typeof value.toJSON === 'function' ? value.toJSON() : String(value);
   return { $bson: type, value: canonical(json) };
-}
+};
 
-function sortFlags(flags) {
+const sortFlags = (flags) => {
   return [...String(flags)].sort().join('');
-}
+};
 
 /**
  * A JavaScript RegExp's flags as the server stores them. The driver writes
@@ -60,11 +60,11 @@ function sortFlags(flags) {
  * `/x/i` read back compare equal, and a `BSONRegExp('x', 's')` match too.
  */
 const DRIVER_REGEXP_FLAGS = { i: 'i', m: 'm', g: 's' };
-function storedFlags(flags) {
+const storedFlags = (flags) => {
   let out = '';
   for (const flag of String(flags)) out += DRIVER_REGEXP_FLAGS[flag] ?? '';
   return out;
-}
+};
 
 /** JavaScript RegExp flags that do not survive the trip to the server as written */
 const UNSTORABLE_FLAGS = /[^im]/g;
@@ -74,7 +74,7 @@ const UNSTORABLE_FLAGS = /[^im]/g;
  * changes (`g` becomes dotAll) or drops (`s`, `u`, `y`, `d`, `v`) — or null.
  * A `BSONRegExp` states server options directly and is always fine.
  */
-function regExpIssue(value, seen = new Set()) {
+const regExpIssue = (value, seen = new Set()) => {
   if (value instanceof RegExp) {
     const bad = value.flags.match(UNSTORABLE_FLAGS);
     return bad
@@ -98,14 +98,14 @@ function regExpIssue(value, seen = new Set()) {
     if (issue) return issue;
   }
   return null;
-}
+};
 
 /**
  * Why `value` cannot be sent as declared — a function, a symbol, a cycle, or a
  * RegExp the driver would change (see {@link regExpIssue}) — or null. Walks
  * plain objects and arrays, the shapes a declaration is written in.
  */
-function unsendable(value, seen = new Set()) {
+const unsendable = (value, seen = new Set()) => {
   if (seen.size === 0) {
     const issue = regExpIssue(value);
     if (issue) return issue;
@@ -123,24 +123,24 @@ function unsendable(value, seen = new Set()) {
   }
   seen.delete(value);
   return null;
-}
+};
 
 /**
  * Assign without invoking setters: a key named `__proto__` (JSON.parse makes
  * one an own property) must stay a key, not replace the object's prototype —
  * otherwise it vanishes from what is sent and what is compared.
  */
-function assign(target, key, value) {
+const assign = (target, key, value) => {
   Object.defineProperty(target, key, {
     value,
     enumerable: true,
     writable: true,
     configurable: true,
   });
-}
+};
 
 /** A JSON-safe, key-sorted stand-in for `value` (see the module comment) */
-function canonical(value) {
+const canonical = (value) => {
   if (value === undefined || value === null) return null;
   const type = typeof value;
   if (type === 'string' || type === 'boolean') return value;
@@ -177,12 +177,12 @@ function canonical(value) {
   keys.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   for (const [key, item] of keys) assign(out, key, canonical(item));
   return out;
-}
+};
 
 /** Deep equality under {@link canonical} */
-function deepEqual(a, b) {
+const deepEqual = (a, b) => {
   return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
-}
+};
 
 /**
  * A copy of a declared value fit to send: plain objects lose their
@@ -191,7 +191,7 @@ function deepEqual(a, b) {
  * `null` by a client with the default `ignoreUndefined: false`, and the next
  * comparison would report a change that can never converge.
  */
-function toWire(value) {
+const toWire = (value) => {
   if (Array.isArray(value)) return value.map((item) => toWire(item));
   if (!isPlainObject(value)) return value;
   const out = {};
@@ -199,7 +199,7 @@ function toWire(value) {
     if (item !== undefined) assign(out, key, toWire(item));
   }
   return out;
-}
+};
 
 module.exports = {
   assign,

@@ -55,7 +55,7 @@ const isMaxKey = (value) => value?._bsontype === 'MaxKey';
 const isBound = (value) => isMinKey(value) || isMaxKey(value);
 
 /** A value's comparison class — two values of one class compare the way MQL's `$gte`/`$lt` do */
-function classOf(value) {
+const classOf = (value) => {
   if (value === null || value === undefined) return 'null';
   switch (typeof value) {
     case 'number':
@@ -84,28 +84,28 @@ function classOf(value) {
       // Objects, arrays, binaries, MinKey/MaxKey: no predicate is drawn on them.
       return undefined;
   }
-}
+};
 
 /** A value at a dotted path — the way an index reads it, a missing one as `null` */
-function valueAt(doc, path) {
+const valueAt = (doc, path) => {
   let value = doc;
   for (const part of path.split('.')) {
     if (value === null || typeof value !== 'object') return null;
     value = value[part];
   }
   return value === undefined ? null : value;
-}
+};
 
 /**
  * The shard-key fields of a document as a write filter — next to the
  * optimistic filter, they send the write to the one shard that owns the
  * document (and keep it off orphans). `_id` is already in that filter.
  */
-function shardKeyFilter(key, doc) {
+const shardKeyFilter = (key, doc) => {
   const filter = {};
   for (const field of Object.keys(key)) if (field !== '_id') filter[field] = valueAt(doc, field);
   return filter;
-}
+};
 
 /**
  * The shard-key guard: a transform that changes a document's shard key is a
@@ -113,7 +113,7 @@ function shardKeyFilter(key, doc) {
  * moves the document (ARCHITECTURE §6.8) — and moving documents between
  * shards is not what a background migration is for.
  */
-function shardKeyGuard(key, prev, next) {
+const shardKeyGuard = (key, prev, next) => {
   const changed = [];
   for (const field of Object.keys(key)) {
     if (!sameKeyValue(valueAt(prev, field), valueAt(next, field))) changed.push(field);
@@ -126,17 +126,17 @@ function shardKeyGuard(key, prev, next) {
       `the transform changes the shard key (${changed.join(', ')}) — change a shard key with an ` +
       'ordinary migration in a transaction, or with reshardCollection',
   };
-}
+};
 
 /**
  * Whether two shard-key values route the same: numbers by value whatever
  * their type (a Long 5 is an int 5 to a chunk, and to a hash), the rest
  * BSON-aware. A value it cannot prove equal counts as changed.
  */
-function sameKeyValue(a, b) {
+const sameKeyValue = (a, b) => {
   if (classOf(a) === 'number' && classOf(b) === 'number') return numberText(a) === numberText(b);
   return sameValue(a, b);
-}
+};
 
 const numberText = (value) =>
   typeof value === 'bigint' || value?._bsontype === 'Long' || value?._bsontype === 'Decimal128'
@@ -144,47 +144,47 @@ const numberText = (value) =>
     : String(Number(value));
 
 /** Whether a plan's epoch is not the collection's any more — resharded, or its key refined */
-function staleEpoch(planned, current) {
+const staleEpoch = (planned, current) => {
   if (!planned || !current) return false;
   if (bytesOf(planned.uuid) !== bytesOf(current.uuid)) return true;
   return JSON.stringify(planned.key) !== JSON.stringify(current.key);
-}
+};
 
 /** A uuid's bytes as hex — the same for a `Binary` and a `UUID` of them */
-function bytesOf(uuid) {
+const bytesOf = (uuid) => {
   return uuid?.buffer instanceof Uint8Array
     ? Buffer.from(uuid.buffer).toString('hex')
     : String(uuid);
-}
+};
 
 /**
  * The `_id` partitioner on a sharded collection whose key is known but whose
  * version index does not carry it: reads stay broadcast, but writes are
  * targeted and the guard holds.
  */
-function withShardKey(partitioner, key) {
+const withShardKey = (partitioner, key) => {
   return Object.freeze({
     ...partitioner,
     writeFilter: (doc) => shardKeyFilter(key, doc),
     checkTransform: (prev, next) => shardKeyGuard(key, prev, next),
   });
-}
+};
 
 /** The hashed field of a shard key, if it has one */
-function hashedFieldOf(key) {
+const hashedFieldOf = (key) => {
   for (const [field, value] of Object.entries(key)) if (value === 'hashed') return field;
   return undefined;
-}
+};
 
 /** A shard-key document with every field at MinKey (or MaxKey) */
-function edge(fields, Bound) {
+const edge = (fields, Bound) => {
   const doc = {};
   for (const field of fields) doc[field] = new Bound();
   return doc;
-}
+};
 
 /** Runs: maximal sequences of adjacent chunks owned by one shard, in key order */
-function runsOf(chunks) {
+const runsOf = (chunks) => {
   const runs = [];
   for (const chunk of chunks) {
     const last = runs[runs.length - 1];
@@ -196,13 +196,13 @@ function runsOf(chunks) {
     }
   }
   return runs;
-}
+};
 
 /**
  * At most `limit` runs: neighbours merged in even blocks. A block that spans
  * shards has no group — its lane is capped by `maxParallel` alone.
  */
-function capRuns(runs, limit) {
+const capRuns = (runs, limit) => {
   if (runs.length <= limit) return runs;
   const size = Math.ceil(runs.length / limit);
   const merged = [];
@@ -217,23 +217,23 @@ function capRuns(runs, limit) {
     merged.push({ min: runs[start].min, max: runs[end - 1].max, shard, chunks });
   }
   return merged;
-}
+};
 
 /** A hash bound as a BigInt — MinKey and MaxKey at the ends of the 64-bit space */
-function hashAt(value) {
+const hashAt = (value) => {
   if (isMinKey(value)) return HASH_MIN;
   if (isMaxKey(value)) return HASH_END;
   if (typeof value === 'bigint') return value;
   if (value?._bsontype === 'Long') return value.toBigInt();
   return BigInt(Math.trunc(Number(value)));
-}
+};
 
 /**
  * Split a run whose first key field is hashed by arithmetic: `parts` equal
  * slices of its hash range. The boundary documents carry MinKey after the
  * hash, so each slice starts before every document of its first hash.
  */
-function splitHashed(run, fields, parts) {
+const splitHashed = (run, fields, parts) => {
   const [first, ...rest] = fields;
   const lo = hashAt(run.min[first]);
   const hi = hashAt(run.max[first]);
@@ -249,7 +249,7 @@ function splitHashed(run, fields, parts) {
   }
   slices.push({ ...run, min, max: run.max });
   return slices;
-}
+};
 
 /**
  * Split a ranged run at quantiles of a sample of its shard-key tuples, sorted
@@ -263,7 +263,7 @@ function splitHashed(run, fields, parts) {
  * whole when it cannot be split (bounds of two types, a sample too small),
  * and `degraded: 'sample-timeout'` when the sample ran out of time.
  */
-async function splitSampled(collection, match, run, fields, key, parts, { total, share }) {
+const splitSampled = async (collection, match, run, fields, key, parts, { total, share }) => {
   const [first] = fields;
   const lo = run.min[first];
   const hi = run.max[first];
@@ -313,12 +313,12 @@ async function splitSampled(collection, match, run, fields, key, parts, { total,
   }
   slices.push({ ...run, min, max: run.max });
   return { pieces: slices };
-}
+};
 
-function sameTuple(a, b, fields) {
+const sameTuple = (a, b, fields) => {
   for (const field of fields) if (!sameValue(a[field], b[field])) return false;
   return true;
-}
+};
 
 /**
  * The shard-aware partitioner of one sharded collection. `options`:
@@ -327,7 +327,7 @@ function sameTuple(a, b, fields) {
  * the `0` one), and how to read the chunks (`undefined` when config may not
  * be read: the plan then samples the whole key space, ungrouped).
  */
-function createShardPartitioner({ key, field, source, readChunks, epoch }) {
+const createShardPartitioner = ({ key, field, source, readChunks, epoch }) => {
   const fields = Object.keys(key);
   const hashed = hashedFieldOf(key);
   const drain = hashed !== undefined;
@@ -336,19 +336,19 @@ function createShardPartitioner({ key, field, source, readChunks, epoch }) {
   const regions = source === 0 ? [null, 0] : [source];
 
   /** An index bound: the version region, a shard-key document, then `_id` */
-  function bound(region, tuple, id) {
+  const bound = (region, tuple, id) => {
     const doc = { [field]: region };
     for (const name of fields) doc[name] = tuple[name];
     if (trailingId) doc._id = id;
     return doc;
-  }
+  };
 
   /**
    * A predicate on the first key field that targets the owning shard — only
    * when both ends are finite and of one class: a one-sided or mixed-type
    * range would leave out every value MQL compares differently.
    */
-  function target(scope) {
+  const target = (scope) => {
     const [first] = fields;
     if (first === hashed) return undefined;
     const lo = scope.min[first];
@@ -361,9 +361,9 @@ function createShardPartitioner({ key, field, source, readChunks, epoch }) {
     let open = true;
     for (let i = 1; i < fields.length; i++) if (!isMinKey(scope.max[fields[i]])) open = false;
     return { [first]: open ? { $gte: lo, $lt: hi } : { $gte: lo, $lte: hi } };
-  }
+  };
 
-  async function plan({ collection, match, hint, maxParallel, settings, shardConcurrency = 1 }) {
+  const plan = async ({ collection, match, hint, maxParallel, settings, shardConcurrency = 1 }) => {
     const aim = targetPartitions(settings, maxParallel);
     const cap = aim * settings.minPartitionDocs;
     const count = await collection.countDocuments(match, {
@@ -442,10 +442,10 @@ function createShardPartitioner({ key, field, source, readChunks, epoch }) {
       ...(degraded !== undefined ? { degraded } : {}),
       partitions: largestFirst(slices),
     };
-  }
+  };
 
   /** The batch query of a key range: its index bounds, the targeting predicate, the cursor */
-  function batchQuery(scope, cursor, { limit, match, hint }) {
+  const batchQuery = (scope, cursor, { limit, match, hint }) => {
     const { MinKey } = loadBson();
     const region = regions[cursor?.region ?? 0];
     const conditions = [match];
@@ -472,23 +472,23 @@ function createShardPartitioner({ key, field, source, readChunks, epoch }) {
         ...READ_OPTIONS,
       },
     };
-  }
+  };
 
   /**
    * The cursor after a batch, or `null` once the range is done. `left`: the
    * ids of documents the batch read but did not rewrite — a draining range
    * steps over them from now on.
    */
-  function advance(cursor, docs, { limit, left = [] }) {
+  const advance = (cursor, docs, { limit, left = [] }) => {
     const position = cursor?.region ?? 0;
     if (docs.length < limit) {
       return position + 1 < regions.length ? { region: position + 1 } : null;
     }
     return past(cursor, docs, { left });
-  }
+  };
 
   /** The cursor just past `docs` — where a batch cut short (or a document stepped over) ends */
-  function past(cursor, docs, { left } = {}) {
+  const past = (cursor, docs, { left } = {}) => {
     const position = cursor?.region ?? 0;
     if (drain) {
       const stuck = [...(cursor?.stuck ?? []), ...(left ?? docs.map((doc) => doc._id))];
@@ -501,7 +501,7 @@ function createShardPartitioner({ key, field, source, readChunks, epoch }) {
     const tuple = { _id: last._id };
     for (const name of fields) tuple[name] = valueAt(last, name);
     return { region: position, tuple };
-  }
+  };
 
   return Object.freeze({
     id: 'shard',
@@ -516,14 +516,14 @@ function createShardPartitioner({ key, field, source, readChunks, epoch }) {
     /** A plan made for another epoch: resharded, or its key refined since */
     stale: (planned) => staleEpoch(planned, epoch ? { uuid: epoch.uuid, key } : undefined),
   });
-}
+};
 
 /** A sort on an index key — every field ascending as the index stores it */
-function sortOf(indexKey) {
+const sortOf = (indexKey) => {
   const sort = {};
   for (const [name, value] of Object.entries(indexKey)) sort[name] = value === -1 ? -1 : 1;
   return sort;
-}
+};
 
 module.exports = {
   MAX_STUCK,

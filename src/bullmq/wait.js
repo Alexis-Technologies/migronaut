@@ -27,7 +27,7 @@ const LISTENER_GRACE_MS = 1000;
  * Finished jobs must still exist in the queue when this attaches: a
  * `removeOnComplete: true` queue gives it nothing to read.
  */
-async function waitForGroup({
+const waitForGroup = async ({
   queue,
   queueEvents,
   groupId,
@@ -36,7 +36,7 @@ async function waitForGroup({
   jobs,
   converge,
   timeoutMs,
-}) {
+}) => {
   if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
     throw new ConfigInvalidError('timeoutMs must be a positive finite number', { timeoutMs });
   }
@@ -70,17 +70,17 @@ async function waitForGroup({
    * branches on (MIGRATION_BLOCKED, CHECKSUM_MISMATCH, …) instead of parsing
    * `failedReason`. Best-effort: the job may be gone, or Redis unreachable.
    */
-  async function failureCode(id) {
+  const failureCode = async (id) => {
     try {
       const code = (await budgeted(queue.getJob(id)))?.progress?.code;
       return typeof code === 'string' && code.length <= 64 ? code : undefined;
     } catch {
       return undefined;
     }
-  }
+  };
 
   /** Wait for one job; `message` and `fields` say which one in a failure */
-  async function finish(id, message, fields) {
+  const finish = async (id, message, fields) => {
     const fail = (failedReason, timedOut, code) =>
       new QueueJobFailedError(message, {
         groupId,
@@ -111,7 +111,7 @@ async function waitForGroup({
       const reason = redactOutbound(error instanceof Error ? error.message : String(error));
       throw fail(reason, false, await failureCode(id));
     }
-  }
+  };
 
   for (const { id, migration } of jobs) {
     results.push(await finish(id, `Migration job failed: ${migration}`, { migration, direction }));
@@ -119,6 +119,6 @@ async function waitForGroup({
   if (!converge) return { groupId, direction, batch, results };
   const converged = await finish(converge.id, 'Converge job failed', { kind: 'converge' });
   return { groupId, direction, batch, results, converge: converged };
-}
+};
 
 module.exports = { waitForGroup };

@@ -28,11 +28,11 @@ const SAMPLE_TIMEOUT_MS = 30_000;
 const MAX_SAMPLE = 100_000;
 
 /** The number of partitions to aim for: one per lane with no parallelism, a few per lane otherwise */
-function targetPartitions(settings, maxParallel) {
+const targetPartitions = (settings, maxParallel) => {
   if (maxParallel === 1) return 1;
   const { overPartition, maxPartitions } = settings;
   return Math.max(1, Math.min(overPartition * maxParallel, maxPartitions));
-}
+};
 
 const withHint = (hint) => (hint === undefined ? {} : { hint });
 
@@ -40,7 +40,7 @@ const withHint = (hint) => (hint === undefined ? {} : { hint });
  * The brackets the matched documents' `_id`s fall in — one indexed `findOne`
  * each (`_id` is the second key of the version index), no admin rights.
  */
-async function presentBrackets(collection, match, hint) {
+const presentBrackets = async (collection, match, hint) => {
   const found = await mapLimit(ID_BRACKETS, READ_CONCURRENCY, async (bracket) => {
     const doc = await collection.findOne(
       { $and: [match, { _id: { $type: bracket.aliases } }] },
@@ -51,7 +51,7 @@ async function presentBrackets(collection, match, hint) {
   const names = [];
   for (const name of found) if (name !== null) names.push(name);
   return names;
-}
+};
 
 /**
  * `$sample` walks a random cursor only while it asks for less than 5% of the
@@ -61,10 +61,10 @@ async function presentBrackets(collection, match, hint) {
 const RANDOM_CURSOR_SHARE = 0.04;
 
 /** How many documents a sample-first pass asks for: `size` matches' worth, within the random cursor */
-function sampleRequest(size, ratio, total) {
+const sampleRequest = (size, ratio, total) => {
   const oversampled = Math.ceil(size / Math.max(ratio, 0.01));
   return Math.max(1, Math.min(MAX_SAMPLE, oversampled, Math.floor(total * RANDOM_CURSOR_SHARE)));
-}
+};
 
 /**
  * A sorted sample of the matched `_id`s with their `$type`: the server sorts
@@ -72,7 +72,7 @@ function sampleRequest(size, ratio, total) {
  * A large match samples the collection first (a random cursor) and filters
  * after, oversampling by how little of it matches; a small one filters first.
  */
-async function sampleIds(collection, match, { size, large, hint, maxTimeMS }) {
+const sampleIds = async (collection, match, { size, large, hint, maxTimeMS }) => {
   const project = { $project: { _id: 1, t: { $type: '$_id' } } };
   const sort = { $sort: { _id: 1 } };
   const pipeline = large
@@ -86,14 +86,14 @@ async function sampleIds(collection, match, { size, large, hint, maxTimeMS }) {
       ...READ_OPTIONS,
     })
     .toArray();
-}
+};
 
 /**
  * Cut one bracket's sorted sample into `parts` ranges: boundaries at
  * `sample[floor(i·m/parts)]`, duplicates dropped, the outer ranges open-ended.
  * Returns `[{ scope, count }]` — `count` being the samples the range holds.
  */
-function sliceBracket(bracket, ids, parts) {
+const sliceBracket = (bracket, ids, parts) => {
   if (parts <= 1 || ids.length < 2) {
     return [{ scope: { kind: 'id-range', bracket }, count: ids.length }];
   }
@@ -127,7 +127,7 @@ function sliceBracket(bracket, ids, parts) {
     count: ids.length - start,
   });
   return ranges;
-}
+};
 
 /** One partition per bracket present, no bounds — the plan when sampling is not worth it */
 const perBracket = (brackets, estimate) =>
@@ -137,9 +137,9 @@ const perBracket = (brackets, estimate) =>
   }));
 
 /** Largest first: a lane starts on the work that would otherwise finish last */
-function largestFirst(partitions) {
+const largestFirst = (partitions) => {
   return partitions.sort((a, b) => b.estimate - a.estimate);
-}
+};
 
 /**
  * Plan the partitions of one pass. `ctx`:
@@ -149,7 +149,7 @@ function largestFirst(partitions) {
  * `match-first`, `sample-first`), `degraded: 'sample-timeout'` that the sample
  * ran out of time.
  */
-async function planIdRanges({ collection, match, hint, maxParallel, settings, maxTimeMS }) {
+const planIdRanges = async ({ collection, match, hint, maxParallel, settings, maxTimeMS }) => {
   const target = targetPartitions(settings, maxParallel);
   const cap = target * settings.minPartitionDocs;
   const count = await collection.countDocuments(match, {
@@ -246,31 +246,31 @@ async function planIdRanges({ collection, match, hint, maxParallel, settings, ma
     estimate,
     partitions: largestFirst(partitions),
   };
-}
+};
 
 /**
  * The batch query of an `_id`-range partition: its scope and the keyset after
  * the last id, sorted by `_id` through the version index.
  */
-function idRangeBatchQuery(scope, cursor, { limit, match, hint }) {
+const idRangeBatchQuery = (scope, cursor, { limit, match, hint }) => {
   const conditions = [match, scopeFilter(scope)];
   if (cursor?.lastId !== undefined) conditions.push(keysetFilter(cursor.lastId));
   return {
     filter: { $and: conditions },
     options: { sort: { _id: 1 }, limit, ...withHint(hint), ...READ_OPTIONS },
   };
-}
+};
 
 /** The cursor after a batch: the last id read — `null` when the partition is done */
-function idRangeAdvance(cursor, docs, { limit }) {
+const idRangeAdvance = (cursor, docs, { limit }) => {
   if (docs.length < limit) return null;
   return idRangePast(cursor, docs);
-}
+};
 
 /** The cursor just past `docs` — where a batch cut short (or a document stepped over) ends */
-function idRangePast(cursor, docs) {
+const idRangePast = (cursor, docs) => {
   return { ...cursor, lastId: docs[docs.length - 1]._id };
-}
+};
 
 const idRangePartitioner = Object.freeze({
   id: 'id',

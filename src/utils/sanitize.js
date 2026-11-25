@@ -31,9 +31,9 @@ const SGR_OR_CONTROL = /(\u001b\[[0-9;]*m)|[\u0000-\u0008\u000b-\u001f\u007f\u00
  * that should carry no styling at all (table cells, spinner text) — apply
  * before adding migronaut's own colors, so those survive.
  */
-function sanitize(text) {
+const sanitize = (text) => {
   return String(text).replace(CONTROL_CHARS, '');
-}
+};
 
 /**
  * Strip control characters while preserving SGR color sequences. For the
@@ -41,8 +41,8 @@ function sanitize(text) {
  * table) and untrusted substrings (a migration name inside a message) arrive
  * in the same string.
  */
-function sanitizeTerminal(text) {
+const sanitizeTerminal = (text) => {
   return String(text).replace(SGR_OR_CONTROL, (_match, sgr) => sgr ?? '');
-}
+};
 
 module.exports = { sanitize, sanitizeTerminal };

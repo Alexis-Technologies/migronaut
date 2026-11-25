@@ -27,7 +27,7 @@ const EXPECTED_INDEXES = [
  * needs none of the kit's private state. `deps.definitions()` (optional) gives
  * the declared collections, for the search check.
  */
-async function runAudit(deps) {
+const runAudit = async (deps) => {
   const checks = [];
   const record = (name, status, detail) => checks.push({ name, status, detail });
 
@@ -184,7 +184,7 @@ async function runAudit(deps) {
   }
 
   return auditReport(checks);
-}
+};
 
 /** Search index lists the audit reads at once */
 const AUDIT_READ_CONCURRENCY = 8;
@@ -195,7 +195,7 @@ const AUDIT_READ_CONCURRENCY = 8;
  * declared — or when the definitions do not load: converge reports that
  * itself, with every issue.
  */
-async function auditSearch(deps, db, config, record) {
+const auditSearch = async (deps, db, config, record) => {
   if (typeof deps.definitions !== 'function') return;
   let definitions;
   try {
@@ -260,10 +260,10 @@ async function auditSearch(deps, db, config, record) {
   } catch (error) {
     record('search', 'warn', `Could not check Atlas Search: ${errorText(error)}`);
   }
-}
+};
 
 /** Roll individual checks up into the report shape (one pass, both counters) */
-function auditReport(checks) {
+const auditReport = (checks) => {
   let failed = 0;
   let warnings = 0;
   for (const check of checks) {
@@ -271,6 +271,6 @@ function auditReport(checks) {
     else if (check.status === 'warn') warnings += 1;
   }
   return { ok: failed === 0, failed, warnings, checks };
-}
+};
 
 module.exports = { runAudit };

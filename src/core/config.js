@@ -65,21 +65,21 @@ const SHARD_AWARE = ['auto', 'off'];
  * tokens — the last two named after the first, so one setting moves all
  * three (and a test of "must differ" covers them together).
  */
-function backgroundCollectionNames(backgroundCollection) {
+const backgroundCollectionNames = (backgroundCollection) => {
   return {
     state: backgroundCollection,
     partitions: `${backgroundCollection}_partitions`,
     watch: `${backgroundCollection}_watch`,
   };
-}
+};
 
-function isStringList(value) {
+const isStringList = (value) => {
   if (!Array.isArray(value) || value.length === 0) return false;
   for (const item of value) {
     if (!isNonEmptyString(item)) return false;
   }
   return true;
-}
+};
 
 /**
  * Validation spec for every checked config key: predicate + failure message.
@@ -245,7 +245,7 @@ for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
  * (empty when valid). With `requireDb: false`, empty `uri`/`dbName` strings
  * are allowed — for commands that never touch the database (`init`, `create`).
  */
-function validateConfig(config, options = {}) {
+const validateConfig = (config, options = {}) => {
   const requireDb = options.requireDb ?? true;
   // An injected client already carries the connection, so a `uri` would be
   // ignored — requiring one would only be busywork.
@@ -293,14 +293,14 @@ function validateConfig(config, options = {}) {
     for (const issue of collectionsIssues(config.collections, { reserved })) issues.push(issue);
   }
   return issues;
-}
+};
 
 /**
  * Every collection migronaut keeps records in, as `[configKey, name, what?]`
  * — `what` names a collection derived from the key (the background
  * partitions and watch collections).
  */
-function bookkeepingCollections(config) {
+const bookkeepingCollections = (config) => {
   const entries = [
     ['migrationsCollection', config.migrationsCollection],
     ['lockCollection', config.lockCollection],
@@ -315,7 +315,7 @@ function bookkeepingCollections(config) {
     );
   }
   return entries;
-}
+};
 
 const TRUE_BOOLEAN_STRINGS = new Set(['true', '1', 'yes']);
 const FALSE_BOOLEAN_STRINGS = new Set(['false', '0', 'no']);
@@ -325,7 +325,7 @@ const FALSE_BOOLEAN_STRINGS = new Set(['false', '0', 'no']);
  * becoming false — a typo like MIGRONAUT_STRICT=on must never disable a safety
  * setting (fail closed).
  */
-function parseBoolean(value, name) {
+const parseBoolean = (value, name) => {
   const normalized = value.trim().toLowerCase();
   if (TRUE_BOOLEAN_STRINGS.has(normalized)) return true;
   if (FALSE_BOOLEAN_STRINGS.has(normalized)) return false;
@@ -333,7 +333,7 @@ function parseBoolean(value, name) {
     name,
     value,
   });
-}
+};
 
 /**
  * Keys never copied from parsed input: JSON.parse creates `__proto__` as an own
@@ -343,7 +343,7 @@ function parseBoolean(value, name) {
 const UNSAFE_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /** Copy only the defined keys from `source` onto `target`, mutating and returning target */
-function mergeDefined(target, source) {
+const mergeDefined = (target, source) => {
   for (const key of Object.keys(source)) {
     if (UNSAFE_MERGE_KEYS.has(key)) continue;
     const value = source[key];
@@ -352,23 +352,23 @@ function mergeDefined(target, source) {
     }
   }
   return target;
-}
+};
 
 /**
  * Parse a string into a positive integer, failing closed like `parseBoolean`.
  * A bare `Number()` turns a typo into `NaN`, which surfaces as a generic
  * validateConfig issue that never names the variable the user actually set.
  */
-function parsePositiveInteger(value, name) {
+const parsePositiveInteger = (value, name) => {
   const parsed = Number(value.trim());
   if (!isPositiveInteger(parsed)) {
     throw new ConfigInvalidError(`${name} must be a positive integer`, { name, value });
   }
   return parsed;
-}
+};
 
 /** Parse one of a fixed set of string values, failing closed on anything else */
-function parseEnum(allowed) {
+const parseEnum = (allowed) => {
   const values = new Set(allowed);
   const list = allowed.map((item) => `'${item}'`).join(' or ');
   return (value, name) => {
@@ -378,7 +378,7 @@ function parseEnum(allowed) {
     }
     return normalized;
   };
-}
+};
 
 const parseString = (value) => value;
 
@@ -454,7 +454,7 @@ const ENV_KEYS = [
 ];
 
 /** Build a partial config from the MIGRONAUT_* environment variables */
-function readEnvConfig(env = process.env) {
+const readEnvConfig = (env = process.env) => {
   const result = {};
   for (const spec of ENV_KEYS) {
     const value = env[spec.env];
@@ -462,17 +462,17 @@ function readEnvConfig(env = process.env) {
     result[spec.path] = spec.parse(value, spec.env);
   }
   return result;
-}
+};
 
 /** Returns true when `filepath` exists on disk */
-async function pathExists(filepath) {
+const pathExists = async (filepath) => {
   try {
     await fs.access(filepath);
     return true;
   } catch {
     return false;
   }
-}
+};
 
 /**
  * Locate a config file in `cwd`, returning its absolute path or null.
@@ -480,7 +480,7 @@ async function pathExists(filepath) {
  * `CONFIG_FILE_NAMES` priority order) wins — preserves the original
  * short-circuit priority without serializing the stat calls.
  */
-async function discoverConfigFile(cwd) {
+const discoverConfigFile = async (cwd) => {
   const candidates = [];
   for (const name of CONFIG_FILE_NAMES) candidates.push(path.join(cwd, name));
   const checks = [];
@@ -490,16 +490,16 @@ async function discoverConfigFile(cwd) {
     if (found[i]) return candidates[i];
   }
   return null;
-}
+};
 
 /** What loadConfigFile answers for a factory that failed in a lenient run — never a config value */
 const LENIENT_FAILURE = Symbol('lenient-failure');
 
 /** What a config file came to, in a word — `object` is the one shape that is a config */
-function shapeOf(value) {
+const shapeOf = (value) => {
   if (value === null) return 'null';
   return Array.isArray(value) ? 'array' : typeof value;
-}
+};
 
 /**
  * Load and return the config object exported by a config file.
@@ -509,7 +509,7 @@ function shapeOf(value) {
  * lets users fetch values from a secret manager. A factory that throws is
  * surfaced as a ConfigInvalidError. JSON configs are always objects.
  */
-async function loadConfigFile(filepath, lenient = false) {
+const loadConfigFile = async (filepath, lenient = false) => {
   if (filepath.endsWith('.json')) {
     const raw = await fs.readFile(filepath, 'utf8');
     try {
@@ -558,7 +558,7 @@ async function loadConfigFile(filepath, lenient = false) {
     }
   }
   return exported;
-}
+};
 
 /**
  * Resolve the final MigronautConfig by merging, in priority order:
@@ -571,7 +571,7 @@ async function loadConfigFile(filepath, lenient = false) {
  *
  * Throws ConfigInvalidError when the merged result fails validation.
  */
-async function loadConfig(options = {}) {
+const loadConfig = async (options = {}) => {
   const cwd = options.cwd ?? process.cwd();
   // The CLI's console logger, used only when neither flags nor the config file
   // supply one — so this module's own lines honor `--verbose`/`--quiet` while
@@ -715,7 +715,7 @@ async function loadConfig(options = {}) {
   }
 
   return config;
-}
+};
 
 // CONFIG_KEYS and ENV_KEYS are exported for the unit test that pins the two
 // tables against each other — internal to the config layer, not part of the

@@ -37,7 +37,7 @@ const WIDE_RANGES = [
 ];
 
 /** Terminal columns a single codepoint occupies (0 for combining marks) */
-function charWidth(codepoint) {
+const charWidth = (codepoint) => {
   // Combining marks attach to the previous glyph and take no width of their own.
   if (codepoint >= 0x0300 && codepoint <= 0x036f) return 0;
   // Variation selectors (VS15/VS16 among them) modify the preceding glyph.
@@ -46,21 +46,21 @@ function charWidth(codepoint) {
     if (codepoint >= start && codepoint <= end) return 2;
   }
   return 1;
-}
+};
 
 /** Terminal columns of already-ANSI-free text — the shared codepoint walk */
-function widthOfPlain(plain) {
+const widthOfPlain = (plain) => {
   let width = 0;
   for (const char of plain) {
     width += charWidth(char.codePointAt(0));
   }
   return width;
-}
+};
 
 /** Number of terminal columns a cell occupies, ignoring ANSI color codes */
-function visibleWidth(text) {
+const visibleWidth = (text) => {
   return widthOfPlain(stripAnsi(text));
-}
+};
 
 /**
  * Shorten `text` to at most `max` visible columns, ending with an ellipsis.
@@ -68,7 +68,7 @@ function visibleWidth(text) {
  * escape sequence in half and leave the terminal restyled past the cell.
  * One stripAnsi + one width walk per call — not one of each per check.
  */
-function truncate(text, max) {
+const truncate = (text, max) => {
   const plain = stripAnsi(text);
   if (widthOfPlain(plain) <= max) return text;
   let out = '';
@@ -80,14 +80,14 @@ function truncate(text, max) {
     width = next;
   }
   return `${out}…`;
-}
+};
 
 /** Build a horizontal border line for the given column widths */
-function borderLine(widths, left, mid, right) {
+const borderLine = (widths, left, mid, right) => {
   const segments = [];
   for (const width of widths) segments.push('─'.repeat(width + 2));
   return left + segments.join(mid) + right;
-}
+};
 
 /**
  * Render `head` + `rows` (arrays of string cells) as a box-drawing table.
@@ -97,7 +97,7 @@ function borderLine(widths, left, mid, right) {
  * (truncate() above accounts for one more scan) — stripAnsi is not free at
  * 5k rows.
  */
-function renderTable(head, rows) {
+const renderTable = (head, rows) => {
   // Measure every cell once and settle the column widths in the same pass.
   const headWidths = new Array(head.length);
   const widths = new Array(head.length);
@@ -137,18 +137,18 @@ function renderTable(head, rows) {
   }
   lines.push(borderLine(widths, '└', '┴', '┘'));
   return lines.join('\n');
-}
+};
 
 /** Render a checksum indicator cell */
-function checksumCell(colors, value) {
+const checksumCell = (colors, value) => {
   if (value === null) return colors.dim('—');
   return value ? colors.green('ok') : colors.red('MISMATCH');
-}
+};
 
 /** Render a status cell */
-function statusCell(colors, status) {
+const statusCell = (colors, status) => {
   return status === 'applied' ? colors.green('applied') : colors.yellow('pending');
-}
+};
 
 /** Longest description rendered before it is ellipsized */
 const MAX_DESCRIPTION_WIDTH = 40;
@@ -165,7 +165,7 @@ const MAX_MIGRATION_WIDTH = 60;
  * TTY the truncatable columns give way instead of every row wrapping into
  * box-drawing noise — the common case over SSH at 80 columns.
  */
-function truncationBudgets(hasDescription, fixedWidth) {
+const truncationBudgets = (hasDescription, fixedWidth) => {
   const columns = process.stdout.isTTY ? process.stdout.columns : undefined;
   if (!columns) {
     return { migration: MAX_MIGRATION_WIDTH, description: MAX_DESCRIPTION_WIDTH };
@@ -180,13 +180,13 @@ function truncationBudgets(hasDescription, fixedWidth) {
   const migration = Math.max(12, Math.min(MAX_MIGRATION_WIDTH, Math.ceil(available * 0.6)));
   const description = Math.max(8, Math.min(MAX_DESCRIPTION_WIDTH, available - migration));
   return { migration, description };
-}
+};
 
 /**
  * Render status rows as a human-readable table string. The Description column
  * appears only when at least one row has one, so the common case stays narrow.
  */
-function renderStatusTable(rows) {
+const renderStatusTable = (rows) => {
   const colors = palette();
   let hasDescription = false;
   for (const row of rows) {
@@ -216,23 +216,23 @@ function renderStatusTable(rows) {
     cells.push(cell);
   }
   return renderTable(head, cells);
-}
+};
 
 /** Shared render for row-listing commands: the table, or a friendly empty line */
-function renderRowsOrEmpty(rows, { logger }) {
+const renderRowsOrEmpty = (rows, { logger }) => {
   if (rows.length === 0) logger.info('No migrations found');
   else logger.info(renderStatusTable(rows));
-}
+};
 
 /** Render the checksum-source cell for an import row */
-function checksumSourceCell(colors, source) {
+const checksumSourceCell = (colors, source) => {
   if (source === 'recomputed') return colors.green('recomputed');
   if (source === 'reused') return colors.cyan('reused');
   return colors.red('missing');
-}
+};
 
 /** Render mapped import rows as a human-readable table string */
-function renderImportTable(rows) {
+const renderImportTable = (rows) => {
   const colors = palette();
   // Batch(5) + Applied At(19) + Checksum(10) plus the 4-column frame.
   const budgets = truncationBudgets(false, 34 + 4 * 3 + 1);
@@ -247,7 +247,7 @@ function renderImportTable(rows) {
     ]);
   }
   return renderTable(head, cells);
-}
+};
 
 /** Longest index or collection name rendered before it is ellipsized */
 const MAX_NAME_WIDTH = 48;
@@ -256,7 +256,7 @@ const MAX_NAME_WIDTH = 48;
 const MAX_DETAIL_WIDTH = 72;
 
 /** Render a converge action cell: what changes stands out, what does not recedes */
-function convergeActionCell(colors, action) {
+const convergeActionCell = (colors, action) => {
   switch (action) {
     case 'create':
       return colors.green(action);
@@ -270,10 +270,10 @@ function convergeActionCell(colors, action) {
     default:
       return colors.dim(action);
   }
-}
+};
 
 /** Where the server is with a search index, when it is not simply serving it */
-function searchBuildDetail(build) {
+const searchBuildDetail = (build) => {
   if (build === undefined) return '';
   switch (searchBuildState(build)) {
     case 'serving':
@@ -287,15 +287,15 @@ function searchBuildDetail(build) {
     default:
       return build.status;
   }
-}
+};
 
 /** Whether a search index row is one worth showing even when nothing changes: not serving yet */
-function searchNotServing(action) {
+const searchNotServing = (action) => {
   return action.target === 'searchIndex' && searchBuildDetail(action.build) !== '';
-}
+};
 
 /** The detail column: what differs, or why the row is what it is — and a search index's build */
-function convergeDetail(action) {
+const convergeDetail = (action) => {
   if (action.reason === 'name' && action.liveName !== undefined) {
     return `renamed from "${action.liveName}"`;
   }
@@ -309,14 +309,14 @@ function convergeDetail(action) {
   const build = searchBuildDetail(action.build);
   if (build) parts.push(build);
   return parts.join(' · ');
-}
+};
 
 /**
  * Render a converge plan (or result) as a table plus a one-line summary.
  * Rows that need nothing are folded into the summary unless `all` — a large
  * schema would otherwise bury its two changes under fifty "unchanged" lines.
  */
-function renderConvergeTable(result, { all = false } = {}) {
+const renderConvergeTable = (result, { all = false } = {}) => {
   const colors = palette();
   const cells = [];
   const counts = {
@@ -386,13 +386,13 @@ function renderConvergeTable(result, { all = false } = {}) {
   const line = parts.join(' · ');
   if (cells.length === 0) return line;
   return `${renderTable(['Collection', 'Target', 'Index', 'Action', 'Detail'], cells)}\n${line}`;
-}
+};
 
 /**
  * Render the converge history: one line per converge that changed something
  * or failed, newest first — the audit view (`migronaut converge --history`).
  */
-function renderConvergeHistory(entries) {
+const renderConvergeHistory = (entries) => {
   if (entries.length === 0) return 'No converge has changed anything yet';
   const colors = palette();
   const cells = entries.map((entry) => [
@@ -407,7 +407,7 @@ function renderConvergeHistory(entries) {
     ),
   ]);
   return renderTable(['When', 'Trigger', 'Result', 'Changes', 'Who', 'Why'], cells);
-}
+};
 
 module.exports = {
   charWidth,

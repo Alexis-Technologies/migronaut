@@ -3,7 +3,7 @@ const { defineCommand, EXIT_CODES } = require('../shared.js');
 const { renderRowsOrEmpty } = require('../table.js');
 
 /** Register the `status` command */
-function registerStatus(program) {
+const registerStatus = (program) => {
   defineCommand(program, {
     name: 'status',
     description: 'Show the full migration status table',
@@ -47,6 +47,6 @@ function registerStatus(program) {
       }
     },
   });
-}
+};
 
 module.exports = { registerStatus };

@@ -13,12 +13,12 @@ const TS_EXTENSIONS = new Set(['.ts', '.mts', '.cts']);
 let reloadCounter = 0;
 
 /** Narrow an unknown value to a function */
-function isFunction(value) {
+const isFunction = (value) => {
   return typeof value === 'function';
-}
+};
 
 /** True when an import failed because Node cannot load the file's extension */
-function isUnknownExtensionError(error) {
+const isUnknownExtensionError = (error) => {
   if (typeof error !== 'object' || error === null) {
     return false;
   }
@@ -27,15 +27,15 @@ function isUnknownExtensionError(error) {
     code === 'ERR_UNKNOWN_FILE_EXTENSION' ||
     (typeof message === 'string' && message.includes('Unknown file extension'))
   );
-}
+};
 
 /** True when type stripping refused non-erasable syntax (enum, namespace, …) */
-function isUnsupportedTsSyntaxError(error) {
+const isUnsupportedTsSyntaxError = (error) => {
   if (typeof error !== 'object' || error === null) {
     return false;
   }
   return error.code === 'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX';
-}
+};
 
 /**
  * An actionable message for a dynamic-import failure whose cause is a
@@ -50,7 +50,7 @@ function isUnsupportedTsSyntaxError(error) {
  * `--no-experimental-strip-types`), and non-erasable syntax such as `enum` or
  * `namespace` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`).
  */
-function tsLoadMessageOrNull(filepath, error, noun) {
+const tsLoadMessageOrNull = (filepath, error, noun) => {
   const ext = path.extname(filepath).toLowerCase();
   if (!TS_EXTENSIONS.has(ext)) {
     return null;
@@ -63,14 +63,14 @@ function tsLoadMessageOrNull(filepath, error, noun) {
     return `Cannot load TypeScript ${noun} "${name}" — it uses syntax Node's type stripping cannot erase (e.g. enum, namespace). Rewrite with erasable-only syntax, or run migronaut under a TypeScript loader (e.g. tsx).`;
   }
   return null;
-}
+};
 
 /**
  * Translate a dynamic-import failure of a migration into a clear
  * MigrationInvalidExportError (see {@link tsLoadMessageOrNull}), or return
  * null to let the original error propagate.
  */
-function tsLoadErrorOrNull(filepath, error) {
+const tsLoadErrorOrNull = (filepath, error) => {
   const message = tsLoadMessageOrNull(filepath, error, 'migration');
   if (message === null) {
     return null;
@@ -80,7 +80,7 @@ function tsLoadErrorOrNull(filepath, error) {
     { filepath, cause: errorText(error) },
     { cause: error },
   );
-}
+};
 
 /**
  * Import a user-authored module (a migration, a collection definition).
@@ -104,7 +104,7 @@ function tsLoadErrorOrNull(filepath, error) {
  * case on a case-insensitive disk), which is not the key the cache holds.
  * Like the query string, this reloads the file itself, not what it requires.
  */
-async function importUserFile(filepath, options = {}) {
+const importUserFile = async (filepath, options = {}) => {
   const url = pathToFileURL(filepath).href;
   if (!options.reload) return import(url);
   delete require.cache[filepath];
@@ -116,7 +116,7 @@ async function importUserFile(filepath, options = {}) {
   }
   if (resolved !== undefined) delete require.cache[resolved];
   return import(`${url}?migronaut=${++reloadCounter}`);
-}
+};
 
 /**
  * Import a migration file: its module, resolved — the default export of a
@@ -125,7 +125,7 @@ async function importUserFile(filepath, options = {}) {
  * @throws {MigrationFileNotFoundError} when the file does not exist
  * @throws {MigrationInvalidExportError} when TypeScript cannot be loaded
  */
-async function importMigrationModule(filepath, options = {}) {
+const importMigrationModule = async (filepath, options = {}) => {
   try {
     await fs.access(filepath);
   } catch {
@@ -144,10 +144,10 @@ async function importMigrationModule(filepath, options = {}) {
   }
   // `mod.default ?? mod` handles the CommonJS default-export case
   return imported.default ?? imported;
-}
+};
 
 /** The `requires` export, validated against the file's own name */
-function readRequires(resolved, filepath) {
+const readRequires = (resolved, filepath) => {
   if (resolved.requires === undefined) return {};
   const issues = requiresIssues(resolved.requires, path.basename(filepath));
   if (issues.length > 0) {
@@ -157,7 +157,7 @@ function readRequires(resolved, filepath) {
     });
   }
   return { requires: [...resolved.requires] };
-}
+};
 
 /**
  * What a migration module exports, validated: a regular migration
@@ -169,7 +169,7 @@ function readRequires(resolved, filepath) {
  *
  * @throws {MigrationInvalidExportError}
  */
-function resolveMigrationExports(resolved, filepath) {
+const resolveMigrationExports = (resolved, filepath) => {
   if (resolved.background !== undefined) {
     if (resolved.up !== undefined || resolved.down !== undefined) {
       throw new MigrationInvalidExportError(
@@ -206,7 +206,7 @@ function resolveMigrationExports(resolved, filepath) {
   Object.assign(migration, readRequires(resolved, filepath));
 
   return migration;
-}
+};
 
 /**
  * Dynamically load a migration file and validate its exports.
@@ -221,13 +221,13 @@ function resolveMigrationExports(resolved, filepath) {
  * @throws {MigrationFileNotFoundError} when the file does not exist
  * @throws {MigrationInvalidExportError} when up/down are not both functions
  */
-async function loadMigrationFile(filepath, options = {}) {
+const loadMigrationFile = async (filepath, options = {}) => {
   const migration = resolveMigrationExports(
     await importMigrationModule(filepath, options),
     filepath,
   );
   return migration;
-}
+};
 
 module.exports = {
   importMigrationModule,

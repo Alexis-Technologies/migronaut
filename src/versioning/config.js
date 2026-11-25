@@ -30,7 +30,7 @@ const MAX_FIELD_NAME = 64;
  * writes it with `$set`/`$inc`, so a dot would address a nested path and a
  * leading `$` an operator; `_id` is immutable.
  */
-function fieldNameIssue(name) {
+const fieldNameIssue = (name) => {
   if (typeof name !== 'string' || name.length === 0) return 'must be a non-empty string';
   if (name.length > MAX_FIELD_NAME) return `must be at most ${MAX_FIELD_NAME} characters`;
   if (name.startsWith('$')) return "must not start with '$'";
@@ -40,7 +40,7 @@ function fieldNameIssue(name) {
   // As a JavaScript key it names the prototype: every write of it would be lost.
   if (name === '__proto__') return 'must not be __proto__';
   return null;
-}
+};
 
 const isCount = (value, floor) => Number.isSafeInteger(value) && value >= floor;
 
@@ -49,7 +49,7 @@ const isCount = (value, floor) => Number.isSafeInteger(value) && value >= floor;
  * when valid). `path` is where it sits — `collections[2].versioning`,
  * `orders.ts: versioning`.
  */
-function versioningIssues(value, path = 'versioning') {
+const versioningIssues = (value, path = 'versioning') => {
   if (!isPlainObject(value)) {
     return [
       {
@@ -97,7 +97,7 @@ function versioningIssues(value, path = 'versioning') {
   }
   if (index !== undefined && typeof index !== 'boolean') report('index', 'must be a boolean');
   return issues;
-}
+};
 
 /**
  * A validated `versioning` value with every default filled in, frozen.
@@ -105,7 +105,7 @@ function versioningIssues(value, path = 'versioning') {
  *
  * @throws {ConfigInvalidError} with every issue in `context.issues`
  */
-function resolveVersioning(value, { path = 'versioning' } = {}) {
+const resolveVersioning = (value, { path = 'versioning' } = {}) => {
   const issues = versioningIssues(value, path);
   if (issues.length > 0) {
     throw new ConfigInvalidError(`Invalid ${path}: ${issues[0].path} ${issues[0].message}`, {
@@ -121,14 +121,14 @@ function resolveVersioning(value, { path = 'versioning' } = {}) {
     revisionField: revision ? (value.revisionField ?? VERSIONING_DEFAULTS.revisionField) : null,
     index: value.index ?? VERSIONING_DEFAULTS.index,
   });
-}
+};
 
 /**
  * The resolved versioning of `collection` among `definitions` — an array of
  * definitions (each with `name`) or a `{ name: definition }` map — or `null`
  * when it is not declared or not versioned.
  */
-function versioningOf(definitions, collection) {
+const versioningOf = (definitions, collection) => {
   let definition;
   if (Array.isArray(definitions)) {
     for (const candidate of definitions) {
@@ -142,7 +142,7 @@ function versioningOf(definitions, collection) {
   }
   if (!isPlainObject(definition) || definition.versioning === undefined) return null;
   return resolveVersioning(definition.versioning, { path: `${collection}.versioning` });
-}
+};
 
 module.exports = {
   MAX_FIELD_NAME,

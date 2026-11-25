@@ -33,14 +33,14 @@ const errorText = (error) =>
  * thrown message). What the changelog's failure trace and a failed span's
  * status message both carry.
  */
-function errorWithCause(error) {
+const errorWithCause = (error) => {
   const message = errorText(error);
   const cause =
     error instanceof MigronautError && typeof error.context?.cause === 'string'
       ? errorText(error.context.cause)
       : undefined;
   return cause ? `${message} — ${cause}` : message;
-}
+};
 
 /**
  * {@link errorText} for an error about the application's data — a background

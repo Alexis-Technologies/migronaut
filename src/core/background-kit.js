@@ -73,11 +73,11 @@ const irreversibleBackground = (name) =>
  * run is the deploy — so it fails instead. `job`: the queue job that run works
  * for, named on every lane's lines and `migration:log` events.
  */
-async function drive(
+const drive = async (
   host,
   name,
   { signal, sliceMs, untilDone = true, concurrency = 1, inline, job },
-) {
+) => {
   const jobOption = job ? { job } : {};
   const deps = host.deps(host.newId(), jobOption);
   const stopped = () =>
@@ -116,10 +116,10 @@ async function drive(
   const state = await host.registered(name);
   if (state.status === 'failed') throw failedError(state);
   return host.status(name);
-}
+};
 
 /** `count` lanes at once: the first that fails for good stops the others, and its error is thrown */
-async function lanes(host, name, count, { signal, sliceMs, untilDone, jobOption }) {
+const lanes = async (host, name, count, { signal, sliceMs, untilDone, jobOption }) => {
   const stop = new AbortController();
   const laneSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
   const running = [];
@@ -133,7 +133,7 @@ async function lanes(host, name, count, { signal, sliceMs, untilDone, jobOption 
   }
   const settled = await Promise.allSettled(running);
   for (const result of settled) if (result.status === 'rejected') throw result.reason;
-}
+};
 
 /**
  * One lane: slices until nothing is left to claim (or one, without
@@ -142,7 +142,7 @@ async function lanes(host, name, count, { signal, sliceMs, untilDone, jobOption 
  * retry can fix — the file changed or is gone, the deployment cannot run it
  * — ends the lane, and so do `MAX_LANE_FAILURES` in a row.
  */
-async function lane(host, name, { signal, sliceMs, untilDone, jobOption = {} }) {
+const lane = async (host, name, { signal, sliceMs, untilDone, jobOption = {} }) => {
   let failures = 0;
   for (;;) {
     if (signal?.aborted) return;
@@ -179,7 +179,7 @@ async function lane(host, name, { signal, sliceMs, untilDone, jobOption = {} }) 
     }
     return;
   }
-}
+};
 
 // ─── down, and requires ───────────────────────────────────────────────────────
 
@@ -189,10 +189,10 @@ async function lane(host, name, { signal, sliceMs, untilDone, jobOption = {} }) 
  * migration (which says how many it rewrote only when it wants to), any
  * step checkpointed at all.
  */
-async function hasRewritten(store, name, spec) {
+const hasRewritten = async (store, name, spec) => {
   const { migrated, batches } = await store.progress(name);
   return spec.mode === 'step' ? batches > 0 : migrated > 0;
-}
+};
 
 /**
  * `down` of a background migration without a revert: withdrawn — but only
@@ -201,7 +201,7 @@ async function hasRewritten(store, name, spec) {
  * delete. Otherwise the lanes are paused and waited for first, so the check
  * sees every batch they wrote; a refused `down` resumes it.
  */
-async function withdraw(host, name, spec, session) {
+const withdraw = async (host, name, spec, session) => {
   const { store } = host;
   const withdrawn = { status: 'withdrawn', direction: 'forward' };
   const state = await store.get(name);
@@ -231,7 +231,7 @@ async function withdraw(host, name, spec, session) {
   }
   await store.remove(name, { session });
   return withdrawn;
-}
+};
 
 /**
  * The background migrations of `requires` not done yet:
@@ -239,7 +239,7 @@ async function withdraw(host, name, spec, session) {
  * and, unless this is only a preview (`reopen: false`), reopened when old
  * shapes reappeared.
  */
-async function unsatisfied(host, requires, { reopen = true } = {}) {
+const unsatisfied = async (host, requires, { reopen = true } = {}) => {
   const deps = host.deps();
   const waiting = [];
   for (const row of await requiresStatus(deps, requires)) {
@@ -258,12 +258,12 @@ async function unsatisfied(host, requires, { reopen = true } = {}) {
     }
   }
   return waiting;
-}
+};
 
 // ─── What it says ─────────────────────────────────────────────────────────────
 
 /** Who drove it last — and a queue chain's round */
-function coordinatorView(state) {
+const coordinatorView = (state) => {
   return state.coordinator
     ? {
         coordinator: {
@@ -273,10 +273,10 @@ function coordinatorView(state) {
         },
       }
     : {};
-}
+};
 
 /** How a background migration's plan used the shard key — for its status */
-function shardingView(sharding) {
+const shardingView = (sharding) => {
   let hashed = false;
   for (const value of Object.values(sharding.key ?? {})) if (value === 'hashed') hashed = true;
   return {
@@ -284,10 +284,10 @@ function shardingView(sharding) {
     ...(sharding.key !== undefined ? { shardKey: sharding.key, hashed } : {}),
     ...(sharding.groups !== undefined ? { groups: sharding.groups } : {}),
   };
-}
+};
 
 /** The public view of a state document, with its current plan's partition counts */
-async function stateView(store, state) {
+const stateView = async (store, state) => {
   const spec = state.spec ?? {};
   const counts =
     state.plan !== undefined
@@ -337,10 +337,10 @@ async function stateView(store, state) {
     ...(state.description ? { description: state.description } : {}),
     ...(state.previous ? { previous: { ...state.previous } } : {}),
   };
-}
+};
 
 /** A partition as `backgroundPartitions` shows it — its lease holder, never the token */
-function partitionView(partition) {
+const partitionView = (partition) => {
   return {
     id: String(partition._id),
     generation: partition.generation,
@@ -367,14 +367,14 @@ function partitionView(partition) {
     failures: partition.failures ?? 0,
     ...(partition.lastError ? { lastError: partition.lastError } : {}),
   };
-}
+};
 
 /**
  * The background migrations with work to do — blocked ones whose requires
  * are met are unblocked on the way — with what a heal needs to tell a
  * stalled one (live leases read for all of them at once).
  */
-async function runnable(host) {
+const runnable = async (host) => {
   const { store } = host;
   const deps = host.deps();
   const states = [];
@@ -400,10 +400,10 @@ async function runnable(host) {
     });
   }
   return rows;
-}
+};
 
 /** A drift watcher's stored document as its status row */
-function watchRow(row) {
+const watchRow = (row) => {
   return {
     collection: row._id,
     state: row.state ?? 'starting',
@@ -416,7 +416,7 @@ function watchRow(row) {
     ...(row.lastEventAt ? { lastEventAt: row.lastEventAt } : {}),
     updatedAt: row.updatedAt,
   };
-}
+};
 
 module.exports = {
   STREAMING_FRESH_MS,

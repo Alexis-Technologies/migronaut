@@ -19,7 +19,7 @@ const UNSAFE_ENV_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
  * silent no-op. Parsing is `util.parseEnv` — always present on the supported
  * Node range (added in 20.12; engines require ≥22.18).
  */
-async function applyEnvFile(filePath, env = process.env) {
+const applyEnvFile = async (filePath, env = process.env) => {
   // stat before read: `--env-file /dev/zero` (or a runaway file) must fail
   // with a typed error, not hang the process reading forever.
   let stats;
@@ -46,6 +46,6 @@ async function applyEnvFile(filePath, env = process.env) {
     if (UNSAFE_ENV_KEYS.has(key)) continue;
     if (env[key] === undefined) env[key] = parsed[key];
   }
-}
+};
 
 module.exports = { applyEnvFile };

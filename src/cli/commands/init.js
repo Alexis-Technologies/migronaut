@@ -4,7 +4,7 @@ const { defineCommand } = require('../shared.js');
 const FORMATS = new Set(['js', 'ts', 'json']);
 
 /** Register the `init` command */
-function registerInit(program) {
+const registerInit = (program) => {
   defineCommand(program, {
     name: 'init',
     description:
@@ -52,13 +52,13 @@ function registerInit(program) {
       });
     },
   });
-}
+};
 
 /** Explicit --format wins; --ts/--js are shorthands; the default is js */
-function resolveFormat(opts) {
+const resolveFormat = (opts) => {
   if (opts.format !== undefined) return opts.format;
   if (opts.ts) return 'ts';
   return 'js';
-}
+};
 
 module.exports = { registerInit };

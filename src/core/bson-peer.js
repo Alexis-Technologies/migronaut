@@ -9,10 +9,10 @@
  */
 let bson;
 
-function loadBson() {
+const loadBson = () => {
   bson ??= require('mongodb').BSON;
   return bson;
-}
+};
 
 /** The size of `value` as a BSON document, in bytes */
 const bsonSize = (value) => loadBson().calculateObjectSize(value);

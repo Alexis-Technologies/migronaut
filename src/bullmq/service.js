@@ -67,7 +67,7 @@ const BACKGROUND_KEYS = new Set([
  * The `background` option, checked and filled in — or undefined when the
  * queue has no background side. `true` takes every default.
  */
-function resolveBackground(background, { queueName, QueueSource }) {
+const resolveBackground = (background, { queueName, QueueSource }) => {
   if (background === undefined || background === false) return undefined;
   const options = background === true ? {} : background;
   if (!isObjectLike(options)) {
@@ -127,25 +127,25 @@ function resolveBackground(background, { queueName, QueueSource }) {
     verifyIntervalMs,
     verifyIntervalGiven: options.verifyIntervalMs !== undefined,
   };
-}
+};
 
-function assertBackgroundConcurrency(concurrency) {
+const assertBackgroundConcurrency = (concurrency) => {
   if (concurrency !== undefined && (!Number.isSafeInteger(concurrency) || concurrency < 1)) {
     throw new ConfigInvalidError('background worker concurrency must be a positive integer', {
       concurrency,
     });
   }
-}
+};
 
 const isClass = (value) => typeof value === 'function';
 
 /** A short string field of a job read back from Redis, or undefined — for log fields only */
-function shortString(value) {
+const shortString = (value) => {
   return typeof value === 'string' && value.length > 0 && value.length <= 255 ? value : undefined;
-}
+};
 
 /** What a failed job's log line can say about it, from the job and from the error */
-function failedJobFields(job, error) {
+const failedJobFields = (job, error) => {
   const data = job?.data ?? {};
   const fields = {
     ...(job?.id !== undefined ? { jobId: String(job.id) } : {}),
@@ -157,16 +157,16 @@ function failedJobFields(job, error) {
   };
   for (const key of Object.keys(fields)) if (fields[key] === undefined) delete fields[key];
   return fields;
-}
+};
 
-function assertName(value, name) {
+const assertName = (value, name) => {
   // BullMQ builds its Redis keys by joining with `:` and rejects it in names.
   if (typeof value !== 'string' || value.length === 0 || value.includes(':')) {
     throw new ConfigInvalidError(`${name} must be a non-empty string without ':'`, {
       [name]: value,
     });
   }
-}
+};
 
 /** How long a `close({ force: true })` on top of a close under way still gives it */
 const FORCE_CLOSE_GRACE_MS = 1_000;
@@ -1128,8 +1128,8 @@ class MigrationQueue {
   }
 }
 
-function createMigrationQueue(options) {
+const createMigrationQueue = (options) => {
   return new MigrationQueue(options);
-}
+};
 
 module.exports = { MigrationQueue, createMigrationQueue };

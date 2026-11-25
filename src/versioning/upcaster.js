@@ -20,12 +20,12 @@ const { isPlainObject, unwrapDefinition } = require('./internal.js');
 
 const NEWER = new Set(['throw', 'keep']);
 
-function shapeError(message, context) {
+const shapeError = (message, context) => {
   return new ShapeVersionError(message, context);
-}
+};
 
 /** The steps, validated against the versioning: `Map<from, fn>` */
-function readSteps(steps, versioning, label) {
+const readSteps = (steps, versioning, label) => {
   if (!isPlainObject(steps)) {
     throw new ConfigInvalidError(`${label}: steps must be an object of { [fromVersion]: fn }`);
   }
@@ -60,10 +60,10 @@ function readSteps(steps, versioning, label) {
     }
   }
   return map;
-}
+};
 
 /** Run one step on `doc` (already a copy) and stamp the version it reaches */
-function runStep(step, doc, from, versioning, context) {
+const runStep = (step, doc, from, versioning, context) => {
   const next = step(doc);
   if (next !== null && typeof next === 'object' && typeof next.then === 'function') {
     throw shapeError(`The step from version ${from} returned a promise — steps are synchronous`, {
@@ -81,13 +81,13 @@ function runStep(step, doc, from, versioning, context) {
   }
   // A copy, not an assignment: a step may return a frozen object.
   return { ...next, [versioning.field]: from + 1 };
-}
+};
 
 /**
  * An upcaster over already-resolved versioning (`defineShapes` passes its
  * own). `collection` names it in errors.
  */
-function createUpcaster(versioning, steps, { newer = 'throw', collection } = {}) {
+const createUpcaster = (versioning, steps, { newer = 'throw', collection } = {}) => {
   const label = collection ? `upcaster(${collection})` : 'upcaster';
   if (!NEWER.has(newer)) {
     throw new ConfigInvalidError(`${label}: newer must be 'throw' or 'keep'`, { newer });
@@ -190,7 +190,7 @@ function createUpcaster(versioning, steps, { newer = 'throw', collection } = {})
   };
 
   return Object.freeze({ current, min, field, upcast, needsUpcast, step });
-}
+};
 
 /**
  * An upcaster for a collection definition (`{ versioning }`, as a
@@ -199,7 +199,7 @@ function createUpcaster(versioning, steps, { newer = 'throw', collection } = {})
  * @throws {ConfigInvalidError} when a step is missing between `min` and
  *   `current`, goes past `current`, is async, or is not a function
  */
-function upcaster(definitionOrModule, steps, options = {}) {
+const upcaster = (definitionOrModule, steps, options = {}) => {
   const definition = unwrapDefinition(definitionOrModule);
   if (!isPlainObject(definition)) {
     throw new ConfigInvalidError('upcaster takes a collection definition or its versioning');
@@ -208,6 +208,6 @@ function upcaster(definitionOrModule, steps, options = {}) {
   const versioning = resolveVersioning(source);
   const collection = typeof definition.name === 'string' ? definition.name : undefined;
   return createUpcaster(versioning, steps, { collection, ...options });
-}
+};
 
 module.exports = { createUpcaster, upcaster };

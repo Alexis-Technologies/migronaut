@@ -90,7 +90,7 @@ const PROCESSOR_KEYS = new Set([
   'userlandLogRows',
 ]);
 
-function resolveBackgroundProcessorOptions(options) {
+const resolveBackgroundProcessorOptions = (options) => {
   if (!isObjectLike(options)) {
     throw new ConfigInvalidError('createBackgroundProcessor options must be an object');
   }
@@ -148,13 +148,13 @@ function resolveBackgroundProcessorOptions(options) {
   assertBackgroundJobOptions(jobOptions);
   assertUserlandLogRows(userlandLogRows);
   return { sliceMs, children, pollIntervalMs, stallMs, maxLaneRetries, userlandLogRows };
-}
+};
 
 /**
  * Build the function a BullMQ Worker on the background queue runs. Declared
  * with exactly three parameters, so BullMQ hands it the cancellation signal.
  */
-function createBackgroundProcessor(options = {}, internals = {}) {
+const createBackgroundProcessor = (options = {}, internals = {}) => {
   const settings = resolveBackgroundProcessorOptions(options);
   const writeWaitMs = internals.writeWaitMs ?? JOB_WRITE_WAIT_MS;
   const { kit: injectedKit, config, kitOptions, queue, jobOptions } = options;
@@ -176,7 +176,7 @@ function createBackgroundProcessor(options = {}, internals = {}) {
    * waited for longer than `writeWaitMs` — with Redis away it would not
    * settle at all, and a lane must not hold its lease for a log row.
    */
-  async function write(action) {
+  const write = async (action) => {
     let pending;
     try {
       pending = Promise.resolve(action());
@@ -185,7 +185,7 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       return;
     }
     await settledWithin(pending, writeWaitMs);
-  }
+  };
 
   /** A log row on the job */
   const log = (job, row) => write(() => job.log?.(redactOutbound(row)));
@@ -198,7 +198,7 @@ function createBackgroundProcessor(options = {}, internals = {}) {
    * then moved to delayed — which BullMQ learns from the error's name. Outside
    * a Worker (no token) there is nothing to move: the outcome is returned.
    */
-  async function later(ctx, delayMs, result, data) {
+  const later = async (ctx, delayMs, result, data) => {
     const { job, token } = ctx;
     if (typeof job.moveToDelayed !== 'function' || typeof token !== 'string') {
       if (!warnedUnmovable) {
@@ -215,21 +215,21 @@ function createBackgroundProcessor(options = {}, internals = {}) {
     if (data !== undefined) await job.updateData(data);
     await job.moveToDelayed(Date.now() + Math.max(0, delayMs), token);
     throw moved(DELAYED_ERROR_NAME);
-  }
+  };
 
   /** A row on a lane's job, tracked so the slice's end can wait for it */
-  function laneLog(lane, row) {
+  const laneLog = (lane, row) => {
     const pending = log(lane.job, row);
     lane.writes.add(pending);
     pending.finally(() => lane.writes.delete(pending));
-  }
+  };
 
   /**
    * A lane's userland lines, into its own job's log — never allowed to fail
    * it. A line with a group is a lane a migration job drives inline: its job
    * is on the other queue, whatever its id.
    */
-  function onUserland(event) {
+  const onUserland = (event) => {
     if (event?.kind !== 'background' || event.jobId === undefined) return;
     if (event.groupId !== undefined) return;
     const lane = lanes.get(event.jobId);
@@ -240,7 +240,7 @@ function createBackgroundProcessor(options = {}, internals = {}) {
     } else {
       lane.dropped += 1;
     }
-  }
+  };
   if (typeof kit.on === 'function') kit.on('migration:log', onUserland);
 
   /**
@@ -248,7 +248,7 @@ function createBackgroundProcessor(options = {}, internals = {}) {
    * events, and its userland lines reach the job's log until the slice ends —
    * drained before the job moves on, so none lands after it.
    */
-  async function asLane(job, fn) {
+  const asLane = async (job, fn) => {
     const ref = jobRefOf(job);
     if (ref === undefined) {
       kit.logger.debug(
@@ -269,10 +269,10 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       // Each write is bounded on its own (`write`), so this drain is too.
       await Promise.allSettled([...lane.writes]);
     }
-  }
+  };
 
   /** Heal from MongoDB: a coordinator for every background migration with work to do */
-  async function heal(reason) {
+  const heal = async (reason) => {
     try {
       return await enqueueBackground(queue, kit, {
         stallMs: settings.stallMs,
@@ -284,30 +284,30 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       });
       return { jobs: [] };
     }
-  }
+  };
 
   /** Whether this coordinator can spawn its lanes as children and wait for them */
-  function childrenFor(ctx) {
+  const childrenFor = (ctx) => {
     return (
       settings.children !== false &&
       typeof parentQueueOf(ctx.job) === 'string' &&
       typeof ctx.job.moveToWaitingChildren === 'function' &&
       typeof ctx.token === 'string'
     );
-  }
+  };
 
   /**
    * Where a coordinator job lives, for its lanes' `parent` — the job's own
    * queue, which is the one a lane must wake, whatever `queue` this
    * processor was handed to add the lanes to.
    */
-  function parentQueueOf(job) {
+  const parentQueueOf = (job) => {
     return typeof job.queueQualifiedName === 'string'
       ? job.queueQualifiedName
       : queue.qualifiedName;
-  }
+  };
 
-  async function runCoordinator(ctx, data) {
+  const runCoordinator = async (ctx, data) => {
     const { job } = ctx;
     const name = data.migration;
     const base = { kind: JOB_NAMES.BACKGROUND, migration: name };
@@ -376,9 +376,9 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       if (await job.moveToWaitingChildren(ctx.token)) throw moved(WAITING_CHILDREN_ERROR_NAME);
       // Every lane finished before this job could wait for them: look again now.
     }
-  }
+  };
 
-  async function addLanes(ctx, { name, answer, round, spawn, parent }) {
+  const addLanes = async (ctx, { name, answer, round, spawn, parent }) => {
     const specs = [];
     for (let lane = 0; lane < answer.lanes; lane++) {
       specs.push(
@@ -399,9 +399,9 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       ctx.job,
       `⇉ ${name}: ${specs.length} lane(s) for generation ${answer.generation} (round ${round})`,
     );
-  }
+  };
 
-  async function runLane(ctx, data) {
+  const runLane = async (ctx, data) => {
     const { job } = ctx;
     const name = data.migration;
     const base = { kind: JOB_NAMES.BACKGROUND_LANE, migration: name };
@@ -470,9 +470,9 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       default:
         return { ...base, outcome: slice.outcome, counters: slice.counters };
     }
-  }
+  };
 
-  async function runVerify() {
+  const runVerify = async () => {
     const result = await kit.verifyBackground();
     const healed = await heal('verify');
     return {
@@ -482,9 +482,9 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       drift: result.drift,
       enqueued: healed.jobs.length,
     };
-  }
+  };
 
-  async function handle(job, token, signal) {
+  const handle = async (job, token, signal) => {
     const signals = [shutdownController.signal];
     if (signal) signals.push(signal);
     const ctx = { job, token, abort: AbortSignal.any(signals) };
@@ -497,10 +497,10 @@ function createBackgroundProcessor(options = {}, internals = {}) {
     if (data.kind === JOB_NAMES.BACKGROUND) return runCoordinator(ctx, data);
     if (data.kind === JOB_NAMES.BACKGROUND_LANE) return runLane(ctx, data);
     return runVerify();
-  }
+  };
 
   // Three declared parameters, on purpose — see the factory's doc comment.
-  async function processor(job, token, signal) {
+  const processor = async (job, token, signal) => {
     const run = handle(job, token, signal);
     inFlight.add(run);
     try {
@@ -521,7 +521,7 @@ function createBackgroundProcessor(options = {}, internals = {}) {
     } finally {
       inFlight.delete(run);
     }
-  }
+  };
 
   /**
    * Stop: a lane stops at its next batch boundary, checkpoints, releases its
@@ -547,7 +547,7 @@ function createBackgroundProcessor(options = {}, internals = {}) {
 
   Object.defineProperty(processor, 'kit', { value: kit, enumerable: true });
   return processor;
-}
+};
 
 module.exports = {
   BACKGROUND_PROCESSOR_DEFAULTS: DEFAULTS,

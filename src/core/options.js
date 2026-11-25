@@ -20,19 +20,19 @@ const { jobRefIssue } = require('../utils/job-ref.js');
  * join. A programmatic caller passing e.g. `{ $ne: null }` would otherwise
  * become a query-operator injection in `findOne({ name })`.
  */
-function assertFilename(filename) {
+const assertFilename = (filename) => {
   if (filename !== undefined && typeof filename !== 'string') {
     throw new MigrationInvalidNameError('Migration name must be a string', {
       name: filename,
     });
   }
-}
+};
 
 /**
  * Validate the `--steps` option for `down`/`dry-run down`: a positive integer,
  * mutually exclusive with a filename and `--batch`. No-op when steps is unset.
  */
-function assertStepsValid(steps, filename, batch) {
+const assertStepsValid = (steps, filename, batch) => {
   if (steps === undefined) {
     return;
   }
@@ -45,13 +45,13 @@ function assertStepsValid(steps, filename, batch) {
   if (!Number.isInteger(steps) || steps < 1) {
     throw new ConfigInvalidError('--steps must be a positive integer', { steps });
   }
-}
+};
 
 /**
  * `--to` names a point in the sequence, so it cannot be combined with the
  * other ways of choosing targets.
  */
-function assertToValid(to, filename, options = {}) {
+const assertToValid = (to, filename, options = {}) => {
   if (to === undefined) return;
   assertFilename(to);
   if (filename) {
@@ -69,19 +69,19 @@ function assertToValid(to, filename, options = {}) {
       to,
     });
   }
-}
+};
 
 /**
  * Validate `--batch`. Without this a typo (`--batch abc` → NaN) matches no
  * records, so the run prints "Nothing to rollback" and exits 0 — the worst
  * possible answer to a mistyped rollback.
  */
-function assertBatchValid(batch) {
+const assertBatchValid = (batch) => {
   if (batch === undefined) return;
   if (!Number.isInteger(batch) || batch < 1) {
     throw new ConfigInvalidError('--batch must be a positive integer', { batch });
   }
-}
+};
 
 /**
  * Validate `requestedBy` / `reason`: who asked for a run, and why — stamped
@@ -89,7 +89,7 @@ function assertBatchValid(batch) {
  * The OS user that ran it is `executedBy` already; on a queue worker that is
  * the container's, which is why the requester has a field of its own.
  */
-function assertActorValid(options) {
+const assertActorValid = (options) => {
   for (const key of ['requestedBy', 'reason']) {
     const issue = actorIssue(key, options?.[key]);
     if (issue) {
@@ -101,13 +101,13 @@ function assertActorValid(options) {
       });
     }
   }
-}
+};
 
 /**
  * Validate `job`: the queue job a run works for, `{ id, groupId? }` — bound
  * into the run's correlation, so it must be small and exactly that shape.
  */
-function assertJobValid(job, options) {
+const assertJobValid = (job, options) => {
   const issue = jobRefIssue(job, options);
   if (issue) {
     // For the error's context: the keys of what was given, not its values.
@@ -115,13 +115,13 @@ function assertJobValid(job, options) {
       job: isPlainObject(job) ? Object.keys(job).join(', ') : typeof job,
     });
   }
-}
+};
 
 /**
  * Validate `checksum`: the SHA-256 the caller expects the named file to have
  * — how a queue job says which version of the file it was planned with.
  */
-function assertChecksumValid(checksum, filename) {
+const assertChecksumValid = (checksum, filename) => {
   if (checksum === undefined) return;
   if (typeof checksum !== 'string' || !/^[0-9a-f]{64}$/.test(checksum)) {
     throw new ConfigInvalidError('checksum must be a SHA-256 hex digest', {
@@ -131,14 +131,14 @@ function assertChecksumValid(checksum, filename) {
   if (!filename) {
     throw new ConfigInvalidError('checksum requires a filename', {});
   }
-}
+};
 
 /**
  * Validate `ordered`: a boolean, and only meaningful for a named file — a
  * bulk run is in order by construction, so asking for it there is a caller
  * mistake worth naming rather than silently ignoring.
  */
-function assertOrderedValid(ordered, filename) {
+const assertOrderedValid = (ordered, filename) => {
   if (ordered === undefined) return;
   if (typeof ordered !== 'boolean') {
     throw new ConfigInvalidError('ordered must be a boolean', { ordered });
@@ -146,7 +146,7 @@ function assertOrderedValid(ordered, filename) {
   if (ordered && !filename) {
     throw new ConfigInvalidError('ordered requires a filename', { ordered });
   }
-}
+};
 
 /**
  * Options that are flags: a boolean, or left out. They are read by
@@ -154,13 +154,13 @@ function assertOrderedValid(ordered, filename) {
  * variable or a JSON body — would run without the lock, and `force: 'no'`
  * re-run an applied migration.
  */
-function assertFlags(options, keys) {
+const assertFlags = (options, keys) => {
   for (const key of keys) {
     if (options[key] !== undefined && typeof options[key] !== 'boolean') {
       throw new ConfigInvalidError(`${key} must be a boolean`, { [key]: options[key] });
     }
   }
-}
+};
 
 const UP_FLAGS = Object.freeze(['noLock', 'force', 'step']);
 const LOCK_FLAGS = Object.freeze(['noLock']);
@@ -175,7 +175,7 @@ const CONVERGE_FLAGS = Object.freeze([
 ]);
 
 /** `up`'s `converge` option: a boolean, and only for a bulk run that reaches the head */
-function assertConvergeAfterUpValid(converge, filename, to) {
+const assertConvergeAfterUpValid = (converge, filename, to) => {
   if (converge === undefined) return;
   if (typeof converge !== 'boolean') {
     throw new ConfigInvalidError('converge must be a boolean', { converge });
@@ -192,24 +192,24 @@ function assertConvergeAfterUpValid(converge, filename, to) {
       { converge, to },
     );
   }
-}
+};
 
 /**
  * `onBackgroundPending`: what a run does at a migration that `requires` a
  * background migration not completed yet — `'error'` (throw
  * BackgroundPendingError) or `'stop'` (end the run there, cleanly).
  */
-function assertBackgroundPendingValid(onBackgroundPending) {
+const assertBackgroundPendingValid = (onBackgroundPending) => {
   if (onBackgroundPending === undefined) return;
   if (onBackgroundPending !== 'error' && onBackgroundPending !== 'stop') {
     throw new ConfigInvalidError("onBackgroundPending must be 'error' or 'stop'", {
       onBackgroundPending,
     });
   }
-}
+};
 
 /** `up(filename, options)` */
-function assertUpOptions(filename, options) {
+const assertUpOptions = (filename, options) => {
   assertFilename(filename);
   assertFlags(options, UP_FLAGS);
   // `to` is checked against a filename only: unlike `down`, an explicit
@@ -227,10 +227,10 @@ function assertUpOptions(filename, options) {
   assertBackgroundPendingValid(options.onBackgroundPending);
   assertActorValid(options);
   assertJobValid(options.job);
-}
+};
 
 /** `down(filename, options)` */
-function assertDownOptions(filename, options) {
+const assertDownOptions = (filename, options) => {
   assertFilename(filename);
   assertFlags(options, LOCK_FLAGS);
   assertStepsValid(options.steps, filename, options.batch);
@@ -239,28 +239,28 @@ function assertDownOptions(filename, options) {
   assertOrderedValid(options.ordered, filename);
   assertActorValid(options);
   assertJobValid(options.job);
-}
+};
 
 /** `redo(filename, options)` */
-function assertRedoOptions(filename, options) {
+const assertRedoOptions = (filename, options) => {
   assertFilename(filename);
   assertFlags(options, LOCK_FLAGS);
   assertActorValid(options);
   assertJobValid(options.job);
-}
+};
 
 /** `dryRun(direction, filename, options)` */
-function assertDryRunOptions(filename, options) {
+const assertDryRunOptions = (filename, options) => {
   assertFilename(filename);
   // `batch`/`to` must be passed too, or a conflict that `down` rejects would
   // be silently allowed in its own preview.
   assertStepsValid(options.steps, filename, options.batch);
   assertBatchValid(options.batch);
   assertToValid(options.to, filename, options);
-}
+};
 
 /** `converge(options)` */
-function assertConvergeOptions(options) {
+const assertConvergeOptions = (options) => {
   assertFlags(options, CONVERGE_FLAGS);
   // A dry run builds nothing, so there is nothing to wait for — asking for
   // both is a mistake worth saying, not a wait that silently never happens.
@@ -271,17 +271,17 @@ function assertConvergeOptions(options) {
     });
   }
   assertActorValid(options);
-}
+};
 
 /** `convergeHistory({ limit })` */
-function assertHistoryLimit(limit) {
+const assertHistoryLimit = (limit) => {
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
     throw new ConfigInvalidError('limit must be an integer from 1 to 1000', { limit });
   }
-}
+};
 
 /** `list(filter, options)` */
-function assertListOptions(filter, options) {
+const assertListOptions = (filter, options) => {
   if (options.checksums !== undefined && typeof options.checksums !== 'boolean') {
     throw new ConfigInvalidError('checksums must be a boolean', { checksums: options.checksums });
   }
@@ -290,24 +290,24 @@ function assertListOptions(filter, options) {
   if (filter !== 'all' && filter !== 'pending' && filter !== 'applied') {
     throw new ConfigInvalidError("list filter must be 'all', 'pending' or 'applied'", { filter });
   }
-}
+};
 
 /** `baseline(options)` */
-function assertBaselineOptions(options) {
+const assertBaselineOptions = (options) => {
   assertFilename(options.to);
   assertFlags(options, LOCK_FLAGS);
-}
+};
 
 /** `runMigrations(config, options)`: its own `noLock`, before a kit is built */
-function assertRunFlags(options) {
+const assertRunFlags = (options) => {
   assertFlags(options, LOCK_FLAGS);
-}
+};
 
 /**
  * `import(options)`: a bad --from/--to must not cost a round trip or take the
  * lock. Defaults come from the already-validated config.
  */
-function assertImportOptions(options) {
+const assertImportOptions = (options) => {
   assertFlags(options, IMPORT_FLAGS);
   if (options.from !== undefined && !isCollectionName(options.from)) {
     throw new ConfigInvalidError('Invalid source collection name', { from: options.from });
@@ -315,7 +315,7 @@ function assertImportOptions(options) {
   if (options.to !== undefined && !isCollectionName(options.to)) {
     throw new ConfigInvalidError('Invalid target collection name', { to: options.to });
   }
-}
+};
 
 module.exports = {
   assertActorValid,

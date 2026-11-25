@@ -59,18 +59,18 @@ const RETRYABLE_CODES = Object.freeze([
  * nothing went wrong. A blocker with a `'failed'` trace stopped the line for
  * real, and that job fails at once, as before.
  */
-function isTransientForJob(error) {
+const isTransientForJob = (error) => {
   if (error instanceof LockAlreadyHeldError) return true;
   return (
     error instanceof MigrationBlockedError &&
     Array.isArray(error.context?.failed) &&
     error.context.failed.length === 0
   );
-}
+};
 
-function isRetryableError(error) {
+const isRetryableError = (error) => {
   return !(error instanceof MigronautError) || RETRYABLE_CODES.includes(error.code);
-}
+};
 
 /** The least time between two `lock-wait` progress updates of one job */
 const WAIT_PROGRESS_INTERVAL_MS = 2000;
@@ -85,13 +85,13 @@ const UNRECOVERABLE_ERROR_NAME = 'UnrecoverableError';
 const WAITING_ERROR_NAME = 'WaitingError';
 
 /** The correlation ids of a job, for its error context and log lines */
-function jobIds(ctx) {
+const jobIds = (ctx) => {
   return {
     ...(ctx.job?.id !== undefined ? { jobId: String(ctx.job.id) } : {}),
     ...(ctx.data?.groupId !== undefined ? { groupId: ctx.data.groupId } : {}),
     ...(ctx.runId ? { runId: ctx.runId } : {}),
   };
-}
+};
 
 /**
  * The job a run works for, as the kit's `job` option — `{ id, groupId? }` (a
@@ -99,13 +99,13 @@ function jobIds(ctx) {
  * take (it then logs nothing of the job; the run itself is unaffected). A
  * group the kit would refuse is left out rather than the whole reference.
  */
-function jobRefOf(job, groupId) {
+const jobRefOf = (job, groupId) => {
   if (job?.id === undefined || job.id === null) return undefined;
   const id = String(job.id);
   const ref = groupId !== undefined ? { id, groupId } : { id };
   if (jobRefIssue(ref) === null) return ref;
   return jobRefIssue({ id }) === null ? { id } : undefined;
-}
+};
 
 /** The longest row a `migration:log` event becomes in a job's log */
 const USERLAND_ROW_MAX = 1024;
@@ -134,7 +134,7 @@ const ROW_FULL = Symbol('row full');
  * it: an event's data may hold a thousand entries of 4 KB each, and the row
  * shows a kilobyte. The JSON of what `JSON.stringify` would write, cut short.
  */
-function boundedJson(data, max) {
+const boundedJson = (data, max) => {
   let out = '';
   const push = (text) => {
     if (out.length + text.length > max) {
@@ -174,14 +174,14 @@ function boundedJson(data, max) {
     if (error !== ROW_FULL) throw error;
   }
   return out;
-}
+};
 
 /** Whether `data` has a key to show — without listing them all */
-function hasEntries(data) {
+const hasEntries = (data) => {
   if (data === null || typeof data !== 'object') return false;
   for (const _key in data) return true;
   return false;
-}
+};
 
 /**
  * A `migration:log` event as a row of the job's log, next to the processor's
@@ -190,7 +190,7 @@ function hasEntries(data) {
  * a line break in the message cannot forge a row of its own — cut at
  * {@link USERLAND_ROW_MAX}; redacted on its way out like every row.
  */
-function userlandRow(event) {
+const userlandRow = (event) => {
   const level = event.level === 'info' ? '' : `${event.level}: `;
   const attempt = event.attempt > 1 ? ` (attempt ${event.attempt})` : '';
   const partition =
@@ -206,21 +206,21 @@ function userlandRow(event) {
   }
   const row = oneLine(`${head}${data}${attempt}${partition}`);
   return row.length > USERLAND_ROW_MAX ? `${row.slice(0, USERLAND_ROW_MAX - 1)}…` : row;
-}
+};
 
 /** The closing row of a job whose userland lines went past the limit */
-function userlandOverflowRow(dropped, limit) {
+const userlandOverflowRow = (dropped, limit) => {
   return `✎ … ${dropped} more line(s) past the limit of ${limit} not mirrored here — see migration:log`;
-}
+};
 
 /** `userlandLogRows`: how many userland rows one job's log takes */
-function assertUserlandLogRows(value) {
+const assertUserlandLogRows = (value) => {
   if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
     throw new ConfigInvalidError('userlandLogRows must be an integer of at least 0', {
       userlandLogRows: value,
     });
   }
-}
+};
 
 /**
  * Whether a `migration:log` event is the job's own. Matched by run and job,
@@ -231,7 +231,7 @@ function assertUserlandLogRows(value) {
  * ids), named by the job and its group: a background queue's lanes have no
  * group, and their ids may well repeat a migration job's.
  */
-function ownLine(ctx, event) {
+const ownLine = (ctx, event) => {
   const ref = ctx.jobRef;
   if (event.kind === 'background') {
     return ref?.groupId !== undefined && event.jobId === ref.id && event.groupId === ref.groupId;
@@ -239,16 +239,16 @@ function ownLine(ctx, event) {
   if (event.kind !== 'migration') return false;
   if (ctx.runId === undefined || event.runId !== ctx.runId) return false;
   return ref === undefined || event.jobId === ref.id;
-}
+};
 
 /** A job in a few words, for log lines: `up 20260101-x.js (1/3)`, `converge`, `sync` */
-function describeJob(data) {
+const describeJob = (data) => {
   if (data.kind !== 'migration') return data.kind;
   return `${data.direction} ${data.migration} (${data.index + 1}/${data.total})`;
-}
+};
 
 /** The structured fields of a job's log lines: what the job is about */
-function jobSummary(data) {
+const jobSummary = (data) => {
   if (data.kind !== 'migration') return { kind: data.kind };
   return {
     migration: data.migration,
@@ -256,18 +256,18 @@ function jobSummary(data) {
     index: data.index,
     total: data.total,
   };
-}
+};
 
 /**
  * Stamp the job's ids onto a typed error before it leaves for the queue — the
  * one place a failed job's run id survives, since a failed job has no return
  * value. Copy-on-write: the error may be a shared abort reason.
  */
-function attachJobIds(error, ctx) {
+const attachJobIds = (error, ctx) => {
   if (!(error instanceof MigronautError)) return;
   const ids = jobIds(ctx);
   if (Object.keys(ids).length > 0) error.context = { ...error.context, ...ids };
-}
+};
 
 /**
  * Prepare an error for the queue. BullMQ stores its message (as the job's
@@ -277,7 +277,7 @@ function attachJobIds(error, ctx) {
  * so the cause is folded into the message, as the changelog's failure trace
  * already does.
  */
-function prepareErrorForQueue(error) {
+const prepareErrorForQueue = (error) => {
   if (!(error instanceof Error)) return;
   const cause = error instanceof MigronautError ? error.context?.cause : undefined;
   try {
@@ -290,14 +290,14 @@ function prepareErrorForQueue(error) {
   } catch {
     // A frozen error cannot be rewritten; its message was written by us anyway.
   }
-}
+};
 
 /**
  * Validate the processor's options and return the resolved lock-wait budget.
  * Pure — nothing is constructed — so a caller can reject bad input before it
  * opens any connection of its own.
  */
-function resolveProcessorOptions(options) {
+const resolveProcessorOptions = (options) => {
   if (!isObjectLike(options)) {
     throw new ConfigInvalidError('createMigrationProcessor options must be an object');
   }
@@ -331,13 +331,13 @@ function resolveProcessorOptions(options) {
   if (background !== undefined) assertBackgroundLink(background);
   assertUserlandLogRows(userlandLogRows);
   return { waitOptions, defaultOrdered: ordered, allow: resolveAllow(allow), userlandLogRows };
-}
+};
 
 /**
  * The background queue a migration processor hands what it registers to:
  * `{ queue, jobOptions?, stallMs? }`.
  */
-function assertBackgroundLink(background) {
+const assertBackgroundLink = (background) => {
   if (!isObjectLike(background) || typeof background.queue?.addBulk !== 'function') {
     throw new ConfigInvalidError('background must be { queue } — the background queue');
   }
@@ -347,7 +347,7 @@ function assertBackgroundLink(background) {
     }
   }
   assertBackgroundJobOptions(background.jobOptions);
-}
+};
 
 /**
  * Build the function a BullMQ Worker runs for each migration job.
@@ -360,7 +360,7 @@ function assertBackgroundLink(background) {
  * Declared with exactly three parameters: BullMQ passes the cancellation
  * signal only to processors whose `length` is at least 3.
  */
-function createMigrationProcessor(options = {}, internals = {}) {
+const createMigrationProcessor = (options = {}, internals = {}) => {
   const { waitOptions, defaultOrdered, allow, userlandLogRows } = resolveProcessorOptions(options);
   const writeWaitMs = internals.writeWaitMs ?? JOB_WRITE_WAIT_MS;
   const { kit: injectedKit, config, kitOptions, queue, jobOptions, background } = options;
@@ -380,7 +380,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
    * allowed to fail the job; `flush` drains what is still in flight before the
    * job settles, so nothing lands on a job BullMQ already finished.
    */
-  function write(ctx, action) {
+  const write = (ctx, action) => {
     let pending;
     try {
       pending = Promise.resolve(action(ctx.job)).catch(() => undefined);
@@ -389,7 +389,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
     }
     ctx.writes.add(pending);
     pending.finally(() => ctx.writes.delete(pending));
-  }
+  };
   const log = (ctx, row) => write(ctx, (job) => job.log?.(redactOutbound(row)));
   const progress = (ctx, phase, extra) =>
     write(ctx, (job) =>
@@ -412,7 +412,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
    * (JOB_WRITE_WAIT_MS): they are best-effort, and a Redis that is away must
    * not hold a finished job, the line behind it and a graceful close.
    */
-  async function flush(ctx) {
+  const flush = async (ctx) => {
     if (ctx.writes.size === 0) return;
     const drained = await settledWithin(Promise.allSettled([...ctx.writes]), writeWaitMs);
     if (!drained) {
@@ -422,7 +422,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
         { ...jobIds(ctx), pendingWrites: ctx.writes.size },
       );
     }
-  }
+  };
 
   /** A userland line into the job's log — up to `userlandLogRows`, then only counted */
   const mirror = (ctx, event) => {
@@ -535,7 +535,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
    * job — it is applied; a coordinator that could not be added now is added
    * by the next heal (a sync tick, a verify tick, a worker's start).
    */
-  async function startBackground(ctx) {
+  const startBackground = async (ctx) => {
     if (background === undefined || ctx.registered.length === 0) return undefined;
     const started = [];
     for (const migration of ctx.registered) {
@@ -555,10 +555,10 @@ function createMigrationProcessor(options = {}, internals = {}) {
     }
     for (const entry of started) log(ctx, `⧗ Background coordinator ${entry.jobId} enqueued`);
     return started;
-  }
+  };
 
   /** Every background migration with work to do gets its coordinator — a sync tick's heal */
-  async function healBackground() {
+  const healBackground = async () => {
     if (background === undefined) return undefined;
     try {
       const { jobs } = await enqueueBackground(background.queue, kit, backgroundOptions());
@@ -569,9 +569,9 @@ function createMigrationProcessor(options = {}, internals = {}) {
       });
       return 0;
     }
-  }
+  };
 
-  function resultOf(ctx, rows, waitedMs) {
+  const resultOf = (ctx, rows, waitedMs) => {
     const { data } = ctx;
     const row = rows[0];
     return {
@@ -584,9 +584,9 @@ function createMigrationProcessor(options = {}, internals = {}) {
       ...(row?.reason ? { reason: row.reason } : {}),
       lockWaitMs: waitedMs,
     };
-  }
+  };
 
-  async function runMigrationJob(ctx, signal) {
+  const runMigrationJob = async (ctx, signal) => {
     const { data } = ctx;
     const ordered = data.ordered ?? defaultOrdered;
     // The run's correlation names this job, so what the migration logs can be
@@ -632,10 +632,10 @@ function createMigrationProcessor(options = {}, internals = {}) {
       }
       throw error;
     }
-  }
+  };
 
   /** The lock-wait loop every run-kind job shares */
-  function waitForLock(ctx, attempt, signal) {
+  const waitForLock = (ctx, attempt, signal) => {
     return withLockWait(attempt, {
       ...waitOptions,
       logger: kit.logger,
@@ -662,9 +662,9 @@ function createMigrationProcessor(options = {}, internals = {}) {
         progress(ctx, 'lock-wait', { attempts, waitedMs: soFar });
       },
     });
-  }
+  };
 
-  async function runConvergeJob(ctx, signal) {
+  const runConvergeJob = async (ctx, signal) => {
     const { data } = ctx;
     // Ordered by default: the tail of a deploy must not converge to a schema
     // its own migrations have not reached yet — and the check is the kit's,
@@ -687,7 +687,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
       ...(ctx.runId ? { runId: ctx.runId } : {}),
       lockWaitMs: waitedMs,
     });
-  }
+  };
 
   /**
    * The circuit breaker of a schedule: the next migration in line failed, and
@@ -697,7 +697,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
    * checksum changes) or someone asks for it explicitly (`enqueueUp(name)`,
    * which never consults this). Returns `{ migration, reason, failedAt? }`.
    */
-  async function heldFailure(first, to) {
+  const heldFailure = async (first, to) => {
     if (!first || (to !== undefined && first.file > to)) return undefined;
     if (typeof kit.list !== 'function' || typeof kit.dryRun !== 'function') return undefined;
     const row = (await kit.list('all', { checksums: false })).find(
@@ -711,7 +711,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
       reason: 'failed, and unchanged since',
       ...(row.failedAt ? { failedAt: row.failedAt } : {}),
     };
-  }
+  };
 
   /** The plan the last tick said it holds a converge for — said once, not on every tick */
   let saidHeldConverge;
@@ -727,7 +727,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
    * `enqueueConverge()` or `migronaut converge` that goes through. Returns
    * `{ reason, failedAt?, error? }`.
    */
-  async function heldConverge(plan) {
+  const heldConverge = async (plan) => {
     if (plan.fingerprint === undefined || typeof kit.convergeHistory !== 'function') {
       return undefined;
     }
@@ -751,12 +751,12 @@ function createMigrationProcessor(options = {}, internals = {}) {
       ...(failedAt ? { failedAt } : {}),
       ...(typeof last.error === 'string' ? { error: redactOutbound(last.error) } : {}),
     };
-  }
+  };
 
   /** What the last sync tick found the line waiting for — `{ migration, waitsFor }` */
   let lastWaiting;
 
-  async function runSyncJob(ctx) {
+  const runSyncJob = async (ctx) => {
     if (!queue) {
       throw new ConfigInvalidError(
         'A sync job needs the queue to enqueue into — pass `queue` to createMigrationProcessor',
@@ -857,17 +857,17 @@ function createMigrationProcessor(options = {}, internals = {}) {
       ...(group.waiting ? { waiting: group.waiting } : {}),
       ...backgroundField,
     };
-  }
+  };
 
   /** Whether a background migration `waiting` waits for is still not done */
-  async function stillWaiting(waiting) {
+  const stillWaiting = async (waiting) => {
     if (typeof kit.backgroundStatus !== 'function') return false;
     for (const name of waiting.waitsFor) {
       const status = await kit.backgroundStatus(name);
       if (status?.status !== 'completed' || status.direction === 'revert') return true;
     }
     return false;
-  }
+  };
 
   /**
    * Put a job that a shutdown stopped before it started its work back at the
@@ -880,7 +880,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
    * next worker runs it. A job whose migration (or converge) had begun is
    * never put back — it ran, and its outcome is what it is.
    */
-  async function requeueOnShutdown(ctx, error, token) {
+  const requeueOnShutdown = async (ctx, error, token) => {
     if (!(error instanceof RunAbortedError) || !shutdownController.signal.aborted) return undefined;
     if (ctx.started || typeof ctx.job?.moveToWait !== 'function' || typeof token !== 'string') {
       return undefined;
@@ -905,9 +905,9 @@ function createMigrationProcessor(options = {}, internals = {}) {
     });
     requeued.name = WAITING_ERROR_NAME;
     return requeued;
-  }
+  };
 
-  async function handle(job, token, signal) {
+  const handle = async (job, token, signal) => {
     const ctx = {
       job,
       data: undefined,
@@ -986,14 +986,14 @@ function createMigrationProcessor(options = {}, internals = {}) {
       abort.removeEventListener('abort', onAbort);
       current = undefined;
     }
-  }
+  };
 
   // Three declared parameters, on purpose — see the factory's doc comment.
-  async function processor(job, token, signal) {
+  const processor = async (job, token, signal) => {
     const run = chain.then(() => handle(job, token, signal));
     chain = run.catch(() => undefined);
     return run;
-  }
+  };
 
   /**
    * Stop taking the lock: a job waiting for it fails with RunAbortedError (a
@@ -1016,7 +1016,7 @@ function createMigrationProcessor(options = {}, internals = {}) {
 
   Object.defineProperty(processor, 'kit', { value: kit, enumerable: true });
   return processor;
-}
+};
 
 module.exports = {
   RETRYABLE_CODES,

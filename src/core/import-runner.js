@@ -19,7 +19,7 @@ const IMPORT_CHUNK_SIZE = 1000;
  * Pure orchestration over capabilities the MigratorKit injects (`deps`):
  * `{config, db, changelog, logger, fields, filepath, assertNotAborted}`.
  */
-async function runImport(deps, options, signal) {
+const runImport = async (deps, options, signal) => {
   const { config, db, changelog, logger } = deps;
 
   const source = options.from ?? MIGRATE_MONGO_COLLECTION;
@@ -158,7 +158,7 @@ async function runImport(deps, options, signal) {
     deps.fields({ source, target, imported: records.length, skipped }),
   );
   return { source, target, imported: records.length, skipped, dryRun, rows };
-}
+};
 
 /**
  * Decide the checksum to store for an imported migration. Order: when
@@ -166,7 +166,7 @@ async function runImport(deps, options, signal) {
  * when it matches a freshly computed hash (algorithms align), else recompute
  * from disk; when the file is missing, fall back to the source hash or empty.
  */
-async function resolveImportChecksum(filepath, fileHash, trustHash) {
+const resolveImportChecksum = async (filepath, fileHash, trustHash) => {
   if (trustHash && fileHash) {
     return { checksum: fileHash, source: 'reused' };
   }
@@ -187,6 +187,6 @@ async function resolveImportChecksum(filepath, fileHash, trustHash) {
     return { checksum: fileHash, source: 'reused' };
   }
   return { checksum: recomputed, source: 'recomputed' };
-}
+};
 
 module.exports = { runImport };

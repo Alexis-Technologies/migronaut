@@ -46,13 +46,13 @@ const VALIDATION_ACTIONS = ['error', 'warn', 'errorAndLog'];
 const FS_CONCURRENCY = 16;
 
 /** `collections[2]` + `indexes` → `collections[2].indexes`; `users.ts:` + `indexes` → `users.ts: indexes` */
-function join(base, key) {
+const join = (base, key) => {
   return base.endsWith(':') ? `${base} ${key}` : `${base}.${key}`;
-}
+};
 
 const isEmptyObject = (value) => isPlainObject(value) && Object.keys(value).length === 0;
 
-function indexListIssues(indexes, base, issues) {
+const indexListIssues = (indexes, base, issues) => {
   if (!Array.isArray(indexes)) {
     issues.push({ path: join(base, 'indexes'), message: 'must be an array of index definitions' });
     return;
@@ -86,9 +86,9 @@ function indexListIssues(indexes, base, issues) {
       }
     }
   }
-}
+};
 
-function searchIndexListIssues(searchIndexes, base, issues) {
+const searchIndexListIssues = (searchIndexes, base, issues) => {
   const listPath = join(base, 'searchIndexes');
   if (!Array.isArray(searchIndexes)) {
     issues.push({ path: listPath, message: 'must be an array of search index definitions' });
@@ -114,7 +114,7 @@ function searchIndexListIssues(searchIndexes, base, issues) {
       names.set(name, position);
     }
   }
-}
+};
 
 /**
  * Validate the `versioning` key and how it fits the rest of the definition:
@@ -123,7 +123,7 @@ function searchIndexListIssues(searchIndexes, base, issues) {
  * is versioned (valid or not), so the validator checks below know a
  * validator is coming.
  */
-function versioningDefinitionIssues(definition, base, issues) {
+const versioningDefinitionIssues = (definition, base, issues) => {
   if (definition.versioning === undefined) return false;
   const path = join(base, 'versioning');
   const found = versioningIssues(definition.versioning, path);
@@ -148,7 +148,7 @@ function versioningDefinitionIssues(definition, base, issues) {
     }
   }
   return true;
-}
+};
 
 /**
  * Validate one collection definition, returning `{ path, message }` issues
@@ -156,7 +156,7 @@ function versioningDefinitionIssues(definition, base, issues) {
  * `users.ts:` for a file); `reserved` are migronaut's own collection names;
  * `fallbackName` is the name a file-based definition gets when it sets none.
  */
-function definitionIssues(definition, { path: base, reserved = [], fallbackName } = {}) {
+const definitionIssues = (definition, { path: base, reserved = [], fallbackName } = {}) => {
   const self = base.endsWith(':') ? base.slice(0, -1) : base;
   if (!isPlainObject(definition)) {
     return [{ path: self, message: 'must be a collection definition object' }];
@@ -232,13 +232,13 @@ function definitionIssues(definition, { path: base, reserved = [], fallbackName 
     report('prune', 'must be a boolean');
   }
   return issues;
-}
+};
 
 /**
  * Validate the `collections` config key: each definition, plus no collection
  * declared twice. `reserved` are the changelog and lock collection names.
  */
-function collectionsIssues(list, { reserved = [] } = {}) {
+const collectionsIssues = (list, { reserved = [] } = {}) => {
   if (list === undefined) return [];
   if (!Array.isArray(list)) {
     return [{ path: 'collections', message: 'must be an array of collection definitions' }];
@@ -260,7 +260,7 @@ function collectionsIssues(list, { reserved = [] } = {}) {
     }
   }
   return issues;
-}
+};
 
 /**
  * A valid definition in the planner's shape: indexes normalized (effective
@@ -271,7 +271,7 @@ function collectionsIssues(list, { reserved = [] } = {}) {
  * validator, its index appended to `indexes` — with `indexesPartial` when it
  * is the only index declared, so the others stay unmanaged.
  */
-function normalizeDefinition(definition, { name, source } = {}) {
+const normalizeDefinition = (definition, { name, source } = {}) => {
   const { validator } = definition;
   let wireValidator = validator === undefined || validator === null ? validator : toWire(validator);
   let indexes = definition.indexes?.map((index) => normalizeDeclaredIndex(index));
@@ -315,14 +315,14 @@ function normalizeDefinition(definition, { name, source } = {}) {
     ...(definition.prune !== undefined ? { prune: definition.prune } : {}),
     ...(versioning !== undefined ? { versioning } : {}),
   };
-}
+};
 
 /** The extensions a definition file may have: `fileExtensions`, dotted, plus `.json` — longest first */
-function definitionExtensions(extensions) {
+const definitionExtensions = (extensions) => {
   const set = new Set(['.json']);
   for (const ext of extensions) set.add(ext.startsWith('.') ? ext : `.${ext}`);
   return [...set].sort((a, b) => b.length - a.length);
-}
+};
 
 /**
  * Load one definition file. JSON is parsed; anything else is imported, and
@@ -331,7 +331,7 @@ function definitionExtensions(extensions) {
  * called — a Mongoose model is a function, and a definitions directory is
  * exactly where one might be left by mistake.
  */
-async function loadDefinitionFile(filepath, options) {
+const loadDefinitionFile = async (filepath, options) => {
   if (filepath.endsWith('.json')) {
     const raw = await fs.readFile(filepath, 'utf8');
     try {
@@ -364,7 +364,7 @@ async function loadDefinitionFile(filepath, options) {
   }
   // A shallow copy: an ES module namespace is an exotic object, not a plain one.
   return isPlainObject(exported) || exported === mod ? { ...exported } : exported;
-}
+};
 
 /**
  * Load every definition file in `dir`: one collection per file, non-recursive,
@@ -372,7 +372,7 @@ async function loadDefinitionFile(filepath, options) {
  * like in the migrations directory. An explicitly configured directory that
  * does not exist is an error, not "no definitions".
  */
-async function loadCollectionsDir(dir, { extensions, reload = false }) {
+const loadCollectionsDir = async (dir, { extensions, reload = false }) => {
   let entries;
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -403,7 +403,7 @@ async function loadCollectionsDir(dir, { extensions, reload = false }) {
     const filepath = path.join(dir, file);
     return { file, name, definition: await loadDefinitionFile(filepath, { reload }) };
   });
-}
+};
 
 /**
  * Every declared collection, normalized: the `collections` key first (already
@@ -414,13 +414,13 @@ async function loadCollectionsDir(dir, { extensions, reload = false }) {
  * @throws {ConfigInvalidError} on a missing directory, a file that does not
  *   load, or invalid definitions (all issues at once, in `context.issues`)
  */
-async function resolveDefinitions({
+const resolveDefinitions = async ({
   inline,
   dir,
   extensions = ['.ts', '.js'],
   reload,
   reserved = [],
-}) {
+}) => {
   const definitions = [];
   const declaredBy = new Map();
   for (const [position, definition] of (inline ?? []).entries()) {
@@ -454,7 +454,7 @@ async function resolveDefinitions({
     throw new ConfigInvalidError('Invalid collection definition(s)', { path: dir, issues });
   }
   return definitions;
-}
+};
 
 module.exports = {
   DEFINITION_KEYS,

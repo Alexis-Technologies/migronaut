@@ -84,7 +84,7 @@ const MAX_STATUS_MESSAGE_LENGTH = 1024;
  * promise nobody here awaits — and when it rejects, an unhandled rejection
  * ends the process. The caller's own handlers are unaffected.
  */
-function quiet(value) {
+const quiet = (value) => {
   if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
     try {
       if (typeof value.then === 'function') value.then(undefined, () => {});
@@ -93,36 +93,36 @@ function quiet(value) {
     }
   }
   return value;
-}
+};
 
 /**
  * The one guard every tracer, span and instrument call goes through: telemetry
  * must never break a migration run, so a throwing SDK is swallowed here — and
  * a rejecting one too, see {@link quiet}.
  */
-function safe(call) {
+const safe = (call) => {
   try {
     return quiet(call());
   } catch {
     return undefined;
   }
-}
+};
 
 /** `attributes` without its undefined values — an SDK warns about (or rejects) those */
-function defined(attributes) {
+const defined = (attributes) => {
   const result = {};
   if (!attributes) return result;
   for (const key of Object.keys(attributes)) {
     if (attributes[key] !== undefined) result[key] = attributes[key];
   }
   return result;
-}
+};
 
 /**
  * The low-cardinality failure class OpenTelemetry's `error.type` asks for: the
  * typed migronaut code when there is one, the error's class name otherwise.
  */
-function errorType(error) {
+const errorType = (error) => {
   // Never throws: it runs on the way out of a failed run, where a hostile
   // `name` getter would otherwise replace the run's own error.
   try {
@@ -132,7 +132,7 @@ function errorType(error) {
     // fall through
   }
   return '_OTHER';
-}
+};
 
 /**
  * The status message for a failed span. Redacted like every string that leaves
@@ -140,13 +140,13 @@ function errorType(error) {
  * with the wrapped cause, since "Migration up failed: X" alone says which
  * migration and not why.
  */
-function failureText(error) {
+const failureText = (error) => {
   // A span goes to a third-party backend: no data values, and a bounded size.
   const { text, cut } = redactWithin(errorWithCause(error), MAX_STATUS_MESSAGE_LENGTH);
   return cut || text.length > MAX_STATUS_MESSAGE_LENGTH
     ? `${text.slice(0, MAX_STATUS_MESSAGE_LENGTH - 1)}…`
     : text;
-}
+};
 
 /** The parts of `telemetry` — anything else in it is a typo, mentioned at debug level */
 const TELEMETRY_KEYS = Object.freeze(['tracer', 'meter', 'attributes']);
@@ -172,7 +172,7 @@ const hasMethods = (value, names) => {
  * Lives here, next to the calls it vouches for: no other module knows an
  * OpenTelemetry method name.
  */
-function telemetryIssues(telemetry) {
+const telemetryIssues = (telemetry) => {
   if (telemetry === undefined || telemetry === null) return [];
   if (typeof telemetry !== 'object' || Array.isArray(telemetry)) {
     return [{ path: 'telemetry', message: 'must be an object' }];
@@ -217,13 +217,13 @@ function telemetryIssues(telemetry) {
     }
   }
   return issues;
-}
+};
 
 /** What the kit holds when there is no tracer: the same surface, doing nothing */
 const NOOP_SPAN = { set() {}, finish() {} };
 
 /** Wrap an SDK span so no call on it can throw into the run, and it ends once */
-function guardSpan(span) {
+const guardSpan = (span) => {
   let ended = false;
   const set = (attributes) => {
     const values = defined(attributes);
@@ -249,7 +249,7 @@ function guardSpan(span) {
       safe(() => span.end());
     },
   };
-}
+};
 
 /**
  * Turn the `telemetry` config option into what the kit reports through. With
@@ -259,7 +259,7 @@ function guardSpan(span) {
  * (`trace.getTracer(…)`, `metrics.getMeter(…)`): migronaut asks them for a
  * span or an instrument and never looks at the SDK behind them.
  */
-function createTelemetry(telemetry, { dbName } = {}) {
+const createTelemetry = (telemetry, { dbName } = {}) => {
   const tracer = telemetry?.tracer ?? undefined;
   const meter = telemetry?.meter ?? undefined;
   // On every span and every metric point: which database the run was against
@@ -278,7 +278,7 @@ function createTelemetry(telemetry, { dbName } = {}) {
    * that calls back twice cannot run a migration twice. The result is taken
    * from `fn` itself rather than from what the tracer returns.
    */
-  function open(name, attributes, fn) {
+  const open = (name, attributes, fn) => {
     if (!tracer) return fn(NOOP_SPAN);
     let called = false;
     let threw = false;
@@ -306,10 +306,10 @@ function createTelemetry(telemetry, { dbName } = {}) {
     if (!called) return run(NOOP_SPAN);
     if (threw) throw result;
     return result;
-  }
+  };
 
   /** `open`, plus ending the span when `fn` settles — failed when it rejects */
-  function wrap(name, attributes, fn) {
+  const wrap = (name, attributes, fn) => {
     if (!tracer) return fn(NOOP_SPAN);
     return open(name, attributes, async (span) => {
       try {
@@ -321,7 +321,7 @@ function createTelemetry(telemetry, { dbName } = {}) {
         throw error;
       }
     });
-  }
+  };
 
   const histogram = (name, description) =>
     meter
@@ -502,7 +502,7 @@ function createTelemetry(telemetry, { dbName } = {}) {
       record(backgroundWatchDelay, delayMs, { [ATTRIBUTES.BACKGROUND_NAME]: name });
     },
   };
-}
+};
 
 module.exports = {
   ATTRIBUTES,

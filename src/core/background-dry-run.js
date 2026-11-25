@@ -48,7 +48,7 @@ const ejson = (value) => {
   }
 };
 
-function sampleSize({ sample, first }) {
+const sampleSize = ({ sample, first }) => {
   const n = first ?? sample ?? 5;
   if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAMPLE) {
     throw new ConfigInvalidError(`The sample must be 1 to ${MAX_SAMPLE} documents`, { sample: n });
@@ -57,7 +57,7 @@ function sampleSize({ sample, first }) {
     throw new ConfigInvalidError('Take either a random sample or the first documents, not both');
   }
   return n;
-}
+};
 
 /**
  * `ctx.logger` in a dry run: the lines say `dryRun: true`, and nothing is
@@ -71,16 +71,16 @@ const dryLogs = (logger) => backgroundLogs({ sink: logger, dryRun: true });
  * refuses a transformation that changes the shard key (`shard-key-changed`),
  * and a preview that said nothing of it would promise what `up` cannot do.
  */
-async function dryPartitioner(deps, collection) {
+const dryPartitioner = async (deps, collection) => {
   if (typeof deps.shardKeyOf !== 'function' || (await deps.topology()) !== 'sharded') {
     return idRangePartitioner;
   }
   const sharding = await deps.shardKeyOf(collection);
   return sharding ? withShardKey(idRangePartitioner, sharding.key) : idRangePartitioner;
-}
+};
 
 /** The job a dry run works with — no partition, no lease */
-function dryJob(name, loaded, direction, logger, partitioner) {
+const dryJob = (name, loaded, direction, logger, partitioner) => {
   return {
     name,
     spec: loaded.spec,
@@ -93,16 +93,16 @@ function dryJob(name, loaded, direction, logger, partitioner) {
     logger,
     logs: dryLogs(logger),
   };
-}
+};
 
 /**
  * Whether a collection is sharded, for the sandbox — asked only behind a
  * mongos; a key that cannot be read is left to the server to judge.
  */
-function shardedCheck(deps) {
+const shardedCheck = (deps) => {
   return async (name) =>
     (await deps.topology()) === 'sharded' && Boolean(await deps.shardKeyOf?.(name));
-}
+};
 
 /** A match of this many documents or more is sampled collection-first — see sampleDocuments */
 const MATCH_FIRST_CAP = 20_000;
@@ -122,7 +122,7 @@ const firstDocuments = (collection, match, n, extra = {}) =>
  * short is taken match-first after all. Every read is time-boxed: out of
  * time, the first `n` by `_id` stand in — `{ docs, degraded }`.
  */
-async function sampleDocuments(collection, match, n) {
+const sampleDocuments = async (collection, match, n) => {
   const options = { maxTimeMS: SAMPLE_TIMEOUT_MS, ...READ_OPTIONS };
   const matchFirst = () =>
     collection.aggregate([{ $match: match }, { $sample: { size: n } }], options).toArray();
@@ -142,13 +142,13 @@ async function sampleDocuments(collection, match, n) {
       degraded: 'sample-timeout',
     };
   }
-}
+};
 
 /**
  * Preview a declarative background migration on a sample. `deps`:
  * `{ db, client, topology, forbidden, logger, shardKeyOf? }`; `loaded`: `{ spec, fns }`.
  */
-async function previewSample(deps, name, loaded, options = {}) {
+const previewSample = async (deps, name, loaded, options = {}) => {
   const { spec } = loaded;
   if (spec.mode !== 'declarative') {
     throw new ConfigInvalidError(
@@ -186,10 +186,10 @@ async function previewSample(deps, name, loaded, options = {}) {
     ...base,
     ...(await validateRows(deps, job, docs, { deadlineMs: deadlineOf(options) })),
   };
-}
+};
 
 /** Each document before, and after its transformation as it would be written */
-async function transformRows(job, docs) {
+const transformRows = async (job, docs) => {
   const ctx = transformContext(job, { dryRun: true });
   const transformed = await transformAll(job, docs, ctx);
   const target = job.direction === 'revert' ? job.spec.from : job.spec.to;
@@ -214,18 +214,18 @@ async function transformRows(job, docs) {
     rows.push(row);
   }
   return rows;
-}
+};
 
 /** `doc` with a stamped operator update applied, top-level only — a preview, not the server */
-function applyLocally(doc, update) {
+const applyLocally = (doc, update) => {
   const out = cloneDocument(doc);
   for (const [key, value] of Object.entries(update.$set ?? {})) out[key] = value;
   for (const key of Object.keys(update.$unset ?? {})) delete out[key];
   for (const [key, value] of Object.entries(update.$inc ?? {})) out[key] = (out[key] ?? 0) + value;
   return out;
-}
+};
 
-function tally(rows) {
+const tally = (rows) => {
   let migrated = 0;
   let failed = 0;
   for (const row of rows) {
@@ -233,7 +233,7 @@ function tally(rows) {
     else failed += 1;
   }
   return { migrated, failed };
-}
+};
 
 /**
  * Each document through the real write path in the sandbox, one at a time.
@@ -244,7 +244,7 @@ function tally(rows) {
 const MAX_DEADLINE_MS = 50_000;
 
 /** `deadlineMs`, checked: 1 to 50 000 (the default) */
-function deadlineOf(options) {
+const deadlineOf = (options) => {
   const ms = options.deadlineMs ?? MAX_DEADLINE_MS;
   if (!Number.isSafeInteger(ms) || ms < 1 || ms > MAX_DEADLINE_MS) {
     throw new ConfigInvalidError(`deadlineMs must be an integer from 1 to ${MAX_DEADLINE_MS}`, {
@@ -252,9 +252,9 @@ function deadlineOf(options) {
     });
   }
   return ms;
-}
+};
 
-async function validateRows(deps, job, docs, { deadlineMs } = {}) {
+const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
   const rows = new Map();
   const ops = [];
   const refusals = [];
@@ -338,7 +338,7 @@ async function validateRows(deps, job, docs, { deadlineMs } = {}) {
     sideEffects,
     attempts,
   };
-}
+};
 
 const MAX_STEPS = 50;
 
@@ -349,7 +349,7 @@ const MAX_STEPS = 50;
  * from the checkpoint the background migration is at (`checkpoint`), or
  * from none (`fromStart`, or not registered). No lock, no lease, no state.
  */
-async function previewSteps(deps, name, loaded, options = {}) {
+const previewSteps = async (deps, name, loaded, options = {}) => {
   const { spec, fns } = loaded;
   const direction = options.direction === 'revert' ? 'revert' : 'forward';
   const fn = direction === 'revert' ? fns.revertStep : fns.step;
@@ -435,7 +435,7 @@ async function previewSteps(deps, name, loaded, options = {}) {
     stoppedBy: report.stoppedBy ?? stoppedBy,
     steps: log,
   };
-}
+};
 
 module.exports = {
   MATCH_FIRST_CAP,

@@ -31,7 +31,7 @@ const LOOKUP_CONCURRENCY = 16;
  * reorder, delay or re-run a job is refused by name rather than silently
  * overridden — the caller should learn the queue is FIFO on purpose.
  */
-function assertJobOptions(jobOptions) {
+const assertJobOptions = (jobOptions) => {
   if (jobOptions === undefined) return;
   if (!isObjectLike(jobOptions)) {
     throw new ConfigInvalidError('jobOptions must be an object', { jobOptions: typeof jobOptions });
@@ -45,13 +45,13 @@ function assertJobOptions(jobOptions) {
       );
     }
   }
-}
+};
 
 /**
  * A background queue's `jobOptions`: the same passthrough, minus what decides
  * how its coordinators and lanes are retried, ordered and woken.
  */
-function assertBackgroundJobOptions(jobOptions) {
+const assertBackgroundJobOptions = (jobOptions) => {
   if (jobOptions === undefined) return;
   if (!isObjectLike(jobOptions)) {
     throw new ConfigInvalidError('background jobOptions must be an object', {
@@ -66,22 +66,22 @@ function assertBackgroundJobOptions(jobOptions) {
       );
     }
   }
-}
+};
 
 /** Validate the `requestedBy` / `reason` of an enqueue call, and return them */
-function actorOf(options) {
+const actorOf = (options) => {
   for (const key of ['requestedBy', 'reason']) {
     const issue = actorIssue(key, options[key]);
     if (issue) throw new ConfigInvalidError(issue, { [key]: typeof options[key] });
   }
   return pickActor(options);
-}
+};
 
-function assertBoolean(value, name) {
+const assertBoolean = (value, name) => {
   if (typeof value !== 'boolean') {
     throw new ConfigInvalidError(`${name} must be a boolean`, { [name]: value });
   }
-}
+};
 
 /**
  * The id of one enqueue call, in the kit's configured format (`generateId`) so
@@ -90,17 +90,17 @@ function assertBoolean(value, name) {
  * either way: a worker refuses a job whose group id is not a short string, and
  * that has to be this call's error, not a job failing later in the queue.
  */
-async function newGroupId(kit) {
+const newGroupId = async (kit) => {
   return assertId(typeof kit.generateId === 'function' ? await kit.generateId() : randomId());
-}
+};
 
 /** Newest applied first — `appliedAt`, name-desc tiebreak: the order rollbacks must follow */
-function newestFirst(a, b) {
+const newestFirst = (a, b) => {
   const delta = (b.appliedAt?.getTime?.() ?? 0) - (a.appliedAt?.getTime?.() ?? 0);
   if (delta !== 0) return delta;
   if (a.file === b.file) return 0;
   return a.file < b.file ? 1 : -1;
-}
+};
 
 /**
  * Whether an `up` group ends with a converge job. Explicit `converge` wins;
@@ -108,7 +108,7 @@ function newestFirst(a, b) {
  * never fires in a queue — every job there is a single-file run. Only a group
  * that brings the database to the head converges, as in the kit.
  */
-async function resolveConverge(kit, { converge, filename, to }) {
+const resolveConverge = async (kit, { converge, filename, to }) => {
   if (converge !== undefined) {
     assertBoolean(converge, 'converge');
     if (converge && (filename !== undefined || to !== undefined)) {
@@ -121,7 +121,7 @@ async function resolveConverge(kit, { converge, filename, to }) {
   }
   if (filename !== undefined || to !== undefined) return false;
   return typeof kit.convergesAfterUp === 'function' && (await kit.convergesAfterUp()) === true;
-}
+};
 
 /**
  * Plan an `up` group without enqueuing it: which files, in which order, under
@@ -135,7 +135,7 @@ async function resolveConverge(kit, { converge, filename, to }) {
  * `plan.migrations`. With nothing pending the converge job is planned only if
  * a dry run finds the database out of step.
  */
-async function planUpJobs(kit, options = {}) {
+const planUpJobs = async (kit, options = {}) => {
   warnUnknownOptions(kit, 'enqueueUp', options, KNOWN_OPTIONS.up);
   const { filename, to, force = false, ordered = true, jobOptions } = options;
   if (filename !== undefined) assertMigrationName(filename);
@@ -222,7 +222,7 @@ async function planUpJobs(kit, options = {}) {
     });
   }
   return plan;
-}
+};
 
 /**
  * An ordered rollback must be the top of the applied stack: every job reverts
@@ -230,7 +230,7 @@ async function planUpJobs(kit, options = {}) {
  * migration can never finish. Refusing here turns that into one synchronous
  * error instead of a group that fails halfway through.
  */
-async function assertTopOfStack(kit, migrations) {
+const assertTopOfStack = async (kit, migrations) => {
   // Names and dates are all this needs — not a re-hash of every applied file.
   const applied = await kit.list('applied', { checksums: false });
   applied.sort(newestFirst);
@@ -249,14 +249,14 @@ async function assertTopOfStack(kit, migrations) {
       `it: ${blockedBy.join(', ')}`,
     { direction: JOB_NAMES.DOWN, names: [...migrations], blockedBy },
   );
-}
+};
 
 /**
  * Plan a `down` group: `kit.dryRun('down')` picks the records (so forward-only
  * and not-applied refusals happen here, before anything is enqueued), then an
  * ordered plan is put in revert order — newest applied first.
  */
-async function planDownJobs(kit, options = {}) {
+const planDownJobs = async (kit, options = {}) => {
   warnUnknownOptions(kit, 'enqueueDown', options, KNOWN_OPTIONS.down);
   const { filename, steps, batch, to, ordered = true, jobOptions } = options;
   if (filename !== undefined) assertMigrationName(filename);
@@ -297,7 +297,7 @@ async function planDownJobs(kit, options = {}) {
     });
   }
   return { groupId, direction: JOB_NAMES.DOWN, batch: null, migrations, jobs };
-}
+};
 
 /**
  * For each id, whether the job stored under it was queued by another enqueue
@@ -305,7 +305,7 @@ async function planDownJobs(kit, options = {}) {
  * job's group differs from ours — and waiting on that id simply joins the job
  * that will do the work. All false on a queue that cannot read jobs back.
  */
-async function foreignJobs(queue, ids, groupId) {
+const foreignJobs = async (queue, ids, groupId) => {
   if (typeof queue.getJob !== 'function') return new Array(ids.length).fill(false);
   // A first deploy can enqueue hundreds of jobs: read them back a few at a time,
   // each answered as it arrives.
@@ -313,14 +313,14 @@ async function foreignJobs(queue, ids, groupId) {
     const job = await queue.getJob(id);
     return Boolean(job && job.data?.groupId !== groupId);
   });
-}
+};
 
 /**
  * The `wait()` of an enqueue handle. It waits through the caller's
  * QueueEvents, else the one the facade lends (`getQueueEvents`) — never
  * opened for a group that has nothing to wait for.
  */
-function makeWait(queue, group, { queueEvents, getQueueEvents } = {}) {
+const makeWait = (queue, group, { queueEvents, getQueueEvents } = {}) => {
   const waitsForSomething = group.jobs.length > 0 || group.converge !== undefined;
   // Async on purpose: whatever goes wrong before the wait starts — the facade
   // is closed and lends no QueueEvents any more, the options are not an
@@ -340,16 +340,16 @@ function makeWait(queue, group, { queueEvents, getQueueEvents } = {}) {
       timeoutMs: waitOptions.timeoutMs,
     });
   };
-}
+};
 
-function assertQueue(queue) {
+const assertQueue = (queue) => {
   if (!queue || typeof queue.addBulk !== 'function') {
     throw new ConfigInvalidError('queue must be a BullMQ Queue (it has no addBulk method)');
   }
-}
+};
 
 /** Add a planned group to the queue (atomically) and return its handle */
-async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = {}) {
+const enqueueGroup = async (queue, kit, plan, { queueEvents, getQueueEvents } = {}) => {
   assertQueue(queue);
   const { groupId, direction, batch } = plan;
   let jobs = [];
@@ -422,7 +422,7 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
       { queueEvents, getQueueEvents },
     ),
   };
-}
+};
 
 /**
  * Enqueue a converge job on its own, on a queue you own: it brings the
@@ -430,7 +430,7 @@ async function enqueueGroup(queue, kit, plan, { queueEvents, getQueueEvents } = 
  * `ordered` (default true) makes it refuse while a migration is still
  * pending — the declared state describes the newest schema.
  */
-async function enqueueConverge(queue, kit, options = {}, internals = {}) {
+const enqueueConverge = async (queue, kit, options = {}, internals = {}) => {
   if (!isObjectLike(options)) {
     throw new ConfigInvalidError('enqueueConverge options must be an object');
   }
@@ -466,26 +466,26 @@ async function enqueueConverge(queue, kit, options = {}, internals = {}) {
       return converge;
     },
   };
-}
+};
 
 /**
  * Enqueue pending migrations (all, up to `to`, or one `filename`) as one job
  * each, on a queue you own. `internals` is how the facade lends its lazily
  * built QueueEvents to `wait()`.
  */
-async function enqueueUp(queue, kit, options = {}, internals = {}) {
+const enqueueUp = async (queue, kit, options = {}, internals = {}) => {
   const { queueEvents, ...planOptions } = options;
   return enqueueGroup(queue, kit, await planUpJobs(kit, planOptions), {
     queueEvents,
     ...internals,
   });
-}
+};
 
 /** How long a running background migration may show no sign of life before a takeover */
 const DEFAULT_STALL_MS = 15 * 60_000;
 
 /** The latest sign of life of a background migration: a checkpoint, a coordinator step, its start */
-function lastActivity(status) {
+const lastActivity = (status) => {
   let latest = 0;
   for (const at of [
     status.lastProgressAt,
@@ -497,7 +497,7 @@ function lastActivity(status) {
     if (time > latest) latest = time;
   }
   return latest;
-}
+};
 
 /**
  * Enqueue the coordinator of one background migration — or, with no
@@ -517,7 +517,7 @@ const ENQUEUE_BACKGROUND_KEYS = new Set([
   'reason',
 ]);
 
-async function enqueueBackground(queue, kit, options = {}) {
+const enqueueBackground = async (queue, kit, options = {}) => {
   if (!isObjectLike(options)) {
     throw new ConfigInvalidError('enqueueBackground options must be an object');
   }
@@ -588,16 +588,16 @@ async function enqueueBackground(queue, kit, options = {}) {
     });
   }
   return { jobs };
-}
+};
 
 /** Enqueue a rollback (last batch, a `batch`, `steps`, back `to`, or one `filename`) */
-async function enqueueDown(queue, kit, options = {}, internals = {}) {
+const enqueueDown = async (queue, kit, options = {}, internals = {}) => {
   const { queueEvents, ...planOptions } = options;
   return enqueueGroup(queue, kit, await planDownJobs(kit, planOptions), {
     queueEvents,
     ...internals,
   });
-}
+};
 
 module.exports = {
   DEFAULT_STALL_MS,

@@ -80,7 +80,7 @@ const retrySoon = (deps, reason) => ({
  * list could not be read" must not pass for "there is no index", or one blip
  * would have a lane give up the version index — and its partitioner with it.
  */
-async function indexKeys(deps, collection) {
+const indexKeys = async (deps, collection) => {
   const cache = deps.indexCache;
   const hit = cache?.get(collection);
   const now = Date.now();
@@ -96,7 +96,7 @@ async function indexKeys(deps, collection) {
   for (const index of indexes) keys.push(index.key);
   cache?.set(collection, { at: now, keys });
   return keys;
-}
+};
 
 /**
  * A collection's shard key as `deps.shardKeyOf` reads it — reused like its
@@ -104,7 +104,7 @@ async function indexKeys(deps, collection) {
  * every watcher job asks, and each answer is a read of `config.collections`
  * through the mongos. A reshard is noticed within the same half minute.
  */
-async function shardKeyOf(deps, collection) {
+const shardKeyOf = async (deps, collection) => {
   const cache = deps.shardKeyCache;
   const hit = cache?.get(collection);
   const now = Date.now();
@@ -112,10 +112,10 @@ async function shardKeyOf(deps, collection) {
   const sharding = await deps.shardKeyOf(collection);
   cache?.set(collection, { at: now, sharding });
   return sharding;
-}
+};
 
 /** Whether a live index key is `wanted` — same fields, same order, same directions or `hashed` */
-function sameIndexKey(live, wanted) {
+const sameIndexKey = (live, wanted) => {
   const a = Object.entries(live);
   const b = Object.entries(wanted);
   if (a.length !== b.length) return false;
@@ -125,7 +125,7 @@ function sameIndexKey(live, wanted) {
     if (x === 'hashed' || y === 'hashed' ? x !== y : Number(x) !== Number(y)) return false;
   }
   return true;
-}
+};
 
 const hasIndex = (keys, wanted) => keys.some((key) => sameIndexKey(key, wanted));
 
@@ -134,7 +134,7 @@ const hasIndex = (keys, wanted) => keys.some((key) => sameIndexKey(key, wanted))
  * the version index that carries the shard key (any index led by the version
  * field ascending serves an equality probe on it).
  */
-async function probeHint(deps, spec) {
+const probeHint = async (deps, spec) => {
   const keys = await indexKeys(deps, spec.collection);
   const exact = versionIndexKey(spec);
   if (hasIndex(keys, exact)) return exact;
@@ -143,17 +143,17 @@ async function probeHint(deps, spec) {
     if (first !== undefined && first[0] === spec.field && Number(first[1]) === 1) return key;
   }
   return versionHint(deps, spec, keys);
-}
+};
 
 /** Say something once per process — `deps.warned` remembers */
-function warnOnce(deps, id, message, fields) {
+const warnOnce = (deps, id, message, fields) => {
   if (deps.warned?.has(id)) return;
   deps.warned?.add(id);
   deps.logger.warn(message, deps.fields(fields));
-}
+};
 
 /** The version index of a collection, when it has one — every scan hints it */
-async function versionHint(deps, spec, keys) {
+const versionHint = async (deps, spec, keys) => {
   if (spec.mode === 'step') return undefined;
   const key = versionIndexKey(spec);
   if (hasIndex(keys ?? (await indexKeys(deps, spec.collection)), key)) return key;
@@ -165,7 +165,7 @@ async function versionHint(deps, spec, keys) {
     { collection: spec.collection },
   );
   return undefined;
-}
+};
 
 /**
  * A transactional background migration needs a replica set or a mongos —
@@ -173,7 +173,7 @@ async function versionHint(deps, spec, keys) {
  *
  * @throws {TransactionsUnsupportedError} on a standalone server
  */
-async function assertTransactions(deps, name, spec) {
+const assertTransactions = async (deps, name, spec) => {
   if (!spec.transaction || typeof deps.topology !== 'function') return;
   if ((await deps.topology()) === 'standalone') {
     throw new TransactionsUnsupportedError(
@@ -182,10 +182,10 @@ async function assertTransactions(deps, name, spec) {
       { migration: name, background: true },
     );
   }
-}
+};
 
 /** The job a lane or a coordinator works with: the spec, the functions, and what they scan */
-async function jobFor(deps, name, state, { direction } = {}) {
+const jobFor = async (deps, name, state, { direction } = {}) => {
   // The state's spec wins below: a definition file broken since the
   // registration must not stop its lanes (`tolerant`).
   const loaded = await deps.load(name, { tolerant: true });
@@ -214,7 +214,7 @@ async function jobFor(deps, name, state, { direction } = {}) {
     ...(deps.job?.id !== undefined ? { jobId: deps.job.id } : {}),
     ...(deps.job?.groupId !== undefined ? { groupId: deps.job.groupId } : {}),
   };
-}
+};
 
 /**
  * How a background migration's collection is split: along the shard key on
@@ -230,7 +230,7 @@ async function jobFor(deps, name, state, { direction } = {}) {
  * taking "unknown" for "not sharded" would hand its key ranges to the `_id`
  * partitioner, which reads a key range as "everything".
  */
-async function partitionerFor(deps, spec, direction, planned) {
+const partitionerFor = async (deps, spec, direction, planned) => {
   const keys = spec.mode === 'step' ? [] : await indexKeys(deps, spec.collection);
   const byId = async (mode) => ({
     partitioner: idRangePartitioner,
@@ -285,7 +285,7 @@ async function partitionerFor(deps, spec, direction, planned) {
     hint: indexKey,
     sharding: { mode: 'shard', key: sharding.key },
   };
-}
+};
 
 /** The partitioner a job would plan with now, as a plan records it */
 const partitionerOf = (job) => (job.spec.mode === 'step' ? 'step' : job.partitioner.id);
@@ -302,13 +302,13 @@ const partitionerOf = (job) => (job.spec.mode === 'step' ? 'step' : job.partitio
  * Either way the same pass is split again — safe: the version filter skips
  * what is done. A plan that names no partitioner is taken as it is.
  */
-function planMismatch(job, plan) {
+const planMismatch = (job, plan) => {
   if (plan === undefined) return undefined;
   if (plan.partitioner !== undefined && plan.partitioner !== partitionerOf(job)) {
     return 'partitioner';
   }
   return job.partitioner.stale?.(plan.epoch) ? 'epoch' : undefined;
-}
+};
 
 /** What a replan says, by what set the plan aside */
 const REPLAN_REASONS = {
@@ -317,7 +317,7 @@ const REPLAN_REASONS = {
 };
 
 /** The shard-aware facts a plan records, for status: how it split, by which key, into how many groups */
-function shardingOf(job, plan) {
+const shardingOf = (job, plan) => {
   if (job.sharding === undefined || job.sharding.mode === 'off') return undefined;
   if (job.sharding.mode === 'untargeted') {
     return { mode: 'untargeted', ...(job.sharding.key ? { key: job.sharding.key } : {}) };
@@ -327,7 +327,7 @@ function shardingOf(job, plan) {
     if (partition.group !== undefined) groups.add(partition.group);
   }
   return { mode: plan.method, key: job.sharding.key, groups: groups.size };
-}
+};
 
 // ─── The coordinator ──────────────────────────────────────────────────────────
 
@@ -343,7 +343,7 @@ function shardingOf(job, plan) {
  *
  * `driver`: `{ kind, ref?, round? }` — who runs this coordinator.
  */
-async function coordinate(deps, name, { signal, driver = { kind: 'local' } } = {}) {
+const coordinate = async (deps, name, { signal, driver = { kind: 'local' } } = {}) => {
   const lock = deps.lockFor(name);
   try {
     return await runWithLock(lock, { logger: deps.logger, owner: deps.owner?.() }, (lockSignal) =>
@@ -358,21 +358,21 @@ async function coordinate(deps, name, { signal, driver = { kind: 'local' } } = {
     }
     throw error;
   }
-}
+};
 
 /** `fn` inside the kit's span for `kind` (`slice`, `coordinate`), when it gives one */
-function withSpan(deps, kind, name, fn) {
+const withSpan = (deps, kind, name, fn) => {
   return typeof deps.span === 'function' ? deps.span(kind, name, fn) : fn();
-}
+};
 
 /** A signal aborted when either is */
-function anySignal(a, b) {
+const anySignal = (a, b) => {
   if (!a) return b;
   if (!b) return a;
   return AbortSignal.any([a, b]);
-}
+};
 
-async function coordinateStep(deps, name, { signal, driver }) {
+const coordinateStep = async (deps, name, { signal, driver }) => {
   const { store } = deps;
   let state = await store.get(name);
   if (state === null) return { next: 'done', status: 'unregistered' };
@@ -418,10 +418,10 @@ async function coordinateStep(deps, name, { signal, driver }) {
   });
   const answer = await coordinatePass(deps, name, state, { signal });
   return round !== undefined ? { ...answer, round } : answer;
-}
+};
 
 /** The rest of a coordinator step, once its driver is recorded */
-async function coordinatePass(deps, name, initial, { signal }) {
+const coordinatePass = async (deps, name, initial, { signal }) => {
   const { store } = deps;
   let state = initial;
   let job;
@@ -509,14 +509,14 @@ async function coordinatePass(deps, name, initial, { signal }) {
     state = finalized.state;
   }
   return retrySoon(deps, 'passes');
-}
+};
 
 /**
  * Plan the next pass: partitions over what still matches, committed under a
  * fresh plan token. Resolves to `{ state }` (with `empty` when nothing is
  * left to plan), or a coordinator answer (`{ next }`).
  */
-async function planPass(deps, job, state, hash, { newPass = true } = {}) {
+const planPass = async (deps, job, state, hash, { newPass = true } = {}) => {
   const { store } = deps;
   const spec = job.spec;
   let plan;
@@ -580,7 +580,7 @@ async function planPass(deps, job, state, hash, { newPass = true } = {}) {
     );
   }
   return { state: committed, empty: plan.partitions.length === 0 };
-}
+};
 
 /**
  * Close a pass: roll the partitions' counters into the state (once per
@@ -590,7 +590,7 @@ async function planPass(deps, job, state, hash, { newPass = true } = {}) {
  * `maxPasses` passes have not drained it, which means something keeps
  * writing the old shape.
  */
-async function finalize(deps, job, state) {
+const finalize = async (deps, job, state) => {
   const { store } = deps;
   const name = state._id;
   const generation = state.generation;
@@ -707,10 +707,10 @@ async function finalize(deps, job, state) {
   );
   await store.dropGenerations(name, generation - 1);
   return { state: next ?? (await store.get(name)) };
-}
+};
 
 /** Move a state to `failed` with `message`, and say so */
-async function failState(deps, state, reason) {
+const failState = async (deps, state, reason) => {
   // Kept, emitted and logged: the application's data stays out of it.
   const message = documentErrorText(reason);
   const failed = await deps.store.move(state._id, {
@@ -727,7 +727,7 @@ async function failState(deps, state, reason) {
     );
   }
   return { next: 'done', status: 'failed', error: message };
-}
+};
 
 /**
  * Where each of `requires` stands, in order — the one rule every guard
@@ -737,7 +737,7 @@ async function failState(deps, state, reason) {
  * an import: `deps.adoptedOf(names)`). A completed revert is not done: what
  * required it needs the forward shape.
  */
-async function requiresStatus(deps, requires) {
+const requiresStatus = async (deps, requires) => {
   if (requires.length === 0) return [];
   const states = await deps.store.getMany(requires);
   const missing = [];
@@ -756,22 +756,22 @@ async function requiresStatus(deps, requires) {
     }
   }
   return rows;
-}
+};
 
 /** The names among `requires` not done yet, in order */
-async function waitingFor(deps, requires) {
+const waitingFor = async (deps, requires) => {
   const waitsFor = [];
   for (const row of await requiresStatus(deps, requires)) {
     if (!row.done) waitsFor.push(row.migration);
   }
   return waitsFor;
-}
+};
 
 /**
  * A blocked one whose `requires` are all done moves to `pending`. Returns
  * the state after, or `null`.
  */
-async function tryUnblock(deps, state) {
+const tryUnblock = async (deps, state) => {
   const waitsFor = await waitingFor(deps, state.requires ?? []);
   if (waitsFor.length > 0) {
     if (JSON.stringify(waitsFor) !== JSON.stringify(state.waitsFor ?? [])) {
@@ -787,7 +787,7 @@ async function tryUnblock(deps, state) {
   });
   if (unblocked !== null) deps.emit('background:unblocked', { migration: state._id });
   return unblocked;
-}
+};
 
 // ─── A lane's slice ───────────────────────────────────────────────────────────
 
@@ -801,7 +801,7 @@ async function tryUnblock(deps, state) {
  * lease was taken). A slice that fails is counted on its partition and
  * thrown.
  */
-async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
+const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
   const { store } = deps;
   const state = await store.get(name);
   if (state === null) return { outcome: 'cancelled', counters: {} };
@@ -1004,7 +1004,7 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
     if (result.outcome !== 'exhausted') return { outcome: result.outcome, counters };
     // That partition is done: claim another while the slice lasts.
   }
-}
+};
 
 /**
  * The process's AIMD controller for one background migration and group —
@@ -1013,7 +1013,7 @@ async function runSlice(deps, name, { signal, sliceMs, owner } = {}) {
  * must reach a runner that has been up for days: the controller is made
  * anew, from what the old one had learned, within the new bounds.
  */
-function adaptiveFor(deps, name, partition, settings) {
+const adaptiveFor = (deps, name, partition, settings) => {
   const cache = deps.adaptiveCache;
   const key = `${name}:${partition.group ?? ''}`;
   const signature =
@@ -1025,7 +1025,7 @@ function adaptiveFor(deps, name, partition, settings) {
   const controller = createAdaptive(settings, initial ? { initial } : {});
   cache?.set(key, { signature, controller });
   return controller;
-}
+};
 
 // ─── Controls ─────────────────────────────────────────────────────────────────
 
@@ -1037,7 +1037,7 @@ function adaptiveFor(deps, name, partition, settings) {
  * @throws {BackgroundConflictError} when the action does not fit its state
  * @throws {NotAppliedError} via the kit when it is not registered
  */
-async function control(deps, name, action, { requestedBy, reason, fromStart = false } = {}) {
+const control = async (deps, name, action, { requestedBy, reason, fromStart = false } = {}) => {
   const { store } = deps;
   const state = await store.get(name);
   if (state === null) {
@@ -1126,13 +1126,13 @@ async function control(deps, name, action, { requestedBy, reason, fromStart = fa
     deps.fields({ background: name, action }),
   );
   return { applied: 'changed', status: target };
-}
+};
 
 /**
  * Pin what is on disk now: its checksum and spec become the state's. A
  * change to what is matched, or how it is split, means a new plan.
  */
-async function repin(deps, name, { requestedBy, reason } = {}) {
+const repin = async (deps, name, { requestedBy, reason } = {}) => {
   const { store } = deps;
   const state = await store.get(name);
   if (state === null) {
@@ -1161,13 +1161,13 @@ async function repin(deps, name, { requestedBy, reason } = {}) {
   await store.set(name, fields);
   deps.emit('background:control', { migration: name, action: 'repin', replan });
   return { applied: 'changed', status: state.status, replan, checksum: loaded.checksum };
-}
+};
 
 /**
  * Wait until no lane holds a lease any more — after a pause or a cancel,
  * for a caller that wants "stopped" to mean stopped.
  */
-async function waitForLanes(deps, name, { signal, timeoutMs = 120_000, pollMs = 250 } = {}) {
+const waitForLanes = async (deps, name, { signal, timeoutMs = 120_000, pollMs = 250 } = {}) => {
   const now = deps.now ?? Date.now;
   const until = now() + timeoutMs;
   for (;;) {
@@ -1177,15 +1177,15 @@ async function waitForLanes(deps, name, { signal, timeoutMs = 120_000, pollMs = 
     // One listener per wait, removed with it — and an aborted signal ends it at once.
     await sleep(pollMs, signal);
   }
-}
+};
 
 /** Why a failed state failed, for a thrown error */
-function failedError(state) {
+const failedError = (state) => {
   return new BackgroundFailedError(
     `Background migration ${state._id} failed${state.lastError ? `: ${state.lastError}` : ''}`,
     { migration: state._id, lastError: state.lastError },
   );
-}
+};
 
 module.exports = {
   STATE_SUMMARY,

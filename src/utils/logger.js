@@ -24,7 +24,7 @@ const silentLogger = {
  * `'error'` only failures. The structured `fields` second argument that core
  * passes is ignored here: the human line already carries that information.
  */
-function createLogger(stream = process.stdout, level = 'info') {
+const createLogger = (stream = process.stdout, level = 'info') => {
   const outColors = createColors(stream);
   const errColors = createColors(process.stderr);
   const threshold = LEVELS[level] ?? LEVELS.info;
@@ -48,7 +48,7 @@ function createLogger(stream = process.stdout, level = 'info') {
     warn: at('warn', (msg) => writeErr(errColors.yellow(sanitizeTerminal(msg)))),
     error: at('error', (msg) => writeErr(errColors.red(sanitizeTerminal(msg)))),
   };
-}
+};
 
 const hasMethod = (value, name) => typeof value?.[name] === 'function';
 
@@ -92,7 +92,7 @@ const adapters = new WeakMap();
  * A logger exposing `child()` is treated as pino-style, so structured fields
  * are passed as the first argument rather than the second.
  */
-function resolveLogger(logger) {
+const resolveLogger = (logger) => {
   if (logger === null) return silentLogger;
   if (logger === undefined) return createLogger();
   if (typeof logger !== 'object' || !isUsableSink(logger)) {
@@ -122,6 +122,6 @@ function resolveLogger(logger) {
   };
   adapters.set(logger, adapter);
   return adapter;
-}
+};
 
 module.exports = { silentLogger, createLogger, resolveLogger };

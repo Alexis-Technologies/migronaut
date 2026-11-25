@@ -8,7 +8,7 @@
  * at one connection pool. Failures still reject on the first error, matching
  * `Promise.all` — the point here is pacing, not error handling.
  */
-async function mapLimit(items, limit, fn) {
+const mapLimit = async (items, limit, fn) => {
   const results = new Array(items.length);
   if (items.length === 0) return results;
 
@@ -27,7 +27,7 @@ async function mapLimit(items, limit, fn) {
   for (let i = 0; i < width; i++) workers.push(worker());
   await Promise.all(workers);
   return results;
-}
+};
 
 /**
  * Wait for `promise` to settle — fulfilled or rejected, it does not matter
@@ -38,7 +38,7 @@ async function mapLimit(items, limit, fn) {
  * limit) would otherwise hold whatever comes after it for as long as the
  * outage lasts. The promise itself goes on; only the wait ends.
  */
-async function settledWithin(promise, ms) {
+const settledWithin = async (promise, ms) => {
   let timer;
   const expired = new Promise((resolve) => {
     timer = setTimeout(() => resolve(false), ms);
@@ -52,6 +52,6 @@ async function settledWithin(promise, ms) {
   } finally {
     clearTimeout(timer);
   }
-}
+};
 
 module.exports = { mapLimit, settledWithin };

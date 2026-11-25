@@ -30,7 +30,7 @@ const READ_CONCURRENCY = 8;
  * server that refuses to say gets the conservative answer: no in-place
  * extras, no shard-key handling.
  */
-async function readServer(db) {
+const readServer = async (db) => {
   const server = { mongos: false, version: undefined, topology: undefined };
   if (typeof db.admin !== 'function') return server;
   try {
@@ -55,7 +55,7 @@ async function readServer(db) {
     // Unknown version: only the always-available in-place changes.
   }
   return server;
-}
+};
 
 const NAMESPACE_NOT_FOUND = 26;
 

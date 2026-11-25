@@ -7,7 +7,7 @@ const { MigrationInvalidNameError } = require('../errors/index.js');
  * by the kit's path resolution and by anything that accepts a name from
  * outside the process (a queue job's payload).
  */
-function isBareFilename(name) {
+const isBareFilename = (name) => {
   return (
     typeof name === 'string' &&
     name.length > 0 &&
@@ -17,17 +17,17 @@ function isBareFilename(name) {
     !name.includes('\\') &&
     !name.includes('\0')
   );
-}
+};
 
 /** Throw MigrationInvalidNameError unless `name` is a bare filename */
-function assertMigrationName(name, context = {}) {
+const assertMigrationName = (name, context = {}) => {
   if (!isBareFilename(name)) {
     throw new MigrationInvalidNameError(
       'Invalid migration name — must be a bare filename with no path segments',
       { name, ...context },
     );
   }
-}
+};
 
 /**
  * Why a file's `requires` export is not valid: an array of bare migration
@@ -36,7 +36,7 @@ function assertMigrationName(name, context = {}) {
  * backwards can never close a cycle — the whole "is it a DAG?" question,
  * answered by the name. Returns `{ path, message }` issues.
  */
-function requiresIssues(requires, name) {
+const requiresIssues = (requires, name) => {
   if (requires === undefined) return [];
   if (!Array.isArray(requires)) {
     return [{ path: 'requires', message: 'must be an array of migration file names' }];
@@ -59,6 +59,6 @@ function requiresIssues(requires, name) {
     }
   }
   return issues;
-}
+};
 
 module.exports = { assertMigrationName, isBareFilename, requiresIssues };

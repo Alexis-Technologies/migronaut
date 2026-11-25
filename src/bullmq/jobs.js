@@ -147,7 +147,7 @@ const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
  * fragment, or the second file's job would be absorbed as a duplicate of the
  * first's.
  */
-function idFragment(migration) {
+const idFragment = (migration) => {
   return migration.replace(/[^A-Za-z0-9._-]/gu, (char) => {
     let encoded = '';
     for (const byte of Buffer.from(char, 'utf8')) {
@@ -155,7 +155,7 @@ function idFragment(migration) {
     }
     return encoded;
   });
-}
+};
 
 /**
  * Deduplication id for one migration in one direction. BullMQ holds the key
@@ -163,12 +163,12 @@ function idFragment(migration) {
  * pending file is absorbed, yet a later down → up cycle is never blocked —
  * which a custom `jobId` would do for as long as the finished job is retained.
  */
-function dedupId(direction, migration, { force = false } = {}) {
+const dedupId = (direction, migration, { force = false } = {}) => {
   // A forced re-run is a request of its own: a plain job for the same file
   // still waiting must not absorb it. (`~force` can never be part of a
   // fragment — there `~` is always followed by two upper-case hex digits.)
   return `${direction}${force ? '~force' : ''}-${idFragment(migration)}`;
-}
+};
 
 /**
  * Deduplication id for a converge job, keyed on the migration it follows. Two
@@ -177,9 +177,9 @@ function dedupId(direction, migration, { force = false } = {}) {
  * earlier converge that sits in front of the new migrations, and nothing would
  * converge after them.
  */
-function convergeDedupId(after) {
+const convergeDedupId = (after) => {
   return after === undefined ? 'converge' : `converge-after-${idFragment(after)}`;
-}
+};
 
 const isGroupId = (value) =>
   typeof value === 'string' && value.length > 0 && value.length <= MAX_GROUP_ID_LENGTH;
@@ -194,7 +194,7 @@ const isGroupId = (value) =>
 const DEFAULT_ALLOW = Object.freeze({ down: true, force: false, unordered: false });
 
 /** Validate an `allow` option and fill in the defaults */
-function resolveAllow(allow) {
+const resolveAllow = (allow) => {
   if (allow === undefined) return DEFAULT_ALLOW;
   if (!isObjectLike(allow)) {
     throw new ConfigInvalidError('allow must be an object', { allow: typeof allow });
@@ -211,19 +211,19 @@ function resolveAllow(allow) {
     }
   }
   return Object.freeze({ ...DEFAULT_ALLOW, ...allow });
-}
+};
 
 /** The permissions a parsed job (or an enqueue request) needs: `'down'`, `'force'`, `'unordered'` */
-function permissionsNeeded(data) {
+const permissionsNeeded = (data) => {
   const needed = [];
   if (data.kind === 'migration' && data.direction === JOB_NAMES.DOWN) needed.push('down');
   if (data.force) needed.push('force');
   if (data.ordered === false) needed.push('unordered');
   return needed;
-}
+};
 
 /** Refuse a well-formed job this worker is not allowed to run */
-function assertAllowed(job, data, allow) {
+const assertAllowed = (job, data, allow) => {
   for (const permission of permissionsNeeded(data)) {
     if (!allow[permission]) {
       throw new QueueJobInvalidError(
@@ -237,14 +237,14 @@ function assertAllowed(job, data, allow) {
       );
     }
   }
-}
+};
 
-function invalid(job, issue) {
+const invalid = (job, issue) => {
   return new QueueJobInvalidError(`Invalid migration job: ${issue}`, {
     ...(job?.id !== undefined ? { jobId: String(job.id) } : {}),
     issue,
   });
-}
+};
 
 /**
  * Validate a job read back from the queue and return a normalized copy.
@@ -253,7 +253,7 @@ function invalid(job, issue) {
  * write access could have put it. Nothing is passed on that was not checked —
  * above all the migration name, which becomes a filesystem path.
  */
-function parseJobData(job) {
+const parseJobData = (job) => {
   if (!isObjectLike(job)) throw invalid(job, 'job is not an object');
   const { name, data } = job;
   if (
@@ -362,10 +362,10 @@ function parseJobData(job) {
     ...(data.checksum !== undefined ? { checksum: data.checksum } : {}),
     ...pickActor(data),
   };
-}
+};
 
 /** The version and field checks every job shares — then the fields of `kind` */
-function assertEnvelope(job, kind) {
+const assertEnvelope = (job, kind) => {
   const { data } = job;
   if (!isObjectLike(data)) throw invalid(job, 'data is not an object');
   if (!Number.isSafeInteger(data.v) || data.v < MIN_JOB_DATA_VERSION) {
@@ -382,13 +382,13 @@ function assertEnvelope(job, kind) {
   for (const key of Object.keys(data)) {
     if (!JOB_FIELDS[kind].has(key)) throw invalid(job, `unknown field "${key}"`);
   }
-}
+};
 
 /**
  * Validate a job read back from a background queue and return a normalized
  * copy — as untrusted as any other: the migration name becomes a path.
  */
-function parseBackgroundJobData(job) {
+const parseBackgroundJobData = (job) => {
   if (!isObjectLike(job)) throw invalid(job, 'job is not an object');
   const { name } = job;
   if (
@@ -443,14 +443,14 @@ function parseBackgroundJobData(job) {
     lane: data.lane,
     retry: data.retry ?? 0,
   };
-}
+};
 
 /**
  * Build one `up`/`down` job spec, ready for `queue.addBulk`. `ordered` is
  * always written: a job must say how it is to run, not leave it to whatever
  * default the worker that picks it up was configured with.
  */
-function buildMigrationJob({
+const buildMigrationJob = ({
   direction,
   migration,
   groupId,
@@ -462,7 +462,7 @@ function buildMigrationJob({
   checksum,
   requestedBy,
   reason,
-}) {
+}) => {
   return {
     name: direction,
     data: {
@@ -479,16 +479,16 @@ function buildMigrationJob({
       ...pickActor({ requestedBy, reason }),
     },
   };
-}
+};
 
 /** Per-job options: the caller's passthrough, then the ones the contract owns */
-function migrationJobOptions(jobOptions, direction, migration, { force = false } = {}) {
+const migrationJobOptions = (jobOptions, direction, migration, { force = false } = {}) => {
   return {
     ...jobOptions,
     ...MIGRATION_JOB_OPTIONS,
     deduplication: { id: dedupId(direction, migration, { force }) },
   };
-}
+};
 
 /**
  * A converge job spec, ready for `queue.addBulk`: the tail of an `up` group
@@ -496,7 +496,7 @@ function migrationJobOptions(jobOptions, direction, migration, { force = false }
  * skips the "nothing may be pending" guard; like a migration job's, it is
  * always written.
  */
-function buildConvergeJob({ groupId, ordered, after, jobOptions, requestedBy, reason } = {}) {
+const buildConvergeJob = ({ groupId, ordered, after, jobOptions, requestedBy, reason } = {}) => {
   return {
     name: JOB_NAMES.CONVERGE,
     data: {
@@ -512,7 +512,7 @@ function buildConvergeJob({ groupId, ordered, after, jobOptions, requestedBy, re
       deduplication: { id: convergeDedupId(after) },
     },
   };
-}
+};
 
 /**
  * How many finished scheduler ticks are kept when the caller's `jobOptions`
@@ -532,7 +532,7 @@ const saidUnknown = new WeakMap();
  * the background processor refuse an unknown key outright, as they always
  * have.) A key whose value is `undefined` asks for nothing and is not said.
  */
-function warnUnknownOptions(kit, where, options, known) {
+const warnUnknownOptions = (kit, where, options, known) => {
   if (!isObjectLike(options) || typeof kit?.logger?.warn !== 'function') return;
   for (const key of Object.keys(options)) {
     if (known.has(key) || options[key] === undefined) continue;
@@ -549,7 +549,7 @@ function warnUnknownOptions(kit, where, options, known) {
       { where, option: key.slice(0, 80) },
     );
   }
-}
+};
 
 /** The options each entry point reads — what warnUnknownOptions measures a call against */
 const KNOWN_OPTIONS = Object.freeze({
@@ -629,7 +629,7 @@ const TICK_RETENTION = Object.freeze({
  * the schedule lives. Each tick starts its own instead; the migrations it
  * enqueues still hang under it. A no-op for a queue without telemetry.
  */
-function tickJobOptions(jobOptions = {}) {
+const tickJobOptions = (jobOptions = {}) => {
   return {
     removeOnComplete: TICK_RETENTION.removeOnComplete,
     removeOnFail: TICK_RETENTION.removeOnFail,
@@ -637,44 +637,44 @@ function tickJobOptions(jobOptions = {}) {
     ...MIGRATION_JOB_OPTIONS,
     telemetry: { ...jobOptions.telemetry, omitContext: true },
   };
-}
+};
 
 /** The job a scheduler tick produces: plan what is pending, enqueue it */
-function buildSyncJobTemplate({ to, jobOptions } = {}) {
+const buildSyncJobTemplate = ({ to, jobOptions } = {}) => {
   return {
     name: JOB_NAMES.SYNC,
     data: { v: JOB_DATA_VERSION, kind: 'sync', ...(to !== undefined ? { to } : {}) },
     opts: tickJobOptions(jobOptions),
   };
-}
+};
 
 /** The job a converge schedule produces — a tick like the `sync` one */
-function buildConvergeJobTemplate({ jobOptions } = {}) {
+const buildConvergeJobTemplate = ({ jobOptions } = {}) => {
   return {
     name: JOB_NAMES.CONVERGE,
     data: { v: JOB_DATA_VERSION, kind: 'converge' },
     opts: tickJobOptions(jobOptions),
   };
-}
+};
 
 /** The background queue that serves a migration queue */
-function backgroundQueueName(queueName) {
+const backgroundQueueName = (queueName) => {
   return `${queueName}${BACKGROUND_QUEUE_SUFFIX}`;
-}
+};
 
 /**
  * Options of a background queue's own jobs: the caller's passthrough, then a
  * bounded retention where they set none — a lane per partition per spawn adds
  * up — then what the contract owns.
  */
-function backgroundJobOptions(jobOptions = {}, owned = {}) {
+const backgroundJobOptions = (jobOptions = {}, owned = {}) => {
   return {
     removeOnComplete: TICK_RETENTION.removeOnComplete,
     removeOnFail: TICK_RETENTION.removeOnFail,
     ...jobOptions,
     ...owned,
   };
-}
+};
 
 /**
  * The coordinator job of a background migration. Deduplicated on its name, so
@@ -683,7 +683,7 @@ function backgroundJobOptions(jobOptions = {}, owned = {}) {
  * of a stalled one gets an id of its own per round. A few attempts with a long
  * backoff are the outer safety net — what it decides is all in MongoDB.
  */
-function buildBackgroundJob({ migration, takeoverOf, jobOptions, requestedBy, reason }) {
+const buildBackgroundJob = ({ migration, takeoverOf, jobOptions, requestedBy, reason }) => {
   const fragment = idFragment(migration);
   return {
     name: JOB_NAMES.BACKGROUND,
@@ -702,7 +702,7 @@ function buildBackgroundJob({ migration, takeoverOf, jobOptions, requestedBy, re
       },
     }),
   };
-}
+};
 
 /**
  * One lane of a background migration. Under a coordinator (`parent`) its id
@@ -710,7 +710,7 @@ function buildBackgroundJob({ migration, takeoverOf, jobOptions, requestedBy, re
  * another parent, and a job it already finished would never wake this one;
  * with no parent (`children: false`) the id is deduplicated per lane slot.
  */
-function buildLaneJob({
+const buildLaneJob = ({
   migration,
   registration,
   generation,
@@ -719,7 +719,7 @@ function buildLaneJob({
   lane,
   parent,
   jobOptions,
-}) {
+}) => {
   const base = `bgl-${idFragment(migration)}-${idFragment(registration)}-g${generation}`;
   return {
     name: JOB_NAMES.BACKGROUND_LANE,
@@ -747,16 +747,16 @@ function buildLaneJob({
           },
     ),
   };
-}
+};
 
 /** The job a drift-watch schedule produces — a tick like the `sync` one */
-function buildBackgroundVerifyJobTemplate({ jobOptions } = {}) {
+const buildBackgroundVerifyJobTemplate = ({ jobOptions } = {}) => {
   return {
     name: JOB_NAMES.BACKGROUND_VERIFY,
     data: { v: JOB_DATA_VERSION, kind: JOB_NAMES.BACKGROUND_VERIFY },
     opts: tickJobOptions(jobOptions),
   };
-}
+};
 
 module.exports = {
   BACKGROUND_FORBIDDEN_JOB_OPTIONS,

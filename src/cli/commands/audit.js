@@ -2,14 +2,14 @@ const { createColors } = require('../../utils/colors.js');
 const { defineCommand, EXIT_CODES } = require('../shared.js');
 
 /** Symbol and color for each check outcome */
-function renderStatus(colors, status) {
+const renderStatus = (colors, status) => {
   if (status === 'pass') return colors.green('✔');
   if (status === 'warn') return colors.yellow('!');
   return colors.red('✖');
-}
+};
 
 /** Register the `audit` command (read-only diagnostics) */
-function registerAudit(program) {
+const registerAudit = (program) => {
   defineCommand(program, {
     name: 'audit',
     description: 'Check the migronaut setup: config, connectivity, transactions, indexes, lock',
@@ -35,6 +35,6 @@ function registerAudit(program) {
       if (!report.ok) process.exitCode = EXIT_CODES.AUDIT_FAILED;
     },
   });
-}
+};
 
 module.exports = { registerAudit };

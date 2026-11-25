@@ -24,7 +24,7 @@ const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
  * number, a `bigint` (`useBigInt64`), an `Int32`, a `Double` or a `Long`
  * (`promoteValues: false`) — or `null` when the value is not one.
  */
-function toCount(value) {
+const toCount = (value) => {
   if (typeof value === 'number') {
     return Number.isSafeInteger(value) && value >= 0 ? value : null;
   }
@@ -39,7 +39,7 @@ function toCount(value) {
     return Number.isSafeInteger(number) ? number : null;
   }
   return null;
-}
+};
 
 const bytesEqual = (a, b) => {
   if (a.length !== b.length) return false;
@@ -55,7 +55,7 @@ const binaryBytes = (value) =>
  * caller then treats them as different, which costs one rewritten field and
  * never loses a change.
  */
-function sameBsonValue(type, a, b) {
+const sameBsonValue = (type, a, b) => {
   switch (type) {
     case 'ObjectId':
     case 'ObjectID':
@@ -90,7 +90,7 @@ function sameBsonValue(type, a, b) {
     default:
       return undefined;
   }
-}
+};
 
 /**
  * Whether two document values would serialize to the same BSON. Key order
@@ -101,7 +101,7 @@ function sameBsonValue(type, a, b) {
  * "different": a spurious difference rewrites one field, a spurious sameness
  * would drop a change.
  */
-function sameValue(a, b) {
+const sameValue = (a, b) => {
   if (a === b) return a !== 0 || Object.is(a, b);
   if (typeof a !== typeof b) return false;
   if (typeof a === 'number') return Number.isNaN(a) && Number.isNaN(b);
@@ -133,7 +133,7 @@ function sameValue(a, b) {
     if (key !== keysB[i] || !sameValue(a[key], b[key])) return false;
   }
   return true;
-}
+};
 
 /**
  * A copy a transformation may mutate freely: plain objects and arrays are
@@ -141,7 +141,7 @@ function sameValue(a, b) {
  * classes included, which a structured clone would strip of their prototype
  * — is shared.
  */
-function cloneDocument(value) {
+const cloneDocument = (value) => {
   if (Array.isArray(value)) {
     const out = new Array(value.length);
     for (let i = 0; i < value.length; i++) out[i] = cloneDocument(value[i]);
@@ -152,14 +152,14 @@ function cloneDocument(value) {
   const out = {};
   for (const key of Object.keys(value)) setOwn(out, key, cloneDocument(value[key]));
   return out;
-}
+};
 
 /**
  * `target[key] = value` as an own, enumerable property — `__proto__` too,
  * which a plain assignment would turn into the object's prototype (a stored
  * field of that name is data, as the BSON parser reads it).
  */
-function setOwn(target, key, value) {
+const setOwn = (target, key, value) => {
   if (key === '__proto__') {
     Object.defineProperty(target, key, {
       value,
@@ -170,16 +170,16 @@ function setOwn(target, key, value) {
   } else {
     target[key] = value;
   }
-}
+};
 
 /**
  * A collection definition as a module may hand it over: an ES-module
  * namespace (`import * as orders`, or `require` of an ES module) carries it
  * as its `default`.
  */
-function unwrapDefinition(value) {
+const unwrapDefinition = (value) => {
   return isPlainObject(value?.default) ? value.default : value;
-}
+};
 
 /** `a.b.c` → `a`; `$[]`-style paths keep their first segment too */
 const topField = (path) => {
@@ -195,7 +195,7 @@ const PIPELINE_WHOLE_STAGES = new Set(['$project', '$replaceRoot', '$replaceWith
  * means it may rewrite the entire document (a replacement, or a pipeline that
  * projects or replaces the root) and `fields` lists the ones it names.
  */
-function touchedFields(update) {
+const touchedFields = (update) => {
   const fields = new Set();
   if (Array.isArray(update)) {
     let whole = false;
@@ -234,13 +234,13 @@ function touchedFields(update) {
     }
   }
   return plain.size > 0 ? { fields: plain, whole: true } : { fields, whole: false };
-}
+};
 
 const LOGICAL = new Set(['$and', '$or', '$nor']);
 
 /** `"$__rev"` or `"$__rev.x"` inside a serialized `$expr` — not `"$__revision"` */
 const references = new Map();
-function fieldReference(field) {
+const fieldReference = (field) => {
   // Built once per field: every guarded write asks.
   let pattern = references.get(field);
   if (pattern === undefined) {
@@ -248,10 +248,10 @@ function fieldReference(field) {
     references.set(field, pattern);
   }
   return pattern;
-}
+};
 
 /** Whether a query filter constrains `field` (at the top level, or through `$and`/`$or`/`$nor`) */
-function filterTouches(filter, field) {
+const filterTouches = (filter, field) => {
   if (!isPlainObject(filter)) return false;
   for (const [key, value] of Object.entries(filter)) {
     if (LOGICAL.has(key) && Array.isArray(value)) {
@@ -263,7 +263,7 @@ function filterTouches(filter, field) {
     }
   }
   return false;
-}
+};
 
 module.exports = {
   bsonType,

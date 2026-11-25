@@ -78,7 +78,7 @@ const MAX_HOPS = 16;
 const MAX_BACKOFF_MS = 30_000;
 
 /** Validate the watcher's options and fill in the defaults */
-function watchOptions(options) {
+const watchOptions = (options) => {
   if (options === null || typeof options !== 'object') {
     throw new ConfigInvalidError('watchBackground options must be an object');
   }
@@ -122,21 +122,21 @@ function watchOptions(options) {
     throw new ConfigInvalidError('onError must be a function');
   }
   return resolved;
-}
+};
 
 /** The background migration that takes a collection to its target — the edge reaching highest */
-function lastEdge(edges) {
+const lastEdge = (edges) => {
   let last;
   for (const edge of edges.values()) if (last === undefined || edge.to > last.to) last = edge;
   return last?.name;
-}
+};
 
 /**
  * How far this host's clock runs ahead of the server's, in milliseconds —
  * from `hello`'s `localTime`, halfway through the round trip. 0 when the
  * server will not say.
  */
-async function clockSkew(db) {
+const clockSkew = async (db) => {
   try {
     const before = Date.now();
     const hello = await db.admin().command({ hello: 1 });
@@ -146,7 +146,7 @@ async function clockSkew(db) {
   } catch {
     return 0;
   }
-}
+};
 
 /**
  * Start watching. `deps`: the kit's background deps plus `{ watchStore,
@@ -154,7 +154,7 @@ async function clockSkew(db) {
  * stop() }`; `stop()` resolves once every stream is closed, its last token
  * saved and its lock released.
  */
-function startWatch(deps, options = {}) {
+const startWatch = (deps, options = {}) => {
   const settings = watchOptions(options);
   const controller = new AbortController();
   const signal = controller.signal;
@@ -179,7 +179,7 @@ function startWatch(deps, options = {}) {
   };
 
   /** Move a follower to `state` — said once per change, and saved when it leads */
-  async function setState(collection, state, { leading = false } = {}) {
+  const setState = async (collection, state, { leading = false } = {}) => {
     const follower = followers.get(collection);
     if (follower === undefined || follower.state === state) return;
     follower.state = state;
@@ -194,10 +194,10 @@ function startWatch(deps, options = {}) {
         );
       });
     }
-  }
+  };
 
   /** The collections to follow now, at most `maxCollections` */
-  function wantedCollections(states) {
+  const wantedCollections = (states) => {
     const names = new Set();
     for (const state of states) {
       const spec = state.spec;
@@ -221,9 +221,9 @@ function startWatch(deps, options = {}) {
       }
     }
     return new Set(sorted.slice(0, settings.maxCollections));
-  }
+  };
 
-  async function supervise() {
+  const supervise = async () => {
     while (!signal.aborted) {
       // A follower found no change streams here at all: nothing to supervise.
       if (unsupported !== undefined) break;
@@ -241,9 +241,9 @@ function startWatch(deps, options = {}) {
       }
       await sleep(settings.refreshMs, signal).catch(() => undefined);
     }
-  }
+  };
 
-  function startFollower(collection) {
+  const startFollower = (collection) => {
     const child = new AbortController();
     const follower = {
       controller: child,
@@ -260,10 +260,10 @@ function startWatch(deps, options = {}) {
         await setState(collection, 'stopped');
         followers.delete(collection);
       });
-  }
+  };
 
   /** Lead the collection when its lock is free; follow (and retry) when it is not */
-  async function follow(collection, followSignal) {
+  const follow = async (collection, followSignal) => {
     while (!followSignal.aborted) {
       let outcome;
       try {
@@ -288,10 +288,10 @@ function startWatch(deps, options = {}) {
       }
       await sleep(jitter(settings.leaderRetryMs), followSignal).catch(() => undefined);
     }
-  }
+  };
 
   /** The leader's loop: open the stream, serve it, reopen it — until stopped */
-  async function lead(collection, leadSignal) {
+  const lead = async (collection, leadSignal) => {
     await deps.watchStore.lead(collection, owner);
     const stored = await deps.watchStore.get(collection);
     let token = stored?.resumeToken;
@@ -331,14 +331,14 @@ function startWatch(deps, options = {}) {
       await sleep(Math.min(MAX_BACKOFF_MS, 250 * 2 ** failures), leadSignal).catch(() => undefined);
     }
     return 'stopped';
-  }
+  };
 
   /**
    * One open stream: events served until the edges need a fresh look
    * (`refreshMs`), the stream ends or fails, or the watcher stops. Resolves
    * to `{ token, end?, error? }`.
    */
-  async function serve(collection, serveSignal, context) {
+  const serve = async (collection, serveSignal, context) => {
     const { edges, target, field } = context;
     const follower = followers.get(collection);
     const stream = deps.db.collection(collection).watch(watchPipeline(field, target), {
@@ -425,10 +425,10 @@ function startWatch(deps, options = {}) {
       // On the way out, the position is kept whatever the cadence said.
       await saveToken(true).catch(() => undefined);
     }
-  }
+  };
 
   /** Behind by more than maxLagMs: reopen the background migrations instead, start from now */
-  async function shed(collection, edges) {
+  const shed = async (collection, edges) => {
     await setState(collection, 'overloaded', { leading: true });
     for (const edge of edges.values()) {
       await control(deps, edge.name, 'retry', {
@@ -440,10 +440,10 @@ function startWatch(deps, options = {}) {
         'its background migrations and started again from now',
       deps.fields({ collection }),
     );
-  }
+  };
 
   /** Upgrade the one document an event names, edge by edge, up to the target shape */
-  async function upgrade(collection, event, context, jobs, lag) {
+  const upgrade = async (collection, event, context, jobs, lag) => {
     const { edges, byName, target, field } = context;
     const follower = followers.get(collection);
     const count = (key) => {
@@ -506,7 +506,7 @@ function startWatch(deps, options = {}) {
         deps.telemetry?.backgroundWatchDelay({ name: edge.name, delayMs: lag });
       }
     }
-  }
+  };
 
   /**
    * One document through the lanes' write path — in a transaction for a
@@ -515,7 +515,7 @@ function startWatch(deps, options = {}) {
    * moves it first is read again and retried, up to `maxConflictRetries`
    * times, as a lane would; `null` when it is still in the way after that.
    */
-  async function rewrite(job, doc) {
+  const rewrite = async (job, doc) => {
     if (!job.spec.transaction) return applyBatch(job, [doc], { db: deps.db });
     let current = doc;
     // Each transaction — the driver's retries included — runs the
@@ -552,14 +552,14 @@ function startWatch(deps, options = {}) {
         await session.endSession().catch(() => undefined);
       }
     }
-  }
+  };
 
   /**
    * What the watcher could not upgrade goes back to the lanes: with
    * `onDrift: 'reopen'` the background migration is reopened (a pass over
    * what is left), otherwise the drift is reported.
    */
-  async function handBack(collection, migration, reason) {
+  const handBack = async (collection, migration, reason) => {
     if (deps.onDrift !== 'reopen') {
       drift(collection, migration, 'reported');
       return;
@@ -577,12 +577,12 @@ function startWatch(deps, options = {}) {
       return;
     }
     drift(collection, migration, 'reopened');
-  }
+  };
 
-  function drift(collection, migration, action) {
+  const drift = (collection, migration, action) => {
     deps.telemetry?.backgroundDrift({ name: migration });
     deps.emit('background:drift', { migration, collection, source: 'stream', action });
-  }
+  };
 
   const work = supervise();
   let stopping;
@@ -616,6 +616,6 @@ function startWatch(deps, options = {}) {
       return stopping;
     },
   };
-}
+};
 
 module.exports = { WATCH_DEFAULTS: DEFAULTS, startWatch, watchOptions };

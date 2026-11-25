@@ -11,30 +11,30 @@
 const ACTOR_LIMITS = Object.freeze({ requestedBy: 128, reason: 512 });
 
 /** The problem with an actor field, or null when it is absent or valid */
-function actorIssue(key, value) {
+const actorIssue = (key, value) => {
   if (value === undefined) return null;
   const max = ACTOR_LIMITS[key];
   if (typeof value !== 'string' || value.length === 0 || value.length > max) {
     return `${key} must be a non-empty string of at most ${max} characters`;
   }
   return null;
-}
+};
 
 /** Just the actor fields of `source` that are set */
-function pickActor(source) {
+const pickActor = (source) => {
   const actor = {};
   for (const key of Object.keys(ACTOR_LIMITS)) {
     if (source?.[key] !== undefined) actor[key] = source[key];
   }
   return actor;
-}
+};
 
 /**
  * The actor fields of `options` as changelog fields: `requestedBy` / `reason`
  * for what a run applies, `<prefix>RequestedBy` / `<prefix>Reason` for what
  * it reverts (`prefix: 'revert'`), so a revert never overwrites who applied.
  */
-function actorFields(options, prefix) {
+const actorFields = (options, prefix) => {
   const fields = {};
   if (options?.requestedBy !== undefined) {
     fields[prefix ? `${prefix}RequestedBy` : 'requestedBy'] = options.requestedBy;
@@ -43,6 +43,6 @@ function actorFields(options, prefix) {
     fields[prefix ? `${prefix}Reason` : 'reason'] = options.reason;
   }
   return fields;
-}
+};
 
 module.exports = { ACTOR_LIMITS, actorFields, actorIssue, pickActor };

@@ -52,7 +52,7 @@ const NO_REPLICATION = new Set([
 const jitter = (ms) => Math.round(ms * (0.5 + Math.random() / 2));
 
 /** Sleep `ms`, cut short (rejecting with the reason) when `signal` aborts */
-function sleep(ms, signal) {
+const sleep = (ms, signal) => {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(signal.reason);
@@ -72,14 +72,14 @@ function sleep(ms, signal) {
     }, ms);
     signal?.addEventListener('abort', onAbort, { once: true });
   });
-}
+};
 
 /**
  * The worst lag of a secondary that counts, in ms — or 0. Hidden and delayed
  * members are left out: a delayed one lags on purpose, and a hidden one
  * serves no reads.
  */
-function replicationLagMs(status, excluded) {
+const replicationLagMs = (status, excluded) => {
   const members = Array.isArray(status?.members) ? status.members : [];
   let primary;
   for (const member of members) {
@@ -95,17 +95,17 @@ function replicationLagMs(status, excluded) {
     if (lag > worst) worst = lag;
   }
   return worst;
-}
+};
 
 /** Hidden or delayed member hosts, from the replica set config */
-function excludedMembers(config) {
+const excludedMembers = (config) => {
   const hosts = new Set();
   for (const member of config?.config?.members ?? []) {
     const delay = member.secondaryDelaySecs ?? member.slaveDelay ?? 0;
     if (member.hidden === true || Number(delay) > 0) hosts.add(member.host);
   }
   return hosts;
-}
+};
 
 /**
  * A throttle for one lane. `options`: `{ spec, db, logger, name, now?,
@@ -117,7 +117,7 @@ function excludedMembers(config) {
  * (`Map<name, { since, warnedAt, reportedAt }>`): a wait goes on across the
  * slices and the lanes of a process, and is said once for all of them.
  */
-function createThrottle({
+const createThrottle = ({
   spec,
   db,
   logger,
@@ -126,7 +126,7 @@ function createThrottle({
   wait = sleep,
   warned,
   lagWaits = new Map(),
-}) {
+}) => {
   const maxLag = spec.maxReplicationLagMs;
   let lagEnabled = maxLag !== false && typeof db?.admin === 'function';
   let lastLagCheck = -Infinity;
@@ -138,7 +138,7 @@ function createThrottle({
   // One warning per process for a lag that cannot be read for lack of rights.
   const warnings = warned ?? new Set();
 
-  async function currentLag() {
+  const currentLag = async () => {
     const admin = db.admin();
     if (now() - lastConfigCheck >= CONFIG_CHECK_INTERVAL_MS) {
       lastConfigCheck = now();
@@ -149,7 +149,7 @@ function createThrottle({
       }
     }
     return replicationLagMs(await admin.command({ replSetGetStatus: 1 }), excluded);
-  }
+  };
 
   /**
    * A lag wait made visible: an event and a metric point at most every 10 s
@@ -157,7 +157,7 @@ function createThrottle({
    * a lane that holds its lease and writes nothing looks healthy to every
    * other check there is.
    */
-  function reportLag(lag, onLag) {
+  const reportLag = (lag, onLag) => {
     const at = now();
     let entry = lagWaits.get(name);
     if (entry === undefined) {
@@ -177,10 +177,10 @@ function createThrottle({
         { background: name, lagMs: lag, waitedMs },
       );
     }
-  }
+  };
 
   /** Wait while a secondary lags too far; resolves to whether the slice ran out meanwhile */
-  async function waitForLag(signal, { deadline, onLag } = {}) {
+  const waitForLag = async (signal, { deadline, onLag } = {}) => {
     if (!lagEnabled || now() - lastLagCheck < LAG_CHECK_INTERVAL_MS) return false;
     for (;;) {
       lastLagCheck = now();
@@ -219,7 +219,7 @@ function createThrottle({
       // pause or a cancel would otherwise wait for the secondary too.
       if (deadline !== undefined && now() >= deadline) return true;
     }
-  }
+  };
 
   return {
     /** Whether the last `beforeBatch` waited for a lagging secondary — read once */
@@ -261,7 +261,7 @@ function createThrottle({
       return { expired: await waitForLag(signal, { deadline, onLag }) };
     },
   };
-}
+};
 
 // ─── Adaptive batch sizing (AIMD) ─────────────────────────────────────────────
 
@@ -285,7 +285,7 @@ const FIRST_BACKOFF_MS = 100;
  * only signal there is. `settings` is the resolved `spec.adaptive`;
  * `initial` the state saved on the partition (`{ batchSize, pauseMs }`).
  */
-function createAdaptive(settings, { initial, now = Date.now } = {}) {
+const createAdaptive = (settings, { initial, now = Date.now } = {}) => {
   const { targetLatencyMs, minBatchSize, maxBatchSize, maxPauseMs } = settings;
   const increase = Math.max(1, Math.floor(maxBatchSize / 20));
   let size = clamp(initial?.batchSize ?? maxBatchSize, minBatchSize, maxBatchSize);
@@ -333,7 +333,7 @@ function createAdaptive(settings, { initial, now = Date.now } = {}) {
       return report;
     },
   };
-}
+};
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 

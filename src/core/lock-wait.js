@@ -33,10 +33,10 @@ const POLL_JITTER_RATIO = 0.25;
  */
 const TTL_PATIENCE_FACTOR = 1.5;
 
-function jitteredDelay(baseMs) {
+const jitteredDelay = (baseMs) => {
   const spread = baseMs * POLL_JITTER_RATIO;
   return Math.max(1, Math.round(baseMs - spread + Math.random() * spread * 2));
-}
+};
 
 /** Polls that must fit in one wait budget: enough to see a live holder's heartbeat move */
 const POLLS_PER_BUDGET = 4;
@@ -47,11 +47,11 @@ const POLLS_PER_BUDGET = 4;
  * the wait budget, so a long sleep can never outlast the budget and make a
  * live holder look stalled. Never below `baseMs`.
  */
-function backoffDelay(baseMs, attempt, budgetMs = Number.POSITIVE_INFINITY) {
+const backoffDelay = (baseMs, attempt, budgetMs = Number.POSITIVE_INFINITY) => {
   const cap = Math.max(baseMs, Math.min(MAX_LOCK_POLL_INTERVAL_MS, budgetMs / POLLS_PER_BUDGET));
   const grown = Math.min(cap, baseMs * 2 ** Math.min(Math.max(attempt - 1, 0), 30));
   return Math.min(jitteredDelay(grown), MAX_TIMER_MS);
-}
+};
 
 /**
  * Validate the wait options. A NaN here (or any non-positive value) disables
@@ -61,11 +61,11 @@ function backoffDelay(baseMs, attempt, budgetMs = Number.POSITIVE_INFINITY) {
  * largest timer would fire after 1ms: the same storm. `lockWaitTimeoutMs` may
  * be left out — the default then follows the holder's TTL.
  */
-function assertLockWaitOptions({
+const assertLockWaitOptions = ({
   onLockHeld,
   lockWaitTimeoutMs,
   lockPollIntervalMs = DEFAULT_LOCK_POLL_INTERVAL_MS,
-} = {}) {
+} = {}) => {
   if (onLockHeld !== undefined && onLockHeld !== 'wait' && onLockHeld !== 'throw') {
     throw new ConfigInvalidError("onLockHeld must be 'wait' or 'throw'", { onLockHeld });
   }
@@ -87,30 +87,30 @@ function assertLockWaitOptions({
       { lockPollIntervalMs },
     );
   }
-}
+};
 
 /** The error an aborted wait rejects with — the signal's own typed reason when it has one */
-function abortedError(signal, extra) {
+const abortedError = (signal, extra) => {
   const reason = signal.reason;
   if (reason instanceof MigronautError) return reason;
   return new RunAbortedError('Lock wait aborted', {
     reason: errorText(reason ?? 'aborted'),
     ...extra,
   });
-}
+};
 
 /**
  * The wait budget: the caller's, or — left out — the default, stretched to
  * outlast the holder's heartbeat and its stale-reclaim window. The holder's
  * TTL comes from its lock document (written since 2.1), else this process's.
  */
-function waitBudget(lockWaitTimeoutMs, error) {
+const waitBudget = (lockWaitTimeoutMs, error) => {
   if (lockWaitTimeoutMs !== undefined) return lockWaitTimeoutMs;
   const ttlMs = error.context?.holder?.ttlMs ?? error.context?.ttlMs;
   return Number.isFinite(ttlMs)
     ? Math.max(DEFAULT_LOCK_WAIT_TIMEOUT_MS, Math.round(ttlMs * TTL_PATIENCE_FACTOR))
     : DEFAULT_LOCK_WAIT_TIMEOUT_MS;
-}
+};
 
 /**
  * Run `attempt()`; while it rejects with LockAlreadyHeldError and `onLockHeld`
@@ -126,7 +126,7 @@ function waitBudget(lockWaitTimeoutMs, error) {
  * that happened ends — `'acquired'`, `'timeout'`, `'aborted'` or `'failed'`
  * (in an error that is not a held lock).
  */
-async function withLockWait(attempt, options = {}) {
+const withLockWait = async (attempt, options = {}) => {
   const {
     onLockHeld = 'throw',
     lockWaitTimeoutMs,
@@ -251,7 +251,7 @@ async function withLockWait(attempt, options = {}) {
       }
     }
   }
-}
+};
 
 module.exports = {
   DEFAULT_LOCK_POLL_INTERVAL_MS,

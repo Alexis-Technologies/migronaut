@@ -17,7 +17,7 @@ const { toCount } = require('../versioning/internal.js');
  */
 
 /** `{ required, properties }` for the managed fields, in a fixed order */
-function versioningRules(versioning) {
+const versioningRules = (versioning) => {
   const { field, min, revisionField } = versioning;
   const properties = { [field]: { bsonType: 'int', minimum: min } };
   const required = [field];
@@ -28,10 +28,10 @@ function versioningRules(versioning) {
   // `min: 0` adapts a collection whose documents predate versioning: the
   // fields are typed when present, but nothing requires them yet.
   return min === 0 ? { properties } : { required, properties };
-}
+};
 
 /** The managed field names a validator already constrains itself */
-function managedFieldsIn(validator, versioning) {
+const managedFieldsIn = (validator, versioning) => {
   const managed = [versioning.field];
   if (versioning.revisionField !== null) managed.push(versioning.revisionField);
   const found = new Set();
@@ -46,14 +46,14 @@ function managedFieldsIn(validator, versioning) {
     if (required.has(name)) found.add(name);
   }
   return [...found];
-}
+};
 
 /**
  * Why a declared validator cannot carry the versioning rules — it constrains
  * a managed field itself, or its `$jsonSchema` is not a schema object. Empty
  * when the merge can go ahead.
  */
-function validatorVersioningIssues(validator, versioning) {
+const validatorVersioningIssues = (validator, versioning) => {
   if (validator === undefined) return [];
   if (validator === null || !isPlainObject(validator)) {
     return ['is null, which would remove the versioning rules — drop the validator key instead'];
@@ -72,7 +72,7 @@ function validatorVersioningIssues(validator, versioning) {
     issues.push(`constrains "${name}", which is managed by versioning — remove that rule`);
   }
   return issues;
-}
+};
 
 /**
  * The validator to declare: the versioning rules alone (no validator
@@ -80,7 +80,7 @@ function validatorVersioningIssues(validator, versioning) {
  * and `properties` first, ours after), or — next to query operators — added
  * as a top-level `$jsonSchema`, which the server combines with them.
  */
-function mergeVersioningValidator(validator, versioning) {
+const mergeVersioningValidator = (validator, versioning) => {
   const rules = versioningRules(versioning);
   if (validator === undefined || Object.keys(validator).length === 0) {
     return { $jsonSchema: rules };
@@ -91,7 +91,7 @@ function mergeVersioningValidator(validator, versioning) {
   if (rules.required) merged.required = [...(schema.required ?? []), ...rules.required];
   merged.properties = { ...schema.properties, ...rules.properties };
   return { ...validator, $jsonSchema: merged };
-}
+};
 
 /** The declared version index — `{ [field]: 1, _id: 1 }`, named by its key */
 const versioningIndex = (versioning) => ({ key: versionIndexKey(versioning) });
@@ -103,17 +103,17 @@ const versioningIndex = (versioning) => ({ key: versionIndexKey(versioning) });
  * document of the shard. A hashed field stays hashed; `_id` is not repeated
  * when the key holds it. On `{ _id: 1 }` it is the ordinary version index.
  */
-function shardedVersionIndexKey(versioning, shardKey) {
+const shardedVersionIndexKey = (versioning, shardKey) => {
   const key = { [versioning.field]: 1 };
   for (const [field, value] of Object.entries(shardKey)) {
     if (field !== versioning.field) key[field] = value;
   }
   if (!('_id' in key)) key._id = 1;
   return key;
-}
+};
 
 /** Whether an index key is the version index's (same fields, same order, ascending) */
-function isVersioningIndexKey(key, versioning) {
+const isVersioningIndexKey = (key, versioning) => {
   if (!isPlainObject(key)) return false;
   const entries = Object.entries(key);
   const expected = Object.entries(versionIndexKey(versioning));
@@ -122,17 +122,17 @@ function isVersioningIndexKey(key, versioning) {
     if (entries[i][0] !== expected[i][0] || Number(entries[i][1]) !== expected[i][1]) return false;
   }
   return true;
-}
+};
 
 /**
  * The version floor the live validator enforces — the `minimum` of the version
  * field's `$jsonSchema` rule — or `null` when it enforces none.
  */
-function liveVersionFloor(options, versioning) {
+const liveVersionFloor = (options, versioning) => {
   const schema = options?.validator?.$jsonSchema;
   const rule = isPlainObject(schema?.properties) ? schema.properties[versioning.field] : undefined;
   return isPlainObject(rule) ? toCount(rule.minimum) : null;
-}
+};
 
 /**
  * The `min` converge must check the data against before it raises the floor,
@@ -140,20 +140,20 @@ function liveVersionFloor(options, versioning) {
  * collection that does not exist yet (no documents), or a floor already that
  * high. Only a rising floor costs a read — the steady state costs nothing.
  */
-function versionFloorToCheck(definition, live) {
+const versionFloorToCheck = (definition, live) => {
   const versioning = definition.versioning;
   if (!versioning || versioning.min === 0 || !live.exists) return null;
   if (live.type !== undefined && live.type !== 'collection') return null;
   const floor = liveVersionFloor(live.options, versioning);
   return floor !== null && floor >= versioning.min ? null : versioning.min;
-}
+};
 
 /**
  * Why the version floor cannot be raised — `live.versionFloor` is what
  * converge read: `{ min, below: true | false | 'unknown', error? }` — or
  * `undefined` when it can. The document ids are never named: they may be PII.
  */
-function versionFloorConflict(floor) {
+const versionFloorConflict = (floor) => {
   if (!floor || floor.below === false) return undefined;
   if (floor.below === true) {
     return (
@@ -166,7 +166,7 @@ function versionFloorConflict(floor) {
     `could not check for documents below version ${floor.min} (${floor.error}) — converge ` +
     'with the old min first so the version index exists, then raise it'
   );
-}
+};
 
 module.exports = {
   isVersioningIndexKey,

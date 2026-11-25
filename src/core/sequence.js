@@ -21,7 +21,7 @@ const linksToFile = (dir, name) =>
   );
 
 /** The migration files in `dir`, sorted ascending — empty when the directory does not exist */
-async function listMigrationFiles(dir, extensions) {
+const listMigrationFiles = async (dir, extensions) => {
   let entries;
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -53,7 +53,7 @@ async function listMigrationFiles(dir, extensions) {
     if (isFile) matches.push(file);
   }
   return matches.sort();
-}
+};
 
 /**
  * The files of `sequence` with no applied name — all of them, or only those
@@ -61,14 +61,14 @@ async function listMigrationFiles(dir, extensions) {
  * trace counts, so a migration that failed stops the line exactly like one
  * that never ran.
  */
-function pendingIn(sequence, appliedNames, before) {
+const pendingIn = (sequence, appliedNames, before) => {
   const pending = [];
   for (const file of sequence) {
     if (before !== undefined && file >= before) break;
     if (!appliedNames.has(file)) pending.push(file);
   }
   return pending;
-}
+};
 
 /**
  * Keep only the pending migrations up to and including `to`.
@@ -78,7 +78,7 @@ function pendingIn(sequence, appliedNames, before) {
  * what makes `up --to X` idempotent — running it twice is a no-op rather
  * than an error.
  */
-function truncateAtTarget(pending, allFiles, to) {
+const truncateAtTarget = (pending, allFiles, to) => {
   if (!allFiles.includes(to)) {
     throw new MigrationFileNotFoundError('Migration file not found', { to });
   }
@@ -88,23 +88,23 @@ function truncateAtTarget(pending, allFiles, to) {
     kept.push(file);
   }
   return kept;
-}
+};
 
 /** The name that sorts last — '' for none */
-function newestOf(names) {
+const newestOf = (names) => {
   let newest = '';
   for (const name of names) {
     if (name > newest) newest = name;
   }
   return newest;
-}
+};
 
 /**
  * Out-of-order arrivals among `targets`: pending files that sort before the
  * newest applied name — migrations merged late from a parallel branch, which
  * will run after migrations authored later. `null` when there are none.
  */
-function lateArrivals(targets, appliedNames) {
+const lateArrivals = (targets, appliedNames) => {
   if (targets.length === 0 || appliedNames.size === 0) return null;
   const newestApplied = newestOf(appliedNames);
   const late = [];
@@ -112,10 +112,10 @@ function lateArrivals(targets, appliedNames) {
     if (!appliedNames.has(target) && target < newestApplied) late.push(target);
   }
   return late.length > 0 ? { late, newestApplied } : null;
-}
+};
 
 /** The names of the records to revert, newest first unless already in revert order */
-function revertOrder(records, preserveOrder) {
+const revertOrder = (records, preserveOrder) => {
   const names = [];
   for (const record of records) names.push(record.name);
   if (!preserveOrder) {
@@ -123,20 +123,20 @@ function revertOrder(records, preserveOrder) {
     names.reverse();
   }
   return names;
-}
+};
 
 /**
  * The refusal of an ordered step: "`subject` is blocked: N `what`: a, b".
  * `context` carries `blockedBy` (and `failed`, the blockers with a failed
  * trace — a stopped line rather than one still on its way).
  */
-function blockedError(subject, what, context) {
+const blockedError = (subject, what, context) => {
   const { blockedBy } = context;
   return new MigrationBlockedError(
     `${subject} is blocked: ${blockedBy.length} ${what}: ${blockedBy.join(', ')}`,
     context,
   );
-}
+};
 
 module.exports = {
   blockedError,

@@ -69,7 +69,7 @@ const SCAFFOLD_PLACEHOLDER = 'TODO';
 const SERVER_JS = new Set(['$where', '$function', '$accumulator']);
 
 /** Whether a filter runs JavaScript on the server, anywhere in it ($expr included) */
-function usesServerJs(value) {
+const usesServerJs = (value) => {
   if (Array.isArray(value)) {
     for (const item of value) if (usesServerJs(item)) return true;
     return false;
@@ -79,7 +79,7 @@ function usesServerJs(value) {
     if (SERVER_JS.has(key) || usesServerJs(item)) return true;
   }
   return false;
-}
+};
 
 /** The longest slice — for a caller that overrides the spec's (a runner, the CLI, a test) too */
 const [, , MAX_SLICE_MS] = INTEGER_SETTINGS.find(([key]) => key === 'sliceMs');
@@ -91,13 +91,13 @@ const [, , MAX_SLICE_MS] = INTEGER_SETTINGS.find(([key]) => key === 'sliceMs');
  *
  * @throws {ConfigInvalidError} when it is not an integer in range
  */
-function assertSliceMs(sliceMs) {
+const assertSliceMs = (sliceMs) => {
   if (!Number.isSafeInteger(sliceMs) || sliceMs < 1 || sliceMs > MAX_SLICE_MS) {
     throw new ConfigInvalidError(`sliceMs must be an integer from 1 to ${MAX_SLICE_MS}`, {
       sliceMs,
     });
   }
-}
+};
 
 const PARTITION_SETTINGS = [
   ['overPartition', 1, 64],
@@ -168,15 +168,15 @@ const MAX_CHECKPOINT_BYTES = 64 * 1024;
 
 const inRange = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 
-function rangeIssues(value, table, base, report) {
+const rangeIssues = (value, table, base, report) => {
   for (const [key, min, max] of table) {
     if (value[key] !== undefined && !inRange(value[key], min, max)) {
       report(`${base}${key}`, `must be an integer from ${min} to ${max}`);
     }
   }
-}
+};
 
-function objectSettingIssues(value, key, table, report) {
+const objectSettingIssues = (value, key, table, report) => {
   if (value === undefined || typeof value === 'boolean') return;
   if (!isPlainObject(value)) {
     report(key, 'must be a boolean or an object');
@@ -187,9 +187,9 @@ function objectSettingIssues(value, key, table, report) {
     if (!known.has(name)) report(`${key}.${name}`, `is not one of the ${key} settings`);
   }
   rangeIssues(value, table, `${key}.`, report);
-}
+};
 
-function settingIssues(spec, report) {
+const settingIssues = (spec, report) => {
   rangeIssues(spec, INTEGER_SETTINGS, '', report);
   if (spec.description !== undefined && typeof spec.description !== 'string') {
     report('description', 'must be a string');
@@ -224,14 +224,14 @@ function settingIssues(spec, report) {
   ) {
     report('adaptive.minBatchSize', 'must not exceed adaptive.maxBatchSize');
   }
-}
+};
 
 /**
  * Why a `background` export is not a valid background migration —
  * `{ path, message }` issues, empty when it is. `versioning` is the declared
  * collection's resolved versioning, when it has one.
  */
-function backgroundIssues(spec, { versioning } = {}) {
+const backgroundIssues = (spec, { versioning } = {}) => {
   if (!isPlainObject(spec)) {
     return [{ path: 'background', message: 'must be an object' }];
   }
@@ -344,7 +344,7 @@ function backgroundIssues(spec, { versioning } = {}) {
     report('revisionField', "has no effect with occ: 'version-only'");
   }
   return issues;
-}
+};
 
 const settingOr = (value, fallback) => (value === undefined ? fallback : value);
 
@@ -355,7 +355,7 @@ const settingOr = (value, fallback) => (value === undefined ? fallback : value);
  *
  * @throws {MigrationInvalidExportError} with every issue in `context.issues`
  */
-function resolveBackgroundSpec(raw, { name, versioning } = {}) {
+const resolveBackgroundSpec = (raw, { name, versioning } = {}) => {
   const issues = backgroundIssues(raw, { versioning });
   if (issues.length > 0) {
     throw new MigrationInvalidExportError(
@@ -447,14 +447,14 @@ function resolveBackgroundSpec(raw, { name, versioning } = {}) {
     },
     fns,
   };
-}
+};
 
 /**
  * What a background migration's documents are, as one string: a change here
  * (another version, filter, field or direction) invalidates every partition
  * already planned — a pass over the old match would be over the wrong set.
  */
-function matchHash(spec, direction = 'forward') {
+const matchHash = (spec, direction = 'forward') => {
   const identity =
     spec.mode === 'step'
       ? { mode: 'step', direction }
@@ -468,7 +468,7 @@ function matchHash(spec, direction = 'forward') {
           direction,
         };
   return crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 32);
-}
+};
 
 // ─── State transitions ────────────────────────────────────────────────────────
 
@@ -513,7 +513,7 @@ const TRANSITIONS = Object.freeze({
  *
  * @throws {BackgroundConflictError} when the action does not fit the status
  */
-function transition(status, action, { migration } = {}) {
+const transition = (status, action, { migration } = {}) => {
   const rule = TRANSITIONS[action];
   if (rule === undefined) {
     throw new BackgroundConflictError(`Unknown background action "${action}"`, { action });
@@ -524,7 +524,7 @@ function transition(status, action, { migration } = {}) {
     `Cannot ${action} ${migration ? `background migration ${migration}` : 'it'}: it is ${status}`,
     { action, status, ...(migration ? { migration } : {}) },
   );
-}
+};
 
 // ─── _id brackets and partition scopes ────────────────────────────────────────
 
@@ -567,13 +567,13 @@ for (const bracket of ID_BRACKETS) {
 const bracketOfType = (type) => BRACKET_OF_TYPE.get(type) ?? 'exotic';
 
 /** The filter that keeps a scan inside a partition's scope */
-function scopeFilter(scope) {
+const scopeFilter = (scope) => {
   if (scope.kind !== 'id-range') return {};
   const condition = { $type: BRACKETS_BY_NAME.get(scope.bracket).aliases };
   if (scope.gte !== undefined) condition.$gte = scope.gte;
   if (scope.lt !== undefined) condition.$lt = scope.lt;
   return { _id: condition };
-}
+};
 
 /** Resume a keyset scan after `lastId` — within one bracket, `$gt` alone is enough */
 const keysetFilter = (lastId) => (lastId === undefined ? {} : { _id: { $gt: lastId } });

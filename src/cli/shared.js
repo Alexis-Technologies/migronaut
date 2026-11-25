@@ -6,12 +6,12 @@ const { createLogger } = require('../utils/logger.js');
 const { redactDeep, redactUris } = require('../utils/redact.js');
 
 /** Write a value as pretty JSON to stdout, followed by a newline */
-function emitJson(value) {
+const emitJson = (value) => {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-}
+};
 
 /** Build the partial config passed to MigratorKit from CLI flags */
-function partialFromOpts(opts) {
+const partialFromOpts = (opts) => {
   const partial = {};
   if (opts.uri) partial.uri = opts.uri;
   if (opts.db) partial.dbName = opts.db;
@@ -20,25 +20,25 @@ function partialFromOpts(opts) {
   if (opts.env === false) partial.envFile = false;
   else if (opts.envFile) partial.envFile = opts.envFile;
   return partial;
-}
+};
 
 const { EXIT_CODES } = require('./exit-codes.js');
 
 /** The exit code for a failure — see {@link EXIT_CODES} */
-function exitCodeFor(error) {
+const exitCodeFor = (error) => {
   if (!(error instanceof MigronautError)) return 1;
   return EXIT_CODES[error.code] ?? 1;
-}
+};
 
 /**
  * Log level from the verbosity flags. `--quiet` keeps errors — the point is to
  * drop the running commentary, not to hide failures.
  */
-function resolveLevel(opts) {
+const resolveLevel = (opts) => {
   if (opts.verbose) return 'debug';
   if (opts.quiet) return 'error';
   return 'info';
-}
+};
 
 /** Exit code convention for a process killed by a signal: 128 + signal number */
 const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
@@ -56,7 +56,7 @@ const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
  * must consult this flag itself before starting the run — otherwise the
  * handler's "then stopping" promise above would be a lie.
  */
-function attachSignalHandlers(migrator, spinner, logger) {
+const attachSignalHandlers = (migrator, spinner, logger) => {
   let stopping = false;
   const handlers = [];
   for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -85,7 +85,7 @@ function attachSignalHandlers(migrator, spinner, logger) {
   };
   detach.stopRequested = () => stopping;
   return detach;
-}
+};
 
 /**
  * Minimal signal handling for read-only commands: clear the spinner's frame,
@@ -94,7 +94,7 @@ function attachSignalHandlers(migrator, spinner, logger) {
  * prompt then overwrites messily. No graceful-stop promise here — a read-only
  * command has nothing to finish.
  */
-function attachCleanupHandlers(spinner) {
+const attachCleanupHandlers = (spinner) => {
   if (!spinner) return () => undefined;
   const handlers = [];
   for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -109,17 +109,17 @@ function attachCleanupHandlers(spinner) {
   return () => {
     for (const [signal, handler] of handlers) process.off(signal, handler);
   };
-}
+};
 
 /**
  * Wrap a logger so every line clears and re-renders an active spinner instead
  * of splicing into the middle of its frame.
  */
-function spinnerAwareLogger(logger, spinner) {
+const spinnerAwareLogger = (logger, spinner) => {
   const wrap = (method) => (message, fields) =>
     spinner.interrupt(() => logger[method](message, fields));
   return { debug: wrap('debug'), info: wrap('info'), warn: wrap('warn'), error: wrap('error') };
-}
+};
 
 /**
  * Report a failure the same way everywhere: `--json` gets one structured
@@ -128,7 +128,7 @@ function spinnerAwareLogger(logger, spinner) {
  * driver echoes the raw connection URI (credentials included) in parse
  * errors, and those surface as message, context.cause, and stack alike.
  */
-function reportError(error, { json, verbose, logger }) {
+const reportError = (error, { json, verbose, logger }) => {
   const message = errorText(error);
   if (json) {
     // `context` carries the detail that used to be dropped entirely —
@@ -157,7 +157,7 @@ function reportError(error, { json, verbose, logger }) {
     if (verbose && error instanceof Error && error.stack) logger.debug(redactUris(error.stack));
   }
   process.exitCode = exitCodeFor(error);
-}
+};
 
 /**
  * A command line that could not be parsed — an unknown flag, a value given to
@@ -166,11 +166,11 @@ function reportError(error, { json, verbose, logger }) {
  * wrapper reads a mistyped flag the way it reads every other failure. For
  * people the message goes to stderr — or `help`, when no command was given.
  */
-function reportUsageError(message, { json = false, help } = {}) {
+const reportUsageError = (message, { json = false, help } = {}) => {
   if (json) emitJson({ error: { code: 'CONFIG_INVALID', message } });
   else process.stderr.write(help !== undefined ? `${help}\n` : `error: ${message}\n`);
   process.exitCode = EXIT_CODES.CONFIG_INVALID;
-}
+};
 
 /**
  * Construct a MigratorKit from CLI options, run `fn(migrator, cli)`, always
@@ -183,7 +183,7 @@ function reportUsageError(message, { json = false, help } = {}) {
  * command that reads, asks, then acts must check between those steps, since
  * `migrator.stop()` is a no-op while no run is in flight.
  */
-async function withMigrator(opts, fn, options = {}) {
+const withMigrator = async (opts, fn, options = {}) => {
   // Required here, not at module top: the orchestrator is the CLI's one heavy
   // import, and `--help`/`--version` never reach this function.
   const { MigratorKit } = require('../core/migrator.js');
@@ -271,7 +271,7 @@ async function withMigrator(opts, fn, options = {}) {
     // A failing close must not replace whatever this command was reporting.
     await migrator.disconnect().catch(() => undefined);
   }
-}
+};
 
 /**
  * Ask a yes/no question on the terminal. Resolves `true` only when the user
@@ -283,7 +283,7 @@ async function withMigrator(opts, fn, options = {}) {
  * the process would then exit 0 having done nothing. It becomes a typed
  * refusal instead.
  */
-async function confirm(question) {
+const confirm = async (question) => {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   let settled = false;
   const closedEarly = new Promise((_resolve, reject) => {
@@ -304,7 +304,7 @@ async function confirm(question) {
     settled = true;
     rl.close();
   }
-}
+};
 
 /**
  * Register a command with the envelope every data command shares: parse
@@ -313,7 +313,7 @@ async function confirm(question) {
  * data as JSON or hand it to `render`. A `run` that returns `undefined` owns
  * its output. `after(data, cli)` runs last in every mode (exit-code logic).
  */
-function defineCommand(program, spec) {
+const defineCommand = (program, spec) => {
   const command = program.command(spec.name).description(spec.description);
   for (const [arg, help] of spec.args ?? []) command.argument(arg, help);
   for (const [flags, help] of spec.options ?? []) command.option(flags, help);
@@ -362,7 +362,7 @@ function defineCommand(program, spec) {
     );
   });
   return command;
-}
+};
 
 module.exports = {
   emitJson,

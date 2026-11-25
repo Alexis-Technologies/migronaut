@@ -22,7 +22,7 @@ const randomId = () => randomUUID();
  * gated on by truthiness in the kit, so an empty or non-string value would
  * silently switch off the reentrancy guard and the owner-scoped lock release.
  */
-function assertId(value) {
+const assertId = (value) => {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_ID_LENGTH) {
     throw new ConfigInvalidError(
       `generateId must return a non-empty string of at most ${MAX_ID_LENGTH} characters`,
@@ -30,7 +30,7 @@ function assertId(value) {
     );
   }
   return value;
-}
+};
 
 /**
  * Turn the `generateId` config option into the function the kit mints ids
@@ -46,7 +46,7 @@ function assertId(value) {
  * reentrancy guard that checks it, and a promise would be stored as a truthy
  * non-id.
  */
-function createIdGenerator(generateId) {
+const createIdGenerator = (generateId) => {
   if (generateId === undefined) return randomId;
   if (typeof generateId !== 'function') {
     throw new ConfigInvalidError('generateId must be a function', {
@@ -72,6 +72,6 @@ function createIdGenerator(generateId) {
     }
     return assertId(value);
   };
-}
+};
 
 module.exports = { MAX_ID_LENGTH, assertId, createIdGenerator, randomId };

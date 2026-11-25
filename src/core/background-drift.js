@@ -19,7 +19,7 @@ const DRIFT_PROBE_MS = 5_000;
 const ACTIVE = new Set(['blocked', 'pending', 'running', 'paused']);
 
 /** One indexed look for a document of a completed forward migration's old shape */
-async function probeOldShape(deps, state, hint) {
+const probeOldShape = async (deps, state, hint) => {
   const spec = state.spec;
   return deps.db
     .collection(spec.collection)
@@ -29,7 +29,7 @@ async function probeOldShape(deps, state, hint) {
       maxTimeMS: DRIFT_PROBE_MS,
       ...READ_OPTIONS,
     });
-}
+};
 
 /**
  * Whether a completed forward migration's collection holds an old-shape
@@ -38,7 +38,7 @@ async function probeOldShape(deps, state, hint) {
  * migration, no version index, a probe that ran out of time) the status is
  * trusted — a scan of the whole collection on every `up` is not an option.
  */
-async function stillDirty(deps, state) {
+const stillDirty = async (deps, state) => {
   const spec = state.spec;
   if (!spec || spec.mode !== 'declarative' || state.direction === 'revert') return false;
   const hint = await probeHint(deps, spec);
@@ -52,7 +52,7 @@ async function stillDirty(deps, state) {
     );
     return false;
   }
-}
+};
 
 /**
  * The drift watch: old-shape documents that appeared after a background
@@ -65,7 +65,7 @@ async function stillDirty(deps, state) {
  * said. Chains (v1→v2→v3) converge on their own. No document id is reported.
  * `streaming`: collections a live watcher leads right now — skipped too.
  */
-async function verify(deps, { onDrift = 'reopen', collections, streaming } = {}) {
+const verify = async (deps, { onDrift = 'reopen', collections, streaming } = {}) => {
   const states = await deps.store.list({}, { projection: STATE_SUMMARY });
   const active = new Set();
   for (const state of states) {
@@ -134,6 +134,6 @@ async function verify(deps, { onDrift = 'reopen', collections, streaming } = {})
     result.drift.push({ migration: state._id, collection: spec.collection, action });
   }
   return result;
-}
+};
 
 module.exports = { probeOldShape, stillDirty, verify };

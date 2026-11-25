@@ -12,7 +12,7 @@ const { errorText, serverErrorOf } = require('../utils/error.js');
  * the server's error behind the driver's (see {@link serverErrorOf}): told by
  * the driver's own alone, a standalone server read as a migration that failed.
  */
-function isTransactionsUnsupported(error) {
+const isTransactionsUnsupported = (error) => {
   const refusal = serverErrorOf(error);
   if (typeof refusal !== 'object' || refusal === null) return false;
   return (
@@ -20,7 +20,7 @@ function isTransactionsUnsupported(error) {
     (typeof refusal.message === 'string' &&
       refusal.message.includes('Transaction numbers are only allowed'))
   );
-}
+};
 
 /**
  * Race a migration against its timeout.
@@ -32,7 +32,7 @@ function isTransactionsUnsupported(error) {
  * other instance indefinitely. Migrations that need real cancellation should
  * watch `ctx.signal`, which `onTimeout` aborts when the timer fires.
  */
-async function withTimeout(promise, timeoutMs, name, direction, onTimeout) {
+const withTimeout = async (promise, timeoutMs, name, direction, onTimeout) => {
   if (!timeoutMs) return promise;
   let timer;
   try {
@@ -66,7 +66,7 @@ async function withTimeout(promise, timeoutMs, name, direction, onTimeout) {
   } finally {
     clearTimeout(timer);
   }
-}
+};
 
 /**
  * Execute a single migration's `up` or `down` safely.
@@ -93,7 +93,7 @@ async function withTimeout(promise, timeoutMs, name, direction, onTimeout) {
  * again, and that run gets a context of its own. Resolves to
  * `{ duration, attempts }`; a failure carries `attempts` in its context.
  */
-async function runMigration(params) {
+const runMigration = async (params) => {
   const { name, migration, direction, context, useTransaction, hooks, onSuccess, logger } = params;
   const { attemptContext } = params;
   const fn = direction === 'up' ? migration.up : migration.down;
@@ -226,6 +226,6 @@ async function runMigration(params) {
       await session.endSession();
     }
   }
-}
+};
 
 module.exports = { isTransactionsUnsupported, runMigration };

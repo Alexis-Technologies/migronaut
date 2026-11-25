@@ -59,7 +59,7 @@ const NEEDS_NAME = new Set(['pause', 'resume', 'cancel', 'retry', 'repin', 'dry-
 const flagName = (key) => `--${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
 
 /** A positive integer flag, or undefined when not given */
-function integerFlag(opts, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+const integerFlag = (opts, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) => {
   if (opts[key] === undefined) return undefined;
   const value = Number(opts[key]);
   if (!Number.isSafeInteger(value) || value < min || value > max) {
@@ -68,10 +68,10 @@ function integerFlag(opts, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {})
     });
   }
   return value;
-}
+};
 
 /** Check the action, its name and its flags — before anything connects */
-function preflight(opts, [action, name]) {
+const preflight = (opts, [action, name]) => {
   if (!ACTIONS.has(action)) {
     throw new ConfigInvalidError(
       `Unknown background action "${action}" (one of: ${[...ACTIONS].join(', ')})`,
@@ -99,10 +99,10 @@ function preflight(opts, [action, name]) {
   integerFlag(opts, 'maxDocs', { max: 1000 });
   integerFlag(opts, 'deadlineMs', { max: 50_000 });
   return true;
-}
+};
 
 /** The controls that cannot be taken back ask first; `--json` needs `--yes` */
-async function confirmed(action, state, { opts, json, logger }) {
+const confirmed = async (action, state, { opts, json, logger }) => {
   const asks =
     action === 'cancel' ||
     action === 'repin' ||
@@ -122,7 +122,7 @@ async function confirmed(action, state, { opts, json, logger }) {
   }
   const what = action === 'retry' ? 'retry from the start' : action;
   return confirm(`${what[0].toUpperCase()}${what.slice(1)} ${state?.migration ?? 'it'}? [y/N] `);
-}
+};
 
 /**
  * `watch`: the live drift watcher in the foreground — every collection with a
@@ -130,7 +130,7 @@ async function confirmed(action, state, { opts, json, logger }) {
  * SIGTERM, which end it cleanly (exit 0): streams closed, positions saved,
  * locks released. What it does is printed as it happens.
  */
-async function watchAction(migrator, opts, collection, { logger, json }) {
+const watchAction = async (migrator, opts, collection, { logger, json }) => {
   const controller = new AbortController();
   const onWatch = (event) => logger.info(`… ${event.collection}: ${event.state}`);
   const onDrift = (event) => {
@@ -173,10 +173,10 @@ async function watchAction(migrator, opts, collection, { logger, json }) {
     migrator.off('background:watch', onWatch);
     migrator.off('background:drift', onDrift);
   }
-}
+};
 
 /** `run`: drive one background migration (or every runnable one, in order) from here */
-async function runAction(migrator, opts, name, { logger }) {
+const runAction = async (migrator, opts, name, { logger }) => {
   const concurrency = integerFlag(opts, 'concurrency', { max: 64 }) ?? 1;
   const controller = new AbortController();
   let stopping = false;
@@ -243,7 +243,7 @@ async function runAction(migrator, opts, name, { logger }) {
   } finally {
     for (const [signal, handler] of handlers) process.off(signal, handler);
   }
-}
+};
 
 const STATUS_COLORS = {
   completed: 'green',
@@ -255,7 +255,7 @@ const STATUS_COLORS = {
   cancelled: 'dim',
 };
 
-function renderStatuses(states) {
+const renderStatuses = (states) => {
   const colors = createColors(process.stdout);
   const rows = states.map((state) => {
     const color = colors[STATUS_COLORS[state.status]] ?? ((text) => text);
@@ -288,9 +288,9 @@ function renderStatuses(states) {
     ],
     rows,
   );
-}
+};
 
-function renderPartitions(partitions) {
+const renderPartitions = (partitions) => {
   return renderTable(
     ['#', 'Status', 'Scope', 'Migrated', 'Lease', 'Claims', 'Error'],
     partitions.map((partition) => [
@@ -307,10 +307,10 @@ function renderPartitions(partitions) {
       partition.lastError ?? '',
     ]),
   );
-}
+};
 
 /** Register the `background` command */
-function registerBackground(program) {
+const registerBackground = (program) => {
   defineCommand(program, {
     name: 'background',
     description:
@@ -471,10 +471,10 @@ function registerBackground(program) {
       }
     },
   });
-}
+};
 
 /** A dry run, for people: one line per document or step, then what the sandbox saw */
-function renderDryRun(dry, logger) {
+const renderDryRun = (dry, logger) => {
   if (dry.mode === 'step') {
     for (const step of dry.steps) {
       logger.info(
@@ -498,6 +498,6 @@ function renderDryRun(dry, logger) {
   }
   if (dry.ops) logger.info(`◎ ${dry.ops.length} operation(s), all rolled back`);
   if (dry.stoppedBy === 'deadline') logger.warn('⚠ Stopped at the deadline');
-}
+};
 
 module.exports = { registerBackground };
