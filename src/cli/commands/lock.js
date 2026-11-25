@@ -7,7 +7,7 @@ const { defineCommand } = require('../shared.js');
  * would fail at exactly the moment it is most needed.
  */
 const lockedAtText = (value) => {
-  return value instanceof Date ? value.toISOString() : String(value);
+  return value instanceof Date ? value.toISOString() : `${value}`;
 };
 
 /** Register the `lock` command (inspect the migration lock without touching it) */
@@ -20,10 +20,7 @@ const registerLock = (program) => {
       return { held: holder !== null, holder };
     },
     render: ({ holder }, { logger }) => {
-      if (!holder) {
-        logger.info('No migration lock is currently held');
-        return;
-      }
+      if (!holder) return void logger.info('No migration lock is currently held');
       logger.info(
         `Lock held by pid ${holder.pid} on ${holder.host} (${holder.executedBy}) ` +
           `since ${lockedAtText(holder.lockedAt)}` +

@@ -54,7 +54,7 @@ const createIdGenerator = (generateId) => {
     });
   }
   return () => {
-    let value;
+    let value = undefined;
     try {
       value = generateId();
     } catch (error) {

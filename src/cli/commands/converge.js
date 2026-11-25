@@ -21,11 +21,28 @@ const actionsToConfirm = (plan) => {
   return found;
 };
 
+/** Whether any row of `actions` is of the kind `kind` */
+const hasAction = (actions, kind) => {
+  for (let i = 0; i < actions.length; i++) {
+    if (actions[i].action === kind) return true;
+  }
+  return false;
+};
+
 /** Whether a plan holds a conflict — the run refuses it whatever the answer */
 const hasConflict = (plan) => {
-  return plan.collections.some((collection) =>
-    collection.actions.some((action) => action.action === 'conflict'),
-  );
+  const collections = plan.collections;
+  for (let i = 0; i < collections.length; i++) {
+    if (hasAction(collections[i].actions, 'conflict')) return true;
+  }
+  return false;
+};
+
+/** The plan-only flag a `--wait-search` came with, as the operator typed it */
+const planOnlyFlag = (opts) => {
+  if (opts.history) return '--history';
+  if (opts.check) return '--check';
+  return '--dry-run';
 };
 
 const assertNotStopped = (stopRequested) => {
@@ -79,7 +96,7 @@ const registerConverge = (program) => {
       if (waitSearch !== undefined && (opts.history || opts.dryRun || opts.check)) {
         throw new ConfigInvalidError(
           `--${waitSearch ? '' : 'no-'}wait-search applies to a real converge — not to ` +
-            `${opts.history ? '--history' : opts.check ? '--check' : '--dry-run'}`,
+            planOnlyFlag(opts),
         );
       }
       if (opts.history) {
@@ -98,7 +115,7 @@ const registerConverge = (program) => {
       const planOnly = Boolean(opts.dryRun || opts.check);
       if (planOnly || !opts.yes) {
         spinner?.start('Comparing declared collections with the database…');
-        let plan;
+        let plan = null;
         try {
           plan = await migrator.converge({ dryRun: true, ...prune });
         } finally {
@@ -122,7 +139,7 @@ const registerConverge = (program) => {
             );
           }
           logger.info(renderConvergeTable(plan));
-          if (opts.rebuildUnique && destructive.some((action) => action.action === 'recreate')) {
+          if (opts.rebuildUnique && hasAction(destructive, 'recreate')) {
             logger.warn(
               '⚠ --rebuild-unique: a rebuilt unique index enforces nothing until it is built ' +
                 'again — a duplicate written in between makes it unbuildable',
@@ -150,15 +167,11 @@ const registerConverge = (program) => {
       }
     },
     render: (result, { logger, opts }) => {
-      if (Array.isArray(result)) {
-        logger.info(renderConvergeHistory(result));
-        return;
-      }
+      if (Array.isArray(result)) return void logger.info(renderConvergeHistory(result));
       // A real run's own lines (✔ Created …, the rollup) are already out.
       if (!result.dryRun) return;
       if (result.collections.length === 0) {
-        logger.info('No collections declared — set collections or collectionsDir');
-        return;
+        return void logger.info('No collections declared — set collections or collectionsDir');
       }
       logger.info(renderConvergeTable(result, { all: Boolean(opts.verbose) }));
     },

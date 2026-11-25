@@ -25,9 +25,13 @@ const CUT_USERINFO = /([^:@/\s]*):[^@/\s]+$/y;
 
 const isLetter = (code) => (code >= 97 && code <= 122) || (code >= 65 && code <= 90);
 
+const isDigit = (code) => code >= 48 && code <= 57;
+
+/** `+`, `-` and `.`: the punctuation a URI scheme may hold */
+const SCHEME_PUNCTUATION = new Set([43, 45, 46]);
+
 /** A character a URI scheme may hold after its first letter: a letter, a digit, `+`, `-`, `.` */
-const isSchemeChar = (code) =>
-  isLetter(code) || (code >= 48 && code <= 57) || code === 43 || code === 45 || code === 46;
+const isSchemeChar = (code) => isLetter(code) || isDigit(code) || SCHEME_PUNCTUATION.has(code);
 
 /** Whether a scheme ends right before `at` — a letter, then scheme characters only */
 const schemeEndsAt = (text, at) => {
@@ -181,8 +185,8 @@ const put = (target, key, value) => {
 const redactDeep = (value) => {
   if (typeof value === 'string') return redactUris(value);
   if (Array.isArray(value)) {
-    const copy = new Array(value.length);
-    for (let index = 0; index < value.length; index++) copy[index] = redactDeep(value[index]);
+    const copy = [];
+    for (let index = 0; index < value.length; index++) copy.push(redactDeep(value[index]));
     return copy;
   }
   if (isPlainObject(value)) {
@@ -288,9 +292,9 @@ const redactBounded = (value, { omit } = {}) => {
     }
     const out = {};
     if (item instanceof Map) {
-      for (const [key, element] of item) {
+      for (const entry of item) {
         if (!take()) break;
-        put(out, String(key), copy(element, depth + 1));
+        put(out, String(entry[0]), copy(entry[1], depth + 1));
       }
       return out;
     }

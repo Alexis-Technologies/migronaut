@@ -23,10 +23,8 @@ const isUnknownExtensionError = (error) => {
     return false;
   }
   const { code, message } = error;
-  return (
-    code === 'ERR_UNKNOWN_FILE_EXTENSION' ||
-    (typeof message === 'string' && message.includes('Unknown file extension'))
-  );
+  if (code === 'ERR_UNKNOWN_FILE_EXTENSION') return true;
+  return typeof message === 'string' && message.includes('Unknown file extension');
 };
 
 /** True when type stripping refused non-erasable syntax (enum, namespace, …) */
@@ -108,13 +106,13 @@ const importUserFile = async (filepath, options = {}) => {
   const url = pathToFileURL(filepath).href;
   if (!options.reload) return import(url);
   delete require.cache[filepath];
-  let resolved;
+  let resolved = '';
   try {
     resolved = realpathSync(filepath);
   } catch {
     // Not there (yet): the import reports it.
   }
-  if (resolved !== undefined) delete require.cache[resolved];
+  if (resolved !== '') delete require.cache[resolved];
   return import(`${url}?migronaut=${++reloadCounter}`);
 };
 
@@ -132,7 +130,7 @@ const importMigrationModule = async (filepath, options = {}) => {
     throw new MigrationFileNotFoundError('Migration file not found', { filepath });
   }
 
-  let imported;
+  let imported = null;
   try {
     imported = await importUserFile(filepath, { reload: options.reload });
   } catch (error) {

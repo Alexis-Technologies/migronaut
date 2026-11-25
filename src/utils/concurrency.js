@@ -9,7 +9,9 @@
  * `Promise.all` — the point here is pacing, not error handling.
  */
 const mapLimit = async (items, limit, fn) => {
-  const results = new Array(items.length);
+  // Workers fill it out of order: every slot exists before the first one lands.
+  const results = [];
+  for (let i = 0; i < items.length; i++) results.push(undefined);
   if (items.length === 0) return results;
 
   const width = Math.max(1, Math.min(limit, items.length));
@@ -39,7 +41,7 @@ const mapLimit = async (items, limit, fn) => {
  * outage lasts. The promise itself goes on; only the wait ends.
  */
 const settledWithin = async (promise, ms) => {
-  let timer;
+  let timer = null;
   const expired = new Promise((resolve) => {
     timer = setTimeout(() => resolve(false), ms);
   });

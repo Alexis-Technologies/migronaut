@@ -44,10 +44,7 @@ const createSpinner = (stream = process.stderr) => {
    * A plain pass-through while the spinner is idle.
    */
   const interrupt = (fn) => {
-    if (timer === null) {
-      fn();
-      return;
-    }
+    if (timer === null) return void fn();
     stream.write(CLEAR_LINE);
     fn();
     render();

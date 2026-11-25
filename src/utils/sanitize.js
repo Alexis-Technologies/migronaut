@@ -32,7 +32,7 @@ const SGR_OR_CONTROL = /(\u001b\[[0-9;]*m)|[\u0000-\u0008\u000b-\u001f\u007f\u00
  * before adding migronaut's own colors, so those survive.
  */
 const sanitize = (text) => {
-  return String(text).replace(CONTROL_CHARS, '');
+  return `${text}`.replace(CONTROL_CHARS, '');
 };
 
 /**

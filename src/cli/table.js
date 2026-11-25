@@ -42,8 +42,9 @@ const charWidth = (codepoint) => {
   if (codepoint >= 0x0300 && codepoint <= 0x036f) return 0;
   // Variation selectors (VS15/VS16 among them) modify the preceding glyph.
   if (codepoint >= 0xfe00 && codepoint <= 0xfe0f) return 0;
-  for (const [start, end] of WIDE_RANGES) {
-    if (codepoint >= start && codepoint <= end) return 2;
+  for (let i = 0; i < WIDE_RANGES.length; i++) {
+    const range = WIDE_RANGES[i];
+    if (codepoint >= range[0] && codepoint <= range[1]) return 2;
   }
   return 1;
 };
@@ -99,21 +100,23 @@ const borderLine = (widths, left, mid, right) => {
  */
 const renderTable = (head, rows) => {
   // Measure every cell once and settle the column widths in the same pass.
-  const headWidths = new Array(head.length);
-  const widths = new Array(head.length);
+  const headWidths = [];
+  const widths = [];
   for (let index = 0; index < head.length; index++) {
-    headWidths[index] = visibleWidth(head[index]);
-    widths[index] = headWidths[index];
+    const width = visibleWidth(head[index]);
+    headWidths.push(width);
+    widths.push(width);
   }
-  const cellWidths = new Array(rows.length);
+  const cellWidths = [];
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
     const row = rows[rowIndex];
-    const measured = new Array(row.length);
+    const measured = [];
     for (let index = 0; index < row.length; index++) {
-      measured[index] = visibleWidth(row[index]);
-      if (measured[index] > widths[index]) widths[index] = measured[index];
+      const width = visibleWidth(row[index]);
+      measured.push(width);
+      if (width > widths[index]) widths[index] = width;
     }
-    cellWidths[rowIndex] = measured;
+    cellWidths.push(measured);
   }
   const renderRow = (cells, measured) => {
     const padded = [];
@@ -205,7 +208,7 @@ const renderStatusTable = (rows) => {
     const cell = [
       truncate(sanitize(row.file), budgets.migration),
       statusCell(colors, row.status),
-      row.batch === null ? '' : String(row.batch),
+      row.batch === null ? '' : `${row.batch}`,
       row.appliedAt ? formatDateTime(row.appliedAt) : '',
       row.duration === null ? '' : `${row.duration}ms`,
       checksumCell(colors, row.checksumOk),
@@ -241,7 +244,7 @@ const renderImportTable = (rows) => {
   for (const row of rows) {
     cells.push([
       truncate(sanitize(row.file), budgets.migration),
-      String(row.batch),
+      `${row.batch}`,
       formatDateTime(row.appliedAt),
       checksumSourceCell(colors, row.checksumSource),
     ]);
@@ -311,6 +314,16 @@ const convergeDetail = (action) => {
   return parts.join(' · ');
 };
 
+/** The lead of a converge summary: everything matched, or how much changed where */
+const convergeSummary = (counts, collections, dryRun) => {
+  if (counts.change === 0 && counts.conflict === 0) {
+    return `✔ ${collections} collection(s) match their declarations`;
+  }
+  const verb = dryRun ? 'Would make' : 'Made';
+  const where = `in ${counts.touched} of ${collections} collection(s)`;
+  return `${verb} ${counts.change} change(s) ${where}`;
+};
+
 /**
  * Render a converge plan (or result) as a table plus a one-line summary.
  * Rows that need nothing are folded into the summary unless `all` — a large
@@ -353,16 +366,7 @@ const renderConvergeTable = (result, { all = false } = {}) => {
     if (changes > 0) counts.touched += 1;
   }
   const collections = result.collections.length;
-  let summary;
-  if (counts.change === 0 && counts.conflict === 0) {
-    summary = `✔ ${collections} collection(s) match their declarations`;
-  } else {
-    const verb = result.dryRun ? 'Would make' : 'Made';
-    summary =
-      `${verb} ${counts.change} change(s) in ${counts.touched} of ${collections} ` +
-      'collection(s)';
-  }
-  const parts = [summary];
+  const parts = [convergeSummary(counts, collections, result.dryRun)];
   if (counts.destructive > 0) parts.push(`${counts.destructive} drop/rebuild`);
   if (counts.conflict > 0) parts.push(colors.red(`${counts.conflict} conflict(s)`));
   if (counts.keep > 0) parts.push(`${counts.keep} undeclared index(es) kept`);
@@ -395,17 +399,21 @@ const renderConvergeTable = (result, { all = false } = {}) => {
 const renderConvergeHistory = (entries) => {
   if (entries.length === 0) return 'No converge has changed anything yet';
   const colors = palette();
-  const cells = entries.map((entry) => [
-    entry.startedAt instanceof Date ? entry.startedAt.toISOString() : String(entry.startedAt),
-    entry.trigger,
-    entry.success ? colors.green('ok') : colors.red('failed'),
-    String(entry.changed),
-    truncate(sanitize(entry.requestedBy ?? entry.executedBy ?? ''), MAX_NAME_WIDTH),
-    truncate(
-      sanitize(entry.reason ?? (entry.success ? '' : (entry.error ?? ''))),
-      MAX_DETAIL_WIDTH,
-    ),
-  ]);
+  const cells = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    cells.push([
+      entry.startedAt instanceof Date ? entry.startedAt.toISOString() : `${entry.startedAt}`,
+      entry.trigger,
+      entry.success ? colors.green('ok') : colors.red('failed'),
+      `${entry.changed}`,
+      truncate(sanitize(entry.requestedBy ?? entry.executedBy ?? ''), MAX_NAME_WIDTH),
+      truncate(
+        sanitize(entry.reason ?? (entry.success ? '' : (entry.error ?? ''))),
+        MAX_DETAIL_WIDTH,
+      ),
+    ]);
+  }
   return renderTable(['When', 'Trigger', 'Result', 'Changes', 'Who', 'Why'], cells);
 };
 

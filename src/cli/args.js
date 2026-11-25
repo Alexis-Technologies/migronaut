@@ -6,18 +6,29 @@ const camelize = (name) => name.replace(/-([a-z0-9])/g, (_, char) => char.toUppe
 /** Pad `label` so descriptions in a help block line up */
 const padLabel = (label, width) => label + ' '.repeat(width - label.length);
 
-/** Render one aligned `label  description` section of a help screen */
-const renderSection = (title, rows) => {
-  if (rows.length === 0) return [];
+/** Append one aligned `label  description` section of a help screen to `lines` */
+const appendSection = (lines, title, rows) => {
+  if (rows.length === 0) return;
   let width = 0;
   for (const row of rows) {
     if (row[0].length > width) width = row[0].length;
   }
-  const lines = [];
+  lines.push('', `${title}:`);
   for (const row of rows) {
     lines.push(`  ${padLabel(row[0], width)}  ${row[1]}`);
   }
-  return ['', `${title}:`, ...lines];
+};
+
+/**
+ * Whether the token after a value-taking option cannot be its value: there is
+ * none, or it is another flag. A leading digit after `-` is a negative number,
+ * not a flag — `--steps -1` should reach the core validator (which rejects it
+ * with an actionable message), not die as "argument missing".
+ */
+const isMissingValue = (next) => {
+  if (next === undefined) return true;
+  const negativeNumber = /^-\d/.test(next);
+  return next.startsWith('-') && next !== '-' && !negativeNumber;
 };
 
 /**
@@ -150,42 +161,30 @@ class Command {
         // Short-circuit, commander-style: the user asking for help must get
         // it even when a later token would fail the parse — mistyping a flag
         // and appending --help to find out what went wrong is the exact case.
-        process.stdout.write(`${this.#helpText(command ?? this)}\n`);
-        return;
+        return void process.stdout.write(`${this.#helpText(command ?? this)}\n`);
       }
       if ((token === '-V' || token === '--version') && this.#version !== null) {
-        process.stdout.write(`${this.#version}\n`);
-        return;
+        return void process.stdout.write(`${this.#version}\n`);
       }
       if (token.startsWith('-') && token !== '-') {
-        let name = token;
-        let inlineValue;
         const separator = token.indexOf('=');
-        if (token.startsWith('--') && separator !== -1) {
-          name = token.slice(0, separator);
-          inlineValue = token.slice(separator + 1);
-        }
+        const hasInlineValue = token.startsWith('--') && separator !== -1;
+        const name = hasInlineValue ? token.slice(0, separator) : token;
+        const inlineValue = hasInlineValue ? token.slice(separator + 1) : undefined;
         const found = this.#findOption(command, name);
         if (!found) return this.#fail(`unknown option '${name}'`);
         const { owner, option } = found;
         if (option.takesValue) {
-          let value = inlineValue;
-          if (value === undefined) {
-            const next = tokens[i + 1];
-            // A leading digit after `-` is a negative number, not a flag —
-            // `--steps -1` should reach the core validator (which rejects it
-            // with an actionable message), not die as "argument missing".
-            const negativeNumber = next !== undefined && /^-\d/.test(next);
-            if (next === undefined || (next.startsWith('-') && next !== '-' && !negativeNumber)) {
-              return this.#fail(
-                `option '${option.flags}' argument missing ` +
-                  `(use ${option.long}=<value> for values starting with '-')`,
-              );
-            }
-            value = next;
-            i++;
+          const fromNext = inlineValue === undefined;
+          const next = tokens[i + 1];
+          if (fromNext && isMissingValue(next)) {
+            return this.#fail(
+              `option '${option.flags}' argument missing ` +
+                `(use ${option.long}=<value> for values starting with '-')`,
+            );
           }
-          owner.#values[option.key] = value;
+          if (fromNext) i++;
+          owner.#values[option.key] = fromNext ? next : inlineValue;
         } else {
           // `--yes=false` is not "no": the value would be dropped and the flag
           // set — consent to a destructive action, or `--no-lock=false`
@@ -279,10 +278,7 @@ class Command {
 
   /** End the parse on an error — `help`: what to show instead of the message (no command) */
   #fail(message, help) {
-    if (this.#usageError !== null) {
-      this.#usageError(message, help);
-      return;
-    }
+    if (this.#usageError !== null) return void this.#usageError(message, help);
     process.stderr.write(help !== undefined ? `${help}\n` : `error: ${message}\n`);
     process.exitCode = 1;
   }
@@ -308,7 +304,7 @@ class Command {
     for (const spec of target.#arguments) {
       argumentRows.push([spec.name, spec.description]);
     }
-    lines.push(...renderSection('Arguments', argumentRows));
+    appendSection(lines, 'Arguments', argumentRows);
 
     const optionRows = [];
     for (const option of target.#options) {
@@ -318,7 +314,7 @@ class Command {
       optionRows.push(['-V, --version', 'output the version number']);
     }
     optionRows.push(['-h, --help', 'display help for command']);
-    lines.push(...renderSection('Options', optionRows));
+    appendSection(lines, 'Options', optionRows);
 
     // Subcommand help also lists the root's flags: they are accepted after the
     // command name, so hiding them here would misdocument the real surface.
@@ -327,7 +323,7 @@ class Command {
       for (const option of this.#options) {
         globalRows.push([option.flags, option.description]);
       }
-      lines.push(...renderSection('Global Options', globalRows));
+      appendSection(lines, 'Global Options', globalRows);
     }
 
     if (isRoot) {
@@ -336,7 +332,7 @@ class Command {
         const options = sub.#options.length > 0 ? ' [options]' : '';
         commandRows.push([`${sub.#name}${options}${this.#argsUsage(sub)}`, sub.#description]);
       }
-      lines.push(...renderSection('Commands', commandRows));
+      appendSection(lines, 'Commands', commandRows);
     }
     return lines.join('\n');
   }

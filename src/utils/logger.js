@@ -2,7 +2,10 @@ const { createColors } = require('./colors.js');
 const { sanitizeTerminal } = require('./sanitize.js');
 
 /** Severity order, used to drop messages below the configured level */
-const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
+const LEVELS = { __proto__: null, debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
+
+/** The level methods a sink may have, in the order they are looked for */
+const SINK_METHODS = ['info', 'debug', 'warn', 'error'];
 
 /** A logger whose methods are all no-ops — used to silence all output */
 const silentLogger = {
@@ -10,6 +13,13 @@ const silentLogger = {
   info: () => {},
   warn: () => {},
   error: () => {},
+};
+
+const noop = () => {};
+
+/** warn/error always go to stderr, whatever stream debug/info write to */
+const writeErr = (msg) => {
+  process.stderr.write(`${msg}\n`);
 };
 
 /**
@@ -31,9 +41,6 @@ const createLogger = (stream = process.stdout, level = 'info') => {
   const writeOut = (msg) => {
     stream.write(`${msg}\n`);
   };
-  const writeErr = (msg) => {
-    process.stderr.write(`${msg}\n`);
-  };
   const at = (name, write) => (LEVELS[name] >= threshold ? write : () => {});
   // Sanitized by construction: messages routinely embed migration names and
   // lock-holder fields — values anyone with DB write access can influence —
@@ -53,11 +60,12 @@ const createLogger = (stream = process.stdout, level = 'info') => {
 const hasMethod = (value, name) => typeof value?.[name] === 'function';
 
 /** A sink is usable when it exposes any of the four level methods */
-const isUsableSink = (value) =>
-  hasMethod(value, 'info') ||
-  hasMethod(value, 'debug') ||
-  hasMethod(value, 'warn') ||
-  hasMethod(value, 'error');
+const isUsableSink = (value) => {
+  for (let i = 0; i < SINK_METHODS.length; i++) {
+    if (hasMethod(value, SINK_METHODS[i])) return true;
+  }
+  return false;
+};
 
 /**
  * Wrap a sink method so a throwing user logger can never break a migration run.
@@ -103,7 +111,6 @@ const resolveLogger = (logger) => {
   const pinoStyle = hasMethod(logger, 'child');
   const child = pinoStyle ? logger.child({ component: 'migronaut' }) : null;
   const sink = child && isUsableSink(child) ? child : logger;
-  const noop = () => {};
   // Fallback preference per level: same severity first, then the neighbors a
   // reader of that sink would expect. debug/info never escalate to warn/error
   // (running commentary must not masquerade as problems); warn/error always

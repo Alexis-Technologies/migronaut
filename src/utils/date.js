@@ -1,6 +1,6 @@
 /** Zero-pad a number to two digits */
 const pad = (n) => {
-  return String(n).padStart(2, '0');
+  return `${n}`.padStart(2, '0');
 };
 
 /**

@@ -1,5 +1,8 @@
 const { MigrationInvalidNameError } = require('../errors/index.js');
 
+/** The directory itself and its parent: names, but never a file's */
+const DOT_NAMES = new Set(['.', '..']);
+
 /**
  * Whether `name` is a bare filename: a non-empty string with no path
  * separator, no NUL byte, and not `.`/`..`. The single definition of the rule
@@ -8,15 +11,8 @@ const { MigrationInvalidNameError } = require('../errors/index.js');
  * outside the process (a queue job's payload).
  */
 const isBareFilename = (name) => {
-  return (
-    typeof name === 'string' &&
-    name.length > 0 &&
-    name !== '.' &&
-    name !== '..' &&
-    !name.includes('/') &&
-    !name.includes('\\') &&
-    !name.includes('\0')
-  );
+  if (typeof name !== 'string' || name.length === 0 || DOT_NAMES.has(name)) return false;
+  return !name.includes('/') && !name.includes('\\') && !name.includes('\0');
 };
 
 /** Throw MigrationInvalidNameError unless `name` is a bare filename */
@@ -43,7 +39,8 @@ const requiresIssues = (requires, name) => {
   }
   const issues = [];
   const seen = new Set();
-  for (const [position, required] of requires.entries()) {
+  for (let position = 0; position < requires.length; position++) {
+    const required = requires[position];
     const path = `requires[${position}]`;
     if (!isBareFilename(required)) {
       issues.push({ path, message: 'must be a bare migration file name' });

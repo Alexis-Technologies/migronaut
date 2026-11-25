@@ -22,7 +22,7 @@ const UNSAFE_ENV_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const applyEnvFile = async (filePath, env = process.env) => {
   // stat before read: `--env-file /dev/zero` (or a runaway file) must fail
   // with a typed error, not hang the process reading forever.
-  let stats;
+  let stats = null;
   try {
     stats = await fs.stat(filePath);
   } catch (error) {

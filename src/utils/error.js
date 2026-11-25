@@ -1,6 +1,9 @@
 const { MigronautError } = require('../errors/index.js');
 const { redactOutbound, redactUris } = require('./redact.js');
 
+/** A write conflict, a transaction the server no longer knows, a lock not taken in time */
+const TRANSIENT_TRANSACTION_CODES = new Set([112, 251, 24]);
+
 /**
  * The server's own error behind what the driver threw. From 7.x the driver
  * replaces a refused write of code 20 (IllegalOperation) with an error of its
@@ -62,11 +65,10 @@ const documentErrorText = (error) => redactOutbound(errorText(error));
  * converge asks of an error is something else — "is it unknown what the
  * server did?", "is this read worth another try?" — and has its own tables.)
  */
-const isTransientTransaction = (error) =>
-  error?.hasErrorLabel?.('TransientTransactionError') === true ||
-  error?.code === 112 ||
-  error?.code === 251 ||
-  error?.code === 24;
+const isTransientTransaction = (error) => {
+  const labelled = error?.hasErrorLabel?.('TransientTransactionError') === true;
+  return labelled || TRANSIENT_TRANSACTION_CODES.has(error?.code);
+};
 
 module.exports = {
   documentErrorText,

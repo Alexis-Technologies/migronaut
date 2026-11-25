@@ -22,7 +22,8 @@ const registerUp = (program) => {
     // Runs before any connection: validation and the confirmation prompt must
     // not cost a round trip, and their errors use the same typed envelope as
     // everything else (CONFIG_INVALID, exit 6).
-    preflight: async (opts, [file], { logger }) => {
+    preflight: async (opts, positionals, { logger }) => {
+      const file = positionals[0];
       if (opts.force && !file) {
         throw new ConfigInvalidError('--force requires a specific migration file');
       }
@@ -47,8 +48,8 @@ const registerUp = (program) => {
       }
       return undefined;
     },
-    run: (migrator, opts, [file]) =>
-      migrator.up(file, {
+    run: (migrator, opts, positionals) =>
+      migrator.up(positionals[0], {
         noLock: opts.noLock,
         ...(opts.force ? { force: true } : {}),
         ...(opts.step ? { step: true } : {}),

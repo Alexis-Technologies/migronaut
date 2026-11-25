@@ -48,13 +48,31 @@ const FLAGS = {
   verify: ['report'],
   watch: ['report'],
 };
-const ALL_FLAGS = new Set(Object.values(FLAGS).flat());
+
+/** Every flag of a `FLAGS`-shaped table, in table order */
+const flagsOf = (table) => {
+  const flags = new Set();
+  const actions = Object.keys(table);
+  for (let i = 0; i < actions.length; i++) {
+    const keys = table[actions[i]];
+    for (let j = 0; j < keys.length; j++) flags.add(keys[j]);
+  }
+  return flags;
+};
+
+const ALL_FLAGS = flagsOf(FLAGS);
 
 /** What `run --all` drives */
 const RUNNABLE = new Set(['blocked', 'pending', 'running']);
 
 /** Actions a name is required for */
 const NEEDS_NAME = new Set(['pause', 'resume', 'cancel', 'retry', 'repin', 'dry-run', 'unlock']);
+
+/** Controls that cannot be taken back, so they ask first (and `retry --from-start`) */
+const ASKS_FIRST = new Set(['cancel', 'repin', 'unlock']);
+
+/** The signals a foreground action ends on */
+const SIGNALS = ['SIGINT', 'SIGTERM'];
 
 const flagName = (key) => `--${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
 
@@ -71,7 +89,9 @@ const integerFlag = (opts, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {})
 };
 
 /** Check the action, its name and its flags — before anything connects */
-const preflight = (opts, [action, name]) => {
+const preflight = (opts, positionals) => {
+  const action = positionals[0];
+  const name = positionals[1];
   if (!ACTIONS.has(action)) {
     throw new ConfigInvalidError(
       `Unknown background action "${action}" (one of: ${[...ACTIONS].join(', ')})`,
@@ -103,11 +123,7 @@ const preflight = (opts, [action, name]) => {
 
 /** The controls that cannot be taken back ask first; `--json` needs `--yes` */
 const confirmed = async (action, state, { opts, json, logger }) => {
-  const asks =
-    action === 'cancel' ||
-    action === 'repin' ||
-    action === 'unlock' ||
-    (action === 'retry' && opts.fromStart);
+  const asks = ASKS_FIRST.has(action) || (action === 'retry' && opts.fromStart);
   if (!asks || opts.yes) return true;
   if (json) {
     throw new ConfigInvalidError(
@@ -122,6 +138,23 @@ const confirmed = async (action, state, { opts, json, logger }) => {
   }
   const what = action === 'retry' ? 'retry from the start' : action;
   return confirm(`${what[0].toUpperCase()}${what.slice(1)} ${state?.migration ?? 'it'}? [y/N] `);
+};
+
+/** Install `handlerFor(signal)` on each of {@link SIGNALS}; returns what removes them again */
+const onSignals = (handlerFor) => {
+  const handlers = [];
+  for (let i = 0; i < SIGNALS.length; i++) {
+    const signal = SIGNALS[i];
+    const handler = handlerFor(signal);
+    process.on(signal, handler);
+    handlers.push({ signal, handler });
+  }
+  return () => {
+    for (let i = 0; i < handlers.length; i++) {
+      const { signal, handler } = handlers[i];
+      process.off(signal, handler);
+    }
+  };
 };
 
 /**
@@ -143,18 +176,11 @@ const watchAction = async (migrator, opts, collection, { logger, json }) => {
     migrator.on('background:watch', onWatch);
     migrator.on('background:drift', onDrift);
   }
-  let stop;
-  const stopped = new Promise((resolve) => {
-    stop = resolve;
+  const { promise: stopped, resolve: stop } = Promise.withResolvers();
+  const detachSignals = onSignals(() => () => {
+    controller.abort();
+    stop();
   });
-  const handlers = ['SIGINT', 'SIGTERM'].map((signal) => [
-    signal,
-    () => {
-      controller.abort();
-      stop();
-    },
-  ]);
-  for (const [signal, handler] of handlers) process.on(signal, handler);
   try {
     const watcher = await migrator.watchBackground({
       ...(collection !== undefined ? { collections: [collection] } : {}),
@@ -169,7 +195,7 @@ const watchAction = async (migrator, opts, collection, { logger, json }) => {
     await watcher.stop();
     return { watch: rows };
   } finally {
-    for (const [signal, handler] of handlers) process.off(signal, handler);
+    detachSignals();
     migrator.off('background:watch', onWatch);
     migrator.off('background:drift', onDrift);
   }
@@ -189,8 +215,7 @@ const runAction = async (migrator, opts, name, { logger }) => {
     );
     controller.abort();
   };
-  const handlers = ['SIGINT', 'SIGTERM'].map((signal) => [signal, () => onSignal(signal)]);
-  for (const [signal, handler] of handlers) process.on(signal, handler);
+  const detachSignals = onSignals((signal) => () => onSignal(signal));
   try {
     const runOne = async (target) => {
       const status = await migrator.backgroundStatus(target);
@@ -227,7 +252,7 @@ const runAction = async (migrator, opts, name, { logger }) => {
     // round) is unblocked when that one completes, and runs in the next.
     // Done when a round changes nothing, or after one with --once.
     const results = new Map();
-    let previous;
+    let previous = '';
     for (;;) {
       const runnable = [];
       for (const state of await migrator.backgroundStatus()) {
@@ -241,11 +266,12 @@ const runAction = async (migrator, opts, name, { logger }) => {
     }
     return [...results.values()];
   } finally {
-    for (const [signal, handler] of handlers) process.off(signal, handler);
+    detachSignals();
   }
 };
 
 const STATUS_COLORS = {
+  __proto__: null,
   completed: 'green',
   running: 'cyan',
   pending: 'yellow',
@@ -257,23 +283,25 @@ const STATUS_COLORS = {
 
 const renderStatuses = (states) => {
   const colors = createColors(process.stdout);
-  const rows = states.map((state) => {
+  const rows = [];
+  for (let i = 0; i < states.length; i++) {
+    const state = states[i];
     const color = colors[STATUS_COLORS[state.status]] ?? ((text) => text);
     const parts = state.partitions;
-    return [
+    rows.push([
       state.migration,
       color(state.status),
       state.collection ?? '—',
       state.from !== undefined ? `${state.from} → ${state.to}` : 'step',
-      String(state.pass),
+      `${state.pass}`,
       parts ? `${parts.done}/${parts.total}` : '—',
       `${state.liveLeases}/${state.maxParallel}`,
-      String(state.totals.migrated ?? 0),
+      `${state.totals.migrated ?? 0}`,
       state.waitsFor.length > 0
         ? `waits for ${state.waitsFor.join(', ')}`
         : (state.lastError ?? ''),
-    ];
-  });
+    ]);
+  }
   return renderTable(
     [
       'Background migration',
@@ -290,23 +318,41 @@ const renderStatuses = (states) => {
   );
 };
 
+/** A partition's scope: `step`, or its bracket and group */
+const scopeText = (partition) => {
+  if (partition.scope.kind === 'step') return 'step';
+  const group = partition.group ? ` @${partition.group}` : '';
+  return `${partition.scope.bracket ?? ''}${group}`;
+};
+
 const renderPartitions = (partitions) => {
-  return renderTable(
-    ['#', 'Status', 'Scope', 'Migrated', 'Lease', 'Claims', 'Error'],
-    partitions.map((partition) => [
-      String(partition.seq),
+  const rows = [];
+  for (let i = 0; i < partitions.length; i++) {
+    const partition = partitions[i];
+    rows.push([
+      `${partition.seq}`,
       partition.status,
-      partition.scope.kind === 'step'
-        ? 'step'
-        : `${partition.scope.bracket ?? ''}${partition.group ? ` @${partition.group}` : ''}`,
-      String(partition.counters.migrated ?? 0),
+      scopeText(partition),
+      `${partition.counters.migrated ?? 0}`,
       partition.lease
         ? `slot ${partition.lease.slot} · ${partition.lease.host}:${partition.lease.pid}`
         : '',
-      String(partition.claims),
+      `${partition.claims}`,
       partition.lastError ?? '',
-    ]),
-  );
+    ]);
+  }
+  return renderTable(['#', 'Status', 'Scope', 'Migrated', 'Lease', 'Claims', 'Error'], rows);
+};
+
+/** What `status --check` makes of the states: 'failed', 'pending', or '' when all completed */
+const checkOutcome = (states) => {
+  let outcome = '';
+  for (let i = 0; i < states.length; i++) {
+    const status = states[i].status;
+    if (status === 'failed') return 'failed';
+    if (status !== 'completed') outcome = 'pending';
+  }
+  return outcome;
 };
 
 /** Register the `background` command */
@@ -348,7 +394,9 @@ const registerBackground = (program) => {
     ],
     spinner: false,
     preflight: (opts, positionals) => preflight(opts, positionals),
-    run: async (migrator, opts, [action, name], cli) => {
+    run: async (migrator, opts, positionals, cli) => {
+      const action = positionals[0];
+      const name = positionals[1];
       const control = {
         ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
         ...(opts.wait ? { wait: true } : {}),
@@ -449,10 +497,11 @@ const registerBackground = (program) => {
       if (data === undefined) return;
       const states = data.background;
       if (opts.check && Array.isArray(states)) {
-        if (states.some((state) => state.status === 'failed')) {
+        const outcome = checkOutcome(states);
+        if (outcome === 'failed') {
           logger.error('✖ A background migration failed');
           process.exitCode = EXIT_CODES.BACKGROUND_FAILED;
-        } else if (states.some((state) => state.status !== 'completed')) {
+        } else if (outcome === 'pending') {
           logger.error('✖ Background migrations are not all completed');
           process.exitCode = EXIT_CODES.BACKGROUND_PENDING;
         }

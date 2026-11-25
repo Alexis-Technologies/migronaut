@@ -11,8 +11,8 @@ const registerRedo = (program) => {
     ],
     lockable: true,
     mutating: true,
-    run: (migrator, opts, [file]) =>
-      migrator.redo(file, {
+    run: (migrator, opts, positionals) =>
+      migrator.redo(positionals[0], {
         noLock: opts.noLock,
         ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
       }),

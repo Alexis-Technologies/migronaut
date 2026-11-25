@@ -110,7 +110,7 @@ const safe = (call) => {
 
 /** `attributes` without its undefined values — an SDK warns about (or rejects) those */
 const defined = (attributes) => {
-  const result = {};
+  const result = Object.create(null);
   if (!attributes) return result;
   for (const key of Object.keys(attributes)) {
     if (attributes[key] !== undefined) result[key] = attributes[key];
@@ -156,6 +156,13 @@ const ATTRIBUTE_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
 /** Static attributes are dimensions: a handful at most */
 const MAX_STATIC_ATTRIBUTES = 20;
 
+/** What a tracer must have to start a span — and a meter, to make its instruments */
+const TRACER_METHODS = ['startActiveSpan'];
+const METER_METHODS = ['createHistogram', 'createCounter'];
+
+/** Neither undefined nor null: an option that was given */
+const isGiven = (value) => value !== undefined && value !== null;
+
 const hasMethods = (value, names) => {
   if (typeof value !== 'object' || value === null) return false;
   for (const name of names) {
@@ -178,16 +185,13 @@ const telemetryIssues = (telemetry) => {
     return [{ path: 'telemetry', message: 'must be an object' }];
   }
   const issues = [];
-  if (telemetry.tracer != null && !hasMethods(telemetry.tracer, ['startActiveSpan'])) {
+  if (isGiven(telemetry.tracer) && !hasMethods(telemetry.tracer, TRACER_METHODS)) {
     issues.push({
       path: 'telemetry.tracer',
       message: 'must be an OpenTelemetry Tracer (an object with startActiveSpan)',
     });
   }
-  if (
-    telemetry.meter != null &&
-    !hasMethods(telemetry.meter, ['createHistogram', 'createCounter'])
-  ) {
+  if (isGiven(telemetry.meter) && !hasMethods(telemetry.meter, METER_METHODS)) {
     issues.push({
       path: 'telemetry.meter',
       message: 'must be an OpenTelemetry Meter (an object with createHistogram and createCounter)',
@@ -218,6 +222,14 @@ const telemetryIssues = (telemetry) => {
   }
   return issues;
 };
+
+/** A slice's document counters, and the `background.result` each is reported as */
+const DOCUMENT_RESULTS = [
+  { field: 'migrated', result: 'migrated' },
+  { field: 'skipped', result: 'skipped' },
+  { field: 'conflicts', result: 'conflict' },
+  { field: 'failed', result: 'failed' },
+];
 
 /** What the kit holds when there is no tracer: the same surface, doing nothing */
 const NOOP_SPAN = { set() {}, finish() {} };
@@ -282,7 +294,7 @@ const createTelemetry = (telemetry, { dbName } = {}) => {
     if (!tracer) return fn(NOOP_SPAN);
     let called = false;
     let threw = false;
-    let result;
+    let result = undefined;
     const run = (span) => {
       if (called) return result;
       called = true;
@@ -462,13 +474,9 @@ const createTelemetry = (telemetry, { dbName } = {}) => {
         [ATTRIBUTES.BACKGROUND_OUTCOME]: outcome,
         ...failure(error),
       });
-      for (const [key, result] of [
-        ['migrated', 'migrated'],
-        ['skipped', 'skipped'],
-        ['conflicts', 'conflict'],
-        ['failed', 'failed'],
-      ]) {
-        add(backgroundDocuments, counters[key] ?? 0, {
+      for (let i = 0; i < DOCUMENT_RESULTS.length; i++) {
+        const { field, result } = DOCUMENT_RESULTS[i];
+        add(backgroundDocuments, counters[field] ?? 0, {
           ...at,
           [ATTRIBUTES.BACKGROUND_RESULT]: result,
         });

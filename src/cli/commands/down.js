@@ -15,8 +15,8 @@ const registerDown = (program) => {
     ],
     lockable: true,
     mutating: true,
-    run: (migrator, opts, [file]) =>
-      migrator.down(file, {
+    run: (migrator, opts, positionals) =>
+      migrator.down(positionals[0], {
         noLock: opts.noLock,
         // `!== undefined`, not truthiness: `--batch 0` is a mistake worth
         // reporting, not one to silently drop. Core validates the value.

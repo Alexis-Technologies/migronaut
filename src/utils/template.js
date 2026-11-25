@@ -35,7 +35,7 @@ const slugify = (name) => {
  */
 const buildPrefix = (options) => {
   if (options.sequential) {
-    return String(options.index).padStart(4, '0');
+    return `${options.index}`.padStart(4, '0');
   }
   return formatStamp(new Date());
 };
@@ -49,7 +49,7 @@ const buildPrefix = (options) => {
  * sorts before an already-applied migration.
  */
 const nextSequenceIndex = async (dir, extensions) => {
-  let files;
+  let files = null;
   try {
     files = await fs.readdir(dir);
   } catch (error) {
@@ -207,7 +207,7 @@ const resolveTemplateContent = async (templatePath, js, esm = false, background 
         { templatePath },
       );
     }
-    let stats;
+    let stats = null;
     try {
       stats = await fs.stat(templatePath);
     } catch (error) {
@@ -313,7 +313,9 @@ const maskUriCredentials = (uri) => {
   let hasCredentials = false;
   let masked = false;
   if (match) {
-    const [, scheme, userinfo, rest] = match;
+    const scheme = match[1];
+    const userinfo = match[2];
+    const rest = match[3];
     hasCredentials = true;
     const colon = userinfo.indexOf(':');
     if (colon !== -1 && colon !== userinfo.length - 1) {

@@ -9,13 +9,8 @@
  * validator — keeping the predicate in config.js would make the two a cycle.
  */
 const isCollectionName = (value) => {
-  return (
-    typeof value === 'string' &&
-    value.length > 0 &&
-    !value.includes('$') &&
-    !value.includes('\0') &&
-    !value.startsWith('system.')
-  );
+  if (typeof value !== 'string' || value.length === 0) return false;
+  return !value.includes('$') && !value.includes('\0') && !value.startsWith('system.');
 };
 
 module.exports = { isCollectionName };

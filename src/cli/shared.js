@@ -78,10 +78,13 @@ const attachSignalHandlers = (migrator, spinner, logger) => {
       migrator.stop(`Received ${signal}`);
     };
     process.on(signal, handler);
-    handlers.push([signal, handler]);
+    handlers.push({ signal, handler });
   }
   const detach = () => {
-    for (const [signal, handler] of handlers) process.off(signal, handler);
+    for (let i = 0; i < handlers.length; i++) {
+      const { signal, handler } = handlers[i];
+      process.off(signal, handler);
+    }
   };
   detach.stopRequested = () => stopping;
   return detach;
@@ -104,10 +107,13 @@ const attachCleanupHandlers = (spinner) => {
       process.kill(process.pid, signal);
     };
     process.on(signal, handler);
-    handlers.push([signal, handler]);
+    handlers.push({ signal, handler });
   }
   return () => {
-    for (const [signal, handler] of handlers) process.off(signal, handler);
+    for (let i = 0; i < handlers.length; i++) {
+      const { signal, handler } = handlers[i];
+      process.off(signal, handler);
+    }
   };
 };
 
@@ -315,8 +321,10 @@ const confirm = async (question) => {
  */
 const defineCommand = (program, spec) => {
   const command = program.command(spec.name).description(spec.description);
-  for (const [arg, help] of spec.args ?? []) command.argument(arg, help);
-  for (const [flags, help] of spec.options ?? []) command.option(flags, help);
+  const args = spec.args ?? [];
+  for (let i = 0; i < args.length; i++) command.argument(args[i][0], args[i][1]);
+  const options = spec.options ?? [];
+  for (let i = 0; i < options.length; i++) command.option(options[i][0], options[i][1]);
   // `lockable: true` declares the option AND computes the inversion once —
   // the `--no-x` flag arriving as `opts.lock === false` is subtle enough that
   // a per-command copy will eventually get it wrong.
@@ -335,8 +343,7 @@ const defineCommand = (program, spec) => {
         const proceed = await spec.preflight(opts, positionals, { logger, json });
         if (proceed === false) return;
       } catch (error) {
-        reportError(error, { json, verbose, logger });
-        return;
+        return void reportError(error, { json, verbose, logger });
       }
     }
 
