@@ -37,17 +37,18 @@ const readServer = async (db) => {
     const hello = await db.admin().command({ hello: 1 });
     server.mongos = hello?.msg === 'isdbgrid';
     // What transactions need: a replica set member or a mongos.
-    server.topology = server.mongos
-      ? 'sharded'
-      : typeof hello?.setName === 'string'
-        ? 'replicaSet'
-        : 'standalone';
+    if (server.mongos) server.topology = 'sharded';
+    else if (typeof hello?.setName === 'string') server.topology = 'replicaSet';
+    else server.topology = 'standalone';
   } catch {
     // Unknown — treated as a replica set or standalone.
   }
   try {
     const info = await db.admin().command({ buildInfo: 1 });
-    const [major, minor, patch] = Array.isArray(info?.versionArray) ? info.versionArray : [];
+    const parts = Array.isArray(info?.versionArray) ? info.versionArray : [];
+    const major = parts[0];
+    const minor = parts[1];
+    const patch = parts[2];
     if (Number.isInteger(major) && Number.isInteger(minor)) {
       server.version = { major, minor, ...(Number.isInteger(patch) ? { patch } : {}) };
     }

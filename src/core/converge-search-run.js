@@ -118,17 +118,17 @@ const readSearch = async (deps, server, definitions, live, search) => {
   // a time-series collection is refused by the planner anyway), and the first
   // declaring one that does not exist yet — the probe's fallback.
   const existing = [];
-  let missing;
-  for (const [position, definition] of definitions.entries()) {
-    if (definition.searchIndexes === undefined) continue;
+  let missing = -1;
+  for (let position = 0; position < definitions.length; position++) {
+    if (definitions[position].searchIndexes === undefined) continue;
     const state = live[position];
     if (state.exists && state.type === 'collection') existing.push(position);
-    else if (!state.exists && missing === undefined) missing = position;
+    else if (!state.exists && missing === -1) missing = position;
   }
-  const target = existing[0] ?? missing;
-  if (target === undefined) return;
+  const target = existing.length > 0 ? existing[0] : missing;
+  if (target === -1) return;
   const targetName = definitions[target].name;
-  let probe;
+  let probe = null;
   try {
     probe = await probeSearch(deps.db, server, {
       collection: targetName,
@@ -144,8 +144,7 @@ const readSearch = async (deps, server, definitions, live, search) => {
       `Atlas Search is not available: ${probe.reason}`,
       deps.fields({ evidence: probe.evidence }),
     );
-    warnSkipping(deps, definitions, search);
-    return;
+    return void warnSkipping(deps, definitions, search);
   }
   if (probe.evidence === 'assumed') {
     // Worth seeing when the run is about to wait on what it assumed.
@@ -214,7 +213,8 @@ const WAIT_PROGRESS_MS = 30_000;
 const waitTargets = (run) => {
   const { definitions, plans, result } = run;
   const targets = [];
-  for (const [position, definition] of definitions.entries()) {
+  for (let position = 0; position < definitions.length; position++) {
+    const definition = definitions[position];
     if (definition.searchIndexes === undefined) continue;
     // The collection's search index rows and update steps by name, read once —
     // not searched again for every declared index.
@@ -241,24 +241,33 @@ const waitTargets = (run) => {
   return targets;
 };
 
+/** What a build state adds to an index's status in {@link describeNotReady} */
+const STATE_NOTES = Object.freeze({ updating: ', updating', stale: ', not replicating' });
+
 /** `movies.default (BUILDING), shows.plot (FAILED: …)` */
 const describeNotReady = (notReady) => {
-  return notReady
-    .map((index) => {
-      const state = searchBuildState(index);
-      const note =
-        state === 'updating' ? ', updating' : state === 'stale' ? ', not replicating' : '';
-      return (
-        `${index.collection}.${index.name} (${index.status}${note}` +
-        `${index.message ? `: ${index.message}` : ''})`
-      );
-    })
-    .join(', ');
+  let text = '';
+  for (let i = 0; i < notReady.length; i++) {
+    const index = notReady[i];
+    const note = STATE_NOTES[searchBuildState(index)] ?? '';
+    if (i > 0) text += ', ';
+    text +=
+      `${index.collection}.${index.name} (${index.status}${note}` +
+      `${index.message ? `: ${index.message}` : ''})`;
+  }
+  return text;
 };
 
 /** Why a wait ran out, and what to do — a STALE index will not get there by waiting longer */
 const timeoutAdvice = (notReady) => {
-  if (notReady.every((index) => searchBuildState(index) === 'stale')) {
+  let allStale = true;
+  for (let i = 0; i < notReady.length; i++) {
+    if (searchBuildState(notReady[i]) !== 'stale') {
+      allStale = false;
+      break;
+    }
+  }
+  if (allStale) {
     return 'a STALE index is queryable but no longer replicating from the collection — see troubleshooting';
   }
   return 'the server goes on building; converge again to wait more, or raise searchIndexWaitTimeoutMs';
@@ -363,11 +372,10 @@ const settleWait = (deps, targets, outcome, wait, result) => {
   }
   if (outcome.outcome === 'ready') {
     const ready = targets.length - outcome.preexisting.length;
-    deps.logger.info(
+    return void deps.logger.info(
       `✔ Search index(es) queryable: ${ready}   [${outcome.waitedMs}ms]`,
       deps.fields({ searchIndexes: ready, waitedMs: outcome.waitedMs }),
     );
-    return;
   }
   const failed = outcome.outcome === 'failed';
   throw new ConvergeFailedError(
@@ -396,17 +404,19 @@ const reportNotReady = (deps, result) => {
     const state = searchBuildState(index);
     const detail = index.message ? `: ${index.message}` : '';
     if (state === 'stale') {
-      warnings.push([
+      warnings.push({
         index,
-        `is STALE — queryable, but no longer replicating from the collection, so its results ` +
+        what:
+          `is STALE — queryable, but no longer replicating from the collection, so its results ` +
           `may be out of date${detail}`,
-      ]);
+      });
     } else if (state === 'failed') {
-      warnings.push([
+      warnings.push({
         index,
-        `failed to build${detail} — converge does not resubmit an unchanged definition; fix ` +
+        what:
+          `failed to build${detail} — converge does not resubmit an unchanged definition; fix ` +
           'the definition or the data',
-      ]);
+      });
     } else {
       building.push(`${index.collection}.${index.name}`);
     }
@@ -418,7 +428,8 @@ const reportNotReady = (deps, result) => {
       deps.fields({ building: building.length }),
     );
   }
-  for (const [index, what] of warnings) {
+  for (let i = 0; i < warnings.length; i++) {
+    const { index, what } = warnings[i];
     deps.logger.warn(
       `⚠ ${index.collection}: search index "${index.name}" ${what}`,
       deps.fields({ collection: index.collection, searchIndex: index.name }),

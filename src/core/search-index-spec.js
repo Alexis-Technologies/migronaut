@@ -61,6 +61,7 @@ const MAPPINGS_DEFAULTS = Object.freeze({ dynamic: false, fields: {} });
  * `dynamic`). Types not listed come back as declared.
  */
 const FIELD_DEFAULTS = Object.freeze({
+  __proto__: null,
   string: { indexOptions: 'offsets', store: true, norms: 'include' },
   number: { representation: 'double', indexIntegers: true, indexDoubles: true },
   numberFacet: { representation: 'double', indexIntegers: true, indexDoubles: true },
@@ -90,6 +91,12 @@ const AUTO_EMBED_IMMUTABLE = ['model', 'numDimensions', 'quantization', 'modalit
 
 const VECTOR = 'vector';
 const AUTO_EMBED = 'autoEmbed';
+
+/** The defaults of a vector index field, by its type — a type not listed has none */
+const VECTOR_FIELD_DEFAULTS_BY_TYPE = new Map([
+  [VECTOR, VECTOR_FIELD_DEFAULTS],
+  [AUTO_EMBED, AUTO_EMBED_FIELD_DEFAULTS],
+]);
 
 /** Validate one search index declaration, returning `{ path, message }` issues (empty when valid) */
 const searchIndexIssues = (index, path) => {
@@ -141,23 +148,22 @@ const searchIndexIssues = (index, path) => {
 
 const vectorDefinitionIssues = (definition, base, issues) => {
   if (definition.mappings !== undefined && definition.fields === undefined) {
-    issues.push({
+    return void issues.push({
       path: base,
       message: "has mappings, which is a search definition — leave type out, or set type: 'search'",
     });
-    return;
   }
   const { fields } = definition;
   if (!Array.isArray(fields) || fields.length === 0) {
-    issues.push({
+    return void issues.push({
       path: `${base}.fields`,
       message: 'must be a non-empty array of fields ({ type, path, … })',
     });
-    return;
   }
   const seen = new Map();
   const kinds = new Set();
-  for (const [position, field] of fields.entries()) {
+  for (let position = 0; position < fields.length; position++) {
+    const field = fields[position];
     const fieldPath = `${base}.fields[${position}]`;
     const usable =
       isPlainObject(field) &&
@@ -212,13 +218,16 @@ const normalizeDeclaredSearchIndex = (index) => {
 
 /** Whether any mongot is still building a newer definition next to the one it serves */
 const isUpdating = (raw, version) => {
-  if (!Array.isArray(raw.statusDetail)) return false;
-  return raw.statusDetail.some((detail) => {
-    if (!isPlainObject(detail)) return false;
+  const details = raw.statusDetail;
+  if (!Array.isArray(details)) return false;
+  for (let i = 0; i < details.length; i++) {
+    const detail = details[i];
+    if (!isPlainObject(detail)) continue;
     if (detail.stagedIndex !== undefined && detail.stagedIndex !== null) return true;
     const served = detail.mainIndex?.definitionVersion?.version;
-    return version !== undefined && typeof served === 'number' && served < version;
-  });
+    if (version !== undefined && typeof served === 'number' && served < version) return true;
+  }
+  return false;
 };
 
 /**
@@ -263,20 +272,17 @@ const isBeingRemoved = (live) => {
  */
 const withDefaults = (value, defaults) => {
   const out = { ...defaults };
-  for (const [key, item] of Object.entries(value)) {
-    if (item !== undefined) assign(out, key, item);
+  const keys = Object.keys(value);
+  for (let i = 0; i < keys.length; i++) {
+    const item = value[keys[i]];
+    if (item !== undefined) assign(out, keys[i], item);
   }
   return out;
 };
 
 const effectiveVectorField = (field) => {
   if (!isPlainObject(field)) return field;
-  const defaults =
-    field.type === VECTOR
-      ? VECTOR_FIELD_DEFAULTS
-      : field.type === AUTO_EMBED
-        ? AUTO_EMBED_FIELD_DEFAULTS
-        : undefined;
+  const defaults = VECTOR_FIELD_DEFAULTS_BY_TYPE.get(field.type);
   if (!defaults) return field;
   const filled = withDefaults(field, defaults);
   if (filled.indexingMethod === 'hnsw') {
@@ -294,27 +300,33 @@ const effectiveVectorField = (field) => {
  * pass that computes its sort key.
  */
 const sortFields = (fields, transform) => {
-  const keyed = new Array(fields.length);
+  const keyed = [];
   for (let position = 0; position < fields.length; position++) {
     const field = transform ? transform(fields[position]) : fields[position];
-    keyed[position] = {
+    keyed.push({
       field,
-      type: String(field?.type ?? ''),
-      path: String(field?.path ?? ''),
+      type: `${field?.type ?? ''}`,
+      path: `${field?.path ?? ''}`,
       text: JSON.stringify(canonical(field)),
-    };
+    });
   }
-  keyed.sort(
-    (a, b) =>
-      compareText(a.type, b.type) || compareText(a.path, b.path) || compareText(a.text, b.text),
-  );
+  keyed.sort(byTypePathText);
   for (let position = 0; position < keyed.length; position++) {
     keyed[position] = keyed[position].field;
   }
   return keyed;
 };
 
-const compareText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const compareText = (a, b) => {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+};
+
+const byTypePathText = (a, b) =>
+  compareText(a.type, b.type) || compareText(a.path, b.path) || compareText(a.text, b.text);
+
+const byText = (a, b) => compareText(a.text, b.text);
 
 /**
  * A field mapping — or a list of them, one field indexed as several types —
@@ -337,12 +349,12 @@ const effectiveFieldMapping = (mapping) => {
  * own. `transform`, when given, is applied to each in the pass that keys it.
  */
 const sortMappings = (mappings, transform) => {
-  const keyed = new Array(mappings.length);
+  const keyed = [];
   for (let position = 0; position < mappings.length; position++) {
     const item = transform ? transform(mappings[position]) : mappings[position];
-    keyed[position] = { item, text: JSON.stringify(canonical(item)) };
+    keyed.push({ item, text: JSON.stringify(canonical(item)) });
   }
-  keyed.sort((a, b) => compareText(a.text, b.text));
+  keyed.sort(byText);
   for (let position = 0; position < keyed.length; position++) {
     keyed[position] = keyed[position].item;
   }
@@ -352,8 +364,9 @@ const sortMappings = (mappings, transform) => {
 /** `{ name: mapping }` with every mapping's defaults filled in */
 const effectiveFields = (fields) => {
   const out = {};
-  for (const [name, mapping] of Object.entries(fields)) {
-    assign(out, name, effectiveFieldMapping(mapping));
+  const names = Object.keys(fields);
+  for (let i = 0; i < names.length; i++) {
+    assign(out, names[i], effectiveFieldMapping(fields[names[i]]));
   }
   return out;
 };
@@ -422,7 +435,9 @@ const immutableChanges = (declared, live) => {
   const { all: haveAll, autoEmbed: have } = embeddingFields(live);
   if (wanted.size === 0 && have.size === 0) return [];
   const changes = [];
-  for (const [path, field] of wantedAll) {
+  for (const entry of wantedAll) {
+    const path = entry[0];
+    const field = entry[1];
     const current = haveAll.get(path);
     if (current && current.type !== field.type && (wanted.has(path) || have.has(path))) {
       changes.push(`${path}.type`);
@@ -430,7 +445,9 @@ const immutableChanges = (declared, live) => {
   }
   if (changes.length > 0) return changes;
   if (have.size > 0 && !sameKeys(wanted, have)) return ['path'];
-  for (const [path, field] of wanted) {
+  for (const entry of wanted) {
+    const path = entry[0];
+    const field = entry[1];
     const current = have.get(path);
     if (!current) continue;
     for (const attribute of AUTO_EMBED_IMMUTABLE) {
@@ -450,8 +467,10 @@ const joinPath = (base, key) => (base ? `${base}.${key}` : key);
 const trimOptions = (want, have, path, ignored) => {
   if (!isPlainObject(want) || !isPlainObject(have)) return have;
   const out = {};
-  for (const [key, value] of Object.entries(have)) {
-    if (Object.hasOwn(want, key)) assign(out, key, value);
+  const keys = Object.keys(have);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (Object.hasOwn(want, key)) assign(out, key, have[key]);
     else ignored.push(joinPath(path, key));
   }
   return out;
@@ -465,7 +484,10 @@ const trimOptions = (want, have, path, ignored) => {
 const trimFieldMap = (want, have, path, ignored) => {
   if (!isPlainObject(want) || !isPlainObject(have)) return have;
   const out = {};
-  for (const [name, mapping] of Object.entries(have)) {
+  const names = Object.keys(have);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const mapping = have[name];
     const trimmed = Object.hasOwn(want, name)
       ? trimFieldMapping(want[name], mapping, joinPath(path, name), ignored)
       : mapping;
@@ -583,7 +605,8 @@ const unionKeys = (a, b) => {
   for (const key of Object.keys(b)) {
     if (!Object.hasOwn(a, key)) keys.push(key);
   }
-  return keys.sort();
+  keys.sort();
+  return keys;
 };
 
 /**

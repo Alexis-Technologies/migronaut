@@ -76,17 +76,32 @@ const INTEGER_LIKE = /^(?:0|[1-9]\d*)$/;
 
 /** Whether `entries` name their fields in exactly the order of `fields` */
 const sameFieldOrder = (entries, fields) => {
-  return entries.every(([field], position) => fields[position] === field);
+  for (let i = 0; i < entries.length; i++) {
+    if (fields[i] !== entries[i][0]) return false;
+  }
+  return true;
 };
 
 /** `[field, direction]` pairs, in the order the index uses them */
 const keyEntries = (key) => {
-  return key instanceof Map ? [...key.entries()] : Object.entries(key);
+  const entries = [];
+  if (key instanceof Map) {
+    for (const entry of key.entries()) entries.push(entry);
+    return entries;
+  }
+  const fields = Object.keys(key);
+  for (let i = 0; i < fields.length; i++) entries.push([fields[i], key[fields[i]]]);
+  return entries;
 };
 
 /** The name MongoDB (and the driver) gives an index declared without one: `email_1`, `a_1_b_-1` */
 const defaultIndexName = (entries) => {
-  return entries.map(([field, direction]) => `${field}_${direction}`).join('_');
+  let name = '';
+  for (let i = 0; i < entries.length; i++) {
+    if (i > 0) name += '_';
+    name += `${entries[i][0]}_${entries[i][1]}`;
+  }
+  return name;
 };
 
 /** Issues with an index key — `null` entries when the key is unusable */
@@ -102,7 +117,9 @@ const keyIssues = (key, report) => {
   }
   let usable = true;
   let integerLike = false;
-  for (const [field, direction] of entries) {
+  for (let i = 0; i < entries.length; i++) {
+    const field = entries[i][0];
+    const direction = entries[i][1];
     if (typeof field !== 'string' || field.length === 0) {
       report('field names must be non-empty strings');
       usable = false;
@@ -156,9 +173,11 @@ const indexIssues = (index, path) => {
   // `wildcardProjection` belongs to an all-fields wildcard (`$**`, compound or
   // not) — the server refuses it on a path wildcard such as `a.$**`.
   let isAllFieldsWildcard = false;
-  for (const [field, direction] of entries ?? []) {
-    if (direction === TEXT) isText = true;
-    if (field === '$**') isAllFieldsWildcard = true;
+  if (entries !== null) {
+    for (let i = 0; i < entries.length; i++) {
+      if (entries[i][1] === TEXT) isText = true;
+      if (entries[i][0] === '$**') isAllFieldsWildcard = true;
+    }
   }
 
   if (index.name !== undefined) {
@@ -185,10 +204,10 @@ const indexIssues = (index, path) => {
     report('expireAfterSeconds')('must be a non-negative integer (seconds)');
   }
   const collation = index.collation;
-  if (
+  const collationInvalid =
     collation !== undefined &&
-    (!isPlainObject(collation) || typeof collation.locale !== 'string' || collation.locale === '')
-  ) {
+    (!isPlainObject(collation) || typeof collation.locale !== 'string' || collation.locale === '');
+  if (collationInvalid) {
     report('collation')('must be an object with a locale');
   }
   for (const option of ['default_language', 'language_override']) {
@@ -241,9 +260,9 @@ const serverKeyOf = (entries) => {
 
 /** Text fields at weight 1, then whatever the declaration weighs differently */
 const textWeights = (entries, declared) => {
-  const weights = {};
-  for (const [field, direction] of entries) {
-    if (direction === TEXT) weights[field] = 1;
+  const weights = { __proto__: null };
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i][1] === TEXT) weights[entries[i][0]] = 1;
   }
   return { ...weights, ...declared };
 };
@@ -280,7 +299,16 @@ const normalizeDeclaredIndex = (index) => {
 
 /** A `listIndexes` document in comparable form */
 const normalizeLiveIndex = (raw) => {
-  const entries = Object.entries(raw.key ?? {});
+  const key = raw.key ?? {};
+  const fields = Object.keys(key);
+  const entries = [];
+  let isText = false;
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    const direction = key[field];
+    entries.push([field, direction]);
+    if (field === '_fts' && direction === TEXT) isText = true;
+  }
   const options = {};
   for (const option of NORMALIZED_OPTIONS) {
     const value = raw[option];
@@ -295,7 +323,7 @@ const normalizeLiveIndex = (raw) => {
   return {
     name: raw.name,
     serverKey: entries,
-    isText: entries.some(([field, direction]) => field === '_fts' && direction === TEXT),
+    isText,
     options,
     raw,
   };
@@ -334,8 +362,10 @@ const UNIVERSAL_COLLATION_DEFAULTS = Object.freeze({
 const withCollationDefaults = (collation) => {
   if (collation === undefined || collation.locale === 'simple') return collation;
   const filled = { ...UNIVERSAL_COLLATION_DEFAULTS };
-  for (const [field, value] of Object.entries(collation)) {
-    if (value !== undefined) filled[field] = value;
+  const fields = Object.keys(collation);
+  for (let i = 0; i < fields.length; i++) {
+    const value = collation[fields[i]];
+    if (value !== undefined) filled[fields[i]] = value;
   }
   return filled;
 };
@@ -361,10 +391,13 @@ const collationMatches = (declared, liveCollation, defaultCollation) => {
   }
   if (declared.locale === 'simple') return liveCollation === undefined;
   if (liveCollation === undefined) return false;
-  for (const [field, value] of Object.entries(withCollationDefaults(declared))) {
+  const filled = withCollationDefaults(declared);
+  const fields = Object.keys(filled);
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
     // A server that omits a universal field reports its default.
     const stored = liveCollation[field] ?? UNIVERSAL_COLLATION_DEFAULTS[field];
-    if (!deepEqual(value, stored)) return false;
+    if (!deepEqual(filled[field], stored)) return false;
   }
   return true;
 };
@@ -485,7 +518,13 @@ const compareIndex = (declared, live, defaultCollation, capabilities = {}) => {
   for (const option of DECLARED_ONLY_OPTIONS) {
     if (d[option] !== undefined && !deepEqual(d[option], l[option])) diffs.push(option);
   }
-  const rebuild = diffs.some((diff) => !(diff in inPlace));
+  let rebuild = false;
+  for (let i = 0; i < diffs.length; i++) {
+    if (!(diffs[i] in inPlace)) {
+      rebuild = true;
+      break;
+    }
+  }
   return { diffs, inPlace: rebuild ? {} : inPlace, rebuild };
 };
 

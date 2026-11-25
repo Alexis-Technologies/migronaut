@@ -42,6 +42,26 @@ const DEFINITION_KEY_SET = new Set(DEFINITION_KEYS);
 const VALIDATION_LEVELS = ['off', 'strict', 'moderate'];
 const VALIDATION_ACTIONS = ['error', 'warn', 'errorAndLog'];
 
+/** `'a', 'b', 'c'` */
+const quotedList = (items) => {
+  let text = '';
+  for (let i = 0; i < items.length; i++) {
+    if (i > 0) text += ', ';
+    text += `'${items[i]}'`;
+  }
+  return text;
+};
+
+/** The validation options, each with the values it takes */
+const VALIDATION_OPTIONS = [
+  { key: 'validationLevel', allowed: VALIDATION_LEVELS, expected: quotedList(VALIDATION_LEVELS) },
+  {
+    key: 'validationAction',
+    allowed: VALIDATION_ACTIONS,
+    expected: quotedList(VALIDATION_ACTIONS),
+  },
+];
+
 /** Simultaneous definition-file loads — the same EMFILE bound as every other multi-file path */
 const FS_CONCURRENCY = 16;
 
@@ -52,16 +72,24 @@ const join = (base, key) => {
 
 const isEmptyObject = (value) => isPlainObject(value) && Object.keys(value).length === 0;
 
+/** Append every item of `items` to `target` */
+const pushAll = (target, items) => {
+  for (let i = 0; i < items.length; i++) target.push(items[i]);
+};
+
 const indexListIssues = (indexes, base, issues) => {
   if (!Array.isArray(indexes)) {
-    issues.push({ path: join(base, 'indexes'), message: 'must be an array of index definitions' });
-    return;
+    return void issues.push({
+      path: join(base, 'indexes'),
+      message: 'must be an array of index definitions',
+    });
   }
   const valid = [];
-  for (const [position, index] of indexes.entries()) {
+  for (let position = 0; position < indexes.length; position++) {
+    const index = indexes[position];
     const indexPath = `${join(base, 'indexes')}[${position}]`;
     const found = indexIssues(index, indexPath);
-    issues.push(...found);
+    pushAll(issues, found);
     if (found.length === 0) {
       valid.push({ position, path: indexPath, index: normalizeDeclaredIndex(index) });
     }
@@ -70,7 +98,7 @@ const indexListIssues = (indexes, base, issues) => {
     for (let b = 0; b < a; b++) {
       const later = valid[a];
       const earlier = valid[b];
-      let message;
+      let message = '';
       if (later.index.name === earlier.index.name) {
         message = `has the same name as indexes[${earlier.position}] ("${later.index.name}")`;
       } else if (later.index.isText && earlier.index.isText) {
@@ -91,14 +119,17 @@ const indexListIssues = (indexes, base, issues) => {
 const searchIndexListIssues = (searchIndexes, base, issues) => {
   const listPath = join(base, 'searchIndexes');
   if (!Array.isArray(searchIndexes)) {
-    issues.push({ path: listPath, message: 'must be an array of search index definitions' });
-    return;
+    return void issues.push({
+      path: listPath,
+      message: 'must be an array of search index definitions',
+    });
   }
   const names = new Map();
-  for (const [position, index] of searchIndexes.entries()) {
+  for (let position = 0; position < searchIndexes.length; position++) {
+    const index = searchIndexes[position];
     const indexPath = `${listPath}[${position}]`;
     const found = searchIndexIssues(index, indexPath);
-    issues.push(...found);
+    pushAll(issues, found);
     if (found.length > 0) continue;
     const { name } = normalizeDeclaredSearchIndex(index);
     if (names.has(name)) {
@@ -125,9 +156,9 @@ const searchIndexListIssues = (searchIndexes, base, issues) => {
  */
 const versioningDefinitionIssues = (definition, base, issues) => {
   if (definition.versioning === undefined) return false;
-  const path = join(base, 'versioning');
-  const found = versioningIssues(definition.versioning, path);
-  issues.push(...found);
+  const versioningPath = join(base, 'versioning');
+  const found = versioningIssues(definition.versioning, versioningPath);
+  pushAll(issues, found);
   if (found.length > 0) return true;
   const versioning = resolveVersioning(definition.versioning);
   if (isPlainObject(definition.validator) || definition.validator === null) {
@@ -136,7 +167,9 @@ const versioningDefinitionIssues = (definition, base, issues) => {
     }
   }
   if (versioning.index && Array.isArray(definition.indexes)) {
-    for (const [position, index] of definition.indexes.entries()) {
+    const indexes = definition.indexes;
+    for (let position = 0; position < indexes.length; position++) {
+      const index = indexes[position];
       if (isPlainObject(index) && isVersioningIndexKey(index.key, versioning)) {
         issues.push({
           path: `${join(base, 'indexes')}[${position}]`,
@@ -188,12 +221,12 @@ const definitionIssues = (definition, { path: base, reserved = [], fallbackName 
     report('name', `"${name}" is one of migronaut's own collections`);
   }
 
-  if (
+  const managesNothing =
     definition.indexes === undefined &&
     definition.searchIndexes === undefined &&
     definition.validator === undefined &&
-    definition.versioning === undefined
-  ) {
+    definition.versioning === undefined;
+  if (managesNothing) {
     issues.push({
       path: self,
       message: 'declares no indexes, searchIndexes, validator or versioning — nothing to manage',
@@ -216,14 +249,12 @@ const definitionIssues = (definition, { path: base, reserved = [], fallbackName 
   }
   // The versioning rules are a validator of their own.
   const hasValidator = (isPlainObject(validator) && !isEmptyObject(validator)) || versioning;
-  for (const [key, allowed] of [
-    ['validationLevel', VALIDATION_LEVELS],
-    ['validationAction', VALIDATION_ACTIONS],
-  ]) {
+  for (let i = 0; i < VALIDATION_OPTIONS.length; i++) {
+    const { key, allowed, expected } = VALIDATION_OPTIONS[i];
     const value = definition[key];
     if (value === undefined) continue;
     if (!allowed.includes(value)) {
-      report(key, `must be ${allowed.map((item) => `'${item}'`).join(', ')}`);
+      report(key, `must be ${expected}`);
     } else if (!hasValidator) {
       report(key, 'has no effect without a validator');
     }
@@ -245,9 +276,10 @@ const collectionsIssues = (list, { reserved = [] } = {}) => {
   }
   const issues = [];
   const seen = new Map();
-  for (const [position, definition] of list.entries()) {
+  for (let position = 0; position < list.length; position++) {
+    const definition = list[position];
     const base = `collections[${position}]`;
-    issues.push(...definitionIssues(definition, { path: base, reserved }));
+    pushAll(issues, definitionIssues(definition, { path: base, reserved }));
     const name = isPlainObject(definition) ? definition.name : undefined;
     if (typeof name !== 'string') continue;
     if (seen.has(name)) {
@@ -262,6 +294,21 @@ const collectionsIssues = (list, { reserved = [] } = {}) => {
   return issues;
 };
 
+const normalizeIndexes = (indexes) => {
+  if (indexes === undefined || indexes === null) return undefined;
+  const out = [];
+  for (let i = 0; i < indexes.length; i++) out.push(normalizeDeclaredIndex(indexes[i]));
+  return out;
+};
+
+const normalizeSearchIndexes = (searchIndexes) => {
+  const out = [];
+  for (let i = 0; i < searchIndexes.length; i++) {
+    out.push(normalizeDeclaredSearchIndex(searchIndexes[i]));
+  }
+  return out;
+};
+
 /**
  * A valid definition in the planner's shape: indexes normalized (effective
  * names, server-form keys, the spec to send), search indexes with their
@@ -274,9 +321,9 @@ const collectionsIssues = (list, { reserved = [] } = {}) => {
 const normalizeDefinition = (definition, { name, source } = {}) => {
   const { validator } = definition;
   let wireValidator = validator === undefined || validator === null ? validator : toWire(validator);
-  let indexes = definition.indexes?.map((index) => normalizeDeclaredIndex(index));
+  let indexes = normalizeIndexes(definition.indexes);
   let validationLevel = definition.validationLevel;
-  let versioning;
+  let versioning = null;
   let indexesPartial = false;
   if (definition.versioning !== undefined) {
     // Folded into an ordinary validator and an ordinary index, so the planner
@@ -301,11 +348,7 @@ const normalizeDefinition = (definition, { name, source } = {}) => {
     indexes,
     ...(indexesPartial ? { indexesPartial } : {}),
     ...(definition.searchIndexes !== undefined
-      ? {
-          searchIndexes: definition.searchIndexes.map((index) =>
-            normalizeDeclaredSearchIndex(index),
-          ),
-        }
+      ? { searchIndexes: normalizeSearchIndexes(definition.searchIndexes) }
       : {}),
     validator: wireValidator,
     ...(validationLevel !== undefined ? { validationLevel } : {}),
@@ -313,7 +356,7 @@ const normalizeDefinition = (definition, { name, source } = {}) => {
       ? { validationAction: definition.validationAction }
       : {}),
     ...(definition.prune !== undefined ? { prune: definition.prune } : {}),
-    ...(versioning !== undefined ? { versioning } : {}),
+    ...(versioning !== null ? { versioning } : {}),
   };
 };
 
@@ -321,7 +364,9 @@ const normalizeDefinition = (definition, { name, source } = {}) => {
 const definitionExtensions = (extensions) => {
   const set = new Set(['.json']);
   for (const ext of extensions) set.add(ext.startsWith('.') ? ext : `.${ext}`);
-  return [...set].sort((a, b) => b.length - a.length);
+  const list = [...set];
+  list.sort((a, b) => b.length - a.length);
+  return list;
 };
 
 /**
@@ -344,7 +389,7 @@ const loadDefinitionFile = async (filepath, options) => {
       );
     }
   }
-  let mod;
+  let mod = null;
   try {
     mod = await importUserFile(filepath, { reload: options.reload });
   } catch (error) {
@@ -366,6 +411,21 @@ const loadDefinitionFile = async (filepath, options) => {
   return isPlainObject(exported) || exported === mod ? { ...exported } : exported;
 };
 
+/** The extension of `accepted` that `file` has (with a name before it), or `''` */
+const extensionOf = (file, accepted) => {
+  for (let i = 0; i < accepted.length; i++) {
+    const candidate = accepted[i];
+    if (file.endsWith(candidate) && file.length > candidate.length) return candidate;
+  }
+  return '';
+};
+
+const byFile = (a, b) => {
+  if (a.file < b.file) return -1;
+  if (a.file > b.file) return 1;
+  return 0;
+};
+
 /**
  * Load every definition file in `dir`: one collection per file, non-recursive,
  * sorted by file name. Dotfiles and declaration files (`.d.ts`) are skipped,
@@ -373,7 +433,7 @@ const loadDefinitionFile = async (filepath, options) => {
  * does not exist is an error, not "no definitions".
  */
 const loadCollectionsDir = async (dir, { extensions, reload = false }) => {
-  let entries;
+  let entries = null;
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch (error) {
@@ -393,12 +453,10 @@ const loadCollectionsDir = async (dir, { extensions, reload = false }) => {
     const file = entry.name;
     if (file.startsWith('.')) continue;
     if (file.endsWith('.d.ts') || file.endsWith('.d.mts') || file.endsWith('.d.cts')) continue;
-    const ext = accepted.find(
-      (candidate) => file.endsWith(candidate) && file.length > candidate.length,
-    );
+    const ext = extensionOf(file, accepted);
     if (ext) files.push({ file, name: file.slice(0, -ext.length) });
   }
-  files.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+  files.sort(byFile);
   return mapLimit(files, FS_CONCURRENCY, async ({ file, name }) => {
     const filepath = path.join(dir, file);
     return { file, name, definition: await loadDefinitionFile(filepath, { reload }) };
@@ -423,7 +481,9 @@ const resolveDefinitions = async ({
 }) => {
   const definitions = [];
   const declaredBy = new Map();
-  for (const [position, definition] of (inline ?? []).entries()) {
+  const list = inline ?? [];
+  for (let position = 0; position < list.length; position++) {
+    const definition = list[position];
     const source = `collections[${position}]`;
     definitions.push(normalizeDefinition(definition, { source }));
     declaredBy.set(definition.name, source);
@@ -436,7 +496,7 @@ const resolveDefinitions = async ({
     const base = `${file}:`;
     const found = definitionIssues(definition, { path: base, reserved, fallbackName });
     if (found.length > 0) {
-      issues.push(...found);
+      pushAll(issues, found);
       continue;
     }
     const name = definition.name ?? fallbackName;

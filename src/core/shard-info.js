@@ -22,7 +22,7 @@ const isUnauthorized = (error) => error?.code === UNAUTHORIZED;
  * it is not sharded, `undefined` when `config.collections` may not be read.
  */
 const readShardKey = async (client, dbName, collection) => {
-  let entry;
+  let entry = null;
   try {
     entry = await client
       .db('config')

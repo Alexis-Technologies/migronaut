@@ -54,6 +54,11 @@ const TARGET_LABELS = Object.freeze({ searchIndex: 'search index' });
 /** Server defaults for a collection that has a validator but did not say how to apply it */
 const VALIDATOR_DEFAULTS = { validationLevel: 'strict', validationAction: 'error' };
 
+/** Append every item of `items` to `target` */
+const pushAll = (target, items) => {
+  for (let i = 0; i < items.length; i++) target.push(items[i]);
+};
+
 /**
  * Whether a row drops or rebuilds an index — or drops a search index (a
  * search index is updated in place, never rebuilt: the old one serves until
@@ -74,10 +79,11 @@ const isDestructive = (action) => {
 const needsConfirmation = (action, collectionActions = []) => {
   if (isDestructive(action)) return true;
   if (action.target !== 'validator' || !CHANGE_ACTIONS.has(action.action)) return false;
-  const created = collectionActions.some(
-    (other) => other.target === 'collection' && other.action === 'create',
-  );
-  return !created;
+  for (let i = 0; i < collectionActions.length; i++) {
+    const other = collectionActions[i];
+    if (other.target === 'collection' && other.action === 'create') return false;
+  }
+  return true;
 };
 
 /**
@@ -117,27 +123,19 @@ const liveValidator = (options) => {
 
 const planValidator = (name, desired, current, row, steps) => {
   if (desired === null) {
-    if (current === null) {
-      row({ target: 'validator', name, action: 'unchanged' });
-      return;
-    }
+    if (current === null) return void row({ target: 'validator', name, action: 'unchanged' });
     const action = row({ target: 'validator', name, action: 'drop', from: current });
-    steps.push({ op: 'collMod', command: { validator: {} }, actions: [action] });
-    return;
+    return void steps.push({ op: 'collMod', command: { validator: {} }, actions: [action] });
   }
   if (current === null) {
     const action = row({ target: 'validator', name, action: 'create', to: desired });
-    steps.push({ op: 'collMod', command: { ...desired }, actions: [action] });
-    return;
+    return void steps.push({ op: 'collMod', command: { ...desired }, actions: [action] });
   }
   const diffs = [];
   if (!deepEqual(desired.validator, current.validator)) diffs.push('validator');
   if (desired.validationLevel !== current.validationLevel) diffs.push('validationLevel');
   if (desired.validationAction !== current.validationAction) diffs.push('validationAction');
-  if (diffs.length === 0) {
-    row({ target: 'validator', name, action: 'unchanged' });
-    return;
-  }
+  if (diffs.length === 0) return void row({ target: 'validator', name, action: 'unchanged' });
   const action = row({
     target: 'validator',
     name,
@@ -163,7 +161,11 @@ const UNIQUE_REBUILD_REASON =
 
 /** Whether a rebuild would open a window without a uniqueness the declaration keeps */
 const dropsUniqueConstraint = (declared, drops) => {
-  return declared.options.unique === true && drops.some((index) => index.options.unique === true);
+  if (declared.options.unique !== true) return false;
+  for (let i = 0; i < drops.length; i++) {
+    if (drops[i].options.unique === true) return true;
+  }
+  return false;
 };
 
 /**
@@ -199,12 +201,14 @@ const DISPLACED_REASON =
  */
 const indexesFor = (definition, live) => {
   const indexes = definition.indexes;
-  if (indexes === undefined || !definition.versioning || !live.shardKey) return { indexes };
+  if (indexes === undefined || !definition.versioning || !live.shardKey) {
+    return { indexes, displaced: '' };
+  }
   const sharded = normalizeDeclaredIndex({
     key: shardedVersionIndexKey(definition.versioning, live.shardKey),
   });
   const result = [];
-  let displaced;
+  let displaced = '';
   for (const index of indexes) {
     if (index.versionIndex === true && index.name !== sharded.name) {
       displaced = index.name;
@@ -320,14 +324,17 @@ const planIndexes = (
   for (const item of pending) {
     const { declared, action } = item;
     const blockers = [];
+    let names = '';
     for (const index of undeclared) {
-      if (!consumed.has(index.name) && collides(declared, index)) blockers.push(index);
+      if (consumed.has(index.name) || !collides(declared, index)) continue;
+      if (blockers.length > 0) names += ', ';
+      names += `"${index.name}"`;
+      blockers.push(index);
     }
     for (const blocker of blockers) consumed.add(blocker.name);
     const drops = item.live ? [item.live] : [];
 
     if (blockers.length > 0) {
-      const names = blockers.map((blocker) => `"${blocker.name}"`).join(', ');
       const identical =
         !item.live &&
         blockers.length === 1 &&
@@ -349,7 +356,7 @@ const planIndexes = (
         }
         continue;
       }
-      drops.push(...blockers);
+      pushAll(drops, blockers);
       action.action = 'recreate';
       action.reason = identical ? 'name' : joinReasons(item.reason, `replaces ${names}`);
     }
@@ -393,7 +400,7 @@ const planIndexes = (
     }
     steps.push({ op: 'createIndex', spec: item.declared.spec, actions: [item.action] });
   }
-  steps.push(...modifies);
+  pushAll(steps, modifies);
   const group = { op: 'rebuild', drops: [], creates: [], actions: [] };
   for (const list of [rebuilds, waiting]) {
     for (const item of list) {
@@ -412,7 +419,7 @@ const planIndexes = (
 
   // The ordinary version index a sharded one replaced: kept, and said so —
   // a background migration may still be hinting it.
-  const old = displaced !== undefined ? byName.get(displaced) : undefined;
+  const old = displaced !== '' ? byName.get(displaced) : undefined;
   if (old !== undefined && !declaredNames.has(displaced) && !prune) {
     consumed.add(displaced);
     row({
@@ -577,7 +584,7 @@ const planSearchIndexes = (declaredList, live, { prune, search }, row, submit, d
     }
   }
   if (specs.length > 0) submit.push({ op: 'createSearchIndexes', specs, actions: created });
-  submit.push(...updates);
+  pushAll(submit, updates);
 
   for (const index of byName.values()) {
     if (declaredNames.has(index.name)) continue;
@@ -640,7 +647,7 @@ const batchCreates = (steps) => {
       batched.push(step);
     } else if (last?.op === 'createIndexes') {
       last.specs.push(step.spec);
-      last.actions.push(...step.actions);
+      pushAll(last.actions, step.actions);
     } else {
       batched.push({ op: 'createIndexes', specs: [step.spec], actions: [...step.actions] });
     }
@@ -715,7 +722,8 @@ const planCollectionSteps = (
       const none = { searchIndexes: [] };
       planSearchIndexes(declaredSearch, none, { prune, search }, row, searchSubmit, searchDrops);
     }
-    steps.push(...searchSubmit, ...indexSteps);
+    pushAll(steps, searchSubmit);
+    pushAll(steps, indexSteps);
     return { name, actions, steps };
   }
 
@@ -744,7 +752,9 @@ const planCollectionSteps = (
   }
   // Search submissions return at once and build in the background, so they go
   // before the regular index builds; every drop still comes last.
-  steps.push(...searchSubmit, ...indexSteps, ...searchDrops);
+  pushAll(steps, searchSubmit);
+  pushAll(steps, indexSteps);
+  pushAll(steps, searchDrops);
   return { name, actions, steps };
 };
 

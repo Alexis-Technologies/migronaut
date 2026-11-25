@@ -45,12 +45,14 @@ const canonicalBson = (type, value) => {
   if (type === 'BSONRegExp') return { $regex: value.pattern, $options: sortFlags(value.options) };
   // Binary, Timestamp, MinKey, … — rare in a validator. Their JSON form is
   // stable and type-tagged, which is all equality needs.
-  const json = typeof value.toJSON === 'function' ? value.toJSON() : String(value);
+  const json = typeof value.toJSON === 'function' ? value.toJSON() : `${value}`;
   return { $bson: type, value: canonical(json) };
 };
 
 const sortFlags = (flags) => {
-  return [...String(flags)].sort().join('');
+  const chars = [...`${flags}`];
+  chars.sort();
+  return chars.join('');
 };
 
 /**
@@ -59,10 +61,10 @@ const sortFlags = (flags) => {
  * other flag. Comparing in this form is what lets a declared `/x/i` and the
  * `/x/i` read back compare equal, and a `BSONRegExp('x', 's')` match too.
  */
-const DRIVER_REGEXP_FLAGS = { i: 'i', m: 'm', g: 's' };
+const DRIVER_REGEXP_FLAGS = { __proto__: null, i: 'i', m: 'm', g: 's' };
 const storedFlags = (flags) => {
   let out = '';
-  for (const flag of String(flags)) out += DRIVER_REGEXP_FLAGS[flag] ?? '';
+  for (const flag of `${flags}`) out += DRIVER_REGEXP_FLAGS[flag] ?? '';
   return out;
 };
 
@@ -85,16 +87,24 @@ const regExpIssue = (value, seen = new Set()) => {
   }
   if (value === null || typeof value !== 'object' || seen.has(value)) return null;
   seen.add(value);
-  const items =
-    value instanceof Map
-      ? [...value.values()]
-      : Array.isArray(value)
-        ? value
-        : isPlainObject(value)
-          ? Object.values(value)
-          : [];
-  for (const item of items) {
-    const issue = regExpIssue(item, seen);
+  if (value instanceof Map) {
+    for (const item of value.values()) {
+      const issue = regExpIssue(item, seen);
+      if (issue) return issue;
+    }
+    return null;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const issue = regExpIssue(value[i], seen);
+      if (issue) return issue;
+    }
+    return null;
+  }
+  if (!isPlainObject(value)) return null;
+  const keys = Object.keys(value);
+  for (let i = 0; i < keys.length; i++) {
+    const issue = regExpIssue(value[keys[i]], seen);
     if (issue) return issue;
   }
   return null;
@@ -116,10 +126,17 @@ const unsendable = (value, seen = new Set()) => {
   if (value === null || type !== 'object') return null;
   if (seen.has(value)) return 'must not contain circular references';
   seen.add(value);
-  const items = Array.isArray(value) ? value : isPlainObject(value) ? Object.values(value) : [];
-  for (const item of items) {
-    const reason = unsendable(item, seen);
-    if (reason) return reason;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const reason = unsendable(value[i], seen);
+      if (reason) return reason;
+    }
+  } else if (isPlainObject(value)) {
+    const keys = Object.keys(value);
+    for (let i = 0; i < keys.length; i++) {
+      const reason = unsendable(value[keys[i]], seen);
+      if (reason) return reason;
+    }
   }
   seen.delete(value);
   return null;
@@ -139,6 +156,13 @@ const assign = (target, key, value) => {
   });
 };
 
+/** Orders `[key, item]` pairs by key, as the default sort orders strings */
+const byKey = (a, b) => {
+  if (a[0] < b[0]) return -1;
+  if (a[0] > b[0]) return 1;
+  return 0;
+};
+
 /** A JSON-safe, key-sorted stand-in for `value` (see the module comment) */
 const canonical = (value) => {
   if (value === undefined || value === null) return null;
@@ -151,8 +175,8 @@ const canonical = (value) => {
   }
   if (type !== 'object') return { $opaque: type };
   if (Array.isArray(value)) {
-    const out = new Array(value.length);
-    for (let i = 0; i < value.length; i++) out[i] = canonical(value[i]);
+    const out = [];
+    for (let i = 0; i < value.length; i++) out.push(canonical(value[i]));
     return out;
   }
   if (value instanceof Date) {
@@ -164,18 +188,27 @@ const canonical = (value) => {
   }
   const bson = bsonType(value);
   if (bson !== undefined) return canonicalBson(bson, value);
-  const entries = value instanceof Map ? [...value.entries()] : Object.entries(value);
-  if (!(value instanceof Map) && !isPlainObject(value)) return { $opaque: 'object' };
-  const out = {};
-  const keys = [];
-  for (const [key, item] of entries) {
-    // Dropped, not nulled: that is what the declaration means, and what a
-    // client with `ignoreUndefined` stores. toWire() makes sure it is also
-    // what migronaut itself sends.
-    if (item !== undefined) keys.push([String(key), item]);
+  const isMap = value instanceof Map;
+  if (!isMap && !isPlainObject(value)) return { $opaque: 'object' };
+  // An `undefined` item is dropped, not nulled: that is what the declaration
+  // means, and what a client with `ignoreUndefined` stores. toWire() makes
+  // sure it is also what migronaut itself sends.
+  const pairs = [];
+  if (isMap) {
+    for (const entry of value) {
+      if (entry[1] !== undefined) pairs.push([String(entry[0]), entry[1]]);
+    }
+  } else {
+    const keys = Object.keys(value);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const item = value[key];
+      if (item !== undefined) pairs.push([key, item]);
+    }
   }
-  keys.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  for (const [key, item] of keys) assign(out, key, canonical(item));
+  pairs.sort(byKey);
+  const out = {};
+  for (let i = 0; i < pairs.length; i++) assign(out, pairs[i][0], canonical(pairs[i][1]));
   return out;
 };
 
@@ -192,10 +225,17 @@ const deepEqual = (a, b) => {
  * comparison would report a change that can never converge.
  */
 const toWire = (value) => {
-  if (Array.isArray(value)) return value.map((item) => toWire(item));
+  if (Array.isArray(value)) {
+    const out = [];
+    for (let i = 0; i < value.length; i++) out.push(toWire(value[i]));
+    return out;
+  }
   if (!isPlainObject(value)) return value;
   const out = {};
-  for (const [key, item] of Object.entries(value)) {
+  const keys = Object.keys(value);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const item = value[key];
     if (item !== undefined) assign(out, key, toWire(item));
   }
   return out;

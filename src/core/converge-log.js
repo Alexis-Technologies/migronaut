@@ -40,11 +40,12 @@ class ConvergeLog {
       this.#indexed = true;
     }
     if (entry.success === false && entry.fingerprint !== undefined) {
-      const [newest] = await collection
+      const rows = await collection
         .find({}, { projection: { success: 1, fingerprint: 1, error: 1 } })
         .sort({ startedAt: -1 })
         .limit(1)
         .toArray();
+      const newest = rows[0];
       const repeats =
         newest !== undefined &&
         newest.success === false &&

@@ -154,7 +154,7 @@ const probeSearch = async (db, server, { collection, readOptions }) => {
       reason: `MongoDB ${version.major}.${version.minor} has no search index commands`,
     };
   }
-  let listed;
+  let listed = null;
   try {
     // Asked of a collection that does not exist yet too: a plain mongod
     // (checked: 7.0, 8.0, 8.2) refuses $listSearchIndexes for want of Search
@@ -253,6 +253,15 @@ const TRANSIENT_NAMES = new Set([
 ]);
 const TRANSIENT_LABELS = ['ResetPool', 'RetryableWriteError', 'PoolRequstedRetry'];
 
+/** Whether a driver error carries one of {@link TRANSIENT_LABELS} */
+const hasTransientLabel = (error) => {
+  if (typeof error.hasErrorLabel !== 'function') return false;
+  for (let i = 0; i < TRANSIENT_LABELS.length; i++) {
+    if (error.hasErrorLabel(TRANSIENT_LABELS[i])) return true;
+  }
+  return false;
+};
+
 /**
  * Whether a failed read is a blip — a network error, a failover, a node
  * shutting down — rather than an answer: the error itself, or what it wraps.
@@ -261,12 +270,7 @@ const TRANSIENT_LABELS = ['ResetPool', 'RetryableWriteError', 'PoolRequstedRetry
 const isTransientError = (error) => {
   for (let current = error, depth = 0; current && depth < 3; depth += 1) {
     if (TRANSIENT_NAMES.has(current.name) || TRANSIENT_CODES.has(current.code)) return true;
-    if (
-      typeof current.hasErrorLabel === 'function' &&
-      TRANSIENT_LABELS.some((label) => current.hasErrorLabel(label))
-    ) {
-      return true;
-    }
+    if (hasTransientLabel(current)) return true;
     current = current.cause;
   }
   return false;
@@ -340,7 +344,7 @@ const awaitSearchIndexes = async ({
   let failedReads = 0;
   for (let attempt = 0; ; attempt++) {
     beforePoll();
-    let live;
+    let live = null;
     try {
       live = await readAll(collections, read);
       failedReads = 0;

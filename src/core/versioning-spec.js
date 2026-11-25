@@ -59,13 +59,12 @@ const validatorVersioningIssues = (validator, versioning) => {
     return ['is null, which would remove the versioning rules — drop the validator key instead'];
   }
   const issues = [];
-  if (validator.$jsonSchema !== undefined && !isPlainObject(validator.$jsonSchema)) {
+  const schema = validator.$jsonSchema;
+  const requiredNotArray =
+    isPlainObject(schema) && schema.required !== undefined && !Array.isArray(schema.required);
+  if (schema !== undefined && !isPlainObject(schema)) {
     issues.push('$jsonSchema must be an object to take the versioning rules');
-  } else if (
-    isPlainObject(validator.$jsonSchema) &&
-    validator.$jsonSchema.required !== undefined &&
-    !Array.isArray(validator.$jsonSchema.required)
-  ) {
+  } else if (requiredNotArray) {
     issues.push('$jsonSchema.required must be an array to take the versioning rules');
   }
   for (const name of managedFieldsIn(validator, versioning)) {
@@ -105,8 +104,10 @@ const versioningIndex = (versioning) => ({ key: versionIndexKey(versioning) });
  */
 const shardedVersionIndexKey = (versioning, shardKey) => {
   const key = { [versioning.field]: 1 };
-  for (const [field, value] of Object.entries(shardKey)) {
-    if (field !== versioning.field) key[field] = value;
+  const fields = Object.keys(shardKey);
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    if (field !== versioning.field) key[field] = shardKey[field];
   }
   if (!('_id' in key)) key._id = 1;
   return key;
@@ -115,11 +116,13 @@ const shardedVersionIndexKey = (versioning, shardKey) => {
 /** Whether an index key is the version index's (same fields, same order, ascending) */
 const isVersioningIndexKey = (key, versioning) => {
   if (!isPlainObject(key)) return false;
-  const entries = Object.entries(key);
-  const expected = Object.entries(versionIndexKey(versioning));
-  if (entries.length !== expected.length) return false;
-  for (let i = 0; i < entries.length; i++) {
-    if (entries[i][0] !== expected[i][0] || Number(entries[i][1]) !== expected[i][1]) return false;
+  const fields = Object.keys(key);
+  const expected = versionIndexKey(versioning);
+  const expectedFields = Object.keys(expected);
+  if (fields.length !== expectedFields.length) return false;
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    if (field !== expectedFields[i] || Number(key[field]) !== expected[field]) return false;
   }
   return true;
 };
