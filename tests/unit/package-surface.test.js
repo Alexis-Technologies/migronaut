@@ -128,6 +128,43 @@ describe('declaration file', () => {
   });
 });
 
+describe('error code docs', () => {
+  /** code → class name, for every subclass the error model exports */
+  const runtimeCodes = () => {
+    const errors = require(path.join(repoRoot, 'src', 'errors', 'index.js'));
+    const codes = new Map();
+    for (const [name, ErrorClass] of Object.entries(errors)) {
+      if (name === 'MigronautError' || typeof ErrorClass !== 'function') continue;
+      codes.set(new ErrorClass('probe').code, name);
+    }
+    return codes;
+  };
+  const sortedObject = (map) => Object.fromEntries([...map].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
+
+  it('should list every error code with its class in docs/reference/error-codes.md', () => {
+    const doc = readRepoFile('docs/reference/error-codes.md');
+    const documented = new Map();
+    for (const match of doc.matchAll(/^\| `([A-Z_]+)` \| `(\w+)` \|/gm)) {
+      assert.ok(!documented.has(match[1]), `${match[1]} is documented twice`);
+      documented.set(match[1], match[2]);
+    }
+    assert.deepStrictEqual(sortedObject(documented), sortedObject(runtimeCodes()));
+  });
+
+  it('should list every exit code with its number in docs/reference/cli.md', () => {
+    const { EXIT_CODES } = require(path.join(repoRoot, 'src', 'cli', 'exit-codes.js'));
+    const doc = readRepoFile('docs/reference/cli.md');
+    const documented = new Map();
+    for (const match of doc.matchAll(/^\| `(\d+)` \| `([A-Z_]+)`/gm)) {
+      documented.set(match[2], Number(match[1]));
+    }
+    assert.deepStrictEqual(
+      sortedObject(documented),
+      sortedObject(new Map(Object.entries(EXIT_CODES))),
+    );
+  });
+});
+
 describe('bullmq subpath', () => {
   it('should expose the adapter through its own entry point', () => {
     const adapter = require(path.join(repoRoot, 'bullmq.js'));
@@ -440,6 +477,38 @@ describe('conventions that only review used to hold', () => {
     assert.deepStrictEqual(offendersOf(/\bconsole\s*\.\s*\w+/), []);
   });
 
+  it('should call Array#find and Array#filter nowhere — the lint bans the other methods', () => {
+    // `find` and `filter` are MongoDB words too (Collection#find, a query's
+    // filter), so the lint cannot ban them by name. An array's takes a
+    // function; MongoDB's takes a filter document.
+    const callback = /\.(?:find|filter)\(\s*(?:async\b|function\b|\(|[\w$]+\s*=>|Boolean\s*\))/;
+    assert.deepStrictEqual(offendersOf(callback), []);
+    assert.ok(callback.test('list.find((item) => item)') && !callback.test('collection.find({})'));
+  });
+
+  it('should destructure no array — a library reads by index', () => {
+    // oxlint has no `no-restricted-syntax`, so this holds alexiskills' rule
+    // instead: declarations and loop heads, arrow parameters, assignments.
+    const patterns = [
+      /\b(?:const|let|var)\s*\[/,
+      /\(\s*(?:[\w$]+\s*,\s*)*\[[\w$\s,.]*\][^()]*\)\s*=>/,
+      /^\s*\[[^\]]+\]\s*=[^=>]/m,
+    ];
+    const samples = [
+      'const [a] = list;',
+      'for (const [k, v] of map)',
+      '([name]) => name',
+      '[a, b] = [b, a];',
+    ];
+    for (const sample of samples) {
+      assert.ok(
+        patterns.some((pattern) => pattern.test(sample)),
+        sample,
+      );
+    }
+    for (const pattern of patterns) assert.deepStrictEqual(offendersOf(pattern), [], `${pattern}`);
+  });
+
   it('should never throw a bare Error — every throw carries a typed code', () => {
     const sanctioned = new Set([
       // Text of the user's scaffold, not migronaut's code.
@@ -483,6 +552,38 @@ describe('published package', () => {
   it('should ship every file the entry points need', () => {
     for (const entry of ['index.js', 'index.d.ts', 'bin', 'src']) {
       assert.ok(packageJson.files.includes(entry), `${entry} must be in "files"`);
+    }
+  });
+
+  it('should ship the license and the security policy beside the changelog', () => {
+    for (const entry of ['README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md']) {
+      assert.ok(packageJson.files.includes(entry), `${entry} must be in "files"`);
+    }
+  });
+
+  it('should name one version in package.json, the CHANGELOG, ARCHITECTURE.md and the docs', () => {
+    // Four spots, synced by hand in the release commit (CLAUDE.md, Release process).
+    const { version } = packageJson;
+    const released = /^## \[(\d+\.\d+\.\d+[^\]]*)\] - \d{4}-\d{2}-\d{2}$/m.exec(
+      readRepoFile('CHANGELOG.md'),
+    );
+    assert.strictEqual(released?.[1], version, 'the newest CHANGELOG release');
+    const snapshot = /\*\*Snapshot at time of writing:\*\* v(\S+) ·/.exec(
+      readRepoFile('ARCHITECTURE.md'),
+    );
+    assert.strictEqual(snapshot?.[1], version, 'the snapshot line of ARCHITECTURE.md');
+    const config = readRepoFile('docs/.vitepress/config.mts');
+    const nav = /\/\/ Hand-synced with package\.json "version".*\n\s*text: 'v([^']+)'/.exec(config);
+    assert.strictEqual(nav?.[1], version, 'the nav label of the docs site');
+  });
+
+  it('should link every CHANGELOG release, newest first, from the link block', () => {
+    const changelog = readRepoFile('CHANGELOG.md');
+    const headings = [...changelog.matchAll(/^## \[([^\]]+)\]/gm)].map((match) => match[1]);
+    assert.strictEqual(headings[0], 'Unreleased', 'an [Unreleased] section on top');
+    for (const heading of headings) {
+      const label = heading.toLowerCase() === 'unreleased' ? 'unreleased' : heading;
+      assert.match(changelog, new RegExp(`^\\[${label.replaceAll('.', '\\.')}\\]: https://`, 'm'));
     }
   });
 
