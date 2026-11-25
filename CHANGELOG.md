@@ -1,9 +1,71 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
+All notable changes to this project are documented in this file. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). Tags `v1.1.0`, `v1.2.3` and `v1.3.0`
+are releases of the upstream `mongo-migrate-kit`, not of this package.
 
-## v2.5.0 — 2026-11-18
+## [Unreleased]
+
+The repository moves to alexiskills 1.1, the agent skills and conventions of the Alexis stack. The
+code keeps its behaviour — the same results, errors, codes, messages and events, on the same
+suites — but for two lookups keyed by input (under **Fixed**). The package now ships `LICENSE`
+and `SECURITY.md` beside the changelog.
+
+### Changed
+
+- **`LICENSE` and `SECURITY.md` ship in the package.** `files` lists them next to `README.md` and
+  `CHANGELOG.md` (npm added `LICENSE` on its own before; the security policy is new in the
+  tarball).
+
+### Fixed
+
+- **Lookup tables keyed by input have no prototype.** A log level named after an
+  `Object.prototype` key (`createLogger(stream, 'toString')`) falls back to `info` instead of
+  silencing every method, and a text index field named `__proto__` keeps its weight in the
+  converge comparison, where it read as changed on every run.
+
+### Documentation
+
+- **The CHANGELOG follows Keep a Changelog.** `## [X.Y.Z] - YYYY-MM-DD` headings under an
+  `[Unreleased]` section, a link block for every release, and the headings of the format:
+  `Breaking changes` is `Changed (breaking)`, 2.0.0's `Fixed / hardened` is `Fixed`, 2.3.0's
+  `Notes` close its `Added`, and the topics of 1.0.0 are groups of its `Added`. The content of the
+  old entries is unchanged.
+- **CLAUDE.md says what migronaut adds to alexiskills**: "Conventions" (with the rules kept on
+  purpose and why), "Errors" (the error model, and the codes 3.0 renames to `ALX_ERR_*`), "Skills"
+  and "Release process". CONTRIBUTING.md points to them.
+
+### Tooling
+
+- **The skills come from `@alexify/metaskills` 1.1.0**, a devDependency, linked into
+  `.claude/skills` by `prepare` (`alexiskills claude`) in place of the six skills of
+  metarhia/metaskills 1.0.5 the repository kept.
+- **The lint of alexiskills 1.1**: the `correctness` and `suspicious` categories as errors,
+  `eqeqeq` with `null` included, `func-style: expression`, `max-depth` 4, `no-nested-ternary`,
+  `no-console`, `no-undef`, `getter-return`; in `src/` the array iteration methods,
+  `Object.entries` / `Object.values`, a `let` without a value and an `err` local are errors, and
+  a function over 80 lines warns. `pnpm run lint` refuses a stale disable directive. Unit tests
+  hold what the lint cannot: no `Array#find` / `Array#filter` (MongoDB's `find` and `filter` share
+  the names) and no array destructuring in `src/` and `bin/`.
+- **`src/` and `bin/` follow the Library profile of `js-conventions`.** The 727 function
+  declarations (672 at module level) are `const` arrows, none moved; 65 array iteration methods are
+  loops in one pass, 128 array destructurings read by index, 47 `Object.entries` / `Object.values`
+  walk `Object.keys`, 9 loose comparisons with `null` are strict, the 107 `let`s without a value
+  start with one or became `const`s, 53 `String()` calls are template literals, 25 nested ternaries
+  are `if`s, helpers or tables, 29 call-then-returns are `return void`, 18 `new Array(n)` are built
+  with `push`, and 29 data arrays spread into arguments are loops. The exceptions, each with its
+  reason, are in CLAUDE.md.
+- **Tests are `describe` and `it('should …')`.** The 60 titles that did not start with `should`
+  keep their meaning in a `describe` of the method or the tag they named; the helpers of the tests,
+  the bench and the scripts are `const` arrows too.
+- **Tests hold the docs and the release to the code**: the tables of
+  `docs/reference/error-codes.md` and of the exit codes in `docs/reference/cli.md`, the four
+  places that name the version (`package.json`, the CHANGELOG, ARCHITECTURE.md and the docs nav),
+  and a link for every CHANGELOG release.
+- **CI's `ci-success` fails on a skipped job** too, not only on a failed or cancelled one.
+
+## [2.5.0] - 2026-11-18
 
 A hardening release: what a review of the whole codebase found — security, resilience and
 observability fixes across the core, background migrations, declared collections and the queue
@@ -133,7 +195,7 @@ new fields on converge, queue and background results are experimental, like the 
   call outside `utils/telemetry.js` — and the existing ones cover `versioning.d.ts`, `ioredis` and
   subpath imports.
 
-## v2.4.0 — 2026-10-07
+## [2.4.0] - 2026-10-07
 
 Migration logs for the application's users. Additive: a migration that never touches the new
 context fields, and a kit with no `migration:log` listener, behave as before. Everything new is
@@ -216,7 +278,7 @@ experimental — its shape may still change in a minor release (named here).
   versioning, background migrations, OpenTelemetry, migration logs — with a diagram of how the parts
   fit together.
 
-## v2.3.0 — 2026-10-06
+## [2.3.0] - 2026-10-06
 
 Document versioning and background migrations. Additive: nothing changes for a project that
 declares no `versioning` and writes no `background` file. Everything new is experimental — its
@@ -288,6 +350,23 @@ shape may still change in a minor release (named here).
   `runnableBackground()` now returns: live leases, last progress, coordinator), `previous` on a
   background status (the registration a re-registration replaced), `plan.atLeast`.
 
+Limits of what 2.3 adds:
+
+- A typed `current` past the highest declared shape is a compile error. Written inline it reads
+  "Type 'number' is not assignable to type 'never'"; from an imported `as const` definition, it
+  names the two versions ("Type '3' is not assignable to type '2'").
+- The shard-aware mode needs `clusterMonitor` (it reads `config.collections` and
+  `config.chunks`); without it, a sharded collection is partitioned by `_id`.
+- Fail-closed limits: `maxDocumentErrors` is at most 1000 (the ids a state keeps); a revision
+  guard refuses an `_id` given as an operator; a background `filter` may not run server-side
+  JavaScript; `create --background`'s placeholder collection (`'TODO'`) is refused by `up`;
+  `watchBackground`, `enqueueBackground` and `createBackgroundProcessor` refuse options they do
+  not know.
+- A lane stopped by its process (a shutdown, a deploy) is not a failed slice, and
+  `maxSliceFailures` counts failed slices in a row. `down` of a one-way background migration pauses
+  it and waits for its lanes before it decides; a `step` migration counts as having rewritten
+  documents once one step was checkpointed.
+
 ### Changed
 
 For code written against 2.2 — the queue adapter's types and results, and two type-level details:
@@ -306,24 +385,7 @@ For code written against 2.2 — the queue adapter's types and results, and two 
 - **Background metric names** (experimental): `migronaut.background.throttled`,
   `migronaut.background.drift.detected`, `migronaut.background.transaction.retried`.
 
-### Notes
-
-- A typed `current` past the highest declared shape is a compile error. Written inline it reads
-  "Type 'number' is not assignable to type 'never'"; from an imported `as const` definition, it
-  names the two versions ("Type '3' is not assignable to type '2'").
-- The shard-aware mode needs `clusterMonitor` (it reads `config.collections` and
-  `config.chunks`); without it, a sharded collection is partitioned by `_id`.
-- Fail-closed limits: `maxDocumentErrors` is at most 1000 (the ids a state keeps); a revision
-  guard refuses an `_id` given as an operator; a background `filter` may not run server-side
-  JavaScript; `create --background`'s placeholder collection (`'TODO'`) is refused by `up`;
-  `watchBackground`, `enqueueBackground` and `createBackgroundProcessor` refuse options they do
-  not know.
-- A lane stopped by its process (a shutdown, a deploy) is not a failed slice, and
-  `maxSliceFailures` counts failed slices in a row. `down` of a one-way background migration pauses
-  it and waits for its lanes before it decides; a `step` migration counts as having rewritten
-  documents once one step was checkpointed.
-
-## v2.2.0 — 2026-10-05
+## [2.2.0] - 2026-10-05
 
 Atlas Search and Vector Search indexes in declared collections. Additive: a definition without
 `searchIndexes` behaves exactly as in 2.1 — converge never even asks the server about Search for
@@ -439,7 +501,7 @@ it.
 - `src/core/converge.js` is split: `converge-search-run.js` (the search half of a run) and
   `server-info.js` (read options, read pace, server version, not-found codes).
 
-## v2.1.0 — 2026-10-04
+## [2.1.0] - 2026-10-04
 
 Migrations as a queue, ids in your own format, OpenTelemetry, and declared collections. Additive:
 nothing changes for anyone who uses none of them, with the narrow exceptions listed under
@@ -759,14 +821,14 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
   against the real `bullmq` package when `MIGRONAUT_TEST_REDIS_URL` is set, which CI now does
   (a Redis service on the `test` job). `bullmq` and `ioredis` are devDependencies for that only.
 
-## v2.0.0 — 2026-08-30
+## [2.0.0] - 2026-08-30
 
 A major bump for three narrow contract changes (below); everything else is
 additive. Upgrading is a no-op for the most commonly scripted surface:
 `pendingMigrations()` / `list('pending')` still report a file as `pending`
 even when a failed attempt was recorded for it.
 
-### Breaking changes
+### Changed (breaking)
 
 - **`unlock --json` now requires `--yes`.** Previously `--json` alone
   force-released the lock; it now refuses with `CONFIG_INVALID` (exit 6), because
@@ -831,7 +893,7 @@ even when a failed attempt was recorded for it.
   warn lines carry `runId`; import interruptions report progress and that a `--force` re-run
   resumes idempotently.
 
-### Fixed / hardened
+### Fixed
 
 - URI redaction now masks query-string secrets (`tlsCertificateKeyFilePassword`, `proxyPassword`,
   `sslKeyPassword`, secret `authMechanismProperties` values) and empty-username passwords —
@@ -846,11 +908,13 @@ even when a failed attempt was recorded for it.
   instead of full records; a warn/error-only injected logger keeps its output instead of being
   silenced entirely.
 
-## v1.0.0 — 2026-07-28
+## [1.0.0] - 2026-07-28
 
 Initial release. Requires **Node.js ≥ 22.18**.
 
-### Core
+### Added
+
+**Core**
 
 - `MigratorKit` orchestration: `up`, `down`, `redo`, `dryRun`, `status`, `list`, `audit`,
   `create`, `init`, `import`, `lockInfo`, `forceUnlock`
@@ -881,7 +945,7 @@ Initial release. Requires **Node.js ≥ 22.18**.
 - Lifecycle hooks: `beforeAll`, `afterAll`, `beforeEach`, `afterEach`, `onError`
 - Append-only audit trail in `_migronaut_migrations` — reverts are never deleted
 
-### Step controls & automation
+**Step controls & automation**
 
 - **`migronaut up --step`** — apply each pending file as its own sequential batch, so a later
   `down` can peel migrations off one at a time
@@ -910,7 +974,7 @@ Initial release. Requires **Node.js ≥ 22.18**.
   info (pid / host / user / since) and a confirmation prompt (`--yes` to skip)
 - **`migronaut up <file> --force --yes`** — confirm a forced re-run non-interactively
 
-### Zero dependencies
+**Zero dependencies**
 
 - **No runtime dependencies at all** — `package.json` has no `dependencies` key; only `mongodb`
   (required) and `mongoose` (optional) as peers
@@ -924,7 +988,7 @@ Initial release. Requires **Node.js ≥ 22.18**.
   instance directly as `logger`; a `component: 'migronaut'` child binding is applied once and a
   throwing logger can never break a migration run
 
-### Import from `migrate-mongo`
+**Import from `migrate-mongo`**
 
 - **`migronaut import`** — read an existing `migrate-mongo` `changelog` and record that history in
   the migronaut changelog, so `migronaut up` runs only what is new. One-time and forward-only; the
@@ -933,7 +997,7 @@ Initial release. Requires **Node.js ≥ 22.18**.
 - **Forward-only safety** — imported records are tagged `origin: 'migrate-mongo'`; `migronaut
   down`/`redo` refuse them up front with a clear reason, so the changelog is never corrupted
 
-### Hardening
+**Hardening**
 
 - **Path-traversal protection** — migration names are validated as bare filenames confined to the
   migrations directory, so a crafted name can't load or read a file outside it
@@ -970,3 +1034,12 @@ Initial release. Requires **Node.js ≥ 22.18**.
   programmatic API overview, an FAQ, and a migrate-mongo migration guide
 - Requires **Node.js ≥ 22.18** — `.ts` migrations run natively (built-in type stripping) with no
   loader or build step; `.js` migrations likewise
+
+[unreleased]: https://github.com/Alexis-Technologies/migronaut/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.4.0...v2.5.0
+[2.4.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.3.0...v2.4.0
+[2.3.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.2.0...v2.3.0
+[2.2.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.1.0...v2.2.0
+[2.1.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.0.0...v2.1.0
+[2.0.0]: https://github.com/Alexis-Technologies/migronaut/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/Alexis-Technologies/migronaut/releases/tag/v1.0.0

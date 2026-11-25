@@ -1519,9 +1519,11 @@ definition it names the two numbers.
 
 ## 7. Cross-cutting conventions
 
-These are enforced by oxlint/oxfmt + review. Violating them is how a PR gets bounced. Note: `never
-console.*` and the `MigronautError`-only-throw rule are **not lint-enforced** (oxlint's config here
-has no rule for either) — catch these in review.
+These are enforced by oxlint/oxfmt, unit tests and review. Violating them is how a PR gets
+bounced. The style is `js-conventions` of alexiskills (its Library profile) with what CLAUDE.md's
+"Conventions" adds; `no-console` is a lint rule, and the `MigronautError`-only-throw rule, the
+absence of `Array#find` / `Array#filter` and of array destructuring in `src/` are held by
+`tests/unit/package-surface.test.js`.
 
 - **Types:** plain CommonJS, not TypeScript — no `import`/`export` syntax, no type annotations in
   `src/`/`bin/`. JSDoc comments document intent for the reader/editor but are never type-checked
@@ -1535,7 +1537,8 @@ has no rule for either) — catch these in review.
 - **Imports/exports:** `require`/`module.exports` only — named exports via `module.exports = {...}`
   (config files are the sole default-export-shaped exception, since they may export an object or a
   factory function directly).
-- **Style:** oxfmt/oxlint — single quotes, semicolons, 100-col, no unused vars/imports.
+- **Style:** oxfmt/oxlint — single quotes, semicolons, 100-col, no unused vars/imports; `const`
+  arrows, loops in one pass instead of array iteration methods in `src/`, strict comparisons.
 - **Public surface:** anything users should touch must be re-exported from an entry point's barrel
   **and** typed in that entry's declaration file — [src/index.js](src/index.js) +
   [index.d.ts](index.d.ts) for the package root, [src/bullmq/index.js](src/bullmq/index.js) +
@@ -1921,7 +1924,8 @@ MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admi
   There is no generation step and no `tsc` pass over `src/`. Correctness is enforced by `tsd`
   (`pnpm run test:types`) against [tests/types/](tests/types/), and `pnpm run check:dts` compiles
   the three files in one program.
-- **Lint/format:** `pnpm run lint` (`oxlint src bin scripts tests bench examples`), `pnpm run format`
+- **Lint/format:** `pnpm run lint` (`oxlint --report-unused-disable-directives-severity=error src
+  bin scripts tests bench examples`, the rules of alexiskills 1.1 — CLAUDE.md, "Conventions"), `pnpm run format`
   (`oxfmt` to fix formatting), `pnpm run format:check` (`oxfmt --check`, no writes). The three root
   shims (`index.js`, `bullmq.js`, `versioning.js`) are one-line re-exports and are not in the globs.
 - **Bundle-size report (informational only):** `pnpm run size` runs `scripts/size.js`, which uses
@@ -1935,12 +1939,14 @@ MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admi
   into the README's Benchmarks section before releases.
 - **Published artifact:** exactly what `files` in [package.json](package.json) lists —
   `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`, `versioning.js`, `versioning.d.ts`,
-  `migronaut.schema.json`, `bin`, `src`, `README.md`, `CHANGELOG.md`. The `exports` map exposes
+  `migronaut.schema.json`, `bin`, `src`, `README.md`, `CHANGELOG.md`, `LICENSE`, `SECURITY.md`. The `exports` map exposes
   three entry points (`.`, `./bullmq` and `./versioning`) and nothing else. `docs/`, `blog/`, `examples/` and this `ARCHITECTURE.md` live in the repo but are
   **never** shipped to npm.
-- **Release:** manual — bump `version` in `package.json`, write the dated entry in `CHANGELOG.md`
-  by hand, commit and tag, then `pnpm run release` (= `pnpm publish`). `prepublishOnly` re-runs
-  lint + format:check + test:coverage + test:types + check:dts as the pre-publish gate.
+- **Release:** manual — bump `version` in `package.json` and the three spots a test holds to it,
+  turn `## [Unreleased]` in `CHANGELOG.md` into the dated `## [X.Y.Z] - YYYY-MM-DD` with its
+  link, commit `chore(release): X.Y.Z` and tag, then `pnpm run release` (= `pnpm publish`).
+  `prepublishOnly` re-runs lint + format:check + test:coverage + test:types + check:dts as the
+  pre-publish gate. CLAUDE.md's "Release process" has the steps.
 - **Publish-account hygiene:** the npm account publishing this package keeps 2FA required for
   publishes ("Require two-factor authentication and disallow tokens" in the package's npm access
   settings, or granular tokens with short expiry). For a zero-dependency package marketed on its

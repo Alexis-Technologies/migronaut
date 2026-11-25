@@ -181,6 +181,7 @@ examples/               # Runnable example apps (migration-service) — own pack
 docs/                   # VitePress user-facing site — never published to npm
 blog/                   # Long-form posts, also docs-only
 migrations/             # Example/dev migration files used while developing this repo itself
+.claude/skills          # a symlink to the alexiskills of node_modules (made by prepare, git-ignored)
 ```
 
 **Layering rule:** Presentation (`cli/`, `bin/`) never touches the DB or contains migration
@@ -215,7 +216,8 @@ When adding new code, follow the right-hand column — there should be no more `
 ## Commands
 
 ```bash
-pnpm run lint              # oxlint src bin scripts tests bench examples
+pnpm install               # also links the alexiskills skills into .claude/skills (prepare)
+pnpm run lint              # oxlint src bin scripts tests bench examples; a stale disable directive fails it
 pnpm run format              # oxfmt src bin scripts tests bench examples
 pnpm run format:check          # oxfmt --check src bin scripts tests bench examples
 pnpm test                        # test:unit then test:integration (~2550 tests)
@@ -247,7 +249,7 @@ pnpm run docs:dev                        # vitepress dev docs
 the pre-merge gate. There is no `build` script and nothing to run before testing or publishing;
 `files` in `package.json` ships `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`,
 `versioning.js`, `versioning.d.ts`, `migronaut.schema.json`, `bin/`, and `src/` as-is, with
-`README.md` and `CHANGELOG.md`.
+`README.md`, `CHANGELOG.md`, `LICENSE` and `SECURITY.md`.
 
 The devDependencies sit on the newest majors the peer range admits (`mongodb` 7, `mongoose` 9,
 `typescript` 7): that is what the gate runs on. CI's `compat` job swaps in `mongodb@6` with
@@ -256,15 +258,44 @@ mix (each refuses the other's BSON types), so they are swapped as a pair. TypeSc
 includes `@types/node` or a lib with `AsyncDisposable` by default, which is why `check:dts` names
 both. The `unit` job names the engines floor exactly (`22.18.0`); `22` alone is the newest 22.x.
 
-## Conventions (enforced by oxlint/oxfmt + review)
+## Conventions
+
+The style is `js-conventions` of alexiskills, its **Library profile** (CommonJS, hand-written
+`.d.ts`, `node:test` with c8, no runtime dependency): `const` arrows and no `function`
+declarations, loops in one pass instead of array iteration methods in `src/`, no array
+destructuring and no `Object.entries` / `Object.values` in `src/`, strict comparisons only, every
+`let` with a value of its kind, no nested ternaries, `return void fn()` for call-then-return. This
+section is what migronaut adds to it or does otherwise. **This file wins** where the two disagree.
+
+### What migronaut adds
 
 - Plain CommonJS (`require`/`module.exports`) in `src/`/`bin/` — no TypeScript syntax, no
-  `import`/`export`. JSDoc is documentation only (see "No build step" above).
-- Never `throw new Error` — always a `MigronautError` subclass with a typed `code`.
+  `import`/`export`. JSDoc in `src/` says *why* (a decision, a trap, an invariant); the public API
+  is documented in the three `.d.ts` files (see "No build step" above).
+- The three root shims (`index.js`, `bullmq.js`, `versioning.js`) and the root `.d.ts` files are
+  outside the lint and format globs: keep them in the house style by hand.
+- Never `throw new Error` — always a `MigronautError` subclass with a typed `code` (see
+  "Errors" below). A unit test (`tests/unit/package-surface.test.js`) holds it, with two
+  sanctioned files: the `throw new Error` lines of `src/utils/template.js` are text of the user's
+  scaffold, and `src/cli/args.js` throws a `TypeError` for a malformed flag definition, a bug in
+  migronaut's own command table.
 - Never `console.*` — always the injected `MigronautLogger` (`null` = silent, used in tests).
+  `no-console` and the same unit test hold it; the CLI writes to `process.stdout` / `stderr`.
+- Logging, telemetry and event listeners never fail the run they observe: `resolveLogger` guards
+  every logger call, `telemetry.js` puts every tracer and meter call behind its one `safe()`, and
+  the kit's `captureRejections` turns a rejecting `async` listener into a debug line. A hook
+  (`beforeEach`, `onError`, …) may fail the run, as `HookFailedError`.
+- A caught error becomes text only through `src/utils/error.js`: `errorText` (credentials in a
+  URI masked), `errorWithCause` ("what failed — why", both halves redacted) and
+  `documentErrorText` (the values a duplicate-key or validation error quotes masked). Never a raw
+  `error.message`, `error.stack` or driver `errorResponse` in a log line, an error context, an
+  event payload or a span.
 - Public API changes touch two files together — the entry's runtime barrel and its hand-written
   types: `src/index.js` + `index.d.ts`, `src/bullmq/index.js` + `bullmq.d.ts`, or
-  `src/versioning/index.js` + `versioning.d.ts` — never one without the other.
+  `src/versioning/index.js` + `versioning.d.ts` — never one without the other, with a `tsd`
+  assertion in `tests/types/`. No `.d.ts` imports an optional package (`mongoose`, `bullmq`,
+  `@opentelemetry/*`); the subpaths import root types from `./index.js`; `versioning.d.ts` may use
+  TypeScript 5.0 (`const` type parameters), the others stay within 4.8.
 - `require('mongodb')` only in `core/migrator.js` and `core/bson-peer.js` (lazily, for `BSON`);
   never `require('mongoose')` under `src/` — the Mongoose plugin works on the schema it is given
   (a unit test greps for both).
@@ -275,11 +306,185 @@ both. The `unit` job names the engines floor exactly (`22.18.0`); `22` alone is 
   outside `src/utils/telemetry.js`, and never `recordException` a raw error (it skips redaction).
 - Never call `randomUUID` (or mint an id any other way) outside `src/utils/id.js` — an id minted
   elsewhere is one the user's `generateId` cannot reach.
+- A new scalar config key gets its `CONFIG_KEYS` entry, its `ENV_KEYS` entry, a line in
+  `migronaut.schema.json` (and its byte-identical copy in `docs/public/`) and the README's env
+  table — unit tests pin each pairing. Before naming anything new, read the names already taken
+  (the last paragraph of "Things that look like bugs but aren't").
+- Migration and config files the user writes may be `.ts`: the scaffolds of
+  `src/utils/template.js` hold only erasable syntax (no `enum`, `namespace` or parameter
+  properties), since Node's type stripping loads them.
+- The hot paths are what `pnpm run bench` measures (`computeChecksum`, `loadMigrationFile`,
+  `Changelog`, `MigrationLock`, `MigratorKit.up()` over many files), the converge comparison
+  (`canonical.js`, the index and search-index diffs — on plan, replan, verify and every settle
+  read) and a background migration's per-document loop: no closure or `RegExp` per call there,
+  `try/catch` only around user code and I/O. Run the bench before and after touching one; a row
+  that moved is a finding.
 - Single quotes, semicolons, 100-col lines, no unused vars/imports (oxlint/oxfmt-enforced).
 - Conventional Commits (`feat(scope):`, `fix(scope):`, `test:`, …).
 
+### The lint, and where it differs from the reference
+
+`.oxlintrc.json` is the reference of alexiskills (`node-tooling-testing`,
+`references/ci-types-release.md`) over the explicit rule list the repository had: `correctness`
+and `suspicious` as errors; `eqeqeq` `always` with `null` included; no `no-void`;
+`func-style: expression`, `max-depth` 4, `no-nested-ternary`, `no-console`, `no-undef` and
+`getter-return` everywhere. In `src/` the unicorn plugin, the array iteration methods and
+`Object.entries` / `Object.values` through `no-restricted-properties`, `init-declarations` (a
+`let` starts with a value), `id-denylist` for `err`, and `max-lines-per-function` 80 as a
+warning. Where it differs, and why:
+
+- **`find` and `filter` are not in `no-restricted-properties`.** They are MongoDB words —
+  `Collection#find`, a query's `filter` option and property, destructured as `{ filter }` — and
+  the rule cannot tell an array from a collection by name. A unit test
+  (`tests/unit/package-surface.test.js`) holds them instead: no `.find(` or `.filter(` called with
+  a function in `src/` or `bin/`.
+- **`no-underscore-dangle`** (of `suspicious`) allows `_id`, `__v`, `__rev` and `_bsontype`, the
+  names MongoDB, the versioning runtime and BSON give, and is off in `tests/`, whose fakes and
+  fixtures reach into internals and globals by underscore names.
+- **`func-style` is off in `tests/fixtures/`**: they are migration and template files in the
+  shape users write them (`export async function up`).
+- **`no-console` is off in `scripts/`, `bench/` and `examples/`**, which print. `bin/` and
+  `src/cli/` need no exception: they write to the process streams.
+- **Array destructuring has no lint rule** (oxlint has no `no-restricted-syntax`); the
+  package-surface test holds `src/` and `bin/` to none.
+
+### Kept on purpose
+
+A rule of alexiskills that migronaut breaks by design, with the reason:
+
+- **`String(value)` where the value may be a symbol** (a template literal throws on one):
+  anything thrown — a non-`Error` throw wrapped as a cause (`core/runner.js`), `errorText`
+  (`utils/error.js`), an error's `name` (`utils/redact.js`), what BullMQ or Redis threw
+  (`bullmq/wait.js`), a thrown driver error's message (`core/background-store.js`); a key of a
+  user `Map` (`utils/redact.js`, `utils/canonical.js`); an event name (`core/migrator.js`); what a
+  caller logs (`core/migration-logger.js`, `utils/sanitize.js`); the argument of a sandboxed
+  `db.collection(name)` (`core/background-sandbox.js`), refused when it is not a string.
+  Everything else is a template literal.
+- **`delete` on data whose missing key means something.** `delete require.cache[…]` in
+  `src/utils/loader.js`: `reloadMigrations` drops the file's entry as well as adding a query
+  string, since the query alone reloads ES modules only and the CommonJS cache would hand back the
+  old module. `process.env` in `src/cli/index.js`: assigning `undefined` stores the string
+  `'undefined'`. A MongoDB query filter and an update document in `src/versioning/mongoose.js`:
+  an absent key is no constraint, and an empty `$setOnInsert` must be absent. The dry run's copy of
+  a user document (`core/background-dry-run.js`), where the delete previews `$unset`.
+- **Spreads of rest arguments**: `cli/args.js` hands a command its positionals (at most the two
+  it declares) the commander way, `core/background-sandbox.js` forwards the arguments of a proxied
+  driver call, and `core/migrator.js` calls a hook with a fixed list of one or two. No data array
+  is spread into arguments.
+- **`let x = undefined`, written out**, where `undefined` is the value of no return or part of a
+  contract: what a function or user code returned (`#withLock` and `runWithLock` in
+  `core/migrator.js`, `utils/id.js`, `utils/telemetry.js`); `failure` in `#withLock` and
+  `#runSequence`, where a thrown `undefined` still counts as no failure, as before; `hosted` in
+  `core/background-runner.js` (`runner.watcher` is `BackgroundWatcher | undefined`); `target` and
+  `suspended` in `core/background-watch-plan.js`, returned as `undefined`.
+- **A sort in place** only as a statement of its own, on an array the function just built (a copy
+  of a `Set`, the characters of a string, rows the kit reads fresh); everything else is
+  `toSorted` (engines is Node ≥ 22.18).
+- **MongoDB documents built from user field names** — query, sort, projection and index key
+  documents, shard-key bounds — stay object literals: they are what the driver serializes and what
+  events and tests compare, not lookup tables. The lookup tables keyed by input (`LEVELS`,
+  `STATUS_COLORS`, `FIELD_DEFAULTS`, `DRIVER_REGEXP_FLAGS`, the weights of a text index, the
+  attributes handed to the tracer) are null-prototype.
+- **`stamp`** (`src/versioning/mongoose.js`) is a `function` expression: Mongoose middleware reads
+  its document from `this`. It is the one function expression in `src/`.
+- **Three disable directives**: `no-control-regex` twice in `utils/sanitize.js` (stripping control
+  characters is the point) and `no-restricted-properties` once in `bullmq/service.js` (the public
+  `schedule({ every })` option destructured, not `Array#every`).
+- **`max-lines-per-function` warns on 39 functions** — the orchestrators of `core/migrator.js`,
+  the queue processors, the converge planners, the CLI command registrations. They are long
+  because they are sequential protocols; a piece is split out where it reads better named, not to
+  reach 80 lines.
+- **Error codes without `ALX_ERR_`**: see "Errors".
+
+### Errors
+
+`src/errors/index.js` holds `MigronautError` and exactly one subclass per code. The class name
+ends in `Error` and its code is that name in `UPPER_SNAKE_CASE` (`LockAlreadyHeldError` /
+`LOCK_ALREADY_HELD`).
+
+- `code` is the contract: what the CLI prints (`✖ LOCK_ALREADY_HELD: …`), what `--json` emits as
+  `error.code`, what `EXIT_CODES` maps and what the queue decides retries by. `context` is plain,
+  JSON-safe data about the failure (it survives `--json` and the changelog's failure trace);
+  `context.results` is reserved for the migration rows a stopped run already applied. `cause` is
+  the original error, so `error.cause.stack` still points into the user's code.
+- A bad option or a malformed file is operational: the user can fix it, and a caller branches on
+  it — `ConfigInvalidError`, `MigrationInvalidNameError`, `QueueJobInvalidError` …, never a bare
+  `TypeError`.
+- Wrap where the meaning changes, keep the original as `{ cause }` and its redacted text in
+  `context.cause`; a `MigronautError` coming up from below keeps its code. A migration that
+  throws becomes `MigrationExecutionFailedError` after `onError` ran (a throwing `onError` never
+  masks it); when only the changelog write failed, `context.phase` is `'changelog-write'` and
+  `onError` does not fire.
+- Never swallow: rethrow, or route to `onError`. A deliberate swallow says why in a comment and
+  leaves a `logger.debug` line (releasing the lock in `finally` after a failed run, closing a
+  connection on the way out).
+- Retrying already exists — reuse it: transactions retry through `withTransaction` (a fresh
+  context per attempt, `ctx.run.attempt`); `core/lock-wait.js` polls a held lock with a jittered,
+  capped interval; migration jobs are `attempts: 1` and `RETRYABLE_CODES`
+  (`src/bullmq/processor.js`) decides the rest; a lane retries a failed slice with backoff; a
+  search-index wait rides out three blips. A new loop is bounded, jittered, retries only codes
+  known to be transient, stops with the kit, and never repeats a non-idempotent write without a
+  guard.
+- The library never installs `process.on(...)` handlers and never calls `process.exit()`. The CLI
+  (`bin/migronaut.js`, `src/cli/`) is an app around the library and may: `attachSignalHandlers`
+  (`src/cli/shared.js`) turns the first SIGINT/SIGTERM into `kit.stop()` and a second one exits
+  130/143; otherwise it sets `process.exitCode` from `EXIT_CODES[error.code] ?? 1` and lets the
+  process drain (`process.exit()` would truncate piped output).
+
+**Adding an error code**, one change: the subclass in `src/errors/index.js` (and its exports);
+the literal in the `MigronautErrorCode` union and the class in `index.d.ts`; the export from
+`src/index.js` with a `tsd` assertion; an exit code in `src/cli/exit-codes.js` (the next free
+number, never renumber one); a row in the table of `docs/reference/error-codes.md` and in the
+exit-code table of `docs/reference/cli.md`; the queue's verdict (`RETRYABLE_CODES` lists the codes
+a retry can fix — an unknown code stays retryable). `tests/unit/package-surface.test.js` holds the
+classes, the union, `EXIT_CODES` and both docs tables to each other. A new member of the public
+union shipped in minors (2.1 – 2.4); 2.0.0 called one breaking — ask which the release is.
+
+**The `ALX_ERR_` prefix is a temporary exception.** alexiskills 1.1 starts every string code with
+`ALX_ERR_`; migronaut's codes are public — printed, emitted in `--json`, mapped to exit codes,
+matched by the queue and by users — so renaming one breaks every consumer that matches on it. They
+keep their names until **3.0**, which renames all of them (`LOCK_ALREADY_HELD` →
+`ALX_ERR_LOCK_ALREADY_HELD`, the class names unchanged):
+
+`LOCK_ALREADY_HELD`, `LOCK_RELEASE_FAILED`, `LOCK_LOST`, `RUN_ABORTED`, `HOOK_FAILED`,
+`CHECKSUM_MISMATCH`, `MIGRATION_FILE_NOT_FOUND`, `MIGRATION_FILE_EXISTS`,
+`MIGRATION_INVALID_NAME`, `MIGRATION_INVALID_EXPORT`, `MIGRATION_EXECUTION_FAILED`,
+`MIGRATION_TIMEOUT`, `TRANSACTIONS_UNSUPPORTED`, `CONFIG_INVALID`, `CONFIG_FILE_EXISTS`,
+`CONNECTION_FAILED`, `NOT_APPLIED`, `IMPORT_TARGET_NOT_EMPTY`, `MIGRATION_IRREVERSIBLE`,
+`MIGRATION_OUT_OF_ORDER`, `MIGRATION_BLOCKED`, `QUEUE_JOB_INVALID`, `QUEUE_JOB_FAILED`,
+`CONVERGE_FAILED`, `REVISION_CONFLICT`, `SHAPE_VERSION_UNSUPPORTED`, `BACKGROUND_PENDING`,
+`BACKGROUND_FAILED`, `BACKGROUND_CONFLICT`, `SANDBOX_REFUSED` — and the three CLI conditions
+`EXIT_CODES` also names, `PENDING_MIGRATIONS`, `AUDIT_FAILED` and `COLLECTIONS_DRIFT`.
+
+Until then a new code follows the existing format, so the set stays one naming scheme; 3.0 moves
+them together, with `Upgrading from 2.x` in the CHANGELOG listing each old and new name.
+
+## Skills
+
+The skills are [alexiskills](https://alexiskills.vercel.app), `@alexify/metaskills` 1.1.0, a
+devDependency: the skills of the Alexis libraries, forked from
+[metarhia/metaskills](https://github.com/metarhia/metaskills). All 37 of them are linked:
+`.claude/skills` is one symlink to `node_modules/@alexify/metaskills/skills`, made by the
+`prepare` script (`alexiskills claude`) on every `pnpm install`, a worktree's included, and left
+out by `.gitignore`. Until 2026-11-25 the directory held six skills of metarhia/metaskills 1.0.5,
+`js-conventions`, `error-handling` and `npm-publish` adapted to this repository; what they said of
+migronaut alone is in this file now ("Conventions", "Errors", "Release process").
+
+- **The skills are not edited here.** A change to one goes to `Alexis-Technologies/metaskills`
+  and comes back with a release of the package. A skill of this repository's own beside them
+  would turn the symlink into a directory of links (the CLI's pack mode, with a block of its own
+  in `.gitignore`), and one named like a skill of the package hides that skill.
+- `npm-publish` runs only as `/npm-publish`; the agent does not call it on its own
+  (`disable-model-invocation: true`).
+
+**This file wins** if a skill and this file ever disagree.
+
 ## Testing notes
 
+- `describe` and `it` from `node:test`, every `it` title starting with `should`, assertions from
+  `node:assert/strict`. A method a group of tests is about is a `describe` of its own
+  (`describe('markApplied')`), and so is a tag (`describe('[probe]')`, `[fidelity]`, `[fake]`,
+  `[background]`), never a prefix of the title.
 - Runner is Node's built-in `node:test` (no external test framework). Two tiers:
   `tests/unit/` (mocked DB, plain function/`mock.fn` stubs — no `vi.mock` module-mocking is
   used anywhere) and `tests/integration/` (real `mongodb-memory-server` replica set, so
@@ -293,7 +498,7 @@ both. The `unit` job names the engines floor exactly (`22.18.0`); `22` alone is 
   does — run it by hand after changing `search-index-spec.js`, `converge-search.js` or the search
   planner; the unit fake carries the coverage, but only a real `mongot` proves the fixed point),
   and `tests/integration/sharded.test.js` when `MIGRONAUT_TEST_SHARDED_URI` is unset (CI never
-  does — run it by hand after changing the shard-aware code; its `[probe]` cases pin what
+  does — run it by hand after changing the shard-aware code; its `[probe]` describes pin what
   ARCHITECTURE §6.8 says a mongos does), and the symlink case of `tests/unit/sequence.test.js`
   where the OS will not create a file symlink (Windows without the privilege — CI's runners have
   it).
@@ -455,3 +660,66 @@ audit check `indexes` (the changelog's own indexes), the audit check `search`, `
 option `userlandLogRows`, the sync result field `convergeHeld`, the converge fields `fingerprint`,
 `repeats` and `lastAt`, the event field `code`, and the throttle reason `lag`.
 Don't "fix" these without checking the doc first.
+
+## Release process
+
+Manual, from a laptop: no release workflow, no provenance, no publish automation, and none to
+propose (nor size budgets, `pnpm audit` in CI or dependabot — the maintainer declined them). The
+`npm-publish` skill of alexiskills walks through the steps; it runs only as `/npm-publish`, and
+this section wins where the two differ. What migronaut adds to its steps:
+
+- **Branch and commits.** A feature lands on its own branch and writes its entries under
+  `## [Unreleased]` while it is built. The release commit on that branch is
+  `chore(release): X.Y.Z`; the branch is squash-merged into `main` as
+  `Migronaut vX.Y: <headline> (#N)`, and the tag `vX.Y.Z` is lightweight, on that squash commit.
+  Releases so far: 1.0.0 and 2.0.0 – 2.5.0. Tags `v1.1.0`, `v1.2.3` and `v1.3.0` are the
+  upstream `mongo-migrate-kit`'s, not releases of this package.
+- **The bump (step 2).** Additive features are minors even when they add `MigronautErrorCode`
+  members (2.1 – 2.4); 2.0.0 was a major for three narrow contract changes, one a new error code.
+  When a release changes a public type, an event payload, an exit code or a default, say so and
+  let the maintainer choose. The version lives in **four places**, changed together in the release
+  commit and held equal by `tests/unit/package-surface.test.js`: `package.json` `"version"` (the
+  CLI reads it at runtime), the newest `## [X.Y.Z] - YYYY-MM-DD` of `CHANGELOG.md`, the snapshot
+  line near the top of `ARCHITECTURE.md` (`**Snapshot at time of writing:** vX.Y.Z`), and the nav
+  label of `docs/.vitepress/config.mts` (commented as hand-synced).
+  `examples/migration-service` depends on `file:../..` — nothing to bump there.
+- **Gates (step 1).** `prepublishOnly` (lint, format:check, test:coverage, test:types,
+  check:dts), then `pnpm run size` (a tripwire, not a budget: the adapter's or the versioning
+  runtime's number jumping by an order of magnitude means something required the engine or
+  `bullmq`) and `pnpm run docs:build`. Then the opt-in suites the release touches ("Commands" has
+  the containers): the real BullMQ one whenever the queue adapter or the background queue changed,
+  Atlas Search after search-index changes, the sharded cluster after shard-aware changes.
+  `pnpm outdated` and `pnpm audit` are about devDependencies only; the peer floors
+  (`mongodb >=5.0.0`, `mongoose >=7.0.0`) stay as they are.
+- **CHANGELOG (step 3).** Keep a Changelog: `## [Unreleased]` on top, `## [X.Y.Z] - YYYY-MM-DD`
+  newest first, a lead paragraph (what the release is about, whether it is additive, what is
+  experimental), the headings of the skill only, bullets with a bold lead-in, and the link block
+  at the bottom — a test holds every heading to its link. Review commits fold into the entry they
+  fix.
+- **Typings (step 4).** `tests/unit/package-surface.test.js` pins the root and `./bullmq`
+  barrels against their `.d.ts` (`./versioning` against a list of names), the error classes
+  against `MigronautErrorCode`, `EXIT_CODES` and the two docs tables; the docs-sync tests pin the
+  rest (`events-docs-sync`, `telemetry-docs-sync`, `schema-sync`, `readme-sync`). Still read each
+  barrel against its declarations for what a name test cannot see — option fields, result fields,
+  event payloads.
+- **Docs and license (step 5).** README: the usage examples, the comparison tables, the env table,
+  and the Benchmarks table re-run with `pnpm run bench` when the release touched a benchmarked
+  path. `docs/`: the guide and command pages, `docs/reference/error-codes.md` and `cli.md`, the
+  home page for a headline feature, the sidebar for a new page. `docs/public/llms.txt` is
+  hand-written: it names every entry point and headline feature, Node ≥ 22.18 and the
+  zero-dependency claim. ARCHITECTURE.md: the snapshot line, the module reference, §8 for a new
+  nuance, §10's published-artifact list. CLAUDE.md: the layout, the names already taken, the
+  commands. SECURITY.md names the current minor line as the one supported (a test holds it).
+  `LICENSE` changes only its year, never its two holders (the original author and Alexis
+  Technologies).
+- **Package (step 6).** `exports` is exactly `.`, `./bullmq` and `./versioning`, `types` first;
+  `files` is the allowlist "Commands" lists (no `.npmignore`, so `.claude`, tests, docs, blog,
+  examples, bench, scripts and assets stay out); no `dependencies` key. The tarball smoke test of
+  the skill runs in a temporary consumer outside the repository, the one place `npm` and `npx`
+  are used: `npm install` of the tarball with `mongodb`, `require` and `import` of the three
+  entries, `tsc` over an import of each, `npx migronaut --version`, and a deep import that fails
+  with `ERR_PACKAGE_PATH_NOT_EXPORTED`. Report the file count and the rows of `pnpm run size`.
+- **Publish.** The maintainer runs `pnpm run release` (`pnpm publish`, which re-runs
+  `prepublishOnly`) from the tagged commit, with npm 2FA, writes the GitHub release notes from
+  the CHANGELOG section, and checks the docs deploy (the nav label shows the new version). The
+  agent never pushes, tags or publishes on its own.

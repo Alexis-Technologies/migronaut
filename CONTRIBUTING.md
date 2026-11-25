@@ -46,9 +46,18 @@ through the injected logger; `null` silences it, which is what tests use.
 Presentation (`src/cli`, `bin`) never touches the database, and core never
 imports the spinner or the table renderer.
 
+**5. The code style is alexiskills'.** `js-conventions` of
+[`@alexify/metaskills`](https://alexiskills.vercel.app) (a devDependency, linked
+into `.claude/skills` by `pnpm install`), its Library profile: `const` arrows,
+loops in one pass instead of array iteration methods in `src/`, strict
+comparisons only, every `let` with a value. `pnpm run lint` holds most of it;
+the "Conventions" section of [CLAUDE.md](CLAUDE.md) says what migronaut does
+differently, and wins.
+
 ## Tests
 
-Node's built-in `node:test` — no external framework.
+Node's built-in `node:test` — no external framework: `describe` and `it`, every
+`it` title starting with `should`, assertions from `node:assert/strict`.
 
 - `tests/unit/` — mocked database, plain stubs. Fast, runs everywhere.
 - `tests/integration/` — a real `mongodb-memory-server` replica set, so
