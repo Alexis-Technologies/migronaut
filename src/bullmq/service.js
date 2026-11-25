@@ -48,6 +48,12 @@ const MIN_SCHEDULE_EVERY_MS = 1000;
 const DEFAULT_BACKGROUND_CONCURRENCY = 2;
 /** How often the drift watch runs on the background queue by default */
 const DEFAULT_BACKGROUND_VERIFY_MS = 600_000;
+/** The jobs a schedule may tick, and the scheduler id each takes by default */
+const SCHEDULER_IDS = new Map([
+  [JOB_NAMES.SYNC, DEFAULT_SCHEDULER_ID],
+  [JOB_NAMES.CONVERGE, DEFAULT_CONVERGE_SCHEDULER_ID],
+  [JOB_NAMES.BACKGROUND_VERIFY, DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID],
+]);
 /** Every key the `background` option accepts */
 const BACKGROUND_KEYS = new Set([
   'queueName',
@@ -62,6 +68,9 @@ const BACKGROUND_KEYS = new Set([
   'watch',
   'maxLaneRetries',
 ]);
+
+/** An interval a schedule accepts: whole milliseconds, a second at least */
+const isScheduleInterval = (ms) => Number.isSafeInteger(ms) && ms >= MIN_SCHEDULE_EVERY_MS;
 
 /**
  * The `background` option, checked and filled in — or undefined when the
@@ -105,10 +114,7 @@ const resolveBackground = (background, { queueName, QueueSource }) => {
   }
   assertBackgroundConcurrency(options.workerOptions?.concurrency);
   const verifyIntervalMs = options.verifyIntervalMs ?? DEFAULT_BACKGROUND_VERIFY_MS;
-  if (
-    verifyIntervalMs !== false &&
-    (!Number.isSafeInteger(verifyIntervalMs) || verifyIntervalMs < MIN_SCHEDULE_EVERY_MS)
-  ) {
+  if (verifyIntervalMs !== false && !isScheduleInterval(verifyIntervalMs)) {
     throw new ConfigInvalidError(
       `background.verifyIntervalMs must be false or an integer ≥ ${MIN_SCHEDULE_EVERY_MS}`,
       { verifyIntervalMs },
@@ -144,18 +150,21 @@ const shortString = (value) => {
   return typeof value === 'string' && value.length > 0 && value.length <= 255 ? value : undefined;
 };
 
+/** `fields[key] = value` — unless there is no value to say */
+const addField = (fields, key, value) => {
+  if (value !== undefined) fields[key] = value;
+};
+
 /** What a failed job's log line can say about it, from the job and from the error */
 const failedJobFields = (job, error) => {
   const data = job?.data ?? {};
-  const fields = {
-    ...(job?.id !== undefined ? { jobId: String(job.id) } : {}),
-    groupId: shortString(data.groupId),
-    migration: shortString(data.migration),
-    direction: shortString(data.direction),
-    runId: shortString(error?.context?.runId),
-    ...(error instanceof MigronautError ? { code: error.code } : {}),
-  };
-  for (const key of Object.keys(fields)) if (fields[key] === undefined) delete fields[key];
+  const fields = {};
+  if (job?.id !== undefined) fields.jobId = `${job.id}`;
+  addField(fields, 'groupId', shortString(data.groupId));
+  addField(fields, 'migration', shortString(data.migration));
+  addField(fields, 'direction', shortString(data.direction));
+  addField(fields, 'runId', shortString(error?.context?.runId));
+  if (error instanceof MigronautError) addField(fields, 'code', error.code);
   return fields;
 };
 
@@ -263,7 +272,8 @@ class MigrationQueue {
     }
     // Anything this object has to construct needs somewhere to connect to.
     const constructs = isClass(Queue) || Worker !== undefined || isClass(QueueEvents);
-    if (constructs && connection == null) {
+    const hasConnection = connection !== undefined && connection !== null;
+    if (constructs && !hasConnection) {
       throw new ConfigInvalidError(
         'connection is required — the BullMQ connection options or your Redis client',
       );
@@ -764,7 +774,7 @@ class MigrationQueue {
     this.#listen(worker, 'stalled', (jobId) =>
       this.#kit.logger.warn(`⚠ Migration job stalled (${jobId}) — it will be re-run`, {
         ...fields,
-        jobId: String(jobId),
+        jobId: `${jobId}`,
       }),
     );
     await worker.waitUntilReady?.();
@@ -802,11 +812,8 @@ class MigrationQueue {
     await this.#kit.connect();
     const queue = this.#backgroundQueue;
     const { verifyIntervalMs, verifyIntervalGiven, workerOptions = {} } = this.#background;
-    if (
-      verifyIntervalMs !== false &&
-      typeof queue.upsertJobScheduler === 'function' &&
-      (verifyIntervalGiven || !(await MigrationQueue.#hasScheduler(queue)))
-    ) {
+    const canVerify = verifyIntervalMs !== false && typeof queue.upsertJobScheduler === 'function';
+    if (canVerify && (verifyIntervalGiven || !(await MigrationQueue.#hasScheduler(queue)))) {
       await queue.upsertJobScheduler(
         DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
         { every: verifyIntervalMs },
@@ -845,7 +852,7 @@ class MigrationQueue {
     this.#listen(worker, 'stalled', (jobId) =>
       this.#kit.logger.warn(`⚠ Background job stalled (${jobId}) — it will be re-run`, {
         ...fields,
-        jobId: String(jobId),
+        jobId: `${jobId}`,
       }),
     );
     await worker.waitUntilReady?.();
@@ -916,19 +923,31 @@ class MigrationQueue {
     // read as finished with no outcome (no returnvalue or failedReason, the
     // attempt not counted). A finished job no longer changes, so read it again.
     if (state === 'completed' || state === 'failed') job = (await this.#queue.getJob(id)) ?? job;
+    const hasReturnValue = job.returnvalue !== undefined && job.returnvalue !== null;
     return redactDeep({
-      id: String(job.id),
+      id: `${job.id}`,
       name: job.name,
       data: job.data,
       state,
       progress: job.progress,
-      ...(job.returnvalue != null ? { returnvalue: job.returnvalue } : {}),
+      ...(hasReturnValue ? { returnvalue: job.returnvalue } : {}),
       ...(job.failedReason ? { failedReason: redactOutbound(job.failedReason) } : {}),
       attemptsMade: job.attemptsMade ?? 0,
       ...(job.timestamp !== undefined ? { timestamp: job.timestamp } : {}),
       ...(job.processedOn !== undefined ? { processedOn: job.processedOn } : {}),
       ...(job.finishedOn !== undefined ? { finishedOn: job.finishedOn } : {}),
     });
+  }
+
+  /** The job a tick of a `job` schedule adds */
+  #scheduleTemplate(job, to) {
+    if (job === JOB_NAMES.BACKGROUND_VERIFY) {
+      return buildBackgroundVerifyJobTemplate({ jobOptions: this.#background.jobOptions });
+    }
+    if (job === JOB_NAMES.CONVERGE) {
+      return buildConvergeJobTemplate({ jobOptions: this.#jobOptions });
+    }
+    return buildSyncJobTemplate({ to, jobOptions: this.#jobOptions });
   }
 
   /**
@@ -944,27 +963,17 @@ class MigrationQueue {
       throw new ConfigInvalidError('schedule options must be an object');
     }
     warnUnknownOptions(this.#kit, 'schedule', options, KNOWN_OPTIONS.schedule);
+    // oxlint-disable-next-line no-restricted-properties -- an option, not Array#every
     const { job = JOB_NAMES.SYNC, every, pattern, tz, to } = options;
-    if (
-      job !== JOB_NAMES.SYNC &&
-      job !== JOB_NAMES.CONVERGE &&
-      job !== JOB_NAMES.BACKGROUND_VERIFY
-    ) {
+    if (!SCHEDULER_IDS.has(job)) {
       throw new ConfigInvalidError(
         "schedule job must be 'sync', 'converge' or 'background-verify'",
         { job },
       );
     }
-    const converge = job === JOB_NAMES.CONVERGE;
     const verify = job === JOB_NAMES.BACKGROUND_VERIFY;
     if (verify) this.#assertBackground("schedule({ job: 'background-verify' })");
-    const {
-      id = verify
-        ? DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID
-        : converge
-          ? DEFAULT_CONVERGE_SCHEDULER_ID
-          : DEFAULT_SCHEDULER_ID,
-    } = options;
+    const { id = SCHEDULER_IDS.get(job) } = options;
     assertName(id, 'id');
     if (job !== JOB_NAMES.SYNC && to !== undefined) {
       throw new ConfigInvalidError('to only applies to a sync schedule', { to });
@@ -996,14 +1005,7 @@ class MigrationQueue {
         'schedule() needs job schedulers (queue.upsertJobScheduler) — BullMQ 5.16 or newer',
       );
     }
-    let template;
-    if (verify) {
-      template = buildBackgroundVerifyJobTemplate({ jobOptions: this.#background.jobOptions });
-    } else if (converge) {
-      template = buildConvergeJobTemplate({ jobOptions: this.#jobOptions });
-    } else {
-      template = buildSyncJobTemplate({ to, jobOptions: this.#jobOptions });
-    }
+    const template = this.#scheduleTemplate(job, to);
     await queue.upsertJobScheduler(
       id,
       { ...(every !== undefined ? { every } : { pattern }), ...(tz !== undefined ? { tz } : {}) },
@@ -1118,7 +1120,9 @@ class MigrationQueue {
       // The work in flight is not waited for — but it keeps its connection
       // until it ends: a kit this object created is disconnected only once
       // the processors have settled.
-      Promise.allSettled(processors.map((processor) => processor.close()))
+      const closing = [];
+      for (let i = 0; i < processors.length; i++) closing.push(processors[i].close());
+      Promise.allSettled(closing)
         .then(() => (this.#ownsKit ? this.#kit.disconnect() : undefined))
         .catch(() => undefined);
     } else if (this.#ownsKit) {

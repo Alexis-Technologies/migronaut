@@ -160,7 +160,7 @@ const planUpJobs = async (kit, options = {}) => {
    * yet — the plan ends before it. (A background file that requires one is
    * not held: it registers as blocked, and starts once it is unblocked.)
    */
-  let waiting;
+  let waiting = null;
   for (const row of rows) {
     if (row.status === 'applied' && !force) continue;
     if (row.kind !== 'background' && Array.isArray(row.waitsFor) && row.waitsFor.length > 0) {
@@ -170,23 +170,24 @@ const planUpJobs = async (kit, options = {}) => {
     migrations.push(row.file);
     if (typeof row.checksum === 'string') checksums.set(row.file, row.checksum);
   }
-  if (waiting !== undefined && filename !== undefined) {
+  if (waiting !== null && filename !== undefined) {
     // Asked for by name: say why now, rather than enqueue a job that can only fail.
+    const waitsFor = [];
+    for (let i = 0; i < waiting.waitsFor.length; i++) {
+      waitsFor.push({ migration: waiting.waitsFor[i] });
+    }
     throw new BackgroundPendingError(
       `${waiting.migration} requires background migration(s) that have not completed: ` +
         waiting.waitsFor.join(', '),
-      {
-        migration: waiting.migration,
-        waitsFor: waiting.waitsFor.map((migration) => ({ migration })),
-      },
+      { migration: waiting.migration, waitsFor },
     );
   }
   const groupId = await newGroupId(kit);
-  const tail = waiting !== undefined ? { waiting } : {};
+  const tail = waiting !== null ? { waiting } : {};
   if (migrations.length === 0) {
     const plan = { groupId, direction: JOB_NAMES.UP, batch: null, migrations, jobs: [], ...tail };
     // A group cut short of the head never converges — nor does it with nothing to run.
-    if (waiting === undefined && converge && !(await kit.converge({ dryRun: true })).inSync) {
+    if (waiting === null && converge && !(await kit.converge({ dryRun: true })).inSync) {
       plan.converge = buildConvergeJob({ groupId, ordered, jobOptions, ...actor });
     }
     return plan;
@@ -194,7 +195,8 @@ const planUpJobs = async (kit, options = {}) => {
 
   const batch = await kit.nextBatch();
   const jobs = [];
-  for (const [index, migration] of migrations.entries()) {
+  for (let index = 0; index < migrations.length; index++) {
+    const migration = migrations[index];
     jobs.push({
       ...buildMigrationJob({
         direction: JOB_NAMES.UP,
@@ -212,7 +214,7 @@ const planUpJobs = async (kit, options = {}) => {
     });
   }
   const plan = { groupId, direction: JOB_NAMES.UP, batch, migrations, jobs, ...tail };
-  if (converge && waiting === undefined) {
+  if (converge && waiting === null) {
     plan.converge = buildConvergeJob({
       groupId,
       ordered,
@@ -236,8 +238,8 @@ const assertTopOfStack = async (kit, migrations) => {
   applied.sort(newestFirst);
   const planned = new Set(migrations);
   let deepest = -1;
-  for (const [index, row] of applied.entries()) {
-    if (planned.has(row.file)) deepest = index;
+  for (let index = 0; index < applied.length; index++) {
+    if (planned.has(applied[index].file)) deepest = index;
   }
   const blockedBy = [];
   for (let index = 0; index < deepest; index++) {
@@ -281,7 +283,8 @@ const planDownJobs = async (kit, options = {}) => {
   if (ordered) await assertTopOfStack(kit, migrations);
 
   const jobs = [];
-  for (const [index, row] of rows.entries()) {
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
     jobs.push({
       ...buildMigrationJob({
         direction: JOB_NAMES.DOWN,
@@ -306,7 +309,11 @@ const planDownJobs = async (kit, options = {}) => {
  * that will do the work. All false on a queue that cannot read jobs back.
  */
 const foreignJobs = async (queue, ids, groupId) => {
-  if (typeof queue.getJob !== 'function') return new Array(ids.length).fill(false);
+  if (typeof queue.getJob !== 'function') {
+    const none = [];
+    for (let i = 0; i < ids.length; i++) none.push(false);
+    return none;
+  }
   // A first deploy can enqueue hundreds of jobs: read them back a few at a time,
   // each answered as it arrives.
   return mapLimit(ids, LOOKUP_CONCURRENCY, async (id) => {
@@ -365,12 +372,13 @@ const enqueueGroup = async (queue, kit, plan, { queueEvents, getQueueEvents } = 
       });
     }
     // The ids of every job added, and the migration ones as jobs — one pass.
-    const ids = new Array(added.length);
-    jobs = new Array(plan.migrations.length);
-    for (const [index, job] of added.entries()) {
-      ids[index] = String(job.id);
-      if (index < jobs.length) {
-        jobs[index] = { id: ids[index], migration: plan.migrations[index], index };
+    const ids = [];
+    jobs = [];
+    for (let index = 0; index < added.length; index++) {
+      const id = `${added[index].id}`;
+      ids.push(id);
+      if (index < plan.migrations.length) {
+        jobs.push({ id, migration: plan.migrations[index], index });
       }
     }
     const foreign = await foreignJobs(queue, ids, groupId);
@@ -378,7 +386,7 @@ const enqueueGroup = async (queue, kit, plan, { queueEvents, getQueueEvents } = 
       if (foreign[job.index]) deduplicated.push(job.migration);
     }
     if (plan.converge) {
-      converge = { id: String(added[specs.length - 1].id), deduplicated: foreign.at(-1) };
+      converge = { id: `${added[specs.length - 1].id}`, deduplicated: foreign.at(-1) };
     }
     const what =
       jobs.length > 0
@@ -441,12 +449,13 @@ const enqueueConverge = async (queue, kit, options = {}, internals = {}) => {
   assertQueue(queue);
   const actor = actorOf(options);
   const groupId = await newGroupId(kit);
-  const [added] = await queue.addBulk([
+  const addedJobs = await queue.addBulk([
     buildConvergeJob({ groupId, ordered, jobOptions, ...actor }),
   ]);
+  const added = addedJobs[0];
   if (!added) throw new ConfigInvalidError('queue.addBulk did not return the converge job');
-  const jobId = String(added.id);
-  const [deduplicated] = await foreignJobs(queue, [jobId], groupId);
+  const jobId = `${added.id}`;
+  const deduplicated = (await foreignJobs(queue, [jobId], groupId))[0];
   const wait = makeWait(
     queue,
     { groupId, direction: 'converge', batch: null, jobs: [], converge: { id: jobId } },
@@ -499,15 +508,6 @@ const lastActivity = (status) => {
   return latest;
 };
 
-/**
- * Enqueue the coordinator of one background migration — or, with no
- * `migration`, of every one with work to do (unblocking those whose requires
- * are met on the way). Safe to call from every pod, as often as you like: a
- * coordinator chain that is alive absorbs the add. A background migration
- * nothing has moved for `stallMs` (no live lease, no checkpoint, no
- * coordinator step) also gets a takeover coordinator — one per round, however
- * many pods ask — whose newer round retires the stuck one.
- */
 /** Every option enqueueBackground takes — a typo (`stalMs`) is refused, not a silent default */
 const ENQUEUE_BACKGROUND_KEYS = new Set([
   'migration',
@@ -517,6 +517,15 @@ const ENQUEUE_BACKGROUND_KEYS = new Set([
   'reason',
 ]);
 
+/**
+ * Enqueue the coordinator of one background migration — or, with no
+ * `migration`, of every one with work to do (unblocking those whose requires
+ * are met on the way). Safe to call from every pod, as often as you like: a
+ * coordinator chain that is alive absorbs the add. A background migration
+ * nothing has moved for `stallMs` (no live lease, no checkpoint, no
+ * coordinator step) also gets a takeover coordinator — one per round, however
+ * many pods ask — whose newer round retires the stuck one.
+ */
 const enqueueBackground = async (queue, kit, options = {}) => {
   if (!isObjectLike(options)) {
     throw new ConfigInvalidError('enqueueBackground options must be an object');
@@ -546,7 +555,8 @@ const enqueueBackground = async (queue, kit, options = {}) => {
     targets.push(status);
   } else {
     // One read for all of them: the runnable list carries what a stall is told by.
-    targets.push(...(await kit.runnableBackground()));
+    const runnable = await kit.runnableBackground();
+    for (let i = 0; i < runnable.length; i++) targets.push(runnable[i]);
   }
   const specs = [];
   const now = Date.now();
@@ -580,10 +590,10 @@ const enqueueBackground = async (queue, kit, options = {}) => {
   if (specs.length === 0) return { jobs: [] };
   const added = await queue.addBulk(specs);
   const jobs = [];
-  for (const [index, job] of added.entries()) {
+  for (let index = 0; index < added.length; index++) {
     jobs.push({
       migration: specs[index].data.migration,
-      id: String(job.id),
+      id: `${added[index].id}`,
       ...(specs[index].data.takeover ? { takeover: true } : {}),
     });
   }

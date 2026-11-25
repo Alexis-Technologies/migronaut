@@ -16,7 +16,6 @@ class MigronautError extends Error {
     if (context !== undefined) {
       this.context = context;
     }
-    Error.captureStackTrace(this, this.constructor);
   }
 }
 

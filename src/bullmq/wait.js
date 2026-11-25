@@ -57,13 +57,13 @@ const waitForGroup = async ({
   const deadline = timeoutMs !== undefined ? Date.now() + timeoutMs : undefined;
   const budgeted = (promise) => {
     if (deadline === undefined) return promise;
-    let timer;
+    let timer = null;
     const expired = new Promise((_resolve, reject) => {
       timer = setTimeout(() => reject(DEADLINE), Math.max(0, deadline - Date.now()));
     });
     return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
   };
-  const timedOut = () => deadline !== undefined && Date.now() >= deadline;
+  const isPastDeadline = () => deadline !== undefined && Date.now() >= deadline;
 
   /**
    * The typed code a failed job reported in its progress — what a caller
@@ -97,7 +97,7 @@ const waitForGroup = async ({
       await budgeted(queueEvents.waitUntilReady?.());
       const job = await budgeted(queue.getJob(id));
       if (!job) throw fail('job not found — it was removed before wait() could read it', false);
-      if (timedOut()) throw outOfTime();
+      if (isPastDeadline()) throw outOfTime();
       return await budgeted(
         job.waitUntilFinished(
           queueEvents,
@@ -107,7 +107,7 @@ const waitForGroup = async ({
     } catch (error) {
       if (error instanceof QueueJobFailedError) throw error;
       // Decided by the clock, not by how BullMQ happens to word its timeout.
-      if (error === DEADLINE || timedOut()) throw outOfTime();
+      if (error === DEADLINE || isPastDeadline()) throw outOfTime();
       const reason = redactOutbound(error instanceof Error ? error.message : String(error));
       throw fail(reason, false, await failureCode(id));
     }

@@ -30,9 +30,12 @@ const readSteps = (steps, versioning, label) => {
     throw new ConfigInvalidError(`${label}: steps must be an object of { [fromVersion]: fn }`);
   }
   const map = new Map();
-  for (const [key, step] of Object.entries(steps)) {
+  const keys = Object.keys(steps);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const step = steps[key];
     const from = Number(key);
-    if (!Number.isSafeInteger(from) || from < 0 || String(from) !== key) {
+    if (!Number.isSafeInteger(from) || from < 0 || `${from}` !== key) {
       throw new ConfigInvalidError(`${label}: step key "${key}" is not a version`);
     }
     if (from >= versioning.current) {

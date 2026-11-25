@@ -74,7 +74,7 @@ const sameBsonValue = (type, a, b) => {
     case 'BSONRegExp':
       return a.pattern === b.pattern && a.options === b.options;
     case 'BSONSymbol':
-      return String(a.valueOf()) === String(b.valueOf());
+      return `${a.valueOf()}` === `${b.valueOf()}`;
     case 'MinKey':
     case 'MaxKey':
       return true;
@@ -143,8 +143,8 @@ const sameValue = (a, b) => {
  */
 const cloneDocument = (value) => {
   if (Array.isArray(value)) {
-    const out = new Array(value.length);
-    for (let i = 0; i < value.length; i++) out[i] = cloneDocument(value[i]);
+    const out = [];
+    for (let i = 0; i < value.length; i++) out.push(cloneDocument(value[i]));
     return out;
   }
   if (value instanceof Date) return new Date(value.getTime());
@@ -190,6 +190,35 @@ const topField = (path) => {
 const PIPELINE_FIELD_STAGES = new Set(['$set', '$addFields']);
 const PIPELINE_WHOLE_STAGES = new Set(['$project', '$replaceRoot', '$replaceWith']);
 
+/** The top field of every string path in `paths` */
+const addTopFields = (fields, paths) => {
+  for (let i = 0; i < paths.length; i++) {
+    if (typeof paths[i] === 'string') fields.add(topField(paths[i]));
+  }
+};
+
+/**
+ * The fields one pipeline stage names, into `fields` — and whether it may
+ * rewrite the entire document.
+ */
+const touchedByStage = (fields, stage) => {
+  let whole = false;
+  const operators = Object.keys(stage);
+  for (let i = 0; i < operators.length; i++) {
+    const operator = operators[i];
+    const spec = stage[operator];
+    if (PIPELINE_FIELD_STAGES.has(operator) && isPlainObject(spec)) {
+      addTopFields(fields, Object.keys(spec));
+    } else if (operator === '$unset') {
+      addTopFields(fields, Array.isArray(spec) ? spec : [spec]);
+    } else if (PIPELINE_WHOLE_STAGES.has(operator)) {
+      whole = true;
+      if (operator === '$project' && isPlainObject(spec)) addTopFields(fields, Object.keys(spec));
+    }
+  }
+  return whole;
+};
+
 /**
  * The top-level fields an update writes: `{ fields, whole }`, where `whole`
  * means it may rewrite the entire document (a replacement, or a pipeline that
@@ -199,22 +228,9 @@ const touchedFields = (update) => {
   const fields = new Set();
   if (Array.isArray(update)) {
     let whole = false;
-    for (const stage of update) {
-      if (!isPlainObject(stage)) continue;
-      for (const [operator, spec] of Object.entries(stage)) {
-        if (PIPELINE_FIELD_STAGES.has(operator) && isPlainObject(spec)) {
-          for (const key of Object.keys(spec)) fields.add(topField(key));
-        } else if (operator === '$unset') {
-          for (const key of Array.isArray(spec) ? spec : [spec]) {
-            if (typeof key === 'string') fields.add(topField(key));
-          }
-        } else if (PIPELINE_WHOLE_STAGES.has(operator)) {
-          whole = true;
-          if (operator === '$project' && isPlainObject(spec)) {
-            for (const key of Object.keys(spec)) fields.add(topField(key));
-          }
-        }
-      }
+    for (let i = 0; i < update.length; i++) {
+      const stage = update[i];
+      if (isPlainObject(stage) && touchedByStage(fields, stage)) whole = true;
     }
     return { fields, whole };
   }
@@ -222,13 +238,19 @@ const touchedFields = (update) => {
   // One walk: a key without `$` makes it a replacement document, whose own
   // keys are then the fields; operator specs name theirs.
   const plain = new Set();
-  for (const [key, spec] of Object.entries(update)) {
+  const keys = Object.keys(update);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const spec = update[key];
     if (!key.startsWith('$')) {
       plain.add(key);
       continue;
     }
     if (!isPlainObject(spec)) continue;
-    for (const [path, value] of Object.entries(spec)) {
+    const paths = Object.keys(spec);
+    for (let j = 0; j < paths.length; j++) {
+      const path = paths[j];
+      const value = spec[path];
       fields.add(topField(path));
       if (key === '$rename' && typeof value === 'string') fields.add(topField(value));
     }
@@ -253,9 +275,12 @@ const fieldReference = (field) => {
 /** Whether a query filter constrains `field` (at the top level, or through `$and`/`$or`/`$nor`) */
 const filterTouches = (filter, field) => {
   if (!isPlainObject(filter)) return false;
-  for (const [key, value] of Object.entries(filter)) {
+  const keys = Object.keys(filter);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const value = filter[key];
     if (LOGICAL.has(key) && Array.isArray(value)) {
-      for (const branch of value) if (filterTouches(branch, field)) return true;
+      for (let j = 0; j < value.length; j++) if (filterTouches(value[j], field)) return true;
     } else if (key === '$expr') {
       if (fieldReference(field).test(JSON.stringify(value ?? null))) return true;
     } else if (!key.startsWith('$') && topField(key) === field) {

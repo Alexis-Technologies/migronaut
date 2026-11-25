@@ -129,7 +129,7 @@ const resolveVersioning = (value, { path = 'versioning' } = {}) => {
  * when it is not declared or not versioned.
  */
 const versioningOf = (definitions, collection) => {
-  let definition;
+  let definition = null;
   if (Array.isArray(definitions)) {
     for (const candidate of definitions) {
       if (isPlainObject(candidate) && candidate.name === collection) {

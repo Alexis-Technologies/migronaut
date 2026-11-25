@@ -34,8 +34,10 @@ const REREAD_OPTIONS = ['session', 'collation', 'hint', 'let'];
 const splitOptions = (options = {}) => {
   if (!isPlainObject(options)) throw new ConfigInvalidError('options must be an object');
   const driverOptions = {};
-  for (const [key, value] of Object.entries(options)) {
-    if (!OWN_OPTIONS.has(key)) driverOptions[key] = value;
+  const keys = Object.keys(options);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (!OWN_OPTIONS.has(key)) driverOptions[key] = options[key];
   }
   if (driverOptions.upsert === true) {
     throw new ConfigInvalidError(
@@ -110,6 +112,13 @@ const guardedFilter = (filter, names, expected) => {
   return { ...filter, ...revisionFilter(names, expected) };
 };
 
+/** What became of the document, as a conflict's message says it */
+const conflictDetail = (context, expected) => {
+  if (context.reason === 'conflict') return `is at revision ${context.actual}, not ${expected}`;
+  if (context.reason === 'not-found') return 'does not exist';
+  return `was not at revision ${expected}, or no longer exists`;
+};
+
 /**
  * A miss, explained: read the document without the revision guard and say
  * whether it moved on (`conflict`, with `actual`), is gone (`not-found`), or
@@ -142,12 +151,7 @@ const conflictError = async (collection, filter, names, expected, { verify, driv
       // `unknown` it stays.
     }
   }
-  const what =
-    context.reason === 'conflict'
-      ? `is at revision ${context.actual}, not ${expected}`
-      : context.reason === 'not-found'
-        ? 'does not exist'
-        : `was not at revision ${expected}, or no longer exists`;
+  const what = conflictDetail(context, expected);
   return new RevisionConflictError(`Revision conflict: the document ${what}`, context);
 };
 
@@ -259,10 +263,7 @@ const jitter = ({ baseMs = 10, maxMs = 1000 } = {}) => {
 
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(signal.reason);
-      return;
-    }
+    if (signal?.aborted) return void reject(signal.reason);
     const timer = setTimeout(() => {
       signal?.removeEventListener('abort', onAbort);
       resolve();

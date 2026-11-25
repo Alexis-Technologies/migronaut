@@ -41,13 +41,19 @@ const assertSchema = (schema) => {
  */
 const updatedFields = (update, revisionField) => {
   const fields = new Set();
-  for (const [key, spec] of Object.entries(update)) {
+  const keys = Object.keys(update);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const spec = update[key];
     if (!key.startsWith('$')) {
       fields.add(topField(key));
       continue;
     }
     if (!isPlainObject(spec)) continue;
-    for (const [path, value] of Object.entries(spec)) {
+    const paths = Object.keys(spec);
+    for (let j = 0; j < paths.length; j++) {
+      const path = paths[j];
+      const value = spec[path];
       if (key === '$setOnInsert' && path === revisionField && value === 0) continue;
       fields.add(topField(path));
       if (key === '$rename' && typeof value === 'string') fields.add(topField(value));
@@ -79,7 +85,10 @@ const applyVersioningPlugin = (schema, versioning) => {
   if (!existing) schema.add({ [field]: { type: Number } });
 
   const stamp = function () {
-    if (this.isNew && this.get(field) == null) this.set(field, current);
+    if (!this.isNew) return;
+    // A path never set reads as `undefined`, one set to `null` as `null`: both get stamped.
+    const version = this.get(field);
+    if (version === undefined || version === null) this.set(field, current);
   };
   // Validation may be skipped (`validateBeforeSave: false`): stamp on save too.
   schema.pre('validate', stamp);
@@ -103,7 +112,8 @@ const applyVersioningPlugin = (schema, versioning) => {
       );
     }
     const where = isPlainObject(this.$where) ? { ...this.$where } : {};
-    if (this.get(revisionField) == null) where[revisionField] = { $in: [null, 0] };
+    const revision = this.get(revisionField);
+    if (revision === undefined || revision === null) where[revisionField] = { $in: [null, 0] };
     else delete where[revisionField];
     this.$where = where;
   });

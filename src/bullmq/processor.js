@@ -87,7 +87,7 @@ const WAITING_ERROR_NAME = 'WaitingError';
 /** The correlation ids of a job, for its error context and log lines */
 const jobIds = (ctx) => {
   return {
-    ...(ctx.job?.id !== undefined ? { jobId: String(ctx.job.id) } : {}),
+    ...(ctx.job?.id !== undefined ? { jobId: `${ctx.job.id}` } : {}),
     ...(ctx.data?.groupId !== undefined ? { groupId: ctx.data.groupId } : {}),
     ...(ctx.runId ? { runId: ctx.runId } : {}),
   };
@@ -101,7 +101,7 @@ const jobIds = (ctx) => {
  */
 const jobRefOf = (job, groupId) => {
   if (job?.id === undefined || job.id === null) return undefined;
-  const id = String(job.id);
+  const id = `${job.id}`;
   const ref = groupId !== undefined ? { id, groupId } : { id };
   if (jobRefIssue(ref) === null) return ref;
   return jobRefIssue({ id }) === null ? { id } : undefined;
@@ -121,7 +121,7 @@ const DEFAULT_USERLAND_LOG_ROWS = 1000;
 const ROW_BREAKS = /\r\n|[\r\n\u2028\u2029]/g;
 
 /** Text as part of one row: line breaks shown as ⏎, control characters dropped */
-const oneLine = (text) => sanitize(String(text).replace(ROW_BREAKS, '⏎'));
+const oneLine = (text) => sanitize(text.replace(ROW_BREAKS, '⏎'));
 
 /** BigInts have no JSON form of their own; a log row shows their digits */
 const jsonValue = (_key, value) => (typeof value === 'bigint' ? value.toString() : value);
@@ -179,7 +179,7 @@ const boundedJson = (data, max) => {
 /** Whether `data` has a key to show — without listing them all */
 const hasEntries = (data) => {
   if (data === null || typeof data !== 'object') return false;
-  for (const _key in data) return true;
+  for (const key in data) return true;
   return false;
 };
 
@@ -282,10 +282,8 @@ const prepareErrorForQueue = (error) => {
   const cause = error instanceof MigronautError ? error.context?.cause : undefined;
   try {
     const message = redactOutbound(error.message);
-    error.message =
-      typeof cause === 'string' && cause.length > 0 && !message.includes(cause)
-        ? `${message} — ${redactOutbound(cause)}`
-        : message;
+    const isCauseNew = typeof cause === 'string' && cause.length > 0 && !message.includes(cause);
+    error.message = isCauseNew ? `${message} — ${redactOutbound(cause)}` : message;
     if (typeof error.stack === 'string') error.stack = redactOutbound(error.stack);
   } catch {
     // A frozen error cannot be rewritten; its message was written by us anyway.
@@ -350,6 +348,73 @@ const assertBackgroundLink = (background) => {
 };
 
 /**
+ * Fire-and-forget write to the job (a log row, a progress update). Never
+ * awaited on the run path — Redis must not pace a migration — and never
+ * allowed to fail the job; `flush` drains what is still in flight before the
+ * job settles, so nothing lands on a job BullMQ already finished.
+ */
+const writeToJob = (ctx, action) => {
+  let pending = null;
+  try {
+    pending = Promise.resolve(action(ctx.job)).catch(() => undefined);
+  } catch {
+    return;
+  }
+  ctx.writes.add(pending);
+  pending.finally(() => ctx.writes.delete(pending));
+};
+
+/** A row on the job's log, redacted on its way out */
+const log = (ctx, row) => writeToJob(ctx, (job) => job.log?.(redactOutbound(row)));
+
+/** The job's progress: the phase, what the job is about, and `extra` */
+const progress = (ctx, phase, extra) =>
+  writeToJob(ctx, (job) =>
+    job.updateProgress?.({
+      phase,
+      ...(ctx.data.kind === 'migration'
+        ? {
+            migration: ctx.data.migration,
+            direction: ctx.data.direction,
+            groupId: ctx.data.groupId,
+            index: ctx.data.index,
+            total: ctx.data.total,
+          }
+        : { kind: ctx.data.kind }),
+      ...extra,
+    }),
+  );
+
+/** What a converge action works on, in a log row */
+const convergeTarget = (event) => {
+  if (event.target === 'index') return `index ${event.name}`;
+  if (event.target === 'searchIndex') return `search index ${event.name}`;
+  return event.target;
+};
+
+/** A migration job's result, from the kit's rows for it */
+const resultOf = (ctx, rows, waitedMs) => {
+  const { data } = ctx;
+  const row = rows[0];
+  return {
+    migration: data.migration,
+    direction: data.direction,
+    status: row?.status ?? 'skipped',
+    ...(row?.duration !== undefined ? { duration: row.duration } : {}),
+    ...(row?.batch !== undefined ? { batch: row.batch } : {}),
+    ...(ctx.runId ? { runId: ctx.runId } : {}),
+    ...(row?.reason ? { reason: row.reason } : {}),
+    lockWaitMs: waitedMs,
+  };
+};
+
+/** The row of `file` among the kit's status rows, or `null` */
+const rowOf = (rows, file) => {
+  for (let i = 0; i < rows.length; i++) if (rows[i].file === file) return rows[i];
+  return null;
+};
+
+/**
  * Build the function a BullMQ Worker runs for each migration job.
  *
  * One long-lived MigratorKit serves every job, and jobs are run one at a time
@@ -372,41 +437,8 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
   /** Serializes jobs in this process — see the factory's doc comment */
   let chain = Promise.resolve();
   /** The job being processed, for the kit's event listeners */
-  let current;
+  let current = null;
 
-  /**
-   * Fire-and-forget write to the job (a log row, a progress update). Never
-   * awaited on the run path — Redis must not pace a migration — and never
-   * allowed to fail the job; `flush` drains what is still in flight before the
-   * job settles, so nothing lands on a job BullMQ already finished.
-   */
-  const write = (ctx, action) => {
-    let pending;
-    try {
-      pending = Promise.resolve(action(ctx.job)).catch(() => undefined);
-    } catch {
-      return;
-    }
-    ctx.writes.add(pending);
-    pending.finally(() => ctx.writes.delete(pending));
-  };
-  const log = (ctx, row) => write(ctx, (job) => job.log?.(redactOutbound(row)));
-  const progress = (ctx, phase, extra) =>
-    write(ctx, (job) =>
-      job.updateProgress?.({
-        phase,
-        ...(ctx.data.kind === 'migration'
-          ? {
-              migration: ctx.data.migration,
-              direction: ctx.data.direction,
-              groupId: ctx.data.groupId,
-              index: ctx.data.index,
-              total: ctx.data.total,
-            }
-          : { kind: ctx.data.kind }),
-        ...extra,
-      }),
-    );
   /**
    * Drain the job's writes still in flight — for at most `writeWaitMs`
    * (JOB_WRITE_WAIT_MS): they are best-effort, and a Redis that is away must
@@ -414,7 +446,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
    */
   const flush = async (ctx) => {
     if (ctx.writes.size === 0) return;
-    const drained = await settledWithin(Promise.allSettled([...ctx.writes]), writeWaitMs);
+    const drained = await settledWithin(Promise.allSettled(ctx.writes), writeWaitMs);
     if (!drained) {
       kit.logger.debug(
         `Job ${ctx.job?.id}: its log and progress writes did not settle in ${writeWaitMs}ms — ` +
@@ -485,13 +517,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     },
     'converge:action': (event) => {
       if (!current) return;
-      const target =
-        event.target === 'index'
-          ? `index ${event.name}`
-          : event.target === 'searchIndex'
-            ? `search index ${event.name}`
-            : event.target;
-      const what = `${event.action} ${target} on ${event.collection}`;
+      const what = `${event.action} ${convergeTarget(event)} on ${event.collection}`;
       if (event.status === 'started') log(current, `… ${what}`);
       else if (event.status === 'applied') log(current, `✔ ${what} [${event.durationMs ?? 0}ms]`);
       else log(current, `✖ ${what}: ${event.error ?? 'failed'}`);
@@ -522,7 +548,8 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       if (current && !current.sealed && ownLine(current, event)) mirror(current, event);
     },
   };
-  for (const [event, listener] of Object.entries(listeners)) kit.on(event, listener);
+  const events = Object.keys(listeners);
+  for (let i = 0; i < events.length; i++) kit.on(events[i], listeners[events[i]]);
 
   /** The background queue options every enqueue from here shares */
   const backgroundOptions = () => ({
@@ -569,21 +596,6 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       });
       return 0;
     }
-  };
-
-  const resultOf = (ctx, rows, waitedMs) => {
-    const { data } = ctx;
-    const row = rows[0];
-    return {
-      migration: data.migration,
-      direction: data.direction,
-      status: row?.status ?? 'skipped',
-      ...(row?.duration !== undefined ? { duration: row.duration } : {}),
-      ...(row?.batch !== undefined ? { batch: row.batch } : {}),
-      ...(ctx.runId ? { runId: ctx.runId } : {}),
-      ...(row?.reason ? { reason: row.reason } : {}),
-      lockWaitMs: waitedMs,
-    };
   };
 
   const runMigrationJob = async (ctx, signal) => {
@@ -700,11 +712,9 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
   const heldFailure = async (first, to) => {
     if (!first || (to !== undefined && first.file > to)) return undefined;
     if (typeof kit.list !== 'function' || typeof kit.dryRun !== 'function') return undefined;
-    const row = (await kit.list('all', { checksums: false })).find(
-      (candidate) => candidate.file === first.file,
-    );
+    const row = rowOf(await kit.list('all', { checksums: false }), first.file);
     if (row?.status !== 'failed' || typeof row.failedChecksum !== 'string') return undefined;
-    const [planned] = await kit.dryRun('up', first.file);
+    const planned = (await kit.dryRun('up', first.file))[0];
     if (planned?.checksum !== row.failedChecksum) return undefined;
     return {
       migration: first.file,
@@ -714,7 +724,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
   };
 
   /** The plan the last tick said it holds a converge for — said once, not on every tick */
-  let saidHeldConverge;
+  let saidHeldConverge = '';
 
   /**
    * The circuit breaker of the converge a tick adds: the newest entry of the
@@ -731,9 +741,9 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     if (plan.fingerprint === undefined || typeof kit.convergeHistory !== 'function') {
       return undefined;
     }
-    const [last] = await kit.convergeHistory({ limit: 1 });
+    const last = (await kit.convergeHistory({ limit: 1 }))[0];
     if (last?.success !== false || last.fingerprint !== plan.fingerprint) {
-      saidHeldConverge = undefined;
+      saidHeldConverge = '';
       return undefined;
     }
     if (saidHeldConverge !== plan.fingerprint) {
@@ -754,7 +764,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
   };
 
   /** What the last sync tick found the line waiting for — `{ migration, waitsFor }` */
-  let lastWaiting;
+  let lastWaiting = null;
 
   const runSyncJob = async (ctx) => {
     if (!queue) {
@@ -783,11 +793,8 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       // the declared collections — a deploy that only changed a definition
       // converges on the next tick. A dry run first, so an idle tick takes no
       // lock; a job only when something differs.
-      if (
-        to === undefined &&
-        typeof kit.convergesAfterUp === 'function' &&
-        (await kit.convergesAfterUp())
-      ) {
+      const canConverge = to === undefined && typeof kit.convergesAfterUp === 'function';
+      if (canConverge && (await kit.convergesAfterUp())) {
         const plan = await kit.converge({ dryRun: true });
         const held = plan.inSync ? undefined : await heldConverge(plan);
         if (held) {
@@ -795,10 +802,10 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
         } else if (!plan.inSync) {
           // Kept like the tick that added it: a schedule adds one per deploy
           // at best, one per tick at worst.
-          const handle = await enqueueConverge(queue, kit, {
+          const enqueued = await enqueueConverge(queue, kit, {
             jobOptions: { ...TICK_RETENTION, ...jobOptions },
           });
-          result.converge = { jobId: handle.jobId, deduplicated: handle.deduplicated };
+          result.converge = { jobId: enqueued.jobId, deduplicated: enqueued.deduplicated };
         }
       }
       return result;
@@ -840,7 +847,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       ...(to !== undefined ? { to } : {}),
       ...(jobOptions ? { jobOptions } : {}),
     });
-    lastWaiting = group.waiting;
+    lastWaiting = group.waiting ?? null;
     const migrations = [];
     for (const job of group.jobs) migrations.push(job.migration);
     return {
@@ -907,6 +914,12 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     return requeued;
   };
 
+  const runJob = (ctx, signal) => {
+    if (ctx.data.kind === 'sync') return runSyncJob(ctx);
+    if (ctx.data.kind === 'converge') return runConvergeJob(ctx, signal);
+    return runMigrationJob(ctx, signal);
+  };
+
   const handle = async (job, token, signal) => {
     const ctx = {
       job,
@@ -943,10 +956,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
         ...jobSummary(ctx.data),
       });
       await kit.connect();
-      let result;
-      if (ctx.data.kind === 'sync') result = await runSyncJob(ctx);
-      else if (ctx.data.kind === 'converge') result = await runConvergeJob(ctx, abort);
-      else result = await runMigrationJob(ctx, abort);
+      const result = await runJob(ctx, abort);
       seal(ctx);
       progress(ctx, 'completed', ctx.runId ? { runId: ctx.runId } : {});
       await flush(ctx);
@@ -975,7 +985,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
           ...(ctx.runId ? { runId: ctx.runId } : {}),
         });
       }
-      write(ctx, (target) =>
+      writeToJob(ctx, (target) =>
         target.log?.(
           redactOutbound(`✖ ${errorText(error)}${ctx.runId ? ` [run ${ctx.runId}]` : ''}`),
         ),
@@ -984,7 +994,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       throw error;
     } finally {
       abort.removeEventListener('abort', onAbort);
-      current = undefined;
+      current = null;
     }
   };
 
@@ -1010,7 +1020,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
   processor.close = async () => {
     processor.shutdown();
     await chain;
-    for (const [event, listener] of Object.entries(listeners)) kit.off(event, listener);
+    for (let i = 0; i < events.length; i++) kit.off(events[i], listeners[events[i]]);
     if (ownsKit) await kit.disconnect();
   };
 

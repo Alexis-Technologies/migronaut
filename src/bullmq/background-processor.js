@@ -71,10 +71,6 @@ const moved = (name) => {
   return error;
 };
 
-/**
- * Validate the background processor's options. Pure, like the migration
- * processor's: nothing is constructed.
- */
 /** Every option createBackgroundProcessor takes — a typo is refused, not ignored */
 const PROCESSOR_KEYS = new Set([
   'kit',
@@ -90,6 +86,10 @@ const PROCESSOR_KEYS = new Set([
   'userlandLogRows',
 ]);
 
+/**
+ * Validate the background processor's options. Pure, like the migration
+ * processor's: nothing is constructed.
+ */
 const resolveBackgroundProcessorOptions = (options) => {
   if (!isObjectLike(options)) {
     throw new ConfigInvalidError('createBackgroundProcessor options must be an object');
@@ -123,10 +123,8 @@ const resolveBackgroundProcessorOptions = (options) => {
     );
   }
   // The kit's own range for a caller's slice (background-spec's assertSliceMs).
-  if (
-    sliceMs !== undefined &&
-    (!Number.isSafeInteger(sliceMs) || sliceMs < 1 || sliceMs > MAX_SLICE_MS)
-  ) {
+  const isSliceMs = Number.isSafeInteger(sliceMs) && sliceMs >= 1 && sliceMs <= MAX_SLICE_MS;
+  if (sliceMs !== undefined && !isSliceMs) {
     throw new ConfigInvalidError(`sliceMs must be an integer from 1 to ${MAX_SLICE_MS}`, {
       sliceMs,
     });
@@ -177,7 +175,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
    * settle at all, and a lane must not hold its lease for a log row.
    */
   const write = async (action) => {
-    let pending;
+    let pending = null;
     try {
       pending = Promise.resolve(action());
     } catch {
@@ -267,7 +265,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
         laneLog(lane, userlandOverflowRow(lane.dropped, settings.userlandLogRows));
       }
       // Each write is bounded on its own (`write`), so this drain is too.
-      await Promise.allSettled([...lane.writes]);
+      await Promise.allSettled(lane.writes);
     }
   };
 
@@ -324,7 +322,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
       if (shutdownController.signal.aborted) return later(ctx, 0, withRound(base), keep());
       const answer = await kit.coordinateBackground(name, {
         signal: ctx.abort,
-        driver: { kind: 'bullmq', ref: String(job.id), ...(round !== undefined ? { round } : {}) },
+        driver: { kind: 'bullmq', ref: `${job.id}`, ...(round !== undefined ? { round } : {}) },
       });
       if (answer.round !== undefined) round = answer.round;
       await progress(job, { status: answer.next, ...(round !== undefined ? { round } : {}) });
@@ -338,7 +336,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
         await log(job, `↷ ${name}: superseded by a newer coordinator`);
         kit.logger.info(`↷ Background coordinator of ${name} superseded by a newer one`, {
           background: name,
-          job: String(job.id),
+          job: `${job.id}`,
         });
         return withRound({ ...base, status: 'superseded' });
       }
@@ -371,7 +369,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
         answer,
         round,
         spawn,
-        parent: { id: String(job.id), queue: parentQueueOf(job) },
+        parent: { id: `${job.id}`, queue: parentQueueOf(job) },
       });
       if (await job.moveToWaitingChildren(ctx.token)) throw moved(WAITING_CHILDREN_ERROR_NAME);
       // Every lane finished before this job could wait for them: look again now.
@@ -406,7 +404,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
     const name = data.migration;
     const base = { kind: JOB_NAMES.BACKGROUND_LANE, migration: name };
     if (shutdownController.signal.aborted) return later(ctx, 0, { ...base, outcome: 'stopped' });
-    let slice;
+    let slice = null;
     try {
       slice = await asLane(job, (ref) =>
         kit.runBackgroundSlice(name, {
@@ -440,7 +438,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
         `⚠ Background lane of ${name}: a slice failed (${message}) — retry ${retry}`,
         {
           background: name,
-          job: String(job.id),
+          job: `${job.id}`,
           retry,
           error: message,
         },
@@ -537,7 +535,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
   /** Shut down, let the jobs in flight settle, disconnect a kit the processor created */
   processor.close = async () => {
     processor.shutdown();
-    await Promise.allSettled([...inFlight]);
+    await Promise.allSettled(inFlight);
     if (typeof kit.off === 'function') kit.off('migration:log', onUserland);
     if (ownsKit) await kit.disconnect();
   };

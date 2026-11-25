@@ -26,8 +26,8 @@ const { createUpcaster } = require('./upcaster.js');
 const entriesOf = (definitions) => {
   if (Array.isArray(definitions)) {
     const entries = [];
-    for (const [position, item] of definitions.entries()) {
-      const definition = unwrapDefinition(item);
+    for (let position = 0; position < definitions.length; position++) {
+      const definition = unwrapDefinition(definitions[position]);
       if (!isPlainObject(definition) || typeof definition.name !== 'string') {
         throw new ConfigInvalidError(
           `defineShapes: definitions[${position}] needs a name — or pass { name: definition }`,
@@ -44,14 +44,26 @@ const entriesOf = (definitions) => {
     );
   }
   const entries = [];
-  for (const [name, definition] of Object.entries(definitions)) {
-    const resolved = unwrapDefinition(definition);
+  const names = Object.keys(definitions);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const resolved = unwrapDefinition(definitions[name]);
     if (!isPlainObject(resolved) || resolved.versioning === undefined) {
       throw new ConfigInvalidError(`defineShapes: "${name}" declares no versioning`);
     }
     entries.push([name, resolved]);
   }
   return entries;
+};
+
+/** An option of a bound guard that names `key` as anything but the collection's own `value` */
+const assertBoundName = (collection, options, key, value) => {
+  if (options[key] !== undefined && options[key] !== value) {
+    throw new ConfigInvalidError(
+      `${collection}: ${key} is "${value}" — the guards bound to it take no other`,
+      { collection, [key]: options[key] },
+    );
+  }
 };
 
 /**
@@ -63,7 +75,10 @@ const defineShapes = (...args) => {
   if (args.length === 0) return (defs) => defineShapes(defs);
   const definitions = args[0];
   const registry = new Map();
-  for (const [name, definition] of entriesOf(definitions)) {
+  const entries = entriesOf(definitions);
+  for (let i = 0; i < entries.length; i++) {
+    const name = entries[i][0];
+    const definition = entries[i][1];
     if (registry.has(name)) {
       throw new ConfigInvalidError(`defineShapes: "${name}" is declared twice`);
     }
@@ -131,17 +146,8 @@ const defineShapes = (...args) => {
       }
       const bound = (options = {}) => {
         if (!isPlainObject(options)) throw new ConfigInvalidError('options must be an object');
-        for (const [key, value] of [
-          ['field', field],
-          ['revisionField', revisionField],
-        ]) {
-          if (options[key] !== undefined && options[key] !== value) {
-            throw new ConfigInvalidError(
-              `${name}: ${key} is "${value}" — the guards bound to it take no other`,
-              { collection: name, [key]: options[key] },
-            );
-          }
-        }
+        assertBoundName(name, options, 'field', field);
+        assertBoundName(name, options, 'revisionField', revisionField);
         return { ...options, field, revisionField };
       };
       return Object.freeze({
@@ -156,8 +162,12 @@ const defineShapes = (...args) => {
       });
     },
     /** `stamp` for one document or every document of an array — for `insertMany` */
-    onInsert: (name, docs) =>
-      Array.isArray(docs) ? docs.map((doc) => stamp(name, doc)) : stamp(name, docs),
+    onInsert: (name, docs) => {
+      if (!Array.isArray(docs)) return stamp(name, docs);
+      const stamped = [];
+      for (let i = 0; i < docs.length; i++) stamped.push(stamp(name, docs[i]));
+      return stamped;
+    },
     /**
      * An upsert's update with the stamp of a document it may insert: the
      * version on `$setOnInsert` (unless the update sets it itself) and the

@@ -128,6 +128,18 @@ const JOB_FIELDS = Object.freeze({
   ]),
   'background-verify': new Set(['v', 'kind']),
 });
+/** The names a migration queue's jobs go by, and a background queue's */
+const MIGRATION_QUEUE_JOBS = new Set([
+  JOB_NAMES.UP,
+  JOB_NAMES.DOWN,
+  JOB_NAMES.SYNC,
+  JOB_NAMES.CONVERGE,
+]);
+const BACKGROUND_QUEUE_JOBS = new Set([
+  JOB_NAMES.BACKGROUND,
+  JOB_NAMES.BACKGROUND_LANE,
+  JOB_NAMES.BACKGROUND_VERIFY,
+]);
 /** The limit every migronaut id is minted under — a producer's own check and this one agree */
 const MAX_GROUP_ID_LENGTH = MAX_ID_LENGTH;
 
@@ -139,6 +151,11 @@ const isObjectLike = (value) =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 const isPositiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
 const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+const isChecksum = (value) => typeof value === 'string' && CHECKSUM_PATTERN.test(value);
+
+/** A job's place in its group: `index` of `total` */
+const isPosition = (index, total) =>
+  Number.isSafeInteger(index) && Number.isSafeInteger(total) && index >= 0 && index < total;
 
 /**
  * A migration name as an id fragment: letters, digits, `.`, `_` and `-` as
@@ -230,7 +247,7 @@ const assertAllowed = (job, data, allow) => {
         `Refused migration job: ${permission === 'unordered' ? 'ordered: false' : permission} ` +
           `is not allowed by this worker (allow.${permission})`,
         {
-          ...(job?.id !== undefined ? { jobId: String(job.id) } : {}),
+          ...(job?.id !== undefined ? { jobId: `${job.id}` } : {}),
           issue: 'not allowed',
           permission,
         },
@@ -241,7 +258,7 @@ const assertAllowed = (job, data, allow) => {
 
 const invalid = (job, issue) => {
   return new QueueJobInvalidError(`Invalid migration job: ${issue}`, {
-    ...(job?.id !== undefined ? { jobId: String(job.id) } : {}),
+    ...(job?.id !== undefined ? { jobId: `${job.id}` } : {}),
     issue,
   });
 };
@@ -256,14 +273,7 @@ const invalid = (job, issue) => {
 const parseJobData = (job) => {
   if (!isObjectLike(job)) throw invalid(job, 'job is not an object');
   const { name, data } = job;
-  if (
-    name !== JOB_NAMES.UP &&
-    name !== JOB_NAMES.DOWN &&
-    name !== JOB_NAMES.SYNC &&
-    name !== JOB_NAMES.CONVERGE
-  ) {
-    throw invalid(job, 'unknown job name');
-  }
+  if (!MIGRATION_QUEUE_JOBS.has(name)) throw invalid(job, 'unknown job name');
   if (!isObjectLike(data)) throw invalid(job, 'data is not an object');
   if (!Number.isSafeInteger(data.v) || data.v < MIN_JOB_DATA_VERSION) {
     throw invalid(job, 'unsupported job data version');
@@ -322,18 +332,12 @@ const parseJobData = (job) => {
   if (!isGroupId(data.groupId)) {
     throw invalid(job, 'groupId is not a short string');
   }
-  if (
-    !Number.isSafeInteger(data.index) ||
-    !Number.isSafeInteger(data.total) ||
-    data.index < 0 ||
-    data.index >= data.total
-  ) {
+  if (!isPosition(data.index, data.total)) {
     throw invalid(job, 'index/total are not a valid position');
   }
   const isUp = name === JOB_NAMES.UP;
-  if (
-    isUp ? !isPositiveInteger(data.batch) : data.batch != null && !isPositiveInteger(data.batch)
-  ) {
+  const hasBatch = data.batch !== undefined && data.batch !== null;
+  if ((isUp || hasBatch) && !isPositiveInteger(data.batch)) {
     throw invalid(job, 'batch is not a positive integer');
   }
   if (data.force !== undefined && (data.force !== true || !isUp)) {
@@ -342,10 +346,7 @@ const parseJobData = (job) => {
   if (data.ordered !== undefined && typeof data.ordered !== 'boolean') {
     throw invalid(job, 'ordered is not a boolean');
   }
-  if (
-    data.checksum !== undefined &&
-    !(typeof data.checksum === 'string' && CHECKSUM_PATTERN.test(data.checksum))
-  ) {
+  if (data.checksum !== undefined && !isChecksum(data.checksum)) {
     throw invalid(job, 'checksum is not a SHA-256 hex digest');
   }
 
@@ -356,7 +357,7 @@ const parseJobData = (job) => {
     groupId: data.groupId,
     index: data.index,
     total: data.total,
-    ...(data.batch != null ? { batch: data.batch } : {}),
+    ...(hasBatch ? { batch: data.batch } : {}),
     ...(data.force ? { force: true } : {}),
     ...(data.ordered !== undefined ? { ordered: data.ordered } : {}),
     ...(data.checksum !== undefined ? { checksum: data.checksum } : {}),
@@ -391,13 +392,7 @@ const assertEnvelope = (job, kind) => {
 const parseBackgroundJobData = (job) => {
   if (!isObjectLike(job)) throw invalid(job, 'job is not an object');
   const { name } = job;
-  if (
-    name !== JOB_NAMES.BACKGROUND &&
-    name !== JOB_NAMES.BACKGROUND_LANE &&
-    name !== JOB_NAMES.BACKGROUND_VERIFY
-  ) {
-    throw invalid(job, 'unknown background job name');
-  }
+  if (!BACKGROUND_QUEUE_JOBS.has(name)) throw invalid(job, 'unknown background job name');
   assertEnvelope(job, name);
   const { data } = job;
   if (name === JOB_NAMES.BACKGROUND_VERIFY) return { kind: name };
@@ -463,6 +458,7 @@ const buildMigrationJob = ({
   requestedBy,
   reason,
 }) => {
+  const hasBatch = batch !== undefined && batch !== null;
   return {
     name: direction,
     data: {
@@ -472,7 +468,7 @@ const buildMigrationJob = ({
       groupId,
       index,
       total,
-      ...(batch != null ? { batch } : {}),
+      ...(hasBatch ? { batch } : {}),
       ...(force ? { force: true } : {}),
       ordered: ordered !== false,
       ...(checksum !== undefined ? { checksum } : {}),
@@ -514,12 +510,6 @@ const buildConvergeJob = ({ groupId, ordered, after, jobOptions, requestedBy, re
   };
 };
 
-/**
- * How many finished scheduler ticks are kept when the caller's `jobOptions`
- * say nothing. BullMQ keeps every finished job by default, and a schedule
- * mints one per tick forever — `every: 60_000` alone is 1,440 jobs a day, in
- * a Redis that usually runs with `noeviction`.
- */
 /** What was already said about options nobody reads, per kit — once, not on every call */
 const saidUnknown = new WeakMap();
 
@@ -614,6 +604,12 @@ const KNOWN_OPTIONS = Object.freeze({
  */
 const JOB_WRITE_WAIT_MS = 5_000;
 
+/**
+ * How many finished scheduler ticks are kept when the caller's `jobOptions`
+ * say nothing. BullMQ keeps every finished job by default, and a schedule
+ * mints one per tick forever — `every: 60_000` alone is 1,440 jobs a day, in
+ * a Redis that usually runs with `noeviction`.
+ */
 const TICK_RETENTION = Object.freeze({
   removeOnComplete: Object.freeze({ count: 100 }),
   removeOnFail: Object.freeze({ count: 500 }),

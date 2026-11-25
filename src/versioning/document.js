@@ -27,6 +27,13 @@ const {
  * resolved `versioning`); `revisionField` is `null` when revisions are off.
  */
 
+/** A system field name (`null`: none), or a ConfigInvalidError naming the option `key` */
+const assertFieldName = (key, name) => {
+  if (name === null) return;
+  const issue = fieldNameIssue(name);
+  if (issue) throw new ConfigInvalidError(`${key} ${issue}`, { key });
+};
+
 /**
  * The system field names, validated: `{ field, revisionField }` with the
  * defaults filled in and `revisionField: null` under `revision: false`.
@@ -37,14 +44,8 @@ const resolveFieldNames = ({ field, revisionField, revision } = {}) => {
   const versionName = field ?? VERSIONING_DEFAULTS.field;
   const revisionName =
     revision === false ? null : (revisionField ?? VERSIONING_DEFAULTS.revisionField);
-  for (const [key, name] of [
-    ['field', versionName],
-    ['revisionField', revisionName],
-  ]) {
-    if (name === null) continue;
-    const issue = fieldNameIssue(name);
-    if (issue) throw new ConfigInvalidError(`${key} ${issue}`, { key });
-  }
+  assertFieldName('field', versionName);
+  assertFieldName('revisionField', revisionName);
   if (versionName === revisionName) {
     throw new ConfigInvalidError('field and revisionField must differ', { key: 'revisionField' });
   }
