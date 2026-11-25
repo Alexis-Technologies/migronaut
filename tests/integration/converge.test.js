@@ -35,12 +35,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}, kitOptions = {}) {
+const kitWith = (overrides = {}, kitOptions = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides, kitOptions);
   kits.push(kit);
   return kit;
-}
+};
 
 const indexesOf = async (collection) =>
   (await mongo.db.collection(collection).listIndexes().toArray()).filter(
@@ -57,14 +57,14 @@ const rows = (result) =>
   );
 
 /** Converge, then prove the database is at a fixed point: a second plan finds nothing */
-async function convergeToFixedPoint(collections, options = {}) {
+const convergeToFixedPoint = async (collections, options = {}) => {
   const result = await kitWith({ collections }).converge(options);
   assert.strictEqual(result.inSync, true, JSON.stringify(result.unstable));
   const replan = await kitWith({ collections }).converge({ ...options, dryRun: true });
   assert.strictEqual(replan.changed, 0, JSON.stringify(rows(replan)));
   assert.strictEqual(replan.inSync, true);
   return result;
-}
+};
 
 describe('converge (integration) — every kind of index reaches a fixed point', () => {
   const kinds = [

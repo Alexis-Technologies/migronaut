@@ -33,12 +33,12 @@ afterEach(() => {
 });
 
 /** Base config pointed at the test mongo + project dir, output silenced */
-function config() {
+const config = () => {
   return { uri: mongo.uri, dbName: DB, migrationsDir: project.dir, logger: null };
-}
+};
 
 /** Insert a fresh (non-stale) lock document so acquisition is blocked */
-async function holdLock() {
+const holdLock = async () => {
   await mongo.db.collection(LOCK_COLLECTION).insertOne({
     _id: 'migronaut_lock',
     lockedAt: new Date(),
@@ -47,7 +47,7 @@ async function holdLock() {
     executedBy: 'peer',
     owner: 'peer-token',
   });
-}
+};
 
 describe('runMigrations (programmatic entry point)', () => {
   it('should apply all pending migrations and report them', async () => {

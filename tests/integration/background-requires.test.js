@@ -33,12 +33,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const V2 = `export const background = {
   collection: 'orders',

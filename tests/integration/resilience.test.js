@@ -40,12 +40,12 @@ afterEach(() => {
   project?.cleanup();
 });
 
-function migrator(overrides = {}) {
+const migrator = (overrides = {}) => {
   return makeMigrator(mongo.uri, DB, project.dir, overrides);
-}
+};
 
 /** A migration whose up() blocks until `release()` is called via a marker doc */
-function slowMigration(collection, value, delayMs = 60) {
+const slowMigration = (collection, value, delayMs = 60) => {
   return `export async function up({ db }) {
   await new Promise((resolve) => setTimeout(resolve, ${delayMs}));
   await db.collection('${collection}').insertOne({ marker: '${value}' });
@@ -54,7 +54,7 @@ export async function down({ db }) {
   await db.collection('${collection}').deleteMany({ marker: '${value}' });
 }
 `;
-}
+};
 
 /**
  * Overwrite the lock's owner token — the state another process leaves behind
@@ -64,21 +64,21 @@ export async function down({ db }) {
  * reads the token back to confirm ownership, so stealing in between makes
  * acquire itself fail, which is a different scenario than the one under test.
  */
-async function stealLock() {
+const stealLock = async () => {
   const result = await mongo.db
     .collection(LOCK_COLLECTION)
     .updateOne({ _id: LOCK_ID }, { $set: { owner: 'someone-else' } });
   assert.strictEqual(result.matchedCount, 1, 'expected a held lock to steal');
-}
+};
 
 /** A deferred resolved from inside the locked body, so tests know it started */
-function deferred() {
+const deferred = () => {
   let settle;
   const promise = new Promise((resolve) => {
     settle = resolve;
   });
   return { promise, resolve: settle };
-}
+};
 
 describe('lost lock (integration)', () => {
   it('should abort the run when another process reclaims the lock', async () => {
@@ -624,7 +624,7 @@ describe('run correlation (integration)', () => {
 
 describe('custom id format — generateId (integration)', () => {
   /** The lock document, sampled once while a run holds it */
-  function lockSampler() {
+  const lockSampler = () => {
     let sample;
     return {
       progress: {
@@ -635,7 +635,7 @@ describe('custom id format — generateId (integration)', () => {
       },
       read: () => sample,
     };
-  }
+  };
 
   it('should mint the run id through generateId — records, lock, events and status', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
@@ -788,8 +788,8 @@ describe('custom id format — generateId (integration)', () => {
 
       await assert.rejects(second.up(), LockAlreadyHeldError);
       // The refused run must not have released the lock on its way out either.
-      const after = await mongo.db.collection(LOCK_COLLECTION).findOne({ _id: LOCK_ID });
-      assert.strictEqual(after.nonce, held.nonce);
+      const lock = await mongo.db.collection(LOCK_COLLECTION).findOne({ _id: LOCK_ID });
+      assert.strictEqual(lock.nonce, held.nonce);
       results = await running;
     } finally {
       // Open clients would keep a failing run of this test from ever exiting.

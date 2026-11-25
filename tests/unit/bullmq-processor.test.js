@@ -24,7 +24,7 @@ const {
 } = require('../../src/errors/index.js');
 const { stubKit } = require('../helpers/stub-kit.js');
 
-function fakeJob(name, data, { attempts } = {}) {
+const fakeJob = (name, data, { attempts } = {}) => {
   const job = {
     id: '11',
     name,
@@ -36,7 +36,7 @@ function fakeJob(name, data, { attempts } = {}) {
     updateProgress: mock.fn(async (progress) => job.progressUpdates.push(progress)),
   };
   return job;
-}
+};
 
 const upJob = (overrides = {}, jobOptions) =>
   fakeJob(
@@ -124,12 +124,12 @@ describe('createMigrationProcessor', () => {
 
   describe('writes to a Redis that is away', () => {
     /** A job whose log rows and progress updates never settle — commands queued for good */
-    function stuckJob() {
+    const stuckJob = () => {
       const job = upJob();
       job.log = mock.fn(() => new Promise(() => {}));
       job.updateProgress = mock.fn(() => new Promise(() => {}));
       return job;
-    }
+    };
 
     it('should settle a finished job without them, and let the next one through', async () => {
       const kit = stubKit();
@@ -1209,7 +1209,7 @@ describe('isRetryableError', () => {
 
 describe('createMigrationProcessor background link', () => {
   const NAME = '0001-orders.js';
-  function linked(overrides = {}, queueOverrides = {}) {
+  const linked = (overrides = {}, queueOverrides = {}) => {
     const added = [];
     const queue = {
       addBulk: mock.fn(async (specs) => {
@@ -1232,7 +1232,7 @@ describe('createMigrationProcessor background link', () => {
       return up(name, options);
     });
     return { kit, queue, added };
-  }
+  };
 
   for (const [what, background, pattern] of [
     ['a non-object', 1, /background must be \{ queue \}/],

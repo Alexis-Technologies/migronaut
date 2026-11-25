@@ -13,23 +13,23 @@ const {
 const { stubKit } = require('../helpers/stub-kit.js');
 
 /** A connection token that would notice being closed — the adapter never owns it */
-function spiedConnection() {
+const spiedConnection = () => {
   const connection = createFakeConnection();
   connection.quit = mock.fn();
   connection.disconnect = mock.fn();
   connection.close = mock.fn();
   return connection;
-}
+};
 
-function make(overrides = {}) {
+const make = (overrides = {}) => {
   const connection = overrides.connection ?? spiedConnection();
   const kit = overrides.kit ?? stubKit();
   const mq = createMigrationQueue({ bullmq: fakeBullmq(), connection, kit, ...overrides });
   return { mq, kit, connection };
-}
+};
 
 /** Capture what the kit's logger is told */
-function recordingLogger(kit) {
+const recordingLogger = (kit) => {
   const lines = [];
   const record = (level) => (msg, fields) => lines.push({ level, msg, fields });
   kit.logger = {
@@ -39,7 +39,7 @@ function recordingLogger(kit) {
     error: record('error'),
   };
   return lines;
-}
+};
 
 const pendingRows = (...files) =>
   files.map((file) => ({ file, status: 'pending', appliedAt: null }));

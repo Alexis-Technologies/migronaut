@@ -15,7 +15,7 @@ const completed = (name, collection) => ({
  * old-shape document. `now` is what each state reads as by the time it is
  * to be reopened — someone may have moved it since the list was read.
  */
-function makeDeps(states, now) {
+const makeDeps = (states, now) => {
   const events = [];
   const lines = [];
   const moves = [];
@@ -45,7 +45,7 @@ function makeDeps(states, now) {
     fields: (extra) => extra,
     emit: (event, payload) => events.push([event, payload]),
   };
-}
+};
 
 describe('verify — a state that moved since the list was read', () => {
   it('should leave the ones it may not reopen and still check the ones after them', async () => {

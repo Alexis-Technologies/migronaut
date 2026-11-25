@@ -29,33 +29,33 @@ afterEach(async () => {
   project?.cleanup();
 });
 
-function migrator(overrides = {}) {
+const migrator = (overrides = {}) => {
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 /** A logger that keeps every line it is given */
-function recordingLogger() {
+const recordingLogger = () => {
   const lines = [];
   const at = (level) => (msg, fields) => lines.push({ level, msg, fields });
   return {
     lines,
     logger: { debug: at('debug'), info: at('info'), warn: at('warn'), error: at('error') },
   };
-}
+};
 
 /** Everything a kit emits as migration:log, and its run ids */
-function listen(kit) {
+const listen = (kit) => {
   const events = [];
   const runs = [];
   kit.on('migration:log', (event) => events.push(event));
   kit.on('run:start', (event) => runs.push(event.runId));
   return { events, runs };
-}
+};
 
 /** A migration that logs a line for its users and an operational one, then inserts */
-function loggingMigration(value) {
+const loggingMigration = (value) => {
   return `export async function up({ db, logger, run }) {
   logger.debug('starting ${value}');
   logger.info('inserting', { userland: true, value: '${value}', frozen: Object.isFrozen(run) });
@@ -66,7 +66,7 @@ export async function down({ db, logger }) {
   await db.collection('things').deleteMany({ marker: '${value}' });
 }
 `;
-}
+};
 
 describe('userland migration logs (integration)', () => {
   it('should emit one event per userland call, correlated with the run and the changelog', async () => {

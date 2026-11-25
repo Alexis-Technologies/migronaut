@@ -35,7 +35,7 @@ const baseEnv = Object.fromEntries(
  * ~30 of these tests to that file's contents. Tests that want the repo config
  * pass `repoRoot` explicitly — that coupling is then the point of the test.
  */
-function runCli(args, env = {}, cwd = project?.dir ?? repoRoot, input) {
+const runCli = (args, env = {}, cwd = project?.dir ?? repoRoot, input) => {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binPath, ...args], {
       cwd,
@@ -56,7 +56,7 @@ function runCli(args, env = {}, cwd = project?.dir ?? repoRoot, input) {
     }
     child.stdin.end();
   });
-}
+};
 
 /** True when `text` contains any ANSI escape sequence */
 const ESC = String.fromCharCode(27);
@@ -84,9 +84,9 @@ afterEach(() => {
   project?.cleanup();
 });
 
-function baseArgs(extra) {
+const baseArgs = (extra) => {
   return ['--uri', mongo.uri, '--db', DB, '--dir', project.dir, ...extra];
-}
+};
 
 describe('migronaut CLI (integration)', () => {
   it('should exit 0 when up succeeds', async () => {
@@ -1188,12 +1188,12 @@ describe('converge CLI (integration)', () => {
   const USERS = { name: 'users', indexes: [{ key: { email: 1 } }] };
 
   /** A migronaut.config.json in the project dir — `collections` has no flag or env var */
-  function declare(collections, extra = {}) {
+  const declare = (collections, extra = {}) => {
     writeFileSync(
       path.join(project.dir, 'migronaut.config.json'),
       JSON.stringify({ collections, ...extra }),
     );
-  }
+  };
   const indexNames = async (collection) =>
     (await mongo.db.collection(collection).listIndexes().toArray())
       .map((index) => index.name)

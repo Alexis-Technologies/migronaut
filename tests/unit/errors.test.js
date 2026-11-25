@@ -47,25 +47,27 @@ describe('domain error classes', () => {
   });
 
   for (const [name, Ctor] of subclasses) {
-    it(`${name} should carry a typed code and extend MigronautError`, () => {
-      const err = new Ctor('Something happened', { detail: 1 });
-      assert.ok(err instanceof MigronautError);
-      assert.ok(err instanceof Error);
-      assert.strictEqual(typeof err.code, 'string');
-      assert.match(err.code, /^[A-Z_]+$/);
-      assert.strictEqual(err.name, name);
-      assert.strictEqual(err.message, 'Something happened');
-      assert.deepStrictEqual(err.context, { detail: 1 });
-    });
+    describe(name, () => {
+      it('should carry a typed code and extend MigronautError', () => {
+        const err = new Ctor('Something happened', { detail: 1 });
+        assert.ok(err instanceof MigronautError);
+        assert.ok(err instanceof Error);
+        assert.strictEqual(typeof err.code, 'string');
+        assert.match(err.code, /^[A-Z_]+$/);
+        assert.strictEqual(err.name, name);
+        assert.strictEqual(err.message, 'Something happened');
+        assert.deepStrictEqual(err.context, { detail: 1 });
+      });
 
-    it(`${name} should be catchable as MigronautError with its code`, () => {
-      const expected = new Ctor('probe').code;
-      try {
-        throw new Ctor('boom');
-      } catch (e) {
-        assert.ok(e instanceof MigronautError);
-        assert.strictEqual(e.code, expected);
-      }
+      it('should be catchable as MigronautError with its code', () => {
+        const expected = new Ctor('probe').code;
+        try {
+          throw new Ctor('boom');
+        } catch (e) {
+          assert.ok(e instanceof MigronautError);
+          assert.strictEqual(e.code, expected);
+        }
+      });
     });
   }
 });

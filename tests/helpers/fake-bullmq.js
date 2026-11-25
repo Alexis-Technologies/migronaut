@@ -62,11 +62,11 @@ const { EventEmitter } = require('node:events');
 const servers = new WeakMap();
 
 /** A fresh "Redis server": pass it as `connection` to isolate a test */
-function createFakeConnection() {
+const createFakeConnection = () => {
   return { fake: 'redis' };
-}
+};
 
-function stateFor(connection, prefix = 'bull', name) {
+const stateFor = (connection, prefix = 'bull', name) => {
   if (connection === null || typeof connection !== 'object') {
     throw new Error('fake-bullmq: `connection` must be a createFakeConnection() token');
   }
@@ -101,44 +101,44 @@ function stateFor(connection, prefix = 'bull', name) {
     queues.set(key, state);
   }
   return state;
-}
+};
 
 /** Into the wait list — and tell the workers */
-function enqueue(state, id, { head = false } = {}) {
+const enqueue = (state, id, { head = false } = {}) => {
   if (head) state.wait.unshift(id);
   else state.wait.push(id);
   state.bus.emit('waiting', { jobId: id });
   state.bus.emit('tick');
-}
+};
 
 /** Delay a job until `timestamp` — promoted to the wait list when it comes */
-function delay(state, id, timestamp) {
+const delay = (state, id, timestamp) => {
   const ms = Math.max(0, timestamp - Date.now());
   const timer = setTimeout(() => promote(state, id), ms);
   timer.unref?.();
   state.delayed.set(id, { until: timestamp, timer });
   state.bus.emit('delayed', { jobId: id, delay: timestamp });
-}
+};
 
-function promote(state, id) {
+const promote = (state, id) => {
   const entry = state.delayed.get(id);
   if (entry === undefined) return;
   clearTimeout(entry.timer);
   state.delayed.delete(id);
   if (state.jobs.has(id)) enqueue(state, id);
-}
+};
 
 /** The queue state and job a `parent` option points at — `{ queue: qualifiedName, id }` */
-function parentOf(state, parent) {
+const parentOf = (state, parent) => {
   const target = state.queues.get(parent.queue);
   return { state: target, job: target?.jobs.get(parent.id) };
-}
+};
 
 /**
  * A child finished: record it on its parent, and wake the parent when it was
  * the last one it waited for. `outcome`: `{ value }` or `{ failedReason }`.
  */
-function childFinished(childState, child, outcome) {
+const childFinished = (childState, child, outcome) => {
   const parent = child.opts.parent;
   if (parent === undefined) return;
   const { state, job } = parentOf(childState, parent);
@@ -157,14 +157,14 @@ function childFinished(childState, child, outcome) {
     job.dependencies.set(key, 'failed');
   }
   wakeIfReady(state, job);
-}
+};
 
 /**
  * A child id added again with a `parent`: BullMQ refuses to move it away from
  * a parent that still exists; otherwise the existing job joins the new parent's
  * dependencies — already processed when it completed.
  */
-function bindExisting(state, existing, parent) {
+const bindExisting = (state, existing, parent) => {
   const before = existing.opts.parent;
   const same = before?.id === parent.id && before?.queue === parent.queue;
   if (before !== undefined && !same && parentOf(state, before).job !== undefined) {
@@ -180,27 +180,27 @@ function bindExisting(state, existing, parent) {
   }
   existing.opts = { ...existing.opts, parent };
   wakeIfReady(target.state, target.job);
-}
+};
 
-function pendingDependencies(job) {
+const pendingDependencies = (job) => {
   let pending = 0;
   for (const status of job.dependencies.values()) {
     if (status === 'unprocessed' || status === 'failed') pending += 1;
   }
   return pending;
-}
+};
 
-function wakeIfReady(state, job) {
+const wakeIfReady = (state, job) => {
   if (!state.waitingChildren.has(job.id) || pendingDependencies(job) > 0) return;
   state.waitingChildren.delete(job.id);
   enqueue(state, job.id);
-}
+};
 
-function assertQueueName(name) {
+const assertQueueName = (name) => {
   if (typeof name !== 'string' || name.includes(':')) {
     throw new Error('Queue name cannot contain :');
   }
-}
+};
 
 class FakeJob {
   #state;
@@ -369,12 +369,12 @@ class FakeJob {
   }
 }
 
-function releaseDedup(state, job) {
+const releaseDedup = (state, job) => {
   const dedupId = job.opts?.deduplication?.id;
   if (dedupId !== undefined && state.dedup.get(dedupId) === job.id) state.dedup.delete(dedupId);
-}
+};
 
-function validateJobOptions(opts) {
+const validateJobOptions = (opts) => {
   if (opts?.parent !== undefined && opts.deduplication !== undefined) {
     throw new Error('Deduplication and parent options cannot be used together');
   }
@@ -385,9 +385,9 @@ function validateJobOptions(opts) {
   if (jobId === undefined) return;
   if (`${parseInt(jobId, 10)}` === jobId) throw new Error('Custom Id cannot be integers');
   if (jobId.includes(':')) throw new Error('Custom Id cannot contain :');
-}
+};
 
-function clearState(state) {
+const clearState = (state) => {
   for (const entry of state.delayed.values()) clearTimeout(entry.timer);
   state.jobs.clear();
   state.wait.length = 0;
@@ -398,7 +398,7 @@ function clearState(state) {
   state.waitingChildren.clear();
   state.dedup.clear();
   state.schedulers.clear();
-}
+};
 
 class FakeQueue extends EventEmitter {
   #state;
@@ -581,12 +581,12 @@ class FakeQueue extends EventEmitter {
 const MOVED = new Set(['WaitingError', 'DelayedError', 'WaitingChildrenError']);
 
 /** A retry's delay: `{ type: 'fixed' | 'exponential', delay }` or a number */
-function backoffMs(backoff, attemptsMade) {
+const backoffMs = (backoff, attemptsMade) => {
   if (backoff === undefined) return 0;
   if (typeof backoff === 'number') return backoff;
   if (backoff.type === 'exponential') return (backoff.delay ?? 0) * 2 ** (attemptsMade - 1);
   return backoff.delay ?? 0;
-}
+};
 
 class FakeWorker extends EventEmitter {
   #state;
@@ -816,7 +816,7 @@ class FakeQueueEvents extends EventEmitter {
  * option. `{ flows: false }`: a BullMQ without parent support, for the
  * adapter's fallback.
  */
-function fakeBullmq({ flows = true } = {}) {
+const fakeBullmq = ({ flows = true } = {}) => {
   if (flows) return { Queue: FakeQueue, Worker: FakeWorker, QueueEvents: FakeQueueEvents };
   const withoutFlows = (Base) =>
     class extends Base {
@@ -830,7 +830,7 @@ function fakeBullmq({ flows = true } = {}) {
     Worker: withoutFlows(FakeWorker),
     QueueEvents: withoutFlows(FakeQueueEvents),
   };
-}
+};
 
 module.exports = {
   FakeJob,

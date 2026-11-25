@@ -210,12 +210,12 @@ describe('createShardPartitioner — batch queries', () => {
 });
 
 describe('createShardPartitioner — planning', () => {
-  function collection({ count = 1000, sample = [] } = {}) {
+  const collection = ({ count = 1000, sample = [] } = {}) => {
     return {
       countDocuments: mock.fn(async () => count),
       aggregate: mock.fn(() => ({ toArray: async () => sample })),
     };
-  }
+  };
 
   it('should plan nothing when nothing matches', async () => {
     const partitioner = createShardPartitioner({
@@ -537,7 +537,7 @@ describe('planMismatch — whether a job can work a plan', () => {
 
 describe('partitionerFor — which partitioner a collection gets', () => {
   const spec = { collection: 'orders', field: '__v', from: 1, to: 2, mode: 'declarative' };
-  function deps(overrides = {}) {
+  const deps = (overrides = {}) => {
     const warnings = [];
     const indexes = overrides.indexes ?? [{ key: { _id: 1 } }, { key: { __v: 1, _id: 1 } }];
     return {
@@ -554,7 +554,7 @@ describe('partitionerFor — which partitioner a collection gets', () => {
       chunksOf: async () => [],
       ...overrides,
     };
-  }
+  };
 
   it('should keep _id ranges off a sharded cluster, with shard-awareness off, or for a step', async () => {
     for (const [what, overrides, stepSpec] of [
@@ -622,11 +622,11 @@ describe('partitionerFor — which partitioner a collection gets', () => {
   });
 
   it('should throw when the indexes could not be listed, not read it as "no index"', async () => {
-    const failing = (error) =>
+    const failing = (cause) =>
       deps({
         db: {
           collection: () => ({
-            listIndexes: () => ({ toArray: () => Promise.reject(error) }),
+            listIndexes: () => ({ toArray: () => Promise.reject(cause) }),
           }),
         },
       });

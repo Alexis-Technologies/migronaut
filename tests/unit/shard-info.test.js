@@ -5,7 +5,7 @@ const { isUnauthorized, readChunks, readShardKey } = require('../../src/core/sha
 const unauthorized = () => Object.assign(new Error('not authorized on config'), { code: 13 });
 
 /** A client whose `config` collections answer what a test scripts */
-function fakeClient({ entry, chunks = {}, error } = {}) {
+const fakeClient = ({ entry, chunks = {}, error } = {}) => {
   const calls = [];
   const client = {
     calls,
@@ -34,7 +34,7 @@ function fakeClient({ entry, chunks = {}, error } = {}) {
     },
   };
   return client;
-}
+};
 
 describe('readShardKey', () => {
   it('should read a sharded collection from config.collections', async () => {

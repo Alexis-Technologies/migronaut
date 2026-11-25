@@ -70,12 +70,12 @@ describe('assertJobOptions', () => {
 
 describe('options nobody reads', () => {
   /** A kit that plans nothing, and keeps the warnings it is given */
-  function warnedKit() {
+  const warnedKit = () => {
     const warnings = [];
     const kit = stubKit({ dryRun: mock.fn(async () => []) });
     kit.logger = { ...kit.logger, warn: (message, fields) => warnings.push([message, fields]) };
     return { kit, warnings };
-  }
+  };
 
   it('should say an unknown option once — and still do what was asked without it', async () => {
     const { kit, warnings } = warnedKit();
@@ -538,12 +538,12 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
   });
 
   describe('group.wait()', () => {
-    function harness() {
+    const harness = () => {
       const connection = createFakeConnection();
       const queue = new FakeQueue('m', { connection });
       const queueEvents = new FakeQueueEvents('m', { connection });
       return { connection, queue, queueEvents };
-    }
+    };
 
     it('should reject, never throw, whatever goes wrong before the wait starts', async () => {
       const { queue } = harness();

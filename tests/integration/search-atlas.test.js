@@ -52,7 +52,7 @@ describe(
       project?.cleanup();
     });
 
-    function kitWith(collections, overrides = {}) {
+    const kitWith = (collections, overrides = {}) => {
       const kit = makeMigrator(ATLAS_URI, DB, project.dir, {
         collections,
         searchIndexWaitTimeoutMs: 300_000,
@@ -60,7 +60,7 @@ describe(
       });
       kits.push(kit);
       return kit;
-    }
+    };
 
     const rows = (result) =>
       result.collections.flatMap((collection) =>
@@ -70,7 +70,7 @@ describe(
       );
 
     /** Converge and wait for the builds, then prove a fixed point: a second plan finds nothing */
-    async function convergeToFixedPoint(collections, options = {}) {
+    const convergeToFixedPoint = async (collections, options = {}) => {
       const result = await kitWith(collections).converge({
         waitForSearchIndexes: true,
         ...options,
@@ -87,7 +87,7 @@ describe(
       );
       assert.deepStrictEqual(ignored, [], 'add these defaults to search-index-spec.js');
       return { result, replan };
-    }
+    };
 
     const listed = async (collection) =>
       db
@@ -95,12 +95,12 @@ describe(
         .aggregate([{ $listSearchIndexes: {} }])
         .toArray();
 
-    async function seed(collection) {
+    const seed = async (collection) => {
       await db.collection(collection).insertMany([
         { title: 'Alien', year: 1979, genre: 'sci-fi', embedding: [0.1, 0.2, 0.3] },
         { title: 'Heat', year: 1995, genre: 'crime', embedding: [0.3, 0.1, 0.2] },
       ]);
-    }
+    };
 
     const VECTOR = {
       fields: [

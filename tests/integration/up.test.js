@@ -36,10 +36,10 @@ afterEach(async () => {
   project?.cleanup();
 });
 
-function setup() {
+const setup = () => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir);
-}
+};
 
 describe('MigratorKit.up (integration)', () => {
   it('should reject a path-traversing filename instead of loading outside the dir', async () => {

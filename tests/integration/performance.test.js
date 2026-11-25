@@ -29,9 +29,9 @@ afterEach(() => {
   project?.cleanup();
 });
 
-function migrator(overrides = {}) {
+const migrator = (overrides = {}) => {
   return makeMigrator(mongo.uri, DB, project.dir, overrides);
-}
+};
 
 describe('changelog indexes (integration)', () => {
   it('should create the indexes the read paths use', async () => {

@@ -18,7 +18,7 @@ const status = (secondaries) => ({
 });
 
 /** A fake clock and a sleep that only advances it */
-function fakeTime() {
+const fakeTime = () => {
   let now = 0;
   const waits = [];
   return {
@@ -30,13 +30,13 @@ function fakeTime() {
       now += ms;
     },
   };
-}
+};
 
-function logger() {
+const logger = () => {
   const lines = [];
   const log = (level) => (message) => lines.push([level, message]);
   return { lines, debug: log('debug'), info: log('info'), warn: log('warn'), error: log('error') };
-}
+};
 
 describe('replication lag', () => {
   it('should measure the worst secondary that counts', () => {

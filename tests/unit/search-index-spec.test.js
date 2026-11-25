@@ -681,8 +681,8 @@ describe('compareSearchIndex', () => {
       const definition = JSON.parse(
         '{"mappings":{"dynamic":false,"fields":{"__proto__":{"type":"token"}}}}',
       );
-      const same = compare({ definition }, { latestDefinition: definition });
-      assert.deepStrictEqual(same.diffs, []);
+      const unchanged = compare({ definition }, { latestDefinition: definition });
+      assert.deepStrictEqual(unchanged.diffs, []);
       const other = JSON.parse(
         '{"mappings":{"dynamic":false,"fields":{"__proto__":{"type":"string"}}}}',
       );

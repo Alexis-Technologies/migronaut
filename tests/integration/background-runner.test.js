@@ -33,26 +33,26 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const config = () => ({ uri: mongo.uri, dbName: DB, migrationsDir: project.dir, logger: null });
 
-function runnerWith(options) {
+const runnerWith = (options) => {
   const runner = startBackgroundRunner({ pollIntervalMs: 50, verifyIntervalMs: false, ...options });
   runners.push(runner);
   return runner;
-}
+};
 
-async function seed(count) {
+const seed = async (count) => {
   await mongo.db
     .collection('orders')
     .insertMany(Array.from({ length: count }, (_, i) => ({ __v: 1, __rev: 0, i })));
-}
+};
 
 const SPEC = `export const background = {
   collection: 'orders',
@@ -70,7 +70,7 @@ const SPEC = `export const background = {
 `;
 
 /** Resolve once the background migration completed */
-async function completed(kit, name = NAME, timeoutMs = 60_000) {
+const completed = async (kit, name = NAME, timeoutMs = 60_000) => {
   const until = Date.now() + timeoutMs;
   for (;;) {
     const status = await kit.backgroundStatus(name);
@@ -78,7 +78,7 @@ async function completed(kit, name = NAME, timeoutMs = 60_000) {
     if (Date.now() > until) throw new Error(`still ${status?.status}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-}
+};
 
 describe('in-process background runner (integration)', () => {
   it('should share the work between two runners without exceeding maxParallel', async () => {

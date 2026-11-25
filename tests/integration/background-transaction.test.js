@@ -36,12 +36,12 @@ afterEach(async () => {
   for (const key of ['__txnHook']) delete globalThis[key];
 });
 
-function kitWith(uri = mongo.uri, dbName = DB, overrides = {}) {
+const kitWith = (uri = mongo.uri, dbName = DB, overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(uri, dbName, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const TRANSACTIONAL = `export const background = {
   collection: 'orders',
@@ -60,13 +60,13 @@ const TRANSACTIONAL = `export const background = {
 };
 `;
 
-async function seed(count) {
+const seed = async (count) => {
   await mongo.db
     .collection('orders')
     .insertMany(
       Array.from({ length: count }, (_, i) => ({ __v: 1, __rev: 0, address: `A${i}`, i })),
     );
-}
+};
 
 const transient = () =>
   Object.assign(new Error('injected transient error'), {

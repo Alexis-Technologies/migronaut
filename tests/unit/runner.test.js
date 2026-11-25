@@ -8,7 +8,7 @@ const {
 } = require('../../src/errors/index.js');
 const { keepEventLoopAlive } = require('../helpers/event-loop.js');
 
-function makeContext() {
+const makeContext = () => {
   // withTransaction is the driver's retry-aware wrapper: it runs the body,
   // commits on success and aborts on throw. The stub mirrors that contract.
   const session = {
@@ -29,7 +29,7 @@ function makeContext() {
   const client = { startSession: mock.fn(() => session) };
   const context = { client, db: {} };
   return { context, session };
-}
+};
 
 describe('runMigration', () => {
   it('should run up without a transaction when useTransaction is false', async () => {
@@ -490,7 +490,7 @@ describe('runMigration — onError always gets a whole context', () => {
 
 describe('runMigration — a context per attempt', () => {
   /** A session whose withTransaction runs the body twice, as the driver does after a transient error */
-  function retryingContext() {
+  const retryingContext = () => {
     const session = {
       withTransaction: mock.fn(async (body) => {
         try {
@@ -503,7 +503,7 @@ describe('runMigration — a context per attempt', () => {
       endSession: mock.fn(() => Promise.resolve(undefined)),
     };
     return { context: { client: { startSession: () => session }, db: {} }, session };
-  }
+  };
 
   it('should add what attemptContext returns, and count one attempt without a transaction', async () => {
     const { context } = makeContext();

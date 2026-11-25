@@ -19,7 +19,7 @@ const {
  * A collection double: `matched` decides whether a write matches, `current`
  * what the follow-up read finds. Every call is recorded in `calls`.
  */
-function fakeCollection({ matched = true, current = null, readFails = false } = {}) {
+const fakeCollection = ({ matched = true, current = null, readFails = false } = {}) => {
   const calls = [];
   return {
     calls,
@@ -42,7 +42,7 @@ function fakeCollection({ matched = true, current = null, readFails = false } = 
       return current;
     },
   };
-}
+};
 
 const conflict =
   (reason, extra = {}) =>

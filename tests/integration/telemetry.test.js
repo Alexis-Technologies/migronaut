@@ -52,7 +52,7 @@ afterEach(async () => {
 });
 
 /** A migration that inserts a marker and reports the active span from inside its body */
-function probedMigration(value) {
+const probedMigration = (value) => {
   return `export async function up({ db }) {
   globalThis.__migronautProbe('${value}');
   await db.collection('things').insertOne({ marker: '${value}' });
@@ -62,18 +62,18 @@ export async function down({ db }) {
   await db.collection('things').deleteMany({ marker: '${value}' });
 }
 `;
-}
+};
 
 /** A migration whose up() fails with a message that echoes a credentialed URI */
-function leakyFailure() {
+const leakyFailure = () => {
   return `export async function up() {
   throw new Error('cannot reach mongodb://app:hunter2@db.internal/app');
 }
 export async function down() {}
 `;
-}
+};
 
-function migrator(overrides = {}, kitOptions = {}) {
+const migrator = (overrides = {}, kitOptions = {}) => {
   return makeMigrator(
     mongo.uri,
     DB,
@@ -81,7 +81,7 @@ function migrator(overrides = {}, kitOptions = {}) {
     { telemetry: { tracer: tracing.tracer, meter: metrics.meter }, ...overrides },
     kitOptions,
   );
-}
+};
 
 const idOf = (span) => span.spanContext().spanId;
 const runSpans = () => tracing.named('migronaut.run');

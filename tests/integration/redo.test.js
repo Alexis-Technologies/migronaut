@@ -27,10 +27,10 @@ afterEach(async () => {
   project?.cleanup();
 });
 
-function setup() {
+const setup = () => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir);
-}
+};
 
 describe('MigratorKit.redo (integration)', () => {
   it('should redo the last applied migration', async () => {

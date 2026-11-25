@@ -34,19 +34,19 @@ afterEach(async () => {
   project?.cleanup();
 });
 
-function setup() {
+const setup = () => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir);
-}
+};
 
 /** Seed a migrate-mongo style changelog collection */
-async function seedChangelog(docs) {
+const seedChangelog = async (docs) => {
   await mongo.db.collection('changelog').insertMany(docs);
-}
+};
 
-function targetRecords() {
+const targetRecords = () => {
   return mongo.db.collection(TARGET).find().sort({ name: 1 }).toArray();
-}
+};
 
 describe('MigratorKit.import (integration)', () => {
   it('should reject a path-traversing fileName from the foreign changelog', async () => {

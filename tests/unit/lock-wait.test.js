@@ -22,14 +22,14 @@ const held = (lockedAt = new Date(0)) =>
   new LockAlreadyHeldError('Migration lock is already held', { holder: { lockedAt } });
 
 /** An attempt that is refused `refusals` times, then succeeds */
-function refusedThenFree(refusals, makeError = () => held()) {
+const refusedThenFree = (refusals, makeError = () => held()) => {
   let calls = 0;
   return async () => {
     calls += 1;
     if (calls <= refusals) throw makeError(calls);
     return 'done';
   };
-}
+};
 
 const fast = { onLockHeld: 'wait', lockPollIntervalMs: 2, lockWaitTimeoutMs: 1000 };
 
@@ -39,7 +39,7 @@ const fast = { onLockHeld: 'wait', lockPollIntervalMs: 2, lockWaitTimeoutMs: 100
  * millisecond early or late by the wall clock — so a measured wait asserted
  * against the real clock is a flake waiting to happen.
  */
-async function withManualClock(fn) {
+const withManualClock = async (fn) => {
   let now = 1_000_000;
   const dateNow = mock.method(Date, 'now', () => now);
   try {
@@ -49,7 +49,7 @@ async function withManualClock(fn) {
   } finally {
     dateNow.mock.restore();
   }
-}
+};
 
 describe('withLockWait', () => {
   it('should return the first attempt untouched when the lock is free', async () => {

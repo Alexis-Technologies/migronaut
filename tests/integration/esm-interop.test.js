@@ -23,11 +23,11 @@ const repoRoot = path.join(__dirname, '..', '..');
  * TypeScript 7 closed its `exports` map, so `typescript/bin/tsc` no longer
  * resolves as a module path.
  */
-function typescriptEntry() {
+const typescriptEntry = () => {
   const manifest = require.resolve('typescript/package.json');
   const { bin } = require(manifest);
   return path.join(path.dirname(manifest), typeof bin === 'string' ? bin : bin.tsc);
-}
+};
 
 describe('ESM consumer interop (integration)', () => {
   let dir;

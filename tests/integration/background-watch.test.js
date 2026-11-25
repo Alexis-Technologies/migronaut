@@ -35,12 +35,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const spec = ({ from = 1, to = 2, extra = '' } = {}) => `export const background = {
   collection: 'orders',
@@ -55,7 +55,7 @@ const spec = ({ from = 1, to = 2, extra = '' } = {}) => `export const background
 const FAST = { refreshMs: 200, checkpointMs: 50, leaderRetryMs: 100 };
 
 /** Wait for `check` to hold, polling */
-async function until(what, check, timeoutMs = 10_000) {
+const until = async (what, check, timeoutMs = 10_000) => {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const value = await check();
@@ -63,10 +63,10 @@ async function until(what, check, timeoutMs = 10_000) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-}
+};
 
 /** A completed background migration v1 → v2 over a few documents, and a watcher on it */
-async function watched(overrides = {}, watchOptions = {}) {
+const watched = async (overrides = {}, watchOptions = {}) => {
   await mongo.db.collection('orders').insertMany([{ __v: 1, __rev: 0, n: 1 }]);
   const kit = kitWith(overrides);
   project.write(NAME, spec());
@@ -80,7 +80,7 @@ async function watched(overrides = {}, watchOptions = {}) {
   watchers.push(watcher);
   await until('the stream', () => states.includes('streaming'));
   return { kit, watcher, states, drift };
-}
+};
 
 const orders = () => mongo.db.collection('orders');
 

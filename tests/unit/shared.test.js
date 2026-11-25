@@ -57,7 +57,7 @@ describe('exitCodeFor', () => {
 
 describe('reportUsageError', () => {
   /** Run `fn` with both streams captured and the exit code put back afterwards */
-  function captured(fn) {
+  const captured = (fn) => {
     const out = [];
     const err = [];
     const stdout = mock.method(process.stdout, 'write', (chunk) => out.push(chunk) > 0);
@@ -70,7 +70,7 @@ describe('reportUsageError', () => {
       stderr.mock.restore();
       process.exitCode = undefined;
     }
-  }
+  };
 
   it('should exit as CONFIG_INVALID with the message on stderr', () => {
     const seen = captured(() => reportUsageError("unknown option '--bogus'"));

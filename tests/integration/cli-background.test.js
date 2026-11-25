@@ -22,7 +22,7 @@ const baseEnv = Object.fromEntries(
 );
 
 /** The CLI as a child process; `onLine` sees stdout line by line (to signal it mid-run) */
-function runCli(args, { input, onLine } = {}) {
+const runCli = (args, { input, onLine } = {}) => {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binPath, ...args], {
       cwd: project.dir,
@@ -43,7 +43,7 @@ function runCli(args, { input, onLine } = {}) {
     if (input !== undefined) child.stdin.write(input);
     child.stdin.end();
   });
-}
+};
 
 let mongo;
 const DB = 'migronaut_cli_background_test';

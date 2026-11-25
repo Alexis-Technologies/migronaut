@@ -24,12 +24,12 @@ beforeEach(async () => {
 
 let models = 0;
 /** A fresh model over `orders` with the plugin — Mongoose refuses to compile one name twice */
-function orderModel(definition = { versioning: { current: 2 } }) {
+const orderModel = (definition = { versioning: { current: 2 } }) => {
   const schema = new mongoose.Schema({ name: String, tags: [String] });
   schema.plugin(versioningPlugin, definition);
   models += 1;
   return connection.model(`Order${models}`, schema, 'orders');
-}
+};
 
 const raw = (filter) => mongo.db.collection('orders').findOne(filter);
 

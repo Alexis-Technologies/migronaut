@@ -15,7 +15,7 @@ const MATCH = { __v: { $in: [null, 1] } };
  * script, and keeps what it was asked. `aggregates`: one answer per call — an
  * array of documents, or an Error to reject with.
  */
-function fakeCollection({ count, total = count, aggregates = [], first = [] }) {
+const fakeCollection = ({ count, total = count, aggregates = [], first = [] }) => {
   const calls = [];
   let asked = 0;
   return {
@@ -41,7 +41,7 @@ function fakeCollection({ count, total = count, aggregates = [], first = [] }) {
       },
     }),
   };
-}
+};
 
 const outOfTime = () => Object.assign(new Error('operation exceeded time limit'), { code: 50 });
 const docs = (n) => Array.from({ length: n }, (_, i) => ({ _id: i }));

@@ -9,13 +9,13 @@ const { keepEventLoopAlive } = require('../helpers/event-loop.js');
 // other update (a renew() only re-stamps lockedAt). acquire() sends a
 // $replaceWith/$cond pipeline (server-time `$$NOW` stamping) whose taken-branch
 // document carries the `$literal`-wrapped owner token and nonce.
-function heldFromUpdate(update) {
+const heldFromUpdate = (update) => {
   const stage = Array.isArray(update) ? update[0] : update;
   const doc = stage?.$replaceWith?.$cond?.[1];
   return doc ? { owner: doc.owner.$literal, nonce: doc.nonce.$literal } : undefined;
-}
+};
 
-function makeDb() {
+const makeDb = () => {
   // acquire() upserts with an `owner` token and a nonce, then reads them back
   // to confirm ownership. The mock captures both from the update and echoes
   // them from findOne so a successful acquire resolves.
@@ -37,7 +37,7 @@ function makeDb() {
   };
   const db = { collection: () => collection };
   return { db, collection };
-}
+};
 
 describe('MigrationLock.acquire', () => {
   it('should upsert the lock document with the configured _id', async () => {
@@ -553,10 +553,10 @@ describe('runWithLock', () => {
   });
 
   /** A logger that keeps its warnings */
-  function warningLogger() {
+  const warningLogger = () => {
     const warnings = [];
     return { ...silentLogger, warnings, warn: (message) => warnings.push(message) };
-  }
+  };
 
   it('should say a reclaimed lock is lost once, and stop renewing what is not its own', async () => {
     const { db, collection } = makeDb();

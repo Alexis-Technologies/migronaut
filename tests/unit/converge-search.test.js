@@ -19,7 +19,7 @@ const serverError = (code, message = `server error ${code}`, fields = {}) =>
  * A database with one collection's `$listSearchIndexes` answer (or error) and
  * a `getParameter` answer (a value, or an error code) — what the probe asks.
  */
-function probeDb({ listed = [], listError, parameter, noAdmin = false } = {}) {
+const probeDb = ({ listed = [], listError, parameter, noAdmin = false } = {}) => {
   const calls = [];
   return {
     calls,
@@ -47,7 +47,7 @@ function probeDb({ listed = [], listError, parameter, noAdmin = false } = {}) {
           }),
         }),
   };
-}
+};
 
 const probe = (db, version) =>
   probeSearch(
@@ -256,7 +256,7 @@ describe('probeSearch', () => {
 });
 
 describe('runSearchStep', () => {
-  function commandDb(fail) {
+  const commandDb = (fail) => {
     const commands = [];
     return {
       commands,
@@ -267,7 +267,7 @@ describe('runSearchStep', () => {
         return { ok: 1 };
       },
     };
-  }
+  };
 
   it('should know its three ops', () => {
     assert.deepStrictEqual(

@@ -31,12 +31,12 @@ const settings = (overrides = {}) => ({
 const MATCH = { __v: 1 };
 const HINT = { __v: 1, _id: 1 };
 
-async function seed(ids, extra = {}) {
+const seed = async (ids, extra = {}) => {
   const docs = ids.map((id, i) => ({ _id: id, __v: 1, i, ...extra }));
   await mongo.db.collection('things').insertMany(docs);
   await mongo.db.collection('things').createIndex(HINT);
   return docs;
-}
+};
 
 const plan = (overrides = {}) =>
   idRangePartitioner.plan({
@@ -49,7 +49,7 @@ const plan = (overrides = {}) =>
   });
 
 /** How many documents each partition's scope matches — and their sum */
-async function coverage(partitions) {
+const coverage = async (partitions) => {
   const counts = [];
   for (const { scope } of partitions) {
     counts.push(
@@ -57,7 +57,7 @@ async function coverage(partitions) {
     );
   }
   return { counts, total: counts.reduce((sum, count) => sum + count, 0) };
-}
+};
 
 describe('idRangePartitioner (integration)', () => {
   it('should split ObjectIds into disjoint ranges that cover every document once', async () => {

@@ -16,10 +16,10 @@
  *
  * @returns {() => void} releases the loop; safe to call more than once
  */
-function keepEventLoopAlive() {
+const keepEventLoopAlive = () => {
   // A long ref'd timer is enough: any ref'd handle stops the loop draining.
   const handle = setTimeout(() => {}, 60_000);
   return () => clearTimeout(handle);
-}
+};
 
 module.exports = { keepEventLoopAlive };

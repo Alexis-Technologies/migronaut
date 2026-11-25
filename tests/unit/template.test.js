@@ -266,8 +266,8 @@ describe('config template injection safety', () => {
     });
 
     it(`should keep the ${name} template loadable for quote/newline/backtick values`, async () => {
-      // Built by concatenation so the placeholder reaches the template as data.
-      const dangerousName = 'line1\nline2`' + '${' + 'danger}';
+      // An escaped placeholder, so it reaches the template as data.
+      const dangerousName = `line1\nline2\`\${danger}`;
       const dangerousDir = './a"b\\c\'d/migrations';
       const tpl = render(
         {

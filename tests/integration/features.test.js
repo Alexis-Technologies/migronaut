@@ -39,16 +39,16 @@ afterEach(() => {
   project?.cleanup();
 });
 
-function migrator(overrides = {}) {
+const migrator = (overrides = {}) => {
   return makeMigrator(mongo.uri, DB, project.dir, overrides);
-}
+};
 
 /** Write three migrations named so their sort order is obvious */
-function writeThree() {
+const writeThree = () => {
   project.write('0001-a.ts', insertMigration('things', 'a'));
   project.write('0002-b.ts', insertMigration('things', 'b'));
   project.write('0003-c.ts', insertMigration('things', 'c'));
-}
+};
 
 describe('injected MongoClient (integration)', () => {
   it('should reuse the caller’s client and leave it open on disconnect', async () => {
@@ -427,13 +427,13 @@ describe('out-of-order detection (integration)', () => {
   const { OutOfOrderMigrationError } = require('../../src/errors/index.js');
 
   /** Apply the newer file first, then merge an older one from a "branch" */
-  async function applyNewerThenMergeOlder(overrides = {}) {
+  const applyNewerThenMergeOlder = async (overrides = {}) => {
     project.write('0002-b.ts', insertMigration('things', 'b'));
     const kit = migrator(overrides);
     await kit.up();
     project.write('0001-a.ts', insertMigration('things', 'a'));
     return kit;
-  }
+  };
 
   it('should warn by default and still apply the late arrival', async () => {
     const warns = [];

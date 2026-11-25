@@ -13,7 +13,7 @@ const LOCK_COLLECTION = '_migronaut_locks';
 const CHANGELOG = '_migronaut_migrations';
 
 /** A migration whose up() takes `ms` and records whether its signal was aborted meanwhile */
-function slowMigration(collection, value, ms) {
+const slowMigration = (collection, value, ms) => {
   return `export async function up({ db, signal }) {
   await new Promise((resolve) => setTimeout(resolve, ${ms}));
   await db.collection('${collection}').insertOne({ marker: '${value}', aborted: signal?.aborted ?? null });
@@ -22,16 +22,16 @@ export async function down({ db }) {
   await db.collection('${collection}').deleteMany({ marker: '${value}' });
 }
 `;
-}
+};
 
 /** A migration whose failure message carries a credentialed URI */
-function leakyMigration() {
+const leakyMigration = () => {
   return `export async function up() {
   throw new Error('cannot reach mongodb://admin:hunter2@db.internal:27017/app');
 }
 export async function down() {}
 `;
-}
+};
 
 /**
  * The adapter's behaviour, written once and run twice: against the in-tree
@@ -50,7 +50,7 @@ export async function down() {}
  * - `logsOf(queue, id)` — a job's log rows
  * - `obliterate(queue)` — drop the queue's keys after the test
  */
-function defineBullMQScenarios(harness) {
+const defineBullMQScenarios = (harness) => {
   let project;
   let connection;
   let prefix;
@@ -75,7 +75,7 @@ function defineBullMQScenarios(harness) {
     project?.cleanup();
   });
 
-  function createQueue(overrides = {}) {
+  const createQueue = (overrides = {}) => {
     const { config, ...rest } = overrides;
     const mq = createMigrationQueue({
       config: {
@@ -96,7 +96,7 @@ function defineBullMQScenarios(harness) {
     });
     opened.push(mq);
     return mq;
-  }
+  };
 
   const write = (name, body) => project.write(name, body);
   const three = () => {
@@ -114,7 +114,7 @@ function defineBullMQScenarios(harness) {
    * Poll the changelog until `name` has `status` — for a migration job a sync
    * tick enqueued, which runs after the tick has already completed.
    */
-  async function untilRecord(name, status, timeoutMs = 10_000) {
+  const untilRecord = async (name, status, timeoutMs = 10_000) => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const record = await harness.mongo().db.collection(CHANGELOG).findOne({ name, status });
@@ -122,10 +122,10 @@ function defineBullMQScenarios(harness) {
       if (Date.now() > deadline) throw new Error(`${name} did not become ${status}`);
       await new Promise((resolve) => setTimeout(resolve, 15));
     }
-  }
+  };
 
   /** Poll until every job has finished, then return their views */
-  async function settled(mq, ids, timeoutMs = 10_000) {
+  const settled = async (mq, ids, timeoutMs = 10_000) => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const views = await Promise.all(ids.map((id) => mq.getJob(id)));
@@ -137,12 +137,12 @@ function defineBullMQScenarios(harness) {
       }
       await new Promise((resolve) => setTimeout(resolve, 15));
     }
-  }
+  };
 
   /** A queue whose jobs give up on a block quickly — for scenarios that expect one */
   const QUICK_BLOCK = { lockWait: { lockPollIntervalMs: 20, lockWaitTimeoutMs: 300 } };
 
-  async function holdLock() {
+  const holdLock = async () => {
     await harness.mongo().db.collection(LOCK_COLLECTION).insertOne({
       _id: 'migronaut_lock',
       lockedAt: new Date(),
@@ -151,7 +151,7 @@ function defineBullMQScenarios(harness) {
       executedBy: 'peer',
       owner: 'peer-token',
     });
-  }
+  };
   const releaseLock = () =>
     harness.mongo().db.collection(LOCK_COLLECTION).deleteOne({ _id: 'migronaut_lock' });
 
@@ -493,6 +493,14 @@ function defineBullMQScenarios(harness) {
     );
     assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
   });
+
+  const eventually = async (check, timeoutMs = 10_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await check())) {
+      if (Date.now() > deadline) throw new Error('condition not reached');
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+  };
 
   // ─── The MongoDB lock ──────────────────────────────────────────────────────
 
@@ -963,13 +971,6 @@ export async function down() {}
       });
     return indexes.map((index) => index.name).filter((name) => name !== '_id_');
   };
-  async function eventually(check, timeoutMs = 10_000) {
-    const deadline = Date.now() + timeoutMs;
-    while (!(await check())) {
-      if (Date.now() > deadline) throw new Error('condition not reached');
-      await new Promise((resolve) => setTimeout(resolve, 15));
-    }
-  }
 
   it('should converge after the last migration of a group, and report it from wait()', async () => {
     three();
@@ -1356,6 +1357,6 @@ export async function down() {}
     await releaseLock();
     assert.strictEqual((await mq.audit()).ok, true);
   });
-}
+};
 
 module.exports = { defineBullMQScenarios };

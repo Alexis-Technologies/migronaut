@@ -8,7 +8,7 @@ const { resolveBackgroundSpec } = require('../../src/core/background-spec.js');
 const NAME = '0001-orders.js';
 
 /** A job over `orders`, one document per transaction, split along a hashed shard key */
-function drainingJob() {
+const drainingJob = () => {
   const { spec, fns } = resolveBackgroundSpec(
     {
       collection: 'orders',
@@ -32,10 +32,10 @@ function drainingJob() {
     partitionId: 'p1',
     partitioner: createShardPartitioner({ key: { region: 'hashed' }, field: '__v', source: 1 }),
   };
-}
+};
 
 /** What a lane hands the engine, over a collection that reads `docs` and whose writes match nothing */
-function laneContext({ docs, cursor }) {
+const laneContext = ({ docs, cursor }) => {
   const checkpoints = [];
   const retries = [];
   const session = {
@@ -69,7 +69,7 @@ function laneContext({ docs, cursor }) {
     readControl: async () => ({ status: 'running', generation: 1, plan: { token: 't1' } }),
     onTransactionRetries: (count) => retries.push(count),
   };
-}
+};
 
 describe('processPartition — a failed document past a batch that was halved', () => {
   it('should record it once, with the batch that reaches it', async () => {

@@ -331,6 +331,12 @@
       "rules": {
         "no-underscore-dangle": "off"
       }
+    },
+    {
+      "files": ["tests/fixtures/**"],
+      "rules": {
+        "func-style": "off"
+      }
     }
   ]
 }

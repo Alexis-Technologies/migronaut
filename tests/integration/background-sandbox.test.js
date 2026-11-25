@@ -40,7 +40,7 @@ const snapshotOf = async () => mongo.db.collection('orders').find().sort({ _id: 
 
 describe('dry-run sandbox (integration)', () => {
   it('should run writes in a transaction that is always aborted, recording them', async () => {
-    const before = await snapshotOf();
+    const snapshot = await snapshotOf();
     const report = await sandbox(async ({ db }) => {
       const orders = db.collection('orders');
       await orders.updateMany({ status: 'new' }, { $set: { status: 'open' } });
@@ -53,7 +53,7 @@ describe('dry-run sandbox (integration)', () => {
     assert.strictEqual(report.value, 3);
     assert.strictEqual(report.ok, true);
     assert.strictEqual(report.aborted, true);
-    assert.deepStrictEqual(await snapshotOf(), before, 'nothing stayed');
+    assert.deepStrictEqual(await snapshotOf(), snapshot, 'nothing stayed');
     assert.strictEqual(await mongo.db.collection('audit').countDocuments(), 0);
     assert.deepStrictEqual(
       report.ops.map((op) => `${op.collection}.${op.method}`),

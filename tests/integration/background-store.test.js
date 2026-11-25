@@ -33,7 +33,7 @@ const partitionsOf = (count) =>
   }));
 
 /** Register and commit a first plan of `count` partitions */
-async function planned(count, name = NAME) {
+const planned = async (count, name = NAME) => {
   await store.register(name, { status: 'pending', mode: 'declarative', direction: 'forward' });
   return store.commitPlan(name, {
     generation: 0,
@@ -41,7 +41,7 @@ async function planned(count, name = NAME) {
     partitions: partitionsOf(count),
     fields: { status: 'running' },
   });
-}
+};
 
 const claimArgs = (state, extra = {}) => ({
   generation: state.generation,

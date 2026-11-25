@@ -25,9 +25,9 @@ beforeEach(async () => {
   await mongo.db.collection(COLLECTION).deleteMany({});
 });
 
-function context() {
+const context = () => {
   return buildContext(mongo.client, mongo.db);
-}
+};
 
 describe('runMigration transactions (integration)', () => {
   it('should commit the transaction on success when useTransaction=true', async () => {

@@ -16,7 +16,7 @@ const {
 const { parentIdOf, startMetrics, startTracing } = require('../helpers/otel.js');
 
 /** A tracer double that records what it was asked for and runs the callback inline */
-function fakeTracer() {
+const fakeTracer = () => {
   const spans = [];
   const calls = [];
   return {
@@ -44,10 +44,10 @@ function fakeTracer() {
       return fn(span);
     },
   };
-}
+};
 
 /** A meter double: every instrument remembers how it was created and what it recorded */
-function fakeMeter() {
+const fakeMeter = () => {
   const instruments = {};
   const make = (kind) => (name, options) => {
     const instrument = {
@@ -69,7 +69,7 @@ function fakeMeter() {
     createHistogram: make('histogram'),
     createCounter: make('counter'),
   };
-}
+};
 
 describe('createTelemetry — switched off', () => {
   it('should run the work with a no-op span when there is nothing to report to', async () => {

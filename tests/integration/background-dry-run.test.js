@@ -35,12 +35,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const raw = () => mongo.db.collection('orders').find().sort({ _id: 1 }).toArray();
 
@@ -61,7 +61,7 @@ describe('dry runs of background migrations (integration)', () => {
 };
 `,
     );
-    const before = await raw();
+    const snapshot = await raw();
     const preview = await kit.dryRunBackground(NAME, { first: 3 });
     assert.deepStrictEqual(
       { method: preview.method, requested: preview.requested, found: preview.found },
@@ -80,7 +80,7 @@ describe('dry runs of background migrations (integration)', () => {
     const sample = await kit.dryRunBackground(NAME, { sample: 4 });
     assert.strictEqual(sample.method, 'sample');
     assert.strictEqual(sample.found, 4);
-    assert.deepStrictEqual(await raw(), before, 'nothing written');
+    assert.deepStrictEqual(await raw(), snapshot, 'nothing written');
     assert.strictEqual(await mongo.db.collection('_migronaut_background').countDocuments(), 0);
   });
 
@@ -106,7 +106,7 @@ describe('dry runs of background migrations (integration)', () => {
 };
 `,
     );
-    const before = await raw();
+    const snapshot = await raw();
     const preview = await kit.dryRunBackground(NAME, { first: 10, validate: true });
     assert.strictEqual(preview.validated, true);
     assert.strictEqual(preview.migrated, 8);
@@ -130,7 +130,7 @@ describe('dry runs of background migrations (integration)', () => {
       0,
       'side writes rolled back',
     );
-    assert.deepStrictEqual(await raw(), before, 'collection unchanged');
+    assert.deepStrictEqual(await raw(), snapshot, 'collection unchanged');
   });
 
   it('should refuse the wrong kind of dry run and a sample out of range', async () => {
@@ -176,7 +176,7 @@ describe('dry runs of step migrations (integration)', () => {
   it('should chain checkpoints over steps that see their own writes, leaving the collection as it was', async () => {
     const kit = kitWith();
     project.write(NAME, STEP);
-    const before = await raw();
+    const snapshot = await raw();
     const report = await kit.dryRunBackground(NAME, { steps: 3, maxDocuments: 50 });
     assert.strictEqual(report.mode, 'step');
     assert.strictEqual(report.ok, true, report.error);
@@ -200,7 +200,7 @@ describe('dry runs of step migrations (integration)', () => {
     assert.strictEqual(byKey.get('3').after.found, true);
     assert.strictEqual(byKey.get('200').after.upserted, true);
     assert.strictEqual(byKey.get('8').after.tail, true);
-    assert.deepStrictEqual(await raw(), before, 'byte for byte the same collection');
+    assert.deepStrictEqual(await raw(), snapshot, 'byte for byte the same collection');
     const done = await kit.dryRunBackground(NAME, { steps: 10 });
     assert.strictEqual(done.stoppedBy, 'done');
     assert.strictEqual(done.steps.length, 5);

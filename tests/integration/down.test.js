@@ -33,10 +33,10 @@ afterEach(async () => {
   project?.cleanup();
 });
 
-function setup() {
+const setup = () => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir);
-}
+};
 
 describe('MigratorKit.down (integration)', () => {
   it('should refuse a path-traversing name even from a crafted applied record', async () => {

@@ -35,16 +35,16 @@ afterEach(async () => {
   project?.cleanup();
 });
 
-function setup(overrides = {}) {
+const setup = (overrides = {}) => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir, overrides);
-}
+};
 
-function three() {
+const three = () => {
   project.write('0001-a.js', insertMigration('things', 'a'));
   project.write('0002-b.js', insertMigration('things', 'b'));
   project.write('0003-c.js', insertMigration('things', 'c'));
-}
+};
 
 const markers = async () =>
   (await mongo.db.collection('things').find().sort({ _id: 1 }).toArray()).map((doc) => doc.marker);
@@ -297,13 +297,13 @@ describe('sequenced single-file runs (integration)', () => {
 
     describe('with a file merged late', () => {
       /** 0002 applied first; 0001 then arrives from a parallel branch */
-      async function lateArrival(overrides) {
+      const lateArrival = async (overrides) => {
         setup(overrides);
         project.write('0002-b.js', insertMigration('things', 'b'));
         await migrator.up();
         project.write('0001-a.js', insertMigration('things', 'a'));
         project.write('0003-c.js', insertMigration('things', 'c'));
-      }
+      };
 
       it('should block later files until the late one is applied', async () => {
         await lateArrival();
@@ -447,12 +447,12 @@ describe('sequenced single-file runs (integration)', () => {
   });
 
   describe("dryRun('up') and the order policy", () => {
-    async function lateArrival(overrides) {
+    const lateArrival = async (overrides) => {
       setup(overrides);
       project.write('0002-b.js', insertMigration('things', 'b'));
       await migrator.up();
       project.write('0001-a.js', insertMigration('things', 'a'));
-    }
+    };
 
     it("should refuse under onOutOfOrder: 'error', exactly as the run would", async () => {
       await lateArrival({ onOutOfOrder: 'error' });

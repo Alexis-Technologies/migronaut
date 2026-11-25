@@ -12,11 +12,11 @@ const {
 } = require('../../src/utils/redact.js');
 
 /** How long `fn` takes, in ms */
-function elapsedMs(fn) {
+const elapsedMs = (fn) => {
   const startedAt = process.hrtime.bigint();
   fn();
   return Number(process.hrtime.bigint() - startedAt) / 1e6;
-}
+};
 
 describe('redactUris', () => {
   it('should mask the password in a URI anywhere inside a message', () => {
@@ -285,7 +285,7 @@ describe('redactBounded', () => {
   it('should keep BSON values and scalars, and copy null-prototype objects', () => {
     const at = new Date(0);
     const id = { _bsontype: 'ObjectId' };
-    Object.setPrototypeOf(id, class ObjectId {}.prototype);
+    Object.setPrototypeOf(id, class BsonValue {}.prototype);
     const bare = Object.create(null);
     bare.k = 'mongodb://u:p@h';
     const { value } = redactBounded({ at, id, bare, n: 1n, ok: true, none: null });

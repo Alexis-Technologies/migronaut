@@ -33,7 +33,7 @@ afterEach(async () => {
 
 const COLLECTIONS = [{ name: 'things', indexes: [{ key: { marker: 1 }, unique: true }] }];
 
-function setup(overrides = {}) {
+const setup = (overrides = {}) => {
   project = makeProject();
   project.write('0001-a.js', insertMigration('things', 'a'));
   project.write('0002-b.js', insertMigration('things', 'b'));
@@ -43,7 +43,7 @@ function setup(overrides = {}) {
     ...overrides,
   });
   return migrator;
-}
+};
 
 const indexNames = async (collection) =>
   (await mongo.db.collection(collection).listIndexes().toArray())
@@ -54,13 +54,13 @@ const appliedNames = async () =>
     .map((record) => record.name)
     .sort();
 
-function recordEvents(kit) {
+const recordEvents = (kit) => {
   const events = [];
   for (const name of ['run:start', 'run:end', 'converge:start', 'converge:end']) {
     kit.on(name, (payload) => events.push([name, payload]));
   }
   return events;
-}
+};
 
 describe('convergeAfterUp (integration)', () => {
   it('should converge after the migrations, under the same run and lock', async () => {

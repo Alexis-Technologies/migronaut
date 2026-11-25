@@ -5,7 +5,7 @@ const { MigratorKit } = require('../../src/core/migrator.js');
 const TMP_ROOT = path.join(process.cwd(), 'tests', '.tmp');
 
 /** Create an isolated migrations directory under tests/.tmp */
-function makeProject() {
+const makeProject = () => {
   mkdirSync(TMP_ROOT, { recursive: true });
   const dir = mkdtempSync(path.join(TMP_ROOT, 'proj-'));
   // The migration bodies below use ESM syntax; declaring the type makes that
@@ -23,13 +23,13 @@ function makeProject() {
       rmSync(dir, { recursive: true, force: true });
     },
   };
-}
+};
 
 /**
  * A migration body that inserts a marker doc into `collection` on up and
  * removes it on down — lets tests assert effects via a separate client.
  */
-function insertMigration(collection, value) {
+const insertMigration = (collection, value) => {
   return `export async function up({ db }) {
   await db.collection('${collection}').insertOne({ marker: '${value}' });
 }
@@ -37,23 +37,23 @@ export async function down({ db }) {
   await db.collection('${collection}').deleteMany({ marker: '${value}' });
 }
 `;
-}
+};
 
 /** A migration body whose up() always throws */
-function failingMigration() {
+const failingMigration = () => {
   return `export async function up() {
   throw new Error('intentional failure');
 }
 export async function down() {}
 `;
-}
+};
 
 /**
  * Build a MigratorKit pointed at the test mongo + project dir, with output
  * silenced. `kitOptions` reaches the constructor's second argument (e.g. a
  * `progress` reporter, which is the deterministic way to act mid-run).
  */
-function makeMigrator(uri, dbName, dir, overrides = {}, kitOptions = {}) {
+const makeMigrator = (uri, dbName, dir, overrides = {}, kitOptions = {}) => {
   return new MigratorKit(
     {
       uri,
@@ -64,6 +64,6 @@ function makeMigrator(uri, dbName, dir, overrides = {}, kitOptions = {}) {
     },
     kitOptions,
   );
-}
+};
 
 module.exports = { makeProject, insertMigration, failingMigration, makeMigrator };

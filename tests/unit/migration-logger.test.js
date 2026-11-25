@@ -14,7 +14,7 @@ const {
 } = require('../../src/core/migration-logger.js');
 
 /** A sink that keeps its lines, and an emitter that keeps its events */
-function harness({ wanted = true } = {}) {
+const harness = ({ wanted = true } = {}) => {
   const lines = [];
   const events = [];
   const sink = {};
@@ -23,7 +23,7 @@ function harness({ wanted = true } = {}) {
   }
   const emitter = { wanted: () => wanted, emit: (payload) => events.push(payload) };
   return { lines, events, sink, emitter };
-}
+};
 
 const FULL_RUN = Object.freeze({
   id: 'run-1',
@@ -37,7 +37,7 @@ const FULL_RUN = Object.freeze({
   attempt: 2,
 });
 
-function ordinary(options = {}) {
+const ordinary = (options = {}) => {
   const parts = harness(options);
   const logger = createMigrationLogger({
     sink: parts.sink,
@@ -48,7 +48,7 @@ function ordinary(options = {}) {
     ...options.logger,
   });
   return { ...parts, logger };
-}
+};
 
 describe('sequence', () => {
   it('should count from 1, separately per counter', () => {
@@ -338,7 +338,7 @@ describe('createMigrationLogger', () => {
 });
 
 describe('createRunLog', () => {
-  function runLog(options = {}) {
+  const runLog = (options = {}) => {
     const parts = harness();
     const log = createRunLog({
       id: 'run-1',
@@ -347,7 +347,7 @@ describe('createRunLog', () => {
       ...options,
     });
     return { ...parts, log };
-  }
+  };
 
   it('should keep a copy of the job, as a reference and as log fields', () => {
     const job = { id: '17', groupId: 'g' };

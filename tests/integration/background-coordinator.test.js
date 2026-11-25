@@ -37,7 +37,7 @@ beforeEach(async () => {
 const moveAddress = ({ address, ...doc }) => ({ ...doc, shipping: { address } });
 
 /** What the kit injects, over in-memory "files" */
-function makeDeps(files) {
+const makeDeps = (files) => {
   const events = [];
   const store = new BackgroundStore(mongo.db, '_migronaut_background');
   const deps = {
@@ -67,9 +67,9 @@ function makeDeps(files) {
     adaptiveCache: new Map(),
   };
   return deps;
-}
+};
 
-async function register(deps, name, status = 'pending') {
+const register = async (deps, name, status = 'pending') => {
   await deps.store.ensureIndexes();
   const { spec } = await deps.load(name);
   return deps.store.register(name, {
@@ -81,10 +81,10 @@ async function register(deps, name, status = 'pending') {
     requires: deps.files[name].requires ?? [],
     waitsFor: [],
   });
-}
+};
 
 /** Drive a background migration the way a runtime would, until the coordinator is done */
-async function drive(deps, name, { lanes = 2, maxSteps = 50, tolerate = false } = {}) {
+const drive = async (deps, name, { lanes = 2, maxSteps = 50, tolerate = false } = {}) => {
   for (let step = 0; step < maxSteps; step++) {
     const answer = await coordinate(deps, name);
     if (answer.next === 'done') return answer;
@@ -109,9 +109,9 @@ async function drive(deps, name, { lanes = 2, maxSteps = 50, tolerate = false } 
     }
   }
   throw new Error('did not finish');
-}
+};
 
-async function seed(count, extra = () => ({})) {
+const seed = async (count, extra = () => ({})) => {
   const docs = Array.from({ length: count }, (_, i) => ({
     _id: new ObjectId(),
     __v: 1,
@@ -121,7 +121,7 @@ async function seed(count, extra = () => ({})) {
   }));
   await mongo.db.collection('orders').insertMany(docs);
   return docs;
-}
+};
 
 describe('background coordinator (integration)', () => {
   it('should plan, run lanes in parallel and complete', async () => {
@@ -280,14 +280,14 @@ describe('background coordinator (integration)', () => {
     });
     assert.strictEqual((await runSlice(deps, NAME)).outcome, 'cancelled');
     await assert.rejects(control(deps, NAME, 'pause'), BackgroundConflictError);
-    const before = await deps.store.get(NAME);
+    const paused = await deps.store.get(NAME);
     assert.deepStrictEqual(await control(deps, NAME, 'retry'), {
       applied: 'changed',
       status: 'pending',
     });
     assert.strictEqual((await drive(deps, NAME)).status, 'completed');
-    const after = await deps.store.get(NAME);
-    assert.strictEqual(after.generation, before.generation, 'the same generation went on');
+    const retried = await deps.store.get(NAME);
+    assert.strictEqual(retried.generation, paused.generation, 'the same generation went on');
     assert.strictEqual(await mongo.db.collection('orders').countDocuments({ __v: 1 }), 0);
 
     // A completed one retried is reopened, over whatever is left.
@@ -380,7 +380,7 @@ describe('background coordinator (integration)', () => {
     };
 
     /** The kit's deps as behind a mongos: a shard key that reads, chunks that do not */
-    function shardedDeps() {
+    const shardedDeps = () => {
       return Object.assign(makeDeps({ [NAME]: { background } }), {
         shardAware: 'auto',
         topology: async () => 'sharded',
@@ -388,18 +388,18 @@ describe('background coordinator (integration)', () => {
         chunksOf: async () => undefined,
         indexCache: new Map(),
       });
-    }
+    };
 
     const seedRegions = () => seed(600, (i) => ({ region: `r${i % 7}` }));
 
     /** Nothing failed on the way: no partition counted a slice, the state is not failed */
-    async function assertNothingFailed(deps) {
+    const assertNothingFailed = async (deps) => {
       for (const partition of await deps.store.partitions(NAME)) {
         assert.strictEqual(partition.failures ?? 0, 0);
         assert.notStrictEqual(partition.status, 'failed');
       }
       assert.notStrictEqual((await deps.store.get(NAME)).status, 'failed');
-    }
+    };
 
     it('should re-split the pass once the shard-aware index appears, as its warning asks', async () => {
       await seedRegions();

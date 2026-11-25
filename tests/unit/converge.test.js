@@ -31,7 +31,7 @@ const searchIndex = (name, definition, fields = {}) => ({
  * `normalize` is what the server does to a stored definition, `readyAfter`
  * how many list reads a created or updated index takes to become READY.
  */
-function fakeDb(
+const fakeDb = (
   collections = {},
   {
     fail = {},
@@ -44,7 +44,7 @@ function fakeDb(
     readyAfter,
     below = {},
   } = {},
-) {
+) => {
   const state = {};
   for (const [name, spec] of Object.entries(collections)) {
     state[name] = {
@@ -283,9 +283,9 @@ function fakeDb(
     }),
   };
   return db;
-}
+};
 
-function makeDeps(db, overrides = {}) {
+const makeDeps = (db, overrides = {}) => {
   const events = [];
   const lines = [];
   const log = (level) => (message, fields) => lines.push({ level, message, fields });
@@ -302,7 +302,7 @@ function makeDeps(db, overrides = {}) {
       ...(overrides.now ? { now: overrides.now } : {}),
     },
   };
-}
+};
 
 const definitions = (...list) => list.map((definition) => normalizeDefinition(definition));
 const statuses = (result) =>
@@ -825,8 +825,8 @@ describe('runConverge — at scale', () => {
       ),
       (error) => {
         assert.match(error.message, /Could not create indexes "a_1", "b_1" on c/);
-        const statuses = error.context.converge.collections[0].actions.map((a) => a.status);
-        assert.deepStrictEqual(statuses, ['failed', 'failed']);
+        const actionStatuses = error.context.converge.collections[0].actions.map((a) => a.status);
+        assert.deepStrictEqual(actionStatuses, ['failed', 'failed']);
         return true;
       },
     );
@@ -1873,10 +1873,10 @@ describe('runConverge — search indexes', () => {
         assert.strictEqual(error.context.phase, phase);
         assert.strictEqual(error.context.collection, collection);
         assert.strictEqual(error.context.converge.collections[0].actions[0].status, 'applied');
-        const statuses = error.context.converge.collections.flatMap((entry) =>
+        const rowStatuses = error.context.converge.collections.flatMap((entry) =>
           entry.actions.map((action) => action.status),
         );
-        assert.ok(!statuses.includes('planned'), 'no row is left planned');
+        assert.ok(!rowStatuses.includes('planned'), 'no row is left planned');
         return true;
       });
     }
@@ -1947,7 +1947,7 @@ describe('runConverge — search indexes', () => {
 describe('runConverge — waiting for search indexes', () => {
   const DYNAMIC = { mappings: { dynamic: true } };
   /** A clock that only moves when the run sleeps */
-  function clock() {
+  const clock = () => {
     const state = { now: 0, pauses: [] };
     return {
       state,
@@ -1957,7 +1957,7 @@ describe('runConverge — waiting for search indexes', () => {
       },
       now: () => state.now,
     };
-  }
+  };
   const waiting = (waitTimeoutMs = 60_000) => ({
     search: { onUnavailable: 'fail', wait: true, waitTimeoutMs },
   });

@@ -237,7 +237,7 @@ describe('terminal width budget', () => {
   };
 
   /** Render with process.stdout temporarily reporting a TTY of `columns` */
-  function renderAt(columns) {
+  const renderAt = (columns) => {
     const hadTty = process.stdout.isTTY;
     const hadColumns = process.stdout.columns;
     Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
@@ -248,7 +248,7 @@ describe('terminal width budget', () => {
       Object.defineProperty(process.stdout, 'isTTY', { value: hadTty, configurable: true });
       Object.defineProperty(process.stdout, 'columns', { value: hadColumns, configurable: true });
     }
-  }
+  };
 
   it('should shrink the migration column so rows fit an 80-column terminal', () => {
     // Without the budget, a 70-char name plus the fixed columns is ~130

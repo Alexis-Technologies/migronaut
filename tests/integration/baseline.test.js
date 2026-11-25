@@ -33,14 +33,14 @@ afterEach(async () => {
   project?.cleanup();
 });
 
-function setup() {
+const setup = () => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir);
-}
+};
 
-function records() {
+const records = () => {
   return mongo.db.collection(TARGET).find().sort({ name: 1 }).toArray();
-}
+};
 
 describe('MigratorKit.baseline (integration)', () => {
   it('should mark files as applied without executing them', async () => {

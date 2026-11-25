@@ -101,10 +101,10 @@ describe('createIdGenerator', () => {
     // first parameter is a seed time or a size, and an argument of ours would
     // be read as one.
     const calls = [];
-    function generator(...args) {
+    const generator = function (...args) {
       calls.push({ args, receiver: this });
       return 'id';
-    }
+    };
     createIdGenerator(generator)('ignored', 21);
     assert.deepStrictEqual(calls, [{ args: [], receiver: undefined }]);
   });

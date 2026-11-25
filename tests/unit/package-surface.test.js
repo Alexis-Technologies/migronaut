@@ -15,7 +15,7 @@ const stripComments = (source) =>
 const DECLARATION_FILES = ['index.d.ts', 'bullmq.d.ts', 'versioning.d.ts'];
 
 /** Every `.js` file under `dir`, repo-relative — the tree the "nothing in src may…" rules walk */
-function sourceFiles(dir) {
+const sourceFiles = (dir) => {
   const files = [];
   for (const entry of readdirSync(path.join(repoRoot, dir), { withFileTypes: true })) {
     const relative = `${dir}/${entry.name}`;
@@ -23,7 +23,7 @@ function sourceFiles(dir) {
     else if (entry.name.endsWith('.js')) files.push(relative);
   }
   return files;
-}
+};
 
 describe('package entry point', () => {
   it('should expose the public surface through the package root', () => {

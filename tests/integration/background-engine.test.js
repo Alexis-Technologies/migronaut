@@ -41,10 +41,10 @@ beforeEach(async () => {
 const moveAddress = ({ address, ...doc }) => ({ ...doc, shipping: { address } });
 
 /** A job and one claimed partition over the whole collection */
-async function setUp(
+const setUp = async (
   raw,
   { partitions = [{ scope: { kind: 'id-range', bracket: 'objectId' } }] } = {},
-) {
+) => {
   const { spec, fns } = resolveBackgroundSpec({ collection: 'orders', from: 1, to: 2, ...raw });
   await store.register(NAME, { status: 'pending', spec });
   const state = await store.commitPlan(NAME, {
@@ -72,12 +72,12 @@ async function setUp(
     logger: silentLogger,
   };
   return { job, state, ...claimed };
-}
+};
 
 const noThrottle = { beforeBatch: async () => {} };
 
 /** Run a claimed partition to an outcome */
-function run({ job, lease, partition }, overrides = {}) {
+const run = ({ job, lease, partition }, overrides = {}) => {
   return processPartition(job, {
     store,
     lease,
@@ -89,7 +89,7 @@ function run({ job, lease, partition }, overrides = {}) {
     readControl: () => store.get(NAME),
     ...overrides,
   });
-}
+};
 
 describe('background engine (integration)', () => {
   it('should keep the stored BSON type of every field it does not change', async () => {

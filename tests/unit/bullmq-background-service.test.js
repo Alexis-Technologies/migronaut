@@ -7,7 +7,7 @@ const { stubKit } = require('../helpers/stub-kit.js');
 
 const NAME = '0001-orders.js';
 
-function backgroundKit(overrides = {}) {
+const backgroundKit = (overrides = {}) => {
   return stubKit({
     driftMode: mock.fn(async () => 'poll'),
     watchBackground: mock.fn(async () => ({
@@ -22,9 +22,9 @@ function backgroundKit(overrides = {}) {
     verifyBackground: mock.fn(async () => ({ checked: 0, skipped: 0, drift: [] })),
     ...overrides,
   });
-}
+};
 
-function make(overrides = {}) {
+const make = (overrides = {}) => {
   const connection = createFakeConnection();
   const kit = overrides.kit ?? backgroundKit();
   const mq = createMigrationQueue({
@@ -35,7 +35,7 @@ function make(overrides = {}) {
     ...overrides,
   });
   return { mq, kit, connection };
-}
+};
 
 describe('createMigrationQueue background option', () => {
   for (const [what, background, pattern, bullmq, extra = {}] of [

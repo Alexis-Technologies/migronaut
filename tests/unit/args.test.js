@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 /** Build a program shaped like the real CLI: global options + subcommands */
-function buildFixture(onAction) {
+const buildFixture = (onAction) => {
   const program = new Command();
   program
     .name('fixture')
@@ -41,7 +41,7 @@ function buildFixture(onAction) {
     .action((direction, file, opts, command) => onAction('dry-run', { direction, file, command }));
 
   return program;
-}
+};
 
 describe('Command routing and options', () => {
   it('should route to the matching subcommand action', async () => {

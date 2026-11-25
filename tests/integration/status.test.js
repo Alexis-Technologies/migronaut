@@ -26,10 +26,10 @@ afterEach(async () => {
   project?.cleanup();
 });
 
-function setup() {
+const setup = () => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir);
-}
+};
 
 describe('MigratorKit.status (integration)', () => {
   it('should report checksumOk=true for unchanged applied files', async () => {

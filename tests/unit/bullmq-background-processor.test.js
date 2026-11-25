@@ -28,7 +28,7 @@ const answering = (answer) =>
   }));
 
 /** A kit whose background methods answer what each test scripts */
-function backgroundKit(overrides = {}) {
+const backgroundKit = (overrides = {}) => {
   return stubKit({
     backgroundStatus: mock.fn(async () => ({
       migration: NAME,
@@ -43,9 +43,9 @@ function backgroundKit(overrides = {}) {
     verifyBackground: mock.fn(async () => ({ checked: 2, skipped: 0, drift: [] })),
     ...overrides,
   });
-}
+};
 
-function fakeQueue({ qualifiedName = 'bull:migronaut-background' } = {}) {
+const fakeQueue = ({ qualifiedName = 'bull:migronaut-background' } = {}) => {
   const added = [];
   return {
     added,
@@ -57,10 +57,10 @@ function fakeQueue({ qualifiedName = 'bull:migronaut-background' } = {}) {
       }));
     }),
   };
-}
+};
 
 /** A job as a Worker hands it over — with the moves a background job makes */
-function fakeJob(name, data, { waits = [], attempts } = {}) {
+const fakeJob = (name, data, { waits = [], attempts } = {}) => {
   const job = {
     id: '42',
     name,
@@ -78,7 +78,7 @@ function fakeJob(name, data, { waits = [], attempts } = {}) {
     moveToWaitingChildren: mock.fn(async () => waits.shift() ?? false),
   };
   return job;
-}
+};
 
 const coordinatorJob = (data = {}, options) =>
   fakeJob('background', { migration: NAME, ...data }, options);
@@ -94,14 +94,14 @@ const laneJob = (data = {}) =>
   });
 
 /** Run the processor and return what it threw — a move is thrown, by name */
-async function moved(processor, job, token = 'token') {
+const moved = async (processor, job, token = 'token') => {
   try {
     await processor(job, token);
   } catch (error) {
     return error;
   }
   assert.fail('expected the job to be moved');
-}
+};
 
 describe('createBackgroundProcessor options', () => {
   const queue = fakeQueue();

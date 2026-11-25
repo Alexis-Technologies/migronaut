@@ -39,12 +39,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const spec = (body) => `export const background = {
   collection: 'orders',
@@ -55,13 +55,13 @@ const spec = (body) => `export const background = {
 };
 `;
 
-async function seed(count) {
+const seed = async (count) => {
   const batch = [];
   for (let i = 0; i < count; i++) batch.push({ __v: 1, __rev: 0, address: `A${i}`, i });
   for (let i = 0; i < batch.length; i += 5000) {
     await mongo.db.collection('orders').insertMany(batch.slice(i, i + 5000));
   }
-}
+};
 
 const partitions = () => mongo.db.collection('_migronaut_background_partitions');
 
