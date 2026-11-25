@@ -25,9 +25,9 @@ const path = require('node:path');
 const GLOBAL_SETUP = 'tests/helpers/global-setup.js';
 
 /** True when this Node recognizes `--test-global-setup` */
-function supportsGlobalSetup() {
+const supportsGlobalSetup = () => {
   return process.allowedNodeEnvironmentFlags.has('--test-global-setup');
-}
+};
 
 const args = ['--test'];
 if (supportsGlobalSetup()) {

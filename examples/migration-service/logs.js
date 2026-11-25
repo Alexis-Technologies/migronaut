@@ -16,7 +16,7 @@ const FLUSH_MS = 250;
 /** Lines held while MongoDB is slow or down — past it, new ones are counted and dropped */
 const MAX_BUFFERED = 10_000;
 
-function createLogStore({ client, dbName, collection = 'migration_logs' }) {
+const createLogStore = ({ client, dbName, collection = 'migration_logs' }) => {
   const logs = client.db(dbName).collection(collection);
   /** Lines not written yet, the batches in flight, and what was lost */
   let buffer = [];
@@ -25,7 +25,7 @@ function createLogStore({ client, dbName, collection = 'migration_logs' }) {
   let timer;
 
   /** Write what is buffered: one batch, never awaited by a migration */
-  function flush() {
+  const flush = () => {
     clearTimeout(timer);
     timer = undefined;
     if (buffer.length === 0) return;
@@ -38,7 +38,7 @@ function createLogStore({ client, dbName, collection = 'migration_logs' }) {
       })
       .finally(() => writing.delete(write));
     writing.add(write);
-  }
+  };
 
   return {
     ensureIndexes: () =>
@@ -95,6 +95,6 @@ function createLogStore({ client, dbName, collection = 'migration_logs' }) {
       await Promise.allSettled([...writing]);
     },
   };
-}
+};
 
 module.exports = { MAX_LINES, createLogStore };

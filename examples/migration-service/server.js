@@ -36,11 +36,11 @@ const STATUS_BY_CODE = {
  * The parts of an error's context fit for an HTTP client. The lock holder
  * (host, pid, OS user of another process) is internal detail.
  */
-function publicContext(context) {
+const publicContext = (context) => {
   if (!context || typeof context !== 'object') return undefined;
   const { holder: _holder, ...rest } = context;
   return rest;
-}
+};
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -49,27 +49,27 @@ class HttpError extends Error {
   }
 }
 
-function send(res, status, body) {
+const send = (res, status, body) => {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(payload),
   });
   res.end(payload);
-}
+};
 
 /**
  * Who asked, and why — recorded on the changelog by the worker. In a real
  * service `requestedBy` comes from the authenticated caller, not the body.
  */
-function who({ requestedBy, reason }) {
+const who = ({ requestedBy, reason }) => {
   return {
     ...(requestedBy !== undefined ? { requestedBy } : {}),
     ...(reason !== undefined ? { reason } : {}),
   };
-}
+};
 
-async function readJson(req) {
+const readJson = async (req) => {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
@@ -88,15 +88,15 @@ async function readJson(req) {
     throw new HttpError(400, 'Request body must be a JSON object');
   }
   return body;
-}
+};
 
 /** 202 with the group handle, or — with `"wait": true` — 200 once every job has finished */
-async function respondWithGroup(res, group, wait) {
+const respondWithGroup = async (res, group, wait) => {
   const { wait: waitForGroup, ...handle } = group;
   if (!wait) return send(res, group.upToDate ? 200 : 202, handle);
   const { results, converge } = await waitForGroup({ timeoutMs: WAIT_TIMEOUT_MS });
   return send(res, 200, { ...handle, results, ...(converge ? { converge } : {}) });
-}
+};
 
 const routes = {
   'GET /healthz': async (_req, res) =>
@@ -173,16 +173,16 @@ const routes = {
 };
 
 /** A path segment, decoded — a malformed one is the client's mistake */
-function segment(raw, what) {
+const segment = (raw, what) => {
   try {
     return decodeURIComponent(raw);
   } catch {
     throw new HttpError(400, `Malformed ${what}`);
   }
-}
+};
 
 /** `?limit=` for the log routes: 1 to MAX_LINES, MAX_LINES by default */
-function lineLimit(searchParams) {
+const lineLimit = (searchParams) => {
   const raw = searchParams.get('limit');
   if (raw === null) return MAX_LINES;
   const limit = Number(raw);
@@ -190,9 +190,9 @@ function lineLimit(searchParams) {
     throw new HttpError(400, `limit must be an integer from 1 to ${MAX_LINES}`);
   }
   return limit;
-}
+};
 
-async function handle(req, res) {
+const handle = async (req, res) => {
   const { pathname, searchParams } = new URL(req.url, 'http://localhost');
   if (req.method === 'GET') {
     // What a run's migrations logged for this service's users, in order — the run id is on
@@ -217,7 +217,7 @@ async function handle(req, res) {
   const route = routes[`${req.method} ${pathname}`];
   if (!route) return send(res, 404, { error: { message: 'Not found' } });
   return route(req, res);
-}
+};
 
 const server = http.createServer((req, res) => {
   handle(req, res).catch((error) => {
@@ -238,7 +238,7 @@ const server = http.createServer((req, res) => {
   });
 });
 
-async function main() {
+const main = async () => {
   await logStore.ensureIndexes();
   if (ROLE === 'worker' || ROLE === 'all') {
     // The events are emitted where the migrations run — here, in the worker. Subscribed before
@@ -256,10 +256,10 @@ async function main() {
     await new Promise((resolve) => server.listen(PORT, HOST, resolve));
     console.log(`api listening on http://${HOST}:${PORT}`);
   }
-}
+};
 
 let shuttingDown = false;
-async function shutdown(signal) {
+const shutdown = async (signal) => {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`${signal} received — shutting down`);
@@ -284,7 +284,7 @@ async function shutdown(signal) {
     await connection.quit().catch(() => undefined);
     await shutdownTracing();
   }
-}
+};
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {

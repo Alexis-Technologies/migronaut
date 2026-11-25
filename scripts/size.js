@@ -36,7 +36,7 @@ const ENTRIES = [
   { label: 'versioning runtime (@alexify/migronaut/versioning)', entry: 'versioning.js' },
 ];
 
-async function bundle(entry, minify) {
+const bundle = async (entry, minify) => {
   const result = await esbuild.build({
     entryPoints: [path.join(ROOT, entry)],
     bundle: true,
@@ -47,13 +47,13 @@ async function bundle(entry, minify) {
     logLevel: 'silent',
   });
   return Buffer.from(result.outputFiles[0].contents);
-}
+};
 
-function kb(bytes) {
+const kb = (bytes) => {
   return `${(bytes / 1024).toFixed(1)} KB`;
-}
+};
 
-async function main() {
+const main = async () => {
   const rows = [];
   for (const { label, entry } of ENTRIES) {
     const raw = await bundle(entry, false);
@@ -71,7 +71,7 @@ async function main() {
   for (const row of rows) {
     console.log(`| ${row.label} | ${row.raw} | ${row.min} | ${row.gzip} |`);
   }
-}
+};
 
 main().catch((error) => {
   console.error(error);

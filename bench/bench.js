@@ -32,7 +32,7 @@ const MEASURE_MS = 1_000;
 const DB_WARMUP_ITERATIONS = 100;
 const DB_MEASURE_MS = 500;
 
-async function bench(name, fn, { warmup = WARMUP_ITERATIONS, measureMs = MEASURE_MS } = {}) {
+const bench = async (name, fn, { warmup = WARMUP_ITERATIONS, measureMs = MEASURE_MS } = {}) => {
   for (let i = 0; i < warmup; i++) await fn();
 
   let iterations = 0;
@@ -45,7 +45,7 @@ async function bench(name, fn, { warmup = WARMUP_ITERATIONS, measureMs = MEASURE
   const opsPerSec = Math.round((iterations / elapsed) * 1000);
   console.log(`${name.padEnd(58)} ${opsPerSec.toLocaleString('en-US').padStart(12)} ops/sec`);
   return { name, opsPerSec };
-}
+};
 
 const CHANGELOG_COLLECTION = '_migronaut_bench_migrations';
 const LOCK_COLLECTION = '_migronaut_bench_locks';
@@ -53,7 +53,7 @@ const CHANGELOG_SEED_COUNT = 1_000;
 const REVERT_POOL_SIZE = 20_000;
 const E2E_MIGRATION_COUNT = 100;
 
-async function main() {
+const main = async () => {
   console.log(`Node ${process.version} | ${new Date().toISOString()}\n`);
   const results = [];
   const fixtureDir = makeFixtureDir();
@@ -235,7 +235,7 @@ async function main() {
   }
 
   return results;
-}
+};
 
 main().catch((error) => {
   console.error(error);
