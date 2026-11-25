@@ -461,7 +461,7 @@ them together, with `Upgrading from 2.x` in the CHANGELOG listing each old and n
 
 ## Skills
 
-The skills are [alexiskills](https://alexiskills.vercel.app), `@alexify/metaskills` 1.1.0, a
+The skills are [alexiskills](https://alexiskills.vercel.app), `@alexify/metaskills` 1.1.2, a
 devDependency: the skills of the Alexis libraries, forked from
 [metarhia/metaskills](https://github.com/metarhia/metaskills). All 37 of them are linked:
 `.claude/skills` is one symlink to `node_modules/@alexify/metaskills/skills`, made by the

@@ -9,8 +9,8 @@ importers:
   .:
     devDependencies:
       '@alexify/metaskills':
-        specifier: ^1.1.0
-        version: 1.1.0
+        specifier: ^1.1.2
+        version: 1.1.2
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1
@@ -80,8 +80,8 @@ importers:
 
 packages:
 
-  '@alexify/metaskills@1.1.0':
-    resolution: {integrity: sha512-DS4dV/NjSs8dm9sbYvULbFulVkUFy+Y6k8GNE1D1qfPCErteLMn0i5t+k5Y3rkX3cZY6cuGh7KRzXK6rZVVOhA==}
+  '@alexify/metaskills@1.1.2':
+    resolution: {integrity: sha512-71Y5a1s8+6J7eTIp36mACA4CQxvjThq5dgMXaKU8r4YtQnFg+dpm3tccpRZhGIu0GMvfa2viPx1UqILthUiUcg==}
     engines: {node: '>=18.0.0'}
     hasBin: true
 
@@ -3124,7 +3124,7 @@ packages:
 
 snapshots:
 
-  '@alexify/metaskills@1.1.0': {}
+  '@alexify/metaskills@1.1.2': {}
 
   '@algolia/abtesting@1.22.0':
     dependencies:

@@ -85,6 +85,18 @@ describe('toWire', () => {
     assert.strictEqual(toWire(map), map);
     assert.strictEqual(toWire(5), 5);
   });
+
+  it('should leave the holes of a sparse array where they were', () => {
+    const declared = [{ a: undefined, b: 1 }];
+    declared[2] = 'c';
+    declared.length = 4;
+    const wire = toWire(declared);
+    assert.strictEqual(wire.length, 4);
+    assert.ok(!(1 in wire) && !(3 in wire), 'a hole is not turned into undefined');
+    assert.deepStrictEqual(Object.keys(wire), ['0', '2']);
+    assert.deepStrictEqual(wire[0], { b: 1 });
+    assert.ok(deepEqual(wire, declared));
+  });
 });
 
 describe('isPlainObject', () => {

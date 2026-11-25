@@ -38,9 +38,12 @@ and `SECURITY.md` beside the changelog.
 
 ### Tooling
 
-- **The skills come from `@alexify/metaskills` 1.1.0**, a devDependency, linked into
+- **The skills come from `@alexify/metaskills` 1.1.2**, a devDependency, linked into
   `.claude/skills` by `prepare` (`alexiskills claude`) in place of the six skills of
-  metarhia/metaskills 1.0.5 the repository kept.
+  metarhia/metaskills 1.0.5 the repository kept. 1.1.1 changed the App profile only; 1.1.2 allows
+  `for...of` and `for...in` over a plain object in library code (the `Object.keys` loops stay) and
+  asks a loop that replaces an array method on a caller's array to skip its holes, as the method
+  did.
 - **The lint of alexiskills 1.1**: the `correctness` and `suspicious` categories as errors,
   `eqeqeq` with `null` included, `func-style: expression`, `max-depth` 4, `no-nested-ternary`,
   `no-console`, `no-undef`, `getter-return`; in `src/` the array iteration methods,
@@ -50,7 +53,10 @@ and `SECURITY.md` beside the changelog.
   the names) and no array destructuring in `src/` and `bin/`.
 - **`src/` and `bin/` follow the Library profile of `js-conventions`.** The 727 function
   declarations (672 at module level) are `const` arrows, none moved; 65 array iteration methods are
-  loops in one pass, 128 array destructurings read by index, 47 `Object.entries` / `Object.values`
+  loops in one pass (the two that walk a caller's array, `toWire` over a declared value and the
+  versioning runtime's `onInsert` over `insertMany` documents, leave its holes as `map` did; the
+  rest walk constants, the kit's own arrays or what MongoDB returned, or run after a validation
+  that refuses a hole), 128 array destructurings read by index, 47 `Object.entries` / `Object.values`
   walk `Object.keys`, 9 loose comparisons with `null` are strict, the 107 `let`s without a value
   start with one or became `const`s, 53 `String()` calls are template literals, 25 nested ternaries
   are `if`s, helpers or tables, 29 call-then-returns are `return void`, 18 `new Array(n)` are built

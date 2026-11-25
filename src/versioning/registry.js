@@ -164,8 +164,12 @@ const defineShapes = (...args) => {
     /** `stamp` for one document or every document of an array — for `insertMany` */
     onInsert: (name, docs) => {
       if (!Array.isArray(docs)) return stamp(name, docs);
+      // A hole stays a hole, as Array#map left it: it is the driver's to refuse, not the stamp's.
       const stamped = [];
-      for (let i = 0; i < docs.length; i++) stamped.push(stamp(name, docs[i]));
+      for (let i = 0; i < docs.length; i++) {
+        if (i in docs) stamped.push(stamp(name, docs[i]));
+        else stamped.length = i + 1;
+      }
       return stamped;
     },
     /**

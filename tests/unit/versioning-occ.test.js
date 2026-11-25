@@ -440,6 +440,17 @@ describe('defineShapes', () => {
     assert.deepStrictEqual(shapes.onInsert('orders', {}), { __v: 2, __rev: 0 });
   });
 
+  it('should leave the holes of a sparse insertMany list unstamped', () => {
+    const shapes = defineShapes({ orders });
+    const docs = [{ a: 1 }];
+    docs[2] = { a: 2 };
+    const stamped = shapes.onInsert('orders', docs);
+    assert.strictEqual(stamped.length, 3);
+    assert.ok(!(1 in stamped), 'a hole is not stamped, and not refused either');
+    assert.deepStrictEqual(stamped[0], { a: 1, __v: 2, __rev: 0 });
+    assert.deepStrictEqual(stamped[2], { a: 2, __v: 2, __rev: 0 });
+  });
+
   it('should stamp an upsert on insert only', () => {
     const shapes = defineShapes({ orders });
     assert.deepStrictEqual(

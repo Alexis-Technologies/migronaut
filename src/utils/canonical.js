@@ -226,8 +226,12 @@ const deepEqual = (a, b) => {
  */
 const toWire = (value) => {
   if (Array.isArray(value)) {
+    // A hole of a sparse declaration stays a hole, as Array#map left it.
     const out = [];
-    for (let i = 0; i < value.length; i++) out.push(toWire(value[i]));
+    for (let i = 0; i < value.length; i++) {
+      if (i in value) out.push(toWire(value[i]));
+      else out.length = i + 1;
+    }
     return out;
   }
   if (!isPlainObject(value)) return value;
