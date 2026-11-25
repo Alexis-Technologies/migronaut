@@ -47,9 +47,9 @@ const runBaseline = async (deps, options, signal) => {
   );
 
   const batch = await deps.nextBatch();
-  const records = new Array(targets.length);
+  const records = [];
   for (let i = 0; i < targets.length; i++) {
-    records[i] = {
+    records.push({
       name: targets[i],
       batch,
       status: 'applied',
@@ -60,7 +60,7 @@ const runBaseline = async (deps, options, signal) => {
       executedBy: deps.executedBy(),
       origin: 'baseline',
       ...(deps.runId() ? { runId: deps.runId() } : {}),
-    };
+    });
   }
 
   // One write, checked against the abort signal first: a baseline is all

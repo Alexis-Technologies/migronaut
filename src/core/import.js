@@ -34,7 +34,7 @@ const orderKey = (doc) => {
  */
 const mapMigrateMongoDocs = async (docs, options) => {
   const offset = options.batchOffset ?? 0;
-  const sorted = [...docs].sort((a, b) => {
+  const sorted = docs.toSorted((a, b) => {
     const delta = orderKey(a) - orderKey(b);
     return delta !== 0 ? delta : a.fileName.localeCompare(b.fileName);
   });

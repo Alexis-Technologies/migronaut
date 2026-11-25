@@ -7,7 +7,7 @@
  * checkpoint must stay small) and writing one as relaxed EJSON for a dry
  * run's report — both things only BSON itself can do exactly.
  */
-let bson;
+let bson = null;
 
 const loadBson = () => {
   bson ??= require('mongodb').BSON;

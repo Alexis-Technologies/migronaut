@@ -70,7 +70,7 @@ const runMigrations = async (config = {}, options = {}) => {
   onKit?.(kit);
   // `up` keeps returning the migration rows; with `convergeAfterUp` the
   // converge outcome rides along in the summary, from the kit's own event.
-  let converge;
+  let converge = null;
   kit.on('converge:end', (event) => {
     if (event.trigger === 'up' && event.success) converge = event.result;
   });

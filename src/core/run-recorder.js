@@ -89,12 +89,7 @@ class RunRecorder {
     // without reconstructing it from per-migration events. On the failure
     // path the partial rows live on the error's context — exactly the case
     // where "how far did it get?" is the question, so they count too.
-    const rows = Array.isArray(result)
-      ? result
-      : failure instanceof MigronautError && Array.isArray(failure.context?.results)
-        ? failure.context.results
-        : null;
-    const { summary, skipped } = countRows(rows);
+    const { summary, skipped } = countRows(rowsOf(result, failure));
     const durationMs = Date.now() - this.#startedAt;
     const telemetry = this.#telemetry;
     if (this.#span) {
@@ -145,6 +140,15 @@ class RunRecorder {
     }
   }
 }
+
+/** The run's rows: its result, or the partial rows a failure carries — `null` when neither has any */
+const rowsOf = (result, failure) => {
+  if (Array.isArray(result)) return result;
+  if (failure instanceof MigronautError && Array.isArray(failure.context?.results)) {
+    return failure.context.results;
+  }
+  return null;
+};
 
 /**
  * `{ summary: { applied, reverted, total }, skipped }` of a run's rows, in one

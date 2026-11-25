@@ -69,19 +69,19 @@ const assertLockWaitOptions = ({
   if (onLockHeld !== undefined && onLockHeld !== 'wait' && onLockHeld !== 'throw') {
     throw new ConfigInvalidError("onLockHeld must be 'wait' or 'throw'", { onLockHeld });
   }
-  if (
+  const timeoutInvalid =
     lockWaitTimeoutMs !== undefined &&
-    (!Number.isFinite(lockWaitTimeoutMs) || lockWaitTimeoutMs <= 0)
-  ) {
+    (!Number.isFinite(lockWaitTimeoutMs) || lockWaitTimeoutMs <= 0);
+  if (timeoutInvalid) {
     throw new ConfigInvalidError('lockWaitTimeoutMs must be a positive finite number', {
       lockWaitTimeoutMs,
     });
   }
-  if (
+  const intervalInvalid =
     !Number.isFinite(lockPollIntervalMs) ||
     lockPollIntervalMs <= 0 ||
-    lockPollIntervalMs > MAX_TIMER_MS
-  ) {
+    lockPollIntervalMs > MAX_TIMER_MS;
+  if (intervalInvalid) {
     throw new ConfigInvalidError(
       `lockPollIntervalMs must be a positive number of milliseconds, at most ${MAX_TIMER_MS}`,
       { lockPollIntervalMs },
@@ -140,15 +140,15 @@ const withLockWait = async (attempt, options = {}) => {
   let waited = false;
   let attempts = 0;
   // The clock starts at the first contention, not before the first attempt —
-  // otherwise a slow initial attempt eats the whole waiting budget.
-  let firstRefusalAt;
-  let deadline;
+  // otherwise a slow initial attempt eats the whole waiting budget. Both are -1 until then.
+  let firstRefusalAt = -1;
+  let deadline = -1;
   // The holder's lockedAt from the last refusal: its heartbeat advances it
   // every TTL/2, so a change between polls is proof of a live, progressing
   // peer.
-  let lastHolderLockedAt;
+  let lastHolderLockedAt = -1;
   let warnedShortBudget = false;
-  const waitedMs = () => (firstRefusalAt === undefined ? 0 : Date.now() - firstRefusalAt);
+  const waitedMs = () => (firstRefusalAt === -1 ? 0 : Date.now() - firstRefusalAt);
   const settle = (outcome) => {
     if (!waited) return;
     try {
@@ -177,15 +177,14 @@ const withLockWait = async (attempt, options = {}) => {
         settle('failed');
         throw error;
       }
-      firstRefusalAt ??= Date.now();
+      if (firstRefusalAt === -1) firstRefusalAt = Date.now();
       const budget = waitBudget(lockWaitTimeoutMs, error);
       const holderTtlMs = error.context?.holder?.ttlMs ?? error.context?.ttlMs;
-      if (
-        !warnedShortBudget &&
+      const budgetWithinHeartbeat =
         lockWaitTimeoutMs !== undefined &&
         Number.isFinite(holderTtlMs) &&
-        lockWaitTimeoutMs <= holderTtlMs / 2
-      ) {
+        lockWaitTimeoutMs <= holderTtlMs / 2;
+      if (!warnedShortBudget && budgetWithinHeartbeat) {
         warnedShortBudget = true;
         logger?.warn(
           `⚠ lockWaitTimeoutMs (${lockWaitTimeoutMs}ms) is no longer than the holder's heartbeat ` +
@@ -201,9 +200,9 @@ const withLockWait = async (attempt, options = {}) => {
       const holderLockedAt = error.context?.holder?.lockedAt?.getTime?.();
       const holderAdvanced =
         holderLockedAt !== undefined &&
-        lastHolderLockedAt !== undefined &&
+        lastHolderLockedAt !== -1 &&
         holderLockedAt > lastHolderLockedAt;
-      if (deadline === undefined || holderAdvanced) {
+      if (deadline === -1 || holderAdvanced) {
         deadline = Date.now() + budget;
       }
       if (holderLockedAt !== undefined) lastHolderLockedAt = holderLockedAt;

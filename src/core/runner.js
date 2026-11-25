@@ -34,7 +34,7 @@ const isTransactionsUnsupported = (error) => {
  */
 const withTimeout = async (promise, timeoutMs, name, direction, onTimeout) => {
   if (!timeoutMs) return promise;
-  let timer;
+  let timer = null;
   try {
     return await Promise.race([
       promise,
@@ -101,7 +101,7 @@ const runMigration = async (params) => {
   const timeoutMs = migration.timeoutMs ?? params.timeoutMs;
 
   const start = Date.now();
-  let session;
+  let session = null;
   // JavaScript cannot cancel a running body, but it can tell it to stop: this
   // controller feeds the context's signal, so the documented "watch ctx.signal"
   // advice covers the migration's own timeout too — not only lock loss and
@@ -114,15 +114,15 @@ const runMigration = async (params) => {
   // A fresh context per attempt, not one mutated in place: a body from an
   // earlier attempt that is still running (a timeout does not stop it) keeps
   // the attempt it started with.
-  const contextOf = (session, attempt) => ({
+  const contextOf = (attemptSession, attempt) => ({
     ...context,
     signal,
-    ...(session ? { session } : {}),
+    ...(attemptSession ? { session: attemptSession } : {}),
     ...attemptContext?.(attempt),
   });
   let attempts = 0;
   // The context the body last ran with — what onError gets.
-  let runtimeContext;
+  let runtimeContext = null;
   const onTimeout = (timeoutError) => timedOut.abort(timeoutError);
   let duration = 0;
   // 'body' while the migration's own code runs; 'changelog' once it committed
@@ -148,7 +148,7 @@ const runMigration = async (params) => {
       });
     } else {
       attempts += 1;
-      runtimeContext = contextOf(undefined, attempts);
+      runtimeContext = contextOf(null, attempts);
       await withTimeout(fn(runtimeContext), timeoutMs, name, direction, onTimeout);
       duration = Date.now() - start;
       phase = 'changelog';
@@ -156,8 +156,9 @@ const runMigration = async (params) => {
     }
 
     return { duration, attempts };
-  } catch (error) {
-    const err = error instanceof Error ? error : new Error(String(error));
+  } catch (thrown) {
+    // User code may throw anything, a symbol included — hence String(), not a template literal.
+    const error = thrown instanceof Error ? thrown : new Error(String(thrown));
     // Failures deserve timing data as much as successes — a slow-then-failing
     // migration is exactly what an operator alerts on.
     const elapsed = Date.now() - start;
@@ -176,9 +177,9 @@ const runMigration = async (params) => {
           phase: 'changelog-write',
           bodySucceeded: true,
           durationMs: elapsed,
-          cause: err.message,
+          cause: error.message,
         },
-        { cause: err },
+        { cause: error },
       );
     }
 
@@ -188,7 +189,7 @@ const runMigration = async (params) => {
         // A transaction that failed before its body ever ran (a session that
         // would not start) still hands onError a whole context: a first
         // attempt's, not counted as one.
-        await hooks.onError(name, err, runtimeContext ?? contextOf(session, 1));
+        await hooks.onError(name, error, runtimeContext ?? contextOf(session, 1));
       } catch (hookError) {
         const message = errorText(hookError);
         logger?.warn(`⚠ onError hook failed for ${name}: ${message}`);
@@ -198,20 +199,20 @@ const runMigration = async (params) => {
     // How many times the body ran (the driver retries a transient
     // transaction error by running it again) — absent if it never started.
     const attemptsField = attempts > 0 ? { attempts } : {};
-    if (err instanceof MigrationTimeoutError) {
-      err.context = { durationMs: elapsed, ...attemptsField, ...err.context };
-      throw err;
+    if (error instanceof MigrationTimeoutError) {
+      error.context = { durationMs: elapsed, ...attemptsField, ...error.context };
+      throw error;
     }
     // What the server said, when the driver put its own words over it.
-    const cause = serverErrorOf(err).message;
+    const cause = serverErrorOf(error).message;
     // A standalone deployment refusing the transaction is a topology problem,
     // not a bug in the migration — say so instead of blaming the file.
-    if (useTransaction && isTransactionsUnsupported(err)) {
+    if (useTransaction && isTransactionsUnsupported(error)) {
       throw new TransactionsUnsupportedError(
         `Cannot run ${name} in a transaction — this deployment is standalone. ` +
           'Set useTransaction: false, or run against a replica set / mongos.',
         { name, direction, durationMs: elapsed, ...attemptsField, cause },
-        { cause: err },
+        { cause: error },
       );
     }
     throw new MigrationExecutionFailedError(
@@ -219,7 +220,7 @@ const runMigration = async (params) => {
       // The message is duplicated into context because that is what survives
       // JSON serialization; `cause` keeps the real Error (and its stack).
       { name, direction, durationMs: elapsed, ...attemptsField, cause },
-      { cause: err },
+      { cause: error },
     );
   } finally {
     if (session) {

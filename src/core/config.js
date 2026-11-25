@@ -53,7 +53,15 @@ const isBoolean = (value) => typeof value === 'boolean';
 const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
 const isExtension = (value) => value === 'ts' || value === 'js';
 const oneOf = (values) => (value) => values.includes(value);
-const quoted = (values) => values.map((value) => `'${value}'`).join(', ');
+/** `values` each in single quotes, joined by `separator` */
+const quoted = (values, separator = ', ') => {
+  let text = '';
+  for (let i = 0; i < values.length; i++) {
+    if (i > 0) text += separator;
+    text += `'${values[i]}'`;
+  }
+  return text;
+};
 
 const ON_DRIFT = ['reopen', 'report'];
 const DRIFT_MODES = ['poll', 'stream', 'both'];
@@ -275,11 +283,16 @@ const validateConfig = (config, options = {}) => {
   // Every bookkeeping collection has one job: sharing one would mix records.
   const bookkeeping = bookkeepingCollections(config);
   for (let position = 1; position < bookkeeping.length; position++) {
-    const [key, name, what] = bookkeeping[position];
+    const entry = bookkeeping[position];
+    const key = entry[0];
+    const name = entry[1];
+    const what = entry[2];
     if (name === undefined) continue;
     for (let earlier = 0; earlier < position; earlier++) {
-      const [otherKey, otherName, otherWhat] = bookkeeping[earlier];
-      if (name !== otherName) continue;
+      const other = bookkeeping[earlier];
+      const otherKey = other[0];
+      const otherWhat = other[2];
+      if (name !== other[1]) continue;
       issues.push({
         path: key,
         message: `${what ? `${what} (${name}) ` : ''}must differ from ${otherWhat ? `${otherKey}'s ${otherWhat}` : otherKey}`,
@@ -289,7 +302,10 @@ const validateConfig = (config, options = {}) => {
   }
   if (Array.isArray(config.collections)) {
     const reserved = [];
-    for (const [, name] of bookkeeping) if (name !== undefined) reserved.push(name);
+    for (let i = 0; i < bookkeeping.length; i++) {
+      const name = bookkeeping[i][1];
+      if (name !== undefined) reserved.push(name);
+    }
     for (const issue of collectionsIssues(config.collections, { reserved })) issues.push(issue);
   }
   return issues;
@@ -370,7 +386,7 @@ const parsePositiveInteger = (value, name) => {
 /** Parse one of a fixed set of string values, failing closed on anything else */
 const parseEnum = (allowed) => {
   const values = new Set(allowed);
-  const list = allowed.map((item) => `'${item}'`).join(' or ');
+  const list = quoted(allowed, ' or ');
   return (value, name) => {
     const normalized = value.trim();
     if (!values.has(normalized)) {
@@ -524,7 +540,7 @@ const loadConfigFile = async (filepath, lenient = false) => {
       );
     }
   }
-  let mod;
+  let mod = null;
   try {
     mod = await import(pathToFileURL(filepath).href);
   } catch (error) {
@@ -558,6 +574,13 @@ const loadConfigFile = async (filepath, lenient = false) => {
     }
   }
   return exported;
+};
+
+/** The names of declared collection definitions, in order */
+const definitionNames = (definitions) => {
+  const names = [];
+  for (let i = 0; i < definitions.length; i++) names.push(definitions[i].name);
+  return names;
 };
 
 /**
@@ -656,7 +679,7 @@ const loadConfig = async (options = {}) => {
   // A typo'd key (`migrationsDirectory`, `useTransactions`) validates fine and
   // then silently does nothing; a debug mention is the cheapest way to notice.
   // The array is only allocated when a stray key actually exists.
-  let unknown;
+  let unknown = null;
   for (const key in config) {
     if (!KNOWN_CONFIG_KEYS.has(key)) (unknown ??= []).push(key);
   }
@@ -703,7 +726,7 @@ const loadConfig = async (options = {}) => {
       redactDeep({
         ...rest,
         ...(clientOptions ? { clientOptions: Object.keys(clientOptions) } : {}),
-        ...(collections ? { collections: collections.map((definition) => definition.name) } : {}),
+        ...(collections ? { collections: definitionNames(collections) } : {}),
         ...(client ? { client: '[injected]' } : {}),
         ...(mongoose ? { mongoose: '[injected]' } : {}),
         ...(hooks ? { hooks: Object.keys(hooks) } : {}),

@@ -299,15 +299,15 @@ class Changelog {
    */
   async markAppliedBulk(db, records) {
     if (records.length === 0) return;
-    const ops = new Array(records.length);
+    const ops = [];
     for (let i = 0; i < records.length; i++) {
-      ops[i] = {
+      ops.push({
         updateOne: {
           filter: { name: records[i].name },
           update: Changelog.#appliedUpdate(records[i]),
           upsert: true,
         },
-      };
+      });
     }
     await this.#coll(db).bulkWrite(ops, { ordered: false });
   }

@@ -107,6 +107,32 @@ const {
 /** Simultaneous file reads — keeps a large migrations dir clear of EMFILE */
 const FS_CONCURRENCY = 16;
 
+/** The label of a migration's success line, by its kind and direction */
+const successLabel = (kind, direction) => {
+  if (kind === 'background') return direction === 'up' ? '⧗ Registered' : '⧗ Reverting';
+  return direction === 'up' ? '✔ Applied ' : '↩ Reverted';
+};
+
+/** What a migration waits for, as a person reads it: `a (running), b (paused)` */
+const waitingText = (waiting) => {
+  let text = '';
+  for (let i = 0; i < waiting.length; i++) {
+    if (i > 0) text += ', ';
+    text += `${waiting[i].migration} (${waiting[i].status})`;
+  }
+  return text;
+};
+
+/** The `migration` of each `{ migration, … }` entry, in order */
+const migrationsOf = (entries) => {
+  const names = [];
+  for (let i = 0; i < entries.length; i++) names.push(entries[i].migration);
+  return names;
+};
+
+/** The result of a converge with nothing declared */
+const emptyConverge = (dryRun) => ({ dryRun, changed: 0, inSync: true, collections: [] });
+
 /**
  * The main orchestration class. Every CLI command delegates here. Holds a
  * partial config that is resolved (merged with env/file/defaults) on first use.
@@ -279,10 +305,7 @@ class MigratorKit extends EventEmitter {
    * minutes later.
    */
   stop(reason = 'Run stopped by request') {
-    if (this.#abort) {
-      this.#abort(reason);
-      return;
-    }
+    if (this.#abort) return void this.#abort(reason);
     if (this.#runSetupDepth > 0) {
       this.#stopRequested = reason;
     }
@@ -594,8 +617,8 @@ class MigratorKit extends EventEmitter {
       fields: (extra) => this.#fields(extra),
     });
     recorder.start();
-    let failure;
-    let result;
+    let failure = undefined;
+    let result = undefined;
     try {
       result = await runWithLock(
         this.#buildLock(),
@@ -667,7 +690,7 @@ class MigratorKit extends EventEmitter {
       if (results) this.#attachResults(reason, results);
       throw reason;
     }
-    throw new RunAbortedError('Run aborted', { ...(results ? { results: [...results] } : {}) });
+    throw new RunAbortedError('Run aborted', results ? { results: [...results] } : {});
   }
 
   /**
@@ -881,14 +904,15 @@ class MigratorKit extends EventEmitter {
     const config = this.#config;
     const results = [];
     let doneCount = 0;
-    let failure;
+    let failure = undefined;
     // The hooks around the whole run see the run's correlation, not one
     // migration's: no migration name, no attempt.
     const run = this.#runLog.info(direction);
     const runContext = { ...context, run, logger: this.#runLog.logger(run) };
     try {
       await this.#runHook(config.hooks?.beforeAll, 'beforeAll', [runContext]);
-      for (const [index, name] of names.entries()) {
+      for (let index = 0; index < names.length; index++) {
+        const name = names[index];
         // Between migrations is the only safe place to stop: the one in flight
         // has committed, and the next has not started.
         this.#assertNotAborted(signal, results);
@@ -1041,14 +1065,7 @@ class MigratorKit extends EventEmitter {
         durationMs: duration,
         ...retried,
       });
-      const label =
-        migration.kind === 'background'
-          ? direction === 'up'
-            ? '⧗ Registered'
-            : '⧗ Reverting'
-          : direction === 'up'
-            ? '✔ Applied '
-            : '↩ Reverted';
+      const label = successLabel(migration.kind, direction);
       logger.info(
         `${label} ${name}   [${duration}ms]`,
         this.#fields({
@@ -1368,7 +1385,7 @@ class MigratorKit extends EventEmitter {
         // leaves no failed trace.
         const waiting = await this.#requiresGuard(name, signal);
         if (waiting.length > 0) {
-          const list = waiting.map((entry) => `${entry.migration} (${entry.status})`).join(', ');
+          const list = waitingText(waiting);
           if ((options.onBackgroundPending ?? 'error') === 'stop') {
             logger.info(
               `⧗ Waiting   ${name} — requires ${list}`,
@@ -1436,7 +1453,7 @@ class MigratorKit extends EventEmitter {
   async #assertNoChecksumDrift(records) {
     await mapLimit(records, FS_CONCURRENCY, async (record) => {
       const filepath = this.#filepath(record.name);
-      let actual;
+      let actual = '';
       try {
         // Through the instance cache: a long-lived process running strict ups
         // repeatedly must not re-hash the whole applied history every time —
@@ -1504,7 +1521,7 @@ class MigratorKit extends EventEmitter {
     const db = this.#requireDb();
     const changelog = this.#requireChangelog();
 
-    let records;
+    let records = null;
     let preserveOrder = false;
     if (filename) {
       const record = await changelog.getByName(db, filename);
@@ -1669,7 +1686,7 @@ class MigratorKit extends EventEmitter {
         }
 
         const downResults = await this.#runDown(target, actor, signal);
-        let upResults;
+        let upResults = null;
         try {
           upResults = await this.#runUp(target, actor, signal);
         } catch (error) {
@@ -1696,7 +1713,7 @@ class MigratorKit extends EventEmitter {
     const changelog = this.#requireChangelog();
     const logger = this.#logger;
 
-    let names;
+    let names = null;
     const recordByName = new Map();
     if (direction === 'up') {
       const applied = new Set();
@@ -1755,12 +1772,12 @@ class MigratorKit extends EventEmitter {
     );
     // A converge plan is only meaningful against the database the migrations
     // leave behind — previewing it now would compare with the wrong state.
-    if (
+    const convergesUnpreviewed =
       direction === 'up' &&
       !filename &&
       options.to === undefined &&
-      (await this.convergesAfterUp())
-    ) {
+      (await this.convergesAfterUp());
+    if (convergesUnpreviewed) {
       logger.info(
         '◎ Dry-run  Converge after up is not previewed — it is planned against the database ' +
           'the migrations leave behind (`converge --dry-run` once they are applied)',
@@ -1776,7 +1793,7 @@ class MigratorKit extends EventEmitter {
    * that does not load is left for the real run to report.
    */
   async #annotateBackground(row, name) {
-    let loaded;
+    let loaded = null;
     try {
       loaded = await this.#peek(name);
     } catch {
@@ -1789,7 +1806,7 @@ class MigratorKit extends EventEmitter {
     if (requires.length === 0) return;
     row.requires = requires;
     const waiting = await this.#unsatisfied(requires, { reopen: false }).catch(() => []);
-    if (waiting.length > 0) row.waitsFor = waiting.map((entry) => entry.migration);
+    if (waiting.length > 0) row.waitsFor = migrationsOf(waiting);
   }
 
   /** Full migration status for all known files and records */
@@ -1802,7 +1819,8 @@ class MigratorKit extends EventEmitter {
 
     const names = new Set(recordByName.keys());
     for (const file of await this.#listMigrationFiles()) names.add(file);
-    const sortedNames = [...names].sort();
+    const sortedNames = [...names];
+    sortedNames.sort();
     // Each row may read and hash a file; unbounded fan-out over thousands of
     // migrations exhausts the descriptor limit.
     const rows = await mapLimit(sortedNames, FS_CONCURRENCY, (name) =>
@@ -1962,7 +1980,7 @@ class MigratorKit extends EventEmitter {
   async #buildStatusRow(name, record, { checksums = true } = {}) {
     const isApplied = record?.status === 'applied';
     const status = MigratorKit.#rowStatus(record);
-    let filepath;
+    let filepath = '';
     try {
       filepath = this.#filepath(name);
     } catch {
@@ -1970,7 +1988,7 @@ class MigratorKit extends EventEmitter {
       // filename must not take down the whole report — mark the one row
       // invalid and keep going.
       return {
-        file: String(name),
+        file: `${name}`,
         status,
         batch: isApplied && record ? record.batch : null,
         appliedAt: isApplied && record ? record.appliedAt : null,
@@ -2161,11 +2179,10 @@ class MigratorKit extends EventEmitter {
   async converge(options = {}) {
     assertConvergeOptions(options);
     const actor = pickActor(options);
-    const empty = (dryRun) => ({ dryRun, changed: 0, inSync: true, collections: [] });
     if (options.dryRun) {
       await this.#ensureConfig();
       const definitions = await this.#resolveCollections();
-      if (definitions.length === 0) return empty(true);
+      if (definitions.length === 0) return emptyConverge(true);
       await this.connect();
       return runConverge(
         this.#convergeDeps(),
@@ -2189,7 +2206,7 @@ class MigratorKit extends EventEmitter {
           'No collections declared — set collections or collectionsDir',
           this.#fields({ command: 'converge' }),
         );
-        return empty(false);
+        return emptyConverge(false);
       }
       await this.connect();
       return this.#withLock(options, { command: 'converge' }, async (signal, lock) => {
@@ -2313,7 +2330,7 @@ class MigratorKit extends EventEmitter {
    */
   async #backgroundSpec(name, loaded, { tolerant = false } = {}) {
     const raw = loaded.background;
-    let versioning;
+    let versioning = null;
     const collection = raw?.collection;
     if (typeof collection === 'string') {
       if (this.#bookkeepingNames().includes(collection)) {
@@ -2543,7 +2560,7 @@ class MigratorKit extends EventEmitter {
   async #versioningOf(collection, { strict = false } = {}) {
     const config = this.#config;
     if (config.collections === undefined && config.collectionsDir === undefined) return undefined;
-    let definitions;
+    let definitions = null;
     try {
       definitions = config.reloadMigrations
         ? await this.#resolveCollections()
@@ -2703,7 +2720,7 @@ class MigratorKit extends EventEmitter {
    * again and an unchanged one never twice. `null` when it cannot be read.
    */
   async #peek(name) {
-    let checksum;
+    let checksum = '';
     try {
       checksum = await this.#cachedChecksum(this.#filepath(name));
     } catch {
@@ -2731,7 +2748,7 @@ class MigratorKit extends EventEmitter {
    * first, under this run's lock, in inline mode. Empty when it may run.
    */
   async #requiresGuard(name, signal) {
-    let loaded;
+    let loaded = null;
     try {
       loaded = await this.#peek(name);
     } catch {
@@ -2783,9 +2800,13 @@ class MigratorKit extends EventEmitter {
       ...(job ? { job } : {}),
     });
     if (status.status === 'blocked') {
+      const waitsFor = [];
+      for (let i = 0; i < status.waitsFor.length; i++) {
+        waitsFor.push({ migration: status.waitsFor[i] });
+      }
       throw new BackgroundPendingError(
         `Background migration ${name} cannot run inline: it waits for ${status.waitsFor.join(', ')}`,
-        { migration: name, waitsFor: status.waitsFor.map((migration) => ({ migration })) },
+        { migration: name, waitsFor },
       );
     }
   }
@@ -3003,10 +3024,10 @@ class MigratorKit extends EventEmitter {
       let checkpoint = null;
       const state = await this.#backgroundStore().get(name);
       if (state !== null && !options.fromStart) {
-        const [partition] = await this.#backgroundStore().partitions(name, {
+        const partitions = await this.#backgroundStore().partitions(name, {
           generation: state.generation,
         });
-        checkpoint = partition?.cursor?.checkpoint ?? null;
+        checkpoint = partitions[0]?.cursor?.checkpoint ?? null;
       }
       return previewSteps(deps, name, loaded, { ...options, checkpoint });
     }

@@ -33,7 +33,7 @@ const runAudit = async (deps) => {
 
   // 1. Configuration. Everything downstream depends on it, so a failure here
   //    is fatal to the audit itself.
-  let config;
+  let config = null;
   try {
     config = await deps.ensureConfig();
     record('config', 'pass', `Loaded (database "${config.dbName}")`);
@@ -197,7 +197,7 @@ const AUDIT_READ_CONCURRENCY = 8;
  */
 const auditSearch = async (deps, db, config, record) => {
   if (typeof deps.definitions !== 'function') return;
-  let definitions;
+  let definitions = null;
   try {
     definitions = await deps.definitions();
   } catch {
@@ -223,7 +223,7 @@ const auditSearch = async (deps, db, config, record) => {
     });
     if (!probe.available) {
       const skip = config.onSearchUnavailable === 'skip';
-      record(
+      return void record(
         'search',
         skip ? 'warn' : 'fail',
         `Not available on this server (${probe.reason}) — ${counted}; ` +
@@ -231,7 +231,6 @@ const auditSearch = async (deps, db, config, record) => {
             ? "converge skips them (onSearchUnavailable: 'skip')"
             : `converge refuses them: ${SEARCH_UNAVAILABLE_HINT}`),
       );
-      return;
     }
     const failed = [];
     const stale = [];
@@ -239,7 +238,8 @@ const auditSearch = async (deps, db, config, record) => {
     const lists = await mapLimit(declaring, AUDIT_READ_CONCURRENCY, ({ definition }) =>
       listSearchIndexes(db, definition.name, READ_OPTIONS),
     );
-    for (const [position, { definition, names }] of declaring.entries()) {
+    for (let position = 0; position < declaring.length; position++) {
+      const { definition, names } = declaring[position];
       for (const raw of lists[position]) {
         const index = normalizeLiveSearchIndex(raw);
         if (!names.has(index.name)) continue;

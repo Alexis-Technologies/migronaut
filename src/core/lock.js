@@ -127,7 +127,7 @@ class MigrationLock {
       ttlMs: { $literal: this.ttlMs },
     };
 
-    let result;
+    let result = null;
     try {
       // Upsert on plain `_id` — upserts reject `$expr` filters (server error
       // 224), so the staleness decision lives in the pipeline instead, still
@@ -183,7 +183,7 @@ class MigrationLock {
     // writer's document wins; either way the loser reads a different one here
     // and backs off instead of running concurrently. The nonce is what makes
     // that hold when both carry the same owner token.
-    let current;
+    let current = null;
     try {
       current = await collection.findOne({ _id: this.#id });
     } catch (error) {
@@ -233,14 +233,14 @@ class MigrationLock {
    * comparison acquire() avoids.
    */
   async inspectWithAge() {
-    const [doc] = await this.#db
+    const docs = await this.#db
       .collection(this.#collectionName)
       .aggregate([
         { $match: { _id: this.#id } },
         { $set: { ageMs: { $subtract: ['$$NOW', '$lockedAt'] } } },
       ])
       .toArray();
-    return doc ?? null;
+    return docs[0] ?? null;
   }
 
   /**
@@ -369,7 +369,7 @@ const runWithLock = async (lock, options, fn) => {
   // re-arms it. (A consecutive-failure counter used to sit alongside this,
   // but firing at 1.5×TTL it could mathematically never beat the deadline.)
   const deadlineMarginMs = Math.min(Math.floor(intervalMs / 2), 5000);
-  let deadline;
+  let deadline = null;
   const armDeadline = () => {
     clearTimeout(deadline);
     deadline = setTimeout(
@@ -388,7 +388,7 @@ const runWithLock = async (lock, options, fn) => {
   // spans a whole interval (the exact condition the heartbeat exists to
   // survive), overlapping ticks would otherwise overwrite `inFlight` and let
   // an earlier, still-unsettled renewal escape the final await.
-  let inFlight;
+  let inFlight = null;
   let pending = false;
   const heartbeat = setInterval(() => {
     if (pending) return;
@@ -405,10 +405,9 @@ const runWithLock = async (lock, options, fn) => {
         if (!held && !stopped) {
           loseLock('another run reclaimed it');
           clearInterval(heartbeat);
-          clearTimeout(deadline);
-          return;
+          return void clearTimeout(deadline);
         }
-        armDeadline();
+        return void armDeadline();
       })
       .catch((error) => {
         if (stopped) return;
@@ -439,7 +438,7 @@ const runWithLock = async (lock, options, fn) => {
     await inFlight;
   };
   let released = false;
-  let releasing;
+  let releasing = null;
   const control = {
     release: () =>
       (releasing ??= (async () => {
@@ -460,8 +459,8 @@ const runWithLock = async (lock, options, fn) => {
       })()),
   };
 
-  let result;
-  let runError;
+  let result = undefined;
+  let runError = null;
   let failed = false;
   try {
     result = await fn(controller.signal, control);

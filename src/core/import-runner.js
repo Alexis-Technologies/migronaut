@@ -36,10 +36,8 @@ const runImport = async (deps, options, signal) => {
     targetChangelog !== changelog && !dryRun
       ? targetChangelog.ensureIndexes(db)
       : Promise.resolve();
-  const [, rawDocs] = await Promise.all([
-    ensureIndexesPromise,
-    changelog.getForeignDocs(db, source),
-  ]);
+  const reads = await Promise.all([ensureIndexesPromise, changelog.getForeignDocs(db, source)]);
+  const rawDocs = reads[1];
   if (rawDocs.length === 0) {
     logger.info(`Nothing to import from "${source}"`, deps.fields({ source, target }));
     return { source, target, imported: 0, skipped: 0, dryRun, rows: [] };
@@ -54,11 +52,11 @@ const runImport = async (deps, options, signal) => {
       skipped += 1;
       // The _id is the only handle the operator has for locating the offending
       // source document — an anonymous count is undebuggable after the fact.
-      // String() keeps an ObjectId safe for any sink; the default logger
+      // As text an ObjectId is safe for any sink; the default logger
       // already sanitizes terminal escapes in DB-derived text.
       logger.warn(
-        `⚠ Skipping source doc without a usable fileName (_id: ${String(doc?._id)})`,
-        deps.fields({ source, docId: String(doc?._id) }),
+        `⚠ Skipping source doc without a usable fileName (_id: ${doc?._id})`,
+        deps.fields({ source, docId: `${doc?._id}` }),
       );
     }
   }
@@ -173,7 +171,7 @@ const resolveImportChecksum = async (filepath, fileHash, trustHash) => {
   // computeChecksum directly, treating ENOENT as "missing" — an access()
   // probe first would double the syscalls and open a TOCTOU window in which
   // the answer can change anyway.
-  let recomputed;
+  let recomputed = '';
   try {
     recomputed = await computeChecksum(filepath);
   } catch (error) {

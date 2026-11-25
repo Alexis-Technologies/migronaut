@@ -13,6 +13,14 @@ const { MigrationBlockedError, MigrationFileNotFoundError } = require('../errors
 /** Declaration files sit next to TypeScript migrations and are never one */
 const DECLARATION_SUFFIXES = ['.d.ts', '.d.mts', '.d.cts'];
 
+/** Whether `file` ends with one of `suffixes` */
+const endsWithAny = (file, suffixes) => {
+  for (let i = 0; i < suffixes.length; i++) {
+    if (file.endsWith(suffixes[i])) return true;
+  }
+  return false;
+};
+
 /** Whether a symlink in `dir` leads to a regular file — a broken one leads nowhere */
 const linksToFile = (dir, name) =>
   fs.stat(path.join(dir, name)).then(
@@ -22,7 +30,7 @@ const linksToFile = (dir, name) =>
 
 /** The migration files in `dir`, sorted ascending — empty when the directory does not exist */
 const listMigrationFiles = async (dir, extensions) => {
-  let entries;
+  let entries = [];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch (error) {
@@ -36,15 +44,8 @@ const listMigrationFiles = async (dir, extensions) => {
     // the whole run with MigrationInvalidExportError.
     const file = entry.name;
     if (file.startsWith('.')) continue;
-    if (DECLARATION_SUFFIXES.some((suffix) => file.endsWith(suffix))) continue;
-    let named = false;
-    for (const ext of extensions) {
-      if (file.endsWith(ext)) {
-        named = true;
-        break;
-      }
-    }
-    if (!named) continue;
+    if (endsWithAny(file, DECLARATION_SUFFIXES)) continue;
+    if (!endsWithAny(file, extensions)) continue;
     // A symlink to a file is a migration like any other — `up <name>` runs it
     // (the loader follows the link), so a bulk run and `status` must see it
     // too, not skip it without a word. What it leads to decides; that is
@@ -52,7 +53,8 @@ const listMigrationFiles = async (dir, extensions) => {
     const isFile = entry.isFile() || (entry.isSymbolicLink() && (await linksToFile(dir, file)));
     if (isFile) matches.push(file);
   }
-  return matches.sort();
+  matches.sort();
+  return matches;
 };
 
 /**
