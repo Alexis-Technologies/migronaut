@@ -49,7 +49,9 @@
     "bin",
     "src",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE",
+    "SECURITY.md"
   ],
   "publishConfig": {
     "access": "public"
