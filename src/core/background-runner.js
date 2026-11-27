@@ -1,4 +1,5 @@
 const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
+const { MAX_TIMER_MS } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { jitter, sleep } = require('./background-throttle.js');
 const { assertSliceMs } = require('./background-spec.js');
@@ -39,17 +40,22 @@ const readOptions = (options) => {
     });
   }
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULTS.pollIntervalMs;
-  if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10) {
-    throw new ConfigInvalidError('pollIntervalMs must be an integer ≥ 10', {
+  const badPoll =
+    !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10 || pollIntervalMs > MAX_TIMER_MS;
+  if (badPoll) {
+    throw new ConfigInvalidError(`pollIntervalMs must be an integer from 10 to ${MAX_TIMER_MS}`, {
       context: { pollIntervalMs },
     });
   }
   const verifyIntervalMs = options.verifyIntervalMs ?? DEFAULTS.verifyIntervalMs;
   const badVerify =
     verifyIntervalMs !== false &&
-    (!Number.isSafeInteger(verifyIntervalMs) || verifyIntervalMs < 100);
+    (!Number.isSafeInteger(verifyIntervalMs) ||
+      verifyIntervalMs < 100 ||
+      verifyIntervalMs > MAX_TIMER_MS);
   if (badVerify) {
-    throw new ConfigInvalidError('verifyIntervalMs must be false or an integer ≥ 100', {
+    const message = `verifyIntervalMs must be false or an integer from 100 to ${MAX_TIMER_MS}`;
+    throw new ConfigInvalidError(message, {
       context: { verifyIntervalMs },
     });
   }
@@ -275,10 +281,12 @@ const startBackgroundRunner = (options = {}) => {
      * checkpoint) — so a shutdown is never held for good.
      */
     stop({ timeoutMs } = {}) {
-      if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0)) {
-        return Promise.reject(
-          new ConfigInvalidError('timeoutMs must be an integer ≥ 0', { context: { timeoutMs } }),
-        );
+      const badTimeout =
+        timeoutMs !== undefined &&
+        (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_TIMER_MS);
+      if (badTimeout) {
+        const message = `timeoutMs must be an integer from 0 to ${MAX_TIMER_MS}`;
+        return Promise.reject(new ConfigInvalidError(message, { context: { timeoutMs } }));
       }
       stopping ??= (async () => {
         if (!signal.aborted) {

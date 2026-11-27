@@ -3,9 +3,11 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
 const { MigratorKit } = require('../../src/core/migrator.js');
+const { MongoClient } = require('mongodb');
 const {
   ConfigInvalidError,
   MigrationFileNotFoundError,
+  MigrationLoadFailedError,
   MigrationTimeoutError,
   NotAppliedError,
 } = require('../../src/errors/index.js');
@@ -167,6 +169,23 @@ describe('up --to / down --to (integration)', () => {
 });
 
 describe('lifecycle events (integration)', () => {
+  it('should deliver an event to every listener when one of them throws', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const kit = migrator();
+    const seen = [];
+    kit.on('run:start', () => {
+      throw new Error('a broken listener');
+    });
+    kit.on('run:start', (event) => seen.push(event.runId));
+    try {
+      await kit.up();
+    } finally {
+      await kit.disconnect();
+    }
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(typeof seen[0], 'string');
+  });
+
   it('should emit run and migration events with a shared runId', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     const kit = migrator();
@@ -498,6 +517,59 @@ describe('out-of-order detection (integration)', () => {
     await kit.disconnect();
     assert.strictEqual(results.length, 2);
     assert.ok(!warns.some((m) => m.includes('Out-of-order')));
+  });
+});
+
+describe('load and bookkeeping failures (integration)', () => {
+  it('should type a file that fails to load and keep the rows applied before it', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    project.write('0003-broken.js', "throw new Error('boom at module scope');\n");
+    const kit = migrator();
+    try {
+      const error = await kit.up().then(
+        () => assert.fail('up should reject'),
+        (rejection) => rejection,
+      );
+      assert.ok(error instanceof MigrationLoadFailedError);
+      assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_LOAD_FAILED');
+      assert.match(error.cause.message, /boom at module scope/);
+      assert.deepStrictEqual(
+        error.context.results.map((row) => [row.file, row.status]),
+        [
+          ['0001-a.ts', 'applied'],
+          ['0002-b.ts', 'applied'],
+        ],
+      );
+    } finally {
+      await kit.disconnect();
+    }
+  });
+
+  it('should read and write the bookkeeping majority-committed on a client that prefers secondaries', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const url = new URL(mongo.uri);
+    url.searchParams.set('readPreference', 'secondaryPreferred');
+    const client = new MongoClient(url.href, { monitorCommands: true });
+    const commands = [];
+    client.on('commandStarted', (event) => commands.push(event.command));
+    await client.connect();
+    const kit = new MigratorKit({
+      client,
+      dbName: DB,
+      migrationsDir: project.dir,
+      logger: null,
+    });
+    try {
+      await kit.up();
+    } finally {
+      await kit.disconnect();
+      await client.close();
+    }
+    const changelogRead = commands.find((command) => command.find === '_migronaut_migrations');
+    assert.strictEqual(changelogRead.readConcern?.level, 'majority');
+    const lockWrite = commands.find((command) => command.update === '_migronaut_locks');
+    assert.strictEqual(lockWrite.writeConcern?.w, 'majority');
   });
 });
 

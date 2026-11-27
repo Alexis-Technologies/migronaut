@@ -143,6 +143,24 @@ describe('migronaut CLI (integration)', () => {
     assert.match(parsed.error.context.cause, /intentional failure/);
   });
 
+  it('should keep the partial rows and a code in --json when a later file fails to load', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    project.write('0003-broken.js', 'module.exports = {\n');
+    const result = await runCli(baseArgs(['up', '--json']));
+    assert.strictEqual(result.code, 35);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.error.code, 'ALX_ERR_MIGRATION_LOAD_FAILED');
+    assert.deepStrictEqual(
+      parsed.partial.map((row) => [row.file, row.status]),
+      [
+        ['0001-a.ts', 'applied'],
+        ['0002-b.ts', 'applied'],
+      ],
+    );
+    assert.match(parsed.error.context.cause, /Unexpected end of input|SyntaxError/);
+  });
+
   it('should print the underlying cause only with --verbose', async () => {
     project.write('0001-bad.ts', failingMigration());
     const plain = await runCli(baseArgs(['up']));

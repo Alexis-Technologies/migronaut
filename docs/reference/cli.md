@@ -188,4 +188,6 @@ working unchanged. The full map is also exported from the package root as
 | `32` | `ALX_ERR_BACKGROUND_FAILED` — a background migration failed |
 | `33` | `ALX_ERR_BACKGROUND_CONFLICT` — a background control action did not fit its state |
 | `34` | `ALX_ERR_SANDBOX_REFUSED` — a background dry run reached for something the sandbox refuses |
+| `35` | `ALX_ERR_MIGRATION_LOAD_FAILED` — a migration file could not be loaded |
+| `36` | `ALX_ERR_DATABASE_OPERATION_FAILED` — the database refused one of migronaut's own operations (changelog, lock) |
 | `130` / `143` | Killed by a second SIGINT / SIGTERM |

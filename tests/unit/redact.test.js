@@ -1,7 +1,12 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { Binary, Long, MongoServerError, ObjectId } = require('mongodb');
-const { errorText, isTransientTransaction, serverErrorOf } = require('../../src/utils/error.js');
+const {
+  errorText,
+  isDriverError,
+  isTransientTransaction,
+  serverErrorOf,
+} = require('../../src/utils/error.js');
 const {
   BOUNDS,
   redactBounded,
@@ -119,6 +124,21 @@ describe('redactDeep', () => {
     assert.deepStrictEqual(Object.getOwnPropertyDescriptor(parsed, '__proto__').value, {
       x: 'mongodb://u:****@h',
     });
+  });
+});
+
+describe('isDriverError', () => {
+  it('should tell driver errors apart by their Mongo… names', () => {
+    class FakeServerError extends Error {
+      constructor(message) {
+        super(message);
+        this.name = 'MongoServerError';
+      }
+    }
+    assert.strictEqual(isDriverError(new FakeServerError('not authorized')), true);
+    assert.strictEqual(isDriverError(new TypeError('a bug')), false);
+    assert.strictEqual(isDriverError({ name: 'MongoServerError' }), false);
+    assert.strictEqual(isDriverError(undefined), false);
   });
 });
 

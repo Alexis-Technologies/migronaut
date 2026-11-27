@@ -2,9 +2,32 @@ const { realpathSync } = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { MigrationFileNotFoundError, MigrationInvalidExportError } = require('../errors/index.js');
+const {
+  MigrationFileNotFoundError,
+  MigrationInvalidExportError,
+  MigrationLoadFailedError,
+} = require('../errors/index.js');
+const { MAX_TIMER_MS } = require('./concurrency.js');
 const { errorText } = require('./error.js');
 const { requiresIssues } = require('./migration-name.js');
+
+/** What `fs.access` says when the file is simply not there */
+const MISSING_FILE_CODES = new Set(['ENOENT', 'ENOTDIR']);
+
+/**
+ * What a migration file may export, spelled to compare with a near miss:
+ * lower case, a trailing `s` dropped — `useTransactions`, `timeoutMS` and
+ * `require` are all one of these, mistyped.
+ */
+const EXPORT_SPELLINGS = new Map([
+  ['up', 'up'],
+  ['down', 'down'],
+  ['usetransaction', 'useTransaction'],
+  ['timeoutm', 'timeoutMs'],
+  ['description', 'description'],
+  ['require', 'requires'],
+  ['background', 'background'],
+]);
 
 /** TypeScript source extensions that require a TS-capable runtime to import */
 const TS_EXTENSIONS = new Set(['.ts', '.mts', '.cts']);
@@ -119,14 +142,26 @@ const importUserFile = async (filepath, options = {}) => {
  * Import a migration file: its module, resolved — the default export of a
  * CommonJS file, the namespace of an ES module with named exports.
  *
+ * Whatever the import threw — a syntax error, a throw at module scope, an
+ * import that does not resolve — leaves as a typed error with the original as
+ * its cause: a raw one carries no code, so a run that applied two files before
+ * it lost them from `--json` and exited 1.
+ *
  * @throws {MigrationFileNotFoundError} when the file does not exist
  * @throws {MigrationInvalidExportError} when TypeScript cannot be loaded
+ * @throws {MigrationLoadFailedError} when the file cannot be read or evaluated
  */
 const importMigrationModule = async (filepath, options = {}) => {
   try {
     await fs.access(filepath);
-  } catch {
-    throw new MigrationFileNotFoundError('Migration file not found', { context: { filepath } });
+  } catch (error) {
+    if (MISSING_FILE_CODES.has(error?.code)) {
+      throw new MigrationFileNotFoundError('Migration file not found', { context: { filepath } });
+    }
+    throw new MigrationLoadFailedError('Migration file cannot be read', {
+      cause: error,
+      context: { filepath, cause: errorText(error) },
+    });
   }
 
   let imported = null;
@@ -137,7 +172,10 @@ const importMigrationModule = async (filepath, options = {}) => {
     if (tsError) {
       throw tsError;
     }
-    throw error;
+    throw new MigrationLoadFailedError('Migration file failed to load', {
+      cause: error,
+      context: { filepath, cause: errorText(error) },
+    });
   }
   // `mod.default ?? mod` handles the CommonJS default-export case
   return imported.default ?? imported;
@@ -155,6 +193,51 @@ const readRequires = (resolved, filepath) => {
   return { requires: [...resolved.requires] };
 };
 
+/** `name` as {@link EXPORT_SPELLINGS} keys it */
+const spellingOf = (name) => {
+  const lower = name.toLowerCase();
+  return lower.endsWith('s') ? lower.slice(0, -1) : lower;
+};
+
+/**
+ * Refuse an export that is a known one mistyped: ignored, it ran the migration
+ * without the transaction or the timeout its author asked for. Exports that
+ * resemble none are the module's own business (a CommonJS file's helpers).
+ */
+const assertNoNearMiss = (resolved, filepath) => {
+  const names = Object.keys(resolved);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const meant = EXPORT_SPELLINGS.get(spellingOf(name));
+    if (meant === undefined || meant === name) continue;
+    throw new MigrationInvalidExportError(`Unknown export '${name}' — did you mean '${meant}'?`, {
+      context: { filepath, export: name, expected: meant },
+    });
+  }
+};
+
+/** Throw for an optional export that is present but not of its kind */
+const assertOptionalExports = (resolved, filepath) => {
+  const { useTransaction, timeoutMs, description } = resolved;
+  if (useTransaction !== undefined && typeof useTransaction !== 'boolean') {
+    throw new MigrationInvalidExportError('useTransaction must be a boolean', {
+      context: { filepath, export: 'useTransaction', type: typeof useTransaction },
+    });
+  }
+  const isTimeout = Number.isInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= MAX_TIMER_MS;
+  if (timeoutMs !== undefined && !isTimeout) {
+    throw new MigrationInvalidExportError(
+      `timeoutMs must be a positive integer, at most ${MAX_TIMER_MS}`,
+      { context: { filepath, export: 'timeoutMs', type: typeof timeoutMs } },
+    );
+  }
+  if (description !== undefined && typeof description !== 'string') {
+    throw new MigrationInvalidExportError('description must be a string', {
+      context: { filepath, export: 'description', type: typeof description },
+    });
+  }
+};
+
 /**
  * What a migration module exports, validated: a regular migration
  * (`{ up, down, useTransaction?, timeoutMs?, description?, requires? }`) or a
@@ -166,6 +249,8 @@ const readRequires = (resolved, filepath) => {
  * @throws {MigrationInvalidExportError}
  */
 const resolveMigrationExports = (resolved, filepath) => {
+  assertNoNearMiss(resolved, filepath);
+  assertOptionalExports(resolved, filepath);
   if (resolved.background !== undefined) {
     if (resolved.up !== undefined || resolved.down !== undefined) {
       throw new MigrationInvalidExportError(
@@ -190,15 +275,9 @@ const resolveMigrationExports = (resolved, filepath) => {
 
   const migration = { up: resolved.up, down: resolved.down };
 
-  if (typeof resolved.useTransaction === 'boolean') {
-    migration.useTransaction = resolved.useTransaction;
-  }
-  if (Number.isInteger(resolved.timeoutMs) && resolved.timeoutMs > 0) {
-    migration.timeoutMs = resolved.timeoutMs;
-  }
-  if (typeof resolved.description === 'string') {
-    migration.description = resolved.description;
-  }
+  if (resolved.useTransaction !== undefined) migration.useTransaction = resolved.useTransaction;
+  if (resolved.timeoutMs !== undefined) migration.timeoutMs = resolved.timeoutMs;
+  if (resolved.description !== undefined) migration.description = resolved.description;
   Object.assign(migration, readRequires(resolved, filepath));
 
   return migration;

@@ -1,4 +1,12 @@
 /**
+ * The longest delay a Node timer honours: anything above it (or `Infinity`)
+ * fires after 1ms, with only a TimeoutOverflowWarning to say so — a timeout or
+ * TTL taken from a user turns into an immediate one. Every duration that ends
+ * in a timer is checked against it where it comes in.
+ */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
  * Map `items` through `fn` with at most `limit` calls in flight, preserving
  * input order in the result.
  *
@@ -56,4 +64,4 @@ const settledWithin = async (promise, ms) => {
   }
 };
 
-module.exports = { mapLimit, settledWithin };
+module.exports = { MAX_TIMER_MS, mapLimit, settledWithin };

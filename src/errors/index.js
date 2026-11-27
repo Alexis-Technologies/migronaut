@@ -125,6 +125,19 @@ class MigrationInvalidExportError extends MigronautError {
   }
 }
 
+/**
+ * Thrown when a migration file cannot be loaded — a syntax error, a throw at
+ * module scope, an import that does not resolve, a file that cannot be read.
+ * `cause` is what the loader threw; nothing of the file ran.
+ */
+class MigrationLoadFailedError extends MigronautError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'MigrationLoadFailedError';
+    this.code = 'ALX_ERR_MIGRATION_LOAD_FAILED';
+  }
+}
+
 /** Thrown when a migration's up() or down() throws during execution */
 class MigrationExecutionFailedError extends MigronautError {
   constructor(message, options = {}) {
@@ -184,6 +197,20 @@ class ConnectionFailedError extends MigronautError {
     super(message, options);
     this.name = 'ConnectionFailedError';
     this.code = 'ALX_ERR_CONNECTION_FAILED';
+  }
+}
+
+/**
+ * Thrown when the database refuses or drops an operation of migronaut's own —
+ * reading or writing the changelog, taking a lock, creating the indexes a
+ * background migration needs — after the connection was made. `cause` is the
+ * driver's error, `context.serverCode` the server's code when it gave one.
+ */
+class DatabaseOperationFailedError extends MigronautError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'DatabaseOperationFailedError';
+    this.code = 'ALX_ERR_DATABASE_OPERATION_FAILED';
   }
 }
 
@@ -388,12 +415,14 @@ module.exports = {
   MigrationFileExistsError,
   MigrationInvalidNameError,
   MigrationInvalidExportError,
+  MigrationLoadFailedError,
   MigrationExecutionFailedError,
   MigrationTimeoutError,
   TransactionsUnsupportedError,
   ConfigInvalidError,
   ConfigFileExistsError,
   ConnectionFailedError,
+  DatabaseOperationFailedError,
   NotAppliedError,
   ImportTargetNotEmptyError,
   IrreversibleMigrationError,

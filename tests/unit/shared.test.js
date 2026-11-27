@@ -7,6 +7,7 @@ const {
   partialFromOpts,
   reportUsageError,
   resolveLevel,
+  stopActiveMigrators,
 } = require('../../src/cli/shared.js');
 const { ConfigInvalidError, LockAlreadyHeldError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
@@ -123,6 +124,23 @@ describe('EXIT_CODES', () => {
     // a crash without parsing stderr — that is what typed exit codes are for.
     assert.strictEqual(typeof EXIT_CODES.ALX_ERR_CONFIG_FILE_EXISTS, 'number');
     assert.strictEqual(typeof EXIT_CODES.ALX_ERR_IMPORT_TARGET_NOT_EMPTY, 'number');
+  });
+
+  it('should be frozen and answer nothing for a name every object has', () => {
+    // The CLI reads this very object: a consumer's write must not change it.
+    assert.strictEqual(Object.isFrozen(EXIT_CODES), true);
+    assert.throws(() => {
+      'use strict';
+      EXIT_CODES.ALX_ERR_LOCK_LOST = 1;
+    }, TypeError);
+    assert.strictEqual(EXIT_CODES.toString, undefined);
+    assert.strictEqual(exitCodeFor({ code: 'toString' }), 1);
+  });
+});
+
+describe('stopActiveMigrators', () => {
+  it('should stop nothing and say so when no command is running', () => {
+    assert.strictEqual(stopActiveMigrators('test'), 0);
   });
 });
 

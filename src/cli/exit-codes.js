@@ -12,8 +12,12 @@
  * Exported from the package root so a programmatic wrapper can mirror the
  * CLI's exit semantics without hardcoding numbers from the docs table. Kept
  * in its own module so importing the library never loads the CLI machinery.
+ * Frozen, with no prototype: the CLI reads this very object, so a consumer's
+ * write would change its exit codes for the whole process, and a code read
+ * from an error must never find `toString`.
  */
-const EXIT_CODES = {
+const EXIT_CODES = Object.freeze({
+  __proto__: null,
   ALX_ERR_PENDING_MIGRATIONS: 2,
   ALX_ERR_LOCK_ALREADY_HELD: 3,
   ALX_ERR_CHECKSUM_MISMATCH: 4,
@@ -47,6 +51,8 @@ const EXIT_CODES = {
   ALX_ERR_BACKGROUND_FAILED: 32,
   ALX_ERR_BACKGROUND_CONFLICT: 33,
   ALX_ERR_SANDBOX_REFUSED: 34,
-};
+  ALX_ERR_MIGRATION_LOAD_FAILED: 35,
+  ALX_ERR_DATABASE_OPERATION_FAILED: 36,
+});
 
 module.exports = { EXIT_CODES };

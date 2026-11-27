@@ -226,7 +226,10 @@ describe('in-process background runner (integration)', () => {
     for (const bad of [
       { concurrency: 0 },
       { pollIntervalMs: 1 },
+      // Past 2^31 - 1 ms a Node timer fires after 1ms: a hot loop, not a slow one.
+      { pollIntervalMs: 2 ** 31 },
       { verifyIntervalMs: 5 },
+      { verifyIntervalMs: 2 ** 31 },
       { onError: 1 },
       { signal: 1 },
       { kit: {} },

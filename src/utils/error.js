@@ -70,10 +70,18 @@ const isTransientTransaction = (error) => {
   return labelled || TRANSIENT_TRANSACTION_CODES.has(error?.code);
 };
 
+/**
+ * Whether the MongoDB driver threw this: every error class of `mongodb` is
+ * named `Mongo…` (a duck test — the driver is not required here, and a kit
+ * built on another copy of it must still be recognized).
+ */
+const isDriverError = (error) => error instanceof Error && `${error.name}`.startsWith('Mongo');
+
 module.exports = {
   documentErrorText,
   errorText,
   errorWithCause,
+  isDriverError,
   isTransientTransaction,
   serverErrorOf,
 };

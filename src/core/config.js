@@ -3,6 +3,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { ConfigInvalidError } = require('../errors/index.js');
 const { isCollectionName } = require('../utils/collection-name.js');
+const { MAX_TIMER_MS } = require('../utils/concurrency.js');
 const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
 
 /** The keys a `telemetry` object may hold — a Set, read once per key */
@@ -51,6 +52,15 @@ const CONFIG_FILE_NAMES = ['migronaut.config.ts', 'migronaut.config.js', 'migron
 const isNonEmptyString = (value) => typeof value === 'string' && value.length > 0;
 const isBoolean = (value) => typeof value === 'boolean';
 const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
+
+/** A duration that ends in a timer: above MAX_TIMER_MS, Node fires it after 1ms */
+const isTimerMs = (value) => isPositiveInteger(value) && value <= MAX_TIMER_MS;
+
+/** The lock TTL in seconds whose milliseconds a timer still honours */
+const MAX_LOCK_TTL_SECONDS = Math.floor(MAX_TIMER_MS / 1000);
+
+/** A lock TTL the heartbeat and the deadline can arm */
+const isLockTtl = (value) => isPositiveInteger(value) && value <= MAX_LOCK_TTL_SECONDS;
 const isExtension = (value) => value === 'ts' || value === 'js';
 const oneOf = (values) => (value) => values.includes(value);
 /** `values` each in single quotes, joined by `separator` */
@@ -119,7 +129,11 @@ const CONFIG_KEYS = [
     check: isCollectionName,
     message: "must be a valid collection name (no '$'/NUL, not system.*)",
   },
-  { path: 'lockTTLSeconds', check: isPositiveInteger, message: 'must be a positive integer' },
+  {
+    path: 'lockTTLSeconds',
+    check: isLockTtl,
+    message: `must be a positive integer, at most ${MAX_LOCK_TTL_SECONDS}`,
+  },
   { path: 'strict', check: isBoolean, message: 'must be a boolean' },
   { path: 'useTransaction', check: isBoolean, message: 'must be a boolean' },
   {
@@ -168,8 +182,8 @@ const CONFIG_KEYS = [
   },
   {
     path: 'timeoutMs',
-    check: isPositiveInteger,
-    message: 'must be a positive integer',
+    check: isTimerMs,
+    message: `must be a positive integer, at most ${MAX_TIMER_MS}`,
     optional: true,
   },
   { path: 'reloadMigrations', check: isBoolean, message: 'must be a boolean', optional: true },
@@ -198,8 +212,8 @@ const CONFIG_KEYS = [
   { path: 'waitForSearchIndexes', check: isBoolean, message: 'must be a boolean', optional: true },
   {
     path: 'searchIndexWaitTimeoutMs',
-    check: isPositiveInteger,
-    message: 'must be a positive integer',
+    check: isTimerMs,
+    message: `must be a positive integer, at most ${MAX_TIMER_MS}`,
     optional: true,
   },
   {

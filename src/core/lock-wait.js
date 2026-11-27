@@ -5,6 +5,7 @@ const {
   MigronautError,
   RunAbortedError,
 } = require('../errors/index.js');
+const { MAX_TIMER_MS } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 
 /**
@@ -21,8 +22,6 @@ const DEFAULT_LOCK_POLL_INTERVAL_MS = 500;
  * released lock is still noticed within a few seconds.
  */
 const MAX_LOCK_POLL_INTERVAL_MS = 5000;
-/** The longest delay a Node timer honours — anything above it fires after 1ms */
-const MAX_TIMER_MS = 2 ** 31 - 1;
 /** ±25% jitter so N instances booting together stop polling in lockstep */
 const POLL_JITTER_RATIO = 0.25;
 /**

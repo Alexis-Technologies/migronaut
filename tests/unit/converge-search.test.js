@@ -397,6 +397,8 @@ describe('isTransientError', () => {
     ['a primary that stepped down', serverError(189, 'PrimarySteppedDown')],
     ['a node shutting down', serverError(91, 'ShutdownInProgress')],
     ['a pool reset', labelled('ResetPool')],
+    ['a pool retry, as driver 7 spells it', labelled('PoolRequestedRetry')],
+    ['a pool retry, as older drivers spell it', labelled('PoolRequstedRetry')],
     [
       'a blip wrapped by converge',
       Object.assign(new Error('Could not read'), { cause: serverError(10107, 'not primary') }),

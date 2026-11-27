@@ -13,6 +13,7 @@ const { describe, it } = require('node:test');
 const {
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
+  MigrationLoadFailedError,
 } = require('../../src/errors/index.js');
 const {
   importMigrationModule,
@@ -63,11 +64,61 @@ describe('loadMigrationFile', () => {
     );
   });
 
-  it('should rethrow a non-TypeScript import failure unchanged', async () => {
-    await assert.rejects(
-      loadMigrationFile(path.join(fixtures, 'throws-on-import.cjs')),
-      /boom at import time/,
+  it('should type a non-TypeScript import failure, the original as its cause', async () => {
+    const file = path.join(fixtures, 'throws-on-import.cjs');
+    await assert.rejects(loadMigrationFile(file), (error) => {
+      assert.ok(error instanceof MigrationLoadFailedError);
+      assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_LOAD_FAILED');
+      assert.match(error.cause.message, /boom at import time/);
+      assert.match(error.context.cause, /boom at import time/);
+      assert.strictEqual(error.context.filepath, file);
+      return true;
+    });
+  });
+});
+
+describe('resolveMigrationExports', () => {
+  const up = async () => undefined;
+  const down = async () => undefined;
+
+  it('should refuse an optional export that is present but not of its kind', () => {
+    const cases = [
+      [{ useTransaction: 'true' }, /useTransaction must be a boolean/],
+      [{ timeoutMs: '5000' }, /timeoutMs must be a positive integer/],
+      [{ timeoutMs: 0 }, /timeoutMs must be a positive integer/],
+      [{ timeoutMs: 2 ** 31 }, /at most 2147483647/],
+      [{ description: 1 }, /description must be a string/],
+    ];
+    for (const [extra, message] of cases) {
+      assert.throws(() => resolveMigrationExports({ up, down, ...extra }, 'x.js'), {
+        code: 'ALX_ERR_MIGRATION_INVALID_EXPORT',
+        message,
+      });
+    }
+  });
+
+  it('should refuse a known export mistyped, and name the one it meant', () => {
+    const cases = [
+      ['useTransactions', 'useTransaction'],
+      ['timeoutMS', 'timeoutMs'],
+      ['require', 'requires'],
+      ['Description', 'description'],
+    ];
+    for (const [typo, meant] of cases) {
+      assert.throws(() => resolveMigrationExports({ up, down, [typo]: true }, 'x.js'), {
+        code: 'ALX_ERR_MIGRATION_INVALID_EXPORT',
+        message: `Unknown export '${typo}' — did you mean '${meant}'?`,
+      });
+    }
+  });
+
+  it('should leave the module its own helpers, and an export left undefined', () => {
+    const migration = resolveMigrationExports(
+      { up, down, seedUsers: () => undefined, timeoutMs: undefined },
+      'x.js',
     );
+    assert.strictEqual(migration.up, up);
+    assert.strictEqual('timeoutMs' in migration, false);
   });
 });
 

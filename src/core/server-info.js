@@ -20,6 +20,21 @@ const READ_OPTIONS = Object.freeze({
   bsonRegExp: false,
 });
 
+/**
+ * How migronaut's own bookkeeping — the changelog and the locks — is read and
+ * written: on the primary, majority-committed, whatever the client prefers.
+ * With a client that reads from secondaries, the read-back after taking a
+ * lock saw the document as it was before the write (a lock that was ours,
+ * reported held and left to no one until its TTL), and the applied set could
+ * lag behind the last run — an applied migration ran again. Inside a
+ * migration's transaction the driver leaves the concerns to the transaction.
+ */
+const BOOKKEEPING_OPTIONS = Object.freeze({
+  readPreference: 'primary',
+  readConcern: Object.freeze({ level: 'majority' }),
+  writeConcern: Object.freeze({ w: 'majority' }),
+});
+
 /** listIndexes calls in flight while reading many collections — a pace, not a pool */
 const READ_CONCURRENCY = 8;
 
@@ -63,6 +78,7 @@ const NAMESPACE_NOT_FOUND = 26;
 const INDEX_NOT_FOUND = 27;
 
 module.exports = {
+  BOOKKEEPING_OPTIONS,
   INDEX_NOT_FOUND,
   NAMESPACE_NOT_FOUND,
   READ_CONCURRENCY,

@@ -1510,12 +1510,14 @@ export type MigronautErrorCode =
   | 'ALX_ERR_MIGRATION_FILE_EXISTS'
   | 'ALX_ERR_MIGRATION_INVALID_NAME'
   | 'ALX_ERR_MIGRATION_INVALID_EXPORT'
+  | 'ALX_ERR_MIGRATION_LOAD_FAILED'
   | 'ALX_ERR_MIGRATION_EXECUTION_FAILED'
   | 'ALX_ERR_MIGRATION_TIMEOUT'
   | 'ALX_ERR_TRANSACTIONS_UNSUPPORTED'
   | 'ALX_ERR_CONFIG_INVALID'
   | 'ALX_ERR_CONFIG_FILE_EXISTS'
   | 'ALX_ERR_CONNECTION_FAILED'
+  | 'ALX_ERR_DATABASE_OPERATION_FAILED'
   | 'ALX_ERR_NOT_APPLIED'
   | 'ALX_ERR_IMPORT_TARGET_NOT_EMPTY'
   | 'ALX_ERR_MIGRATION_IRREVERSIBLE'
@@ -2984,6 +2986,16 @@ export class MigrationInvalidExportError extends MigronautError {
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
+/**
+ * Thrown when a migration file cannot be loaded — a syntax error, a throw at
+ * module scope, an import that does not resolve, a file that cannot be read.
+ * `cause` is what the loader threw; nothing of the file ran.
+ */
+export class MigrationLoadFailedError extends MigronautError {
+  readonly code: 'ALX_ERR_MIGRATION_LOAD_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
+}
+
 /** Thrown when a migration's up() or down() throws during execution */
 export class MigrationExecutionFailedError extends MigronautError {
   readonly code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED';
@@ -3005,6 +3017,17 @@ export class ConfigFileExistsError extends MigronautError {
 /** Thrown when connecting to MongoDB fails */
 export class ConnectionFailedError extends MigronautError {
   readonly code: 'ALX_ERR_CONNECTION_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown when the database refuses or drops an operation of migronaut's own —
+ * reading or writing the changelog, taking a lock, creating the indexes a
+ * background migration needs — after the connection was made. `cause` is the
+ * driver's error; `context.serverCode` is the server's code when it gave one.
+ */
+export class DatabaseOperationFailedError extends MigronautError {
+  readonly code: 'ALX_ERR_DATABASE_OPERATION_FAILED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 

@@ -39,6 +39,28 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 - **`ALX_ERR_LOCK_RELEASE_FAILED` keeps the driver's reason in `context.cause`**, as every other
   wrap site does, instead of `context.error` — the field every reader of a wrapped error looks in
   (`errorWithCause`, the queue's failure reason).
+- **A migration file that does not load is `ALX_ERR_MIGRATION_LOAD_FAILED`** (exit 35), with what
+  the loader threw as its `cause` — a syntax error, a throw at module scope, an import that does
+  not resolve, a file that cannot be read. It left raw, with no code: `--json` lost the rows a run
+  applied before it, the exit code was 1 and a queue job reported `UNKNOWN`. A file that cannot be
+  read for another reason than its absence (EACCES) is no longer `ALX_ERR_MIGRATION_FILE_NOT_FOUND`.
+- **A driver error that ends a run is `ALX_ERR_DATABASE_OPERATION_FAILED`** (exit 36): a changelog
+  read, the lock, a background migration's indexes — after the connection was made.
+  `context.serverCode` is the server's code, `cause` the driver's error, and the rows applied
+  before it travel in `context.results` like every other failure's. It is in `RETRYABLE_CODES`.
+- **A migration export that is present but not of its kind is refused** —
+  `useTransaction: 'true'`, `timeoutMs: '5000'`, a `description` that is not a string — as is a
+  known export mistyped (`useTransactions`, `timeoutMS`, `require`), with the name it meant: both
+  were ignored, and the migration ran without the transaction or the timeout it asked for. Exports
+  that resemble none are left to the module.
+- **Durations that end in a timer have a ceiling**: `lockTTLSeconds` at most 2147483,
+  `timeoutMs` (the config's and a migration's) and `searchIndexWaitTimeoutMs` at most
+  2147483647, as are the background runner's `pollIntervalMs`, `verifyIntervalMs` and
+  `stop({ timeoutMs })`, and a queue group's `wait({ timeoutMs })`. Above it Node fires a timer
+  after 1 ms: a 30-day lock TTL lost the lock right after taking it, a long timeout timed out at
+  once. `migronaut.schema.json` says so too.
+- **`EXIT_CODES` is frozen, with no prototype.** The CLI reads the same object, so a consumer's
+  write changed its exit codes for the whole process.
 
 ### Changed
 
@@ -48,6 +70,22 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 
 ### Fixed
 
+- **Every listener of a kit event gets it**, each called on its own: one that threw kept every
+  listener after it from the event — the queue processor's among them, which reads the run id
+  from `run:start`, so the job's userland log rows were dropped.
+- **The changelog and the locks are read and written on the primary, majority-committed**,
+  whatever the client prefers. With `readPreference=secondaryPreferred`, the read-back after taking
+  a lock could see the document before the write (the run refused as held, the lock left to no one
+  until its TTL), and the applied set could lag — an applied migration ran again.
+- **The pool's `PoolRequestedRetry` label is a transient search-index error again**: driver 7
+  spells it so, and only the older `PoolRequstedRetry` was recognized.
+- **A migration queue takes its listeners off a Queue it was handed** when it closes, and
+  `runMigrations` off the kit it handed `onKit`: each kept the adapter and its kit alive.
+- **`allow` refuses a permission named after an `Object.prototype` key** (`toString`).
+- **An error that escapes the CLI stops the run in flight.** After an unhandled rejection (a
+  migration's write no one awaited) the rest is no longer applied on top of it; after an uncaught
+  exception the run is stopped and given up to 10 s to release its lock before the exit, where the
+  CLI exited at once and left the lock to its TTL. A failed write to stdout sets exit code 1.
 - **Lookup tables keyed by input have no prototype.** A log level named after an
   `Object.prototype` key (`createLogger(stream, 'toString')`) falls back to `info` instead of
   silencing every method, and a text index field named `__proto__` keeps its weight in the

@@ -251,7 +251,14 @@ const TRANSIENT_NAMES = new Set([
   'MongoServerSelectionError',
   'MongoPoolClearedError',
 ]);
-const TRANSIENT_LABELS = ['ResetPool', 'RetryableWriteError', 'PoolRequstedRetry'];
+// The pool's label is `PoolRequestedRetry` in driver 7 and was misspelled
+// `PoolRequstedRetry` before it: both, for the whole peer range.
+const TRANSIENT_LABELS = [
+  'ResetPool',
+  'RetryableWriteError',
+  'PoolRequestedRetry',
+  'PoolRequstedRetry',
+];
 
 /** Whether a driver error carries one of {@link TRANSIENT_LABELS} */
 const hasTransientLabel = (error) => {

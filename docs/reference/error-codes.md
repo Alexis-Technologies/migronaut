@@ -63,12 +63,14 @@ can tell how far the run got. A failed converge carries its own progress in
 | `ALX_ERR_MIGRATION_FILE_EXISTS` | `MigrationFileExistsError` | `migronaut create` would overwrite an existing file | Pick a different name, or delete the existing file |
 | `ALX_ERR_MIGRATION_INVALID_NAME` | `MigrationInvalidNameError` | A migration name escapes the migrations dir, or isn't a string | Use a bare filename, not a path |
 | `ALX_ERR_MIGRATION_INVALID_EXPORT` | `MigrationInvalidExportError` | A file is missing `up`/`down` functions | Export both `up` and `down` |
+| `ALX_ERR_MIGRATION_LOAD_FAILED` | `MigrationLoadFailedError` | A migration file could not be loaded — a syntax error, a throw at module scope, an import that does not resolve, a file that cannot be read. Nothing of it ran | `context.cause` is what the loader said; `node <file>` shows the same error with its line |
 | `ALX_ERR_MIGRATION_EXECUTION_FAILED` | `MigrationExecutionFailedError` | A migration's `up`/`down` threw | Read the cause; fix the migration logic |
 | `ALX_ERR_MIGRATION_TIMEOUT` | `MigrationTimeoutError` | A migration ran longer than `timeoutMs` | Raise the limit, or make the migration watch `ctx.signal` |
 | `ALX_ERR_TRANSACTIONS_UNSUPPORTED` | `TransactionsUnsupportedError` | `useTransaction` is on, but the deployment is standalone | Set `useTransaction: false`, or run a replica set / mongos |
 | `ALX_ERR_CONFIG_INVALID` | `ConfigInvalidError` | Config failed validation | Check required fields and types |
 | `ALX_ERR_CONFIG_FILE_EXISTS` | `ConfigFileExistsError` | `migronaut init` found an existing config | Use `--force` to overwrite |
 | `ALX_ERR_CONNECTION_FAILED` | `ConnectionFailedError` | Couldn't connect to MongoDB | Verify `uri`/`dbName` and that Mongo is up |
+| `ALX_ERR_DATABASE_OPERATION_FAILED` | `DatabaseOperationFailedError` | After the connection was made, the database refused or dropped an operation of migronaut's own — reading or writing the changelog, taking the lock, creating a background migration's indexes | `context.serverCode` is the server's code (`13` = unauthorized: grant the role read-write on the bookkeeping collections); a network blip is worth a retry |
 | `ALX_ERR_NOT_APPLIED` | `NotAppliedError` | Tried to revert a migration that isn't applied | Run `migronaut status` to see what's applied |
 | `ALX_ERR_IMPORT_TARGET_NOT_EMPTY` | `ImportTargetNotEmptyError` | `migronaut import` target already has records | Use `--force` to import anyway |
 | `ALX_ERR_MIGRATION_IRREVERSIBLE` | `IrreversibleMigrationError` | Tried to revert a forward-only record ([imported](/commands/import) or [baselined](/commands/baseline)) | Write a new forward migration instead |

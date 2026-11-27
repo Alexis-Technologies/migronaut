@@ -220,6 +220,8 @@ class MigrationQueue {
   #backgroundWorker;
   #backgroundStarting;
   #backgroundWatcher;
+  /** Every listener `#listen` added — what close takes off a caller's own emitters */
+  #subscriptions = [];
 
   constructor(options) {
     if (!isObjectLike(options)) {
@@ -502,7 +504,24 @@ class MigrationQueue {
 
   /** Subscribe if the object is an emitter — an unlistened `error` event throws */
   #listen(emitter, event, listener) {
-    if (typeof emitter?.on === 'function') emitter.on(event, listener);
+    if (typeof emitter?.on !== 'function') return;
+    emitter.on(event, listener);
+    this.#subscriptions.push({ emitter, event, listener });
+  }
+
+  /**
+   * Take this object's listeners off an emitter the caller owns: it outlives
+   * the close, and each listener would keep this queue and its kit alive with
+   * it — a Queue shared by many short-lived adapters piled them up. The ones
+   * on emitters this object made stay: an emitter closed with no `error`
+   * listener throws on a late one.
+   */
+  #unlisten(emitter) {
+    for (let i = 0; i < this.#subscriptions.length; i++) {
+      const subscription = this.#subscriptions[i];
+      if (subscription.emitter !== emitter) continue;
+      if (typeof emitter.off === 'function') emitter.off(subscription.event, subscription.listener);
+    }
   }
 
   #assertOpen() {
@@ -1117,7 +1136,9 @@ class MigrationQueue {
     }
     if (this.#queueEvents && this.#ownsQueueEvents) await attempt(() => this.#queueEvents.close());
     if (this.#ownsQueue) await attempt(() => this.#queue.close());
+    else this.#unlisten(this.#queue);
     if (this.#ownsBackgroundQueue) await attempt(() => this.#backgroundQueue.close());
+    else if (this.#backgroundQueue) this.#unlisten(this.#backgroundQueue);
     if (force) {
       // The work in flight is not waited for — but it keeps its connection
       // until it ends: a kit this object created is disconnected only once

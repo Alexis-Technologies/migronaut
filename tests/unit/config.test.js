@@ -629,8 +629,24 @@ describe('validateConfig', () => {
   it('should report a non-positive lockTTLSeconds', () => {
     const issues = validateConfig(validConfig({ lockTTLSeconds: -1 }));
     assert.deepStrictEqual(issues, [
-      { path: 'lockTTLSeconds', message: 'must be a positive integer' },
+      { path: 'lockTTLSeconds', message: 'must be a positive integer, at most 2147483' },
     ]);
+  });
+
+  it('should report a timer duration a Node timer would fire at once', () => {
+    // Above 2^31 - 1 ms Node fires a timer after 1ms: a lock lost on taking
+    // it, every migration timed out.
+    const issues = validateConfig(
+      validConfig({ lockTTLSeconds: 2_592_000, timeoutMs: 3e9, searchIndexWaitTimeoutMs: 2 ** 31 }),
+    );
+    const paths = [];
+    for (const issue of issues) paths.push(issue.path);
+    assert.deepStrictEqual(paths.sort(), [
+      'lockTTLSeconds',
+      'searchIndexWaitTimeoutMs',
+      'timeoutMs',
+    ]);
+    assert.deepStrictEqual(validateConfig(validConfig({ lockTTLSeconds: 2_147_483 })), []);
   });
 
   it('should report a non-integer lockTTLSeconds', () => {

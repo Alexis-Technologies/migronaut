@@ -1,4 +1,5 @@
 const { actorFields } = require('../utils/actor.js');
+const { BOOKKEEPING_OPTIONS } = require('./server-info.js');
 
 /**
  * Reads and writes migration records in the changelog collection
@@ -15,7 +16,7 @@ class Changelog {
   }
 
   #coll(db) {
-    return db.collection(this.#collectionName);
+    return db.collection(this.#collectionName, BOOKKEEPING_OPTIONS);
   }
 
   /**
@@ -48,7 +49,7 @@ class Changelog {
    */
   async getForeignDocs(db, collectionName) {
     return db
-      .collection(collectionName)
+      .collection(collectionName, BOOKKEEPING_OPTIONS)
       .find()
       .project({ fileName: 1, fileHash: 1, appliedAt: 1, migrationBlock: 1, _id: 0 })
       .toArray();

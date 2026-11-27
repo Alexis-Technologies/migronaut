@@ -200,6 +200,8 @@ describe('createMigrationQueue', () => {
       const { mq } = make({ kit, bullmq: { ...fakeBullmq(), telemetry } });
       const group = await mq.enqueueUp();
       await mq.startWorker();
+      // A timeout a Node timer would fire at once is refused.
+      await assert.rejects(group.wait({ timeoutMs: 2 ** 31 }), /at most 2147483647/);
       // Waiting is what builds it.
       await group.wait({ timeoutMs: 2000 });
       assert.ok(mq.queueEvents instanceof FakeQueueEvents);
@@ -341,6 +343,16 @@ describe('createMigrationQueue', () => {
       assert.strictEqual(mq.queueName, 'tenant-a');
       await mq.close();
       assert.strictEqual(queue.closed, false);
+    });
+
+    it('should take its listeners off a Queue instance it was handed, on close', async () => {
+      const connection = createFakeConnection();
+      const queue = new FakeQueue('tenant-a', { connection });
+      const before = queue.listenerCount('error');
+      const mq = createMigrationQueue({ bullmq: { Queue: queue }, kit: stubKit() });
+      assert.strictEqual(queue.listenerCount('error'), before + 1);
+      await mq.close();
+      assert.strictEqual(queue.listenerCount('error'), before);
     });
 
     it('should use a QueueEvents instance as-is and never close it', async () => {
@@ -579,6 +591,8 @@ describe('createMigrationQueue', () => {
       const strict = make({ allow: { down: false } });
       await assert.rejects(strict.mq.enqueueDown(), /allow\.down/);
       assert.throws(() => make({ allow: { everything: true } }), ConfigInvalidError);
+      // A name every object answers to is not a permission.
+      assert.throws(() => make({ allow: { toString: true } }), /allow\.toString/);
       await mq.close();
       await strict.mq.close();
     });

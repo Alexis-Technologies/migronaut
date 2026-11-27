@@ -59,6 +59,8 @@ import {
   type RunResult,
   type RunStartEvent,
   SandboxRefusedError,
+  MigrationLoadFailedError,
+  DatabaseOperationFailedError,
   type SearchIndexBuild,
   type SearchIndexDefinition,
   type SearchIndexStatus,
@@ -691,6 +693,21 @@ expectType<'ALX_ERR_BACKGROUND_PENDING'>(new BackgroundPendingError('pending').c
 expectType<'ALX_ERR_BACKGROUND_FAILED'>(new BackgroundFailedError('failed').code);
 expectType<'ALX_ERR_BACKGROUND_CONFLICT'>(new BackgroundConflictError('conflict').code);
 expectType<'ALX_ERR_SANDBOX_REFUSED'>(new SandboxRefusedError('refused').code);
+
+// ─── Load and database failures ──────────────────────────────────────────────
+for (const code of [
+  'ALX_ERR_MIGRATION_LOAD_FAILED',
+  'ALX_ERR_DATABASE_OPERATION_FAILED',
+] as const) {
+  expectAssignable<MigronautErrorCode>(code);
+  expectType<number>(EXIT_CODES[code]);
+}
+expectType<'ALX_ERR_MIGRATION_LOAD_FAILED'>(
+  new MigrationLoadFailedError('load', { cause: new SyntaxError('x') }).code,
+);
+expectType<'ALX_ERR_DATABASE_OPERATION_FAILED'>(
+  new DatabaseOperationFailedError('db', { context: { serverCode: 13 } }).code,
+);
 
 // ─── Collection versioning ───────────────────────────────────────────────────
 expectAssignable<CollectionDefinition>({ name: 'orders', versioning: { current: 2 } });

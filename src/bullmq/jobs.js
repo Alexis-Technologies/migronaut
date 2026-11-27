@@ -217,7 +217,7 @@ const resolveAllow = (allow) => {
     throw new ConfigInvalidError('allow must be an object', { context: { allow: typeof allow } });
   }
   for (const key of Object.keys(allow)) {
-    if (!(key in DEFAULT_ALLOW)) {
+    if (!Object.hasOwn(DEFAULT_ALLOW, key)) {
       throw new ConfigInvalidError(
         `allow.${key} is not a known permission (down, force, unordered)`,
         { context: { key } },

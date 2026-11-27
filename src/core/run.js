@@ -73,14 +73,16 @@ const runMigrations = async (config = {}, options = {}) => {
   // `up` keeps returning the migration rows; with `convergeAfterUp` the
   // converge outcome rides along in the summary, from the kit's own event.
   let converge = null;
-  kit.on('converge:end', (event) => {
+  const onConverge = (event) => {
     if (event.trigger === 'up' && event.success) converge = event.result;
-  });
+  };
+  kit.on('converge:end', onConverge);
   // With onBackgroundPending: 'stop', where the run stopped and what for.
   const waiting = [];
-  kit.on('background:waiting', (event) => {
+  const onWaiting = (event) => {
     waiting.push({ migration: event.migration, waitsFor: event.waitsFor });
-  });
+  };
+  kit.on('background:waiting', onWaiting);
 
   // An abort reaches the run wherever it is: the wait loop sees the signal
   // between polls, and kit.stop() stops a run that is setting up or between
@@ -128,6 +130,9 @@ const runMigrations = async (config = {}, options = {}) => {
     };
   } finally {
     signal?.removeEventListener('abort', onAbort);
+    // onKit may have handed the kit out: it leaves without this call's listeners.
+    kit.off('converge:end', onConverge);
+    kit.off('background:waiting', onWaiting);
     await kit.disconnect().catch(() => undefined);
   }
 };

@@ -7,6 +7,7 @@ const {
 const { errorText } = require('../utils/error.js');
 const { randomId } = require('../utils/id.js');
 const { safeUsername } = require('../utils/user.js');
+const { BOOKKEEPING_OPTIONS } = require('./server-info.js');
 
 /** Fixed `_id` of the singleton migration lock document */
 const LOCK_ID = 'migronaut_lock';
@@ -77,6 +78,11 @@ class MigrationLock {
     this.#label = label;
   }
 
+  /** The lock collection, read and written on the primary (see BOOKKEEPING_OPTIONS) */
+  #coll() {
+    return this.#db.collection(this.#collectionName, BOOKKEEPING_OPTIONS);
+  }
+
   /** The lock document's `_id` */
   get id() {
     return this.#id;
@@ -108,7 +114,7 @@ class MigrationLock {
    * @throws {LockAlreadyHeldError} when another process holds a fresh lock
    */
   async acquire(token) {
-    const collection = this.#db.collection(this.#collectionName);
+    const collection = this.#coll();
     // The caller may supply the run id so the lock document, the changelog
     // records and the log lines of one run all carry the same token.
     const owner = token ?? randomId();
@@ -211,17 +217,16 @@ class MigrationLock {
     if (!this.#owner) {
       return false;
     }
-    const result = await this.#db
-      .collection(this.#collectionName)
-      .updateOne({ _id: this.#id, owner: this.#owner, nonce: this.#nonce }, [
-        { $set: { lockedAt: '$$NOW' } },
-      ]);
+    const result = await this.#coll().updateOne(
+      { _id: this.#id, owner: this.#owner, nonce: this.#nonce },
+      [{ $set: { lockedAt: '$$NOW' } }],
+    );
     return result.matchedCount === 1;
   }
 
   /** Read the current lock document, or null when no lock is held */
   async inspect() {
-    return this.#db.collection(this.#collectionName).findOne({ _id: this.#id });
+    return this.#coll().findOne({ _id: this.#id });
   }
 
   /**
@@ -231,8 +236,7 @@ class MigrationLock {
    * comparison acquire() avoids.
    */
   async inspectWithAge() {
-    const docs = await this.#db
-      .collection(this.#collectionName)
+    const docs = await this.#coll()
       .aggregate([
         { $match: { _id: this.#id } },
         { $set: { ageMs: { $subtract: ['$$NOW', '$lockedAt'] } } },
@@ -251,9 +255,10 @@ class MigrationLock {
     // could be one run's while the one deleted is another's that took the
     // lock in between. With its metadata, so every supported driver answers
     // in the same shape (5.x has no other).
-    const result = await this.#db
-      .collection(this.#collectionName)
-      .findOneAndDelete({ _id: this.#id }, { includeResultMetadata: true });
+    const result = await this.#coll().findOneAndDelete(
+      { _id: this.#id },
+      { includeResultMetadata: true },
+    );
     return result?.value ?? null;
   }
 
@@ -271,7 +276,7 @@ class MigrationLock {
     if (!this.#owner) return;
     const filter = { _id: this.#id, owner: this.#owner, nonce: this.#nonce };
     try {
-      await this.#db.collection(this.#collectionName).deleteOne(filter);
+      await this.#coll().deleteOne(filter);
       this.#owner = undefined;
       this.#nonce = undefined;
     } catch (error) {

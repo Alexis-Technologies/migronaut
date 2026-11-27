@@ -91,6 +91,21 @@ const attachSignalHandlers = (migrator, spinner, logger) => {
 };
 
 /**
+ * The migrators of this process's mutating commands, while they run: what
+ * bin/migronaut.js stops when something escaped every handler — a rejection no
+ * one awaited, a throw from a timer. Stopped, a run ends after the migration
+ * in flight and releases its lock, instead of applying the rest in a state no
+ * one can vouch for, or exiting with the lock left to its TTL.
+ */
+const activeMigrators = new Set();
+
+/** Ask every running migrator of this process to stop (see activeMigrators); how many there were */
+const stopActiveMigrators = (reason) => {
+  for (const migrator of activeMigrators) migrator.stop(reason);
+  return activeMigrators.size;
+};
+
+/**
  * Minimal signal handling for read-only commands: clear the spinner's frame,
  * then re-deliver the signal to Node's default handler (exit). Without this,
  * Ctrl-C during "Connecting to MongoDB…" leaves a partial frame the shell
@@ -239,6 +254,7 @@ const withMigrator = async (opts, fn, options = {}) => {
   const detachSignals = options.mutating
     ? attachSignalHandlers(migrator, spinner, logger)
     : attachCleanupHandlers(spinner);
+  if (options.mutating) activeMigrators.add(migrator);
   try {
     // Pre-connect is cosmetic (early spinner + early failure): every kit
     // method connects on its own. `connect: false` opts out — `audit` reports
@@ -274,6 +290,7 @@ const withMigrator = async (opts, fn, options = {}) => {
     spinner?.stop();
     reportError(error, { json, verbose, logger });
   } finally {
+    activeMigrators.delete(migrator);
     detachSignals();
     spinner?.stop();
     // A failing close must not replace whatever this command was reporting.
@@ -384,5 +401,6 @@ module.exports = {
   exitCodeFor,
   resolveLevel,
   attachSignalHandlers,
+  stopActiveMigrators,
   EXIT_CODES,
 };

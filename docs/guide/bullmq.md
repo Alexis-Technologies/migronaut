@@ -184,7 +184,8 @@ call's jobs, so both can `wait()`). A job that finds its migration already appli
 **Which failures could be retried.** If you enqueue jobs yourself with `attempts > 1`, the processor
 tells BullMQ not to retry what cannot succeed without a fix (a blocked, failed, invalid or drifted
 migration), and leaves the transient ones retryable: `ALX_ERR_LOCK_ALREADY_HELD`, `ALX_ERR_LOCK_LOST`,
-`ALX_ERR_LOCK_RELEASE_FAILED`, `ALX_ERR_RUN_ABORTED`, `ALX_ERR_CONNECTION_FAILED` (`RETRYABLE_CODES`).
+`ALX_ERR_LOCK_RELEASE_FAILED`, `ALX_ERR_RUN_ABORTED`, `ALX_ERR_CONNECTION_FAILED`,
+`ALX_ERR_DATABASE_OPERATION_FAILED` (`RETRYABLE_CODES`).
 
 **Opting out.** `enqueueUp(file, { ordered: false })` gives the CLI's plain single-file `up`, with
 no order guard — for the rare deliberate out-of-sequence apply.

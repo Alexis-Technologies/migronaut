@@ -10,12 +10,14 @@ const {
   ChecksumMismatchError,
   ConfigInvalidError,
   ConnectionFailedError,
+  DatabaseOperationFailedError,
   HookFailedError,
   IrreversibleMigrationError,
   LockAlreadyHeldError,
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
   MigrationInvalidNameError,
+  MigrationLoadFailedError,
   MigronautError,
   NotAppliedError,
   OutOfOrderMigrationError,
@@ -24,7 +26,7 @@ const {
 const { actorFields, pickActor } = require('../utils/actor.js');
 const { computeChecksum } = require('../utils/checksum.js');
 const { mapLimit } = require('../utils/concurrency.js');
-const { errorText, errorWithCause } = require('../utils/error.js');
+const { errorText, errorWithCause, isDriverError, serverErrorOf } = require('../utils/error.js');
 const { createIdGenerator } = require('../utils/id.js');
 const { jobFields } = require('../utils/job-ref.js');
 const { loadMigrationFile } = require('../utils/loader.js');
@@ -150,6 +152,29 @@ const emptyConverge = (dryRun) => ({ dryRun, changed: 0, inSync: true, collectio
  */
 const RECORD_LOCK_WAIT = Symbol('migronaut.recordLockWait');
 
+/** What `fs.access` says when a named migration is simply not there */
+const MISSING_FILE_CODES = new Set(['ENOENT', 'ENOTDIR']);
+
+/**
+ * The error a run leaves with. A driver error that got this far — a changelog
+ * read, the lock, a background migration's indexes — is typed on the way out:
+ * raw, it carried no code, so `--json` lost the rows applied before it, the
+ * exit code was 1 and the queue saw `UNKNOWN`. Anything else is typed already,
+ * or a bug, and leaves as it is.
+ */
+const typedRunFailure = (error, operation) => {
+  if (error instanceof MigronautError || !isDriverError(error)) return error;
+  const serverCode = serverErrorOf(error).code;
+  return new DatabaseOperationFailedError(`A database operation failed during ${operation}`, {
+    cause: error,
+    context: {
+      operation,
+      ...(serverCode !== undefined ? { serverCode } : {}),
+      cause: errorText(error),
+    },
+  });
+};
+
 class MigratorKit extends EventEmitter {
   #partialConfig;
   #configPath;
@@ -260,17 +285,33 @@ class MigratorKit extends EventEmitter {
     this.#deliver(event, { ...(this.#runId ? { runId: this.#runId } : {}), ...payload });
   }
 
-  /** {@link #emit} without the run id stamp: for a payload that carries its own */
+  /**
+   * {@link #emit} without the run id stamp: for a payload that carries its own.
+   *
+   * Each listener is called on its own: `emit` stops at the first one that
+   * throws, so a user's broken listener kept every listener after it — the
+   * queue processor's, which reads the run id from `run:start` — from ever
+   * seeing the event. Called by hand, a listener's rejected promise does not
+   * reach `captureRejections`, so it is routed to the same handler here.
+   */
   #deliver(event, payload) {
-    try {
-      this.emit(event, payload);
-    } catch (error) {
-      // A listener's failure is its own problem — but an invisible one is
-      // undebuggable, so leave a trace at debug level.
-      this.#logger.debug(
-        `Event listener for '${event}' threw: ${errorText(error)}`,
-        this.#fields({ event, error: errorText(error) }),
-      );
+    const listeners = this.rawListeners(event);
+    for (let i = 0; i < listeners.length; i++) {
+      try {
+        const returned = listeners[i].call(this, payload);
+        if (typeof returned?.then === 'function') {
+          returned.then(undefined, (error) =>
+            this[EventEmitter.captureRejectionSymbol](error, event),
+          );
+        }
+      } catch (error) {
+        // A listener's failure is its own problem — but an invisible one is
+        // undebuggable, so leave a trace at debug level.
+        this.#logger.debug(
+          `Event listener for '${event}' threw: ${errorText(error)}`,
+          this.#fields({ event, error: errorText(error) }),
+        );
+      }
     }
   }
 
@@ -645,8 +686,8 @@ class MigratorKit extends EventEmitter {
       );
       return result;
     } catch (error) {
-      failure = error;
-      throw error;
+      failure = typedRunFailure(error, info.command);
+      throw failure;
     } finally {
       recorder.finish(result, failure);
       this.#abort = undefined;
@@ -851,8 +892,16 @@ class MigratorKit extends EventEmitter {
       const filepath = this.#filepath(filename);
       try {
         await fs.access(filepath);
-      } catch {
-        throw new MigrationFileNotFoundError('Migration file not found', { context: { filename } });
+      } catch (error) {
+        if (MISSING_FILE_CODES.has(error?.code)) {
+          throw new MigrationFileNotFoundError('Migration file not found', {
+            context: { filename },
+          });
+        }
+        throw new MigrationLoadFailedError('Migration file cannot be read', {
+          cause: error,
+          context: { filename, cause: errorText(error) },
+        });
       }
       return [filename];
     }
@@ -920,12 +969,12 @@ class MigratorKit extends EventEmitter {
         if (outcome === 'stop') break;
       }
     } catch (error) {
-      failure = error;
+      failure = typedRunFailure(error, direction);
       // Failures before the migration body — beforeEach, a file that fails to
       // load — bypass #executeMigration's catch, so the partial results must be
       // attached here too or a --json consumer loses the applied-so-far list
       // exactly when it matters. Copy-on-write makes a re-attach harmless.
-      this.#attachResults(error, results);
+      this.#attachResults(failure, results);
     }
     const succeeded = failure === undefined;
     // afterAll runs on the failure path too — which is exactly when a

@@ -1,4 +1,5 @@
 const { ConfigInvalidError, QueueJobFailedError } = require('../errors/index.js');
+const { MAX_TIMER_MS } = require('../utils/concurrency.js');
 const { redactOutbound } = require('../utils/redact.js');
 
 /** Rejects a budgeted await that outlived the deadline — told apart from every other failure */
@@ -37,8 +38,11 @@ const waitForGroup = async ({
   converge,
   timeoutMs,
 }) => {
-  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
-    throw new ConfigInvalidError('timeoutMs must be a positive finite number', {
+  const badTimeout =
+    timeoutMs !== undefined &&
+    (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMER_MS);
+  if (badTimeout) {
+    throw new ConfigInvalidError(`timeoutMs must be a positive number, at most ${MAX_TIMER_MS}`, {
       context: { timeoutMs },
     });
   }
