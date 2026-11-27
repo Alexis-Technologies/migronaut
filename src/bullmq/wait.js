@@ -1,10 +1,15 @@
-const { ConfigInvalidError, QueueJobFailedError } = require('../errors/index.js');
+const { addAbortListener } = require('node:events');
+
+const { ConfigInvalidError, QueueJobFailedError, RunAbortedError } = require('../errors/index.js');
 const { MAX_TIMER_MS } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { redactOutbound } = require('../utils/redact.js');
 
 /** Rejects a budgeted await that outlived the deadline — told apart from every other failure */
 const DEADLINE = Symbol('wait deadline');
+
+/** Rejects a budgeted await that the caller's signal stopped */
+const ABORTED = Symbol('wait aborted');
 
 /**
  * How much longer than the remaining budget BullMQ's own `waitUntilFinished`
@@ -15,6 +20,45 @@ const DEADLINE = Symbol('wait deadline');
  * would be reported as an ordinary job failure.
  */
 const LISTENER_GRACE_MS = 1000;
+
+/**
+ * One budget for everything a wait awaits — connecting QueueEvents and
+ * reading a job included: with a Redis that is down, those are the awaits
+ * that would otherwise hang. `race(promise)` settles as the promise does, or
+ * rejects with DEADLINE or ABORTED, whichever comes first.
+ */
+const createBudget = (timeoutMs, signal) => {
+  const deadline = timeoutMs !== undefined ? Date.now() + timeoutMs : undefined;
+  let stopping = null;
+  const aborted =
+    signal === undefined
+      ? null
+      : new Promise((_resolve, reject) => {
+          stopping = addAbortListener(signal, () => reject(ABORTED));
+        });
+  // Raced on every await, never awaited alone: a stop between two awaits must
+  // not surface as an unhandled rejection.
+  aborted?.catch(() => undefined);
+  const race = (promise) => {
+    if (deadline === undefined && aborted === null) return promise;
+    let timer = null;
+    const racers = [promise];
+    if (aborted !== null) racers.push(aborted);
+    if (deadline !== undefined) {
+      const expired = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(DEADLINE), Math.max(0, deadline - Date.now()));
+      });
+      racers.push(expired);
+    }
+    return Promise.race(racers).finally(() => clearTimeout(timer));
+  };
+  return {
+    deadline,
+    race,
+    isPastDeadline: () => deadline !== undefined && Date.now() >= deadline,
+    dispose: () => stopping?.[Symbol.dispose](),
+  };
+};
 
 /**
  * Wait for every job of an enqueue group, in group order — and for the
@@ -38,7 +82,13 @@ const waitForGroup = async ({
   jobs,
   converge,
   timeoutMs,
+  signal,
 }) => {
+  if (signal !== undefined && !(signal instanceof AbortSignal)) {
+    throw new ConfigInvalidError('signal must be an AbortSignal', {
+      context: { signal: typeof signal },
+    });
+  }
   const badTimeout =
     timeoutMs !== undefined &&
     (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMER_MS);
@@ -58,19 +108,15 @@ const waitForGroup = async ({
     );
   }
 
-  // One budget for everything this call awaits — connecting QueueEvents and
-  // reading a job included: with a Redis that is down, those are the awaits
-  // that would otherwise hang.
-  const deadline = timeoutMs !== undefined ? Date.now() + timeoutMs : undefined;
-  const budgeted = (promise) => {
-    if (deadline === undefined) return promise;
-    let timer = null;
-    const expired = new Promise((_resolve, reject) => {
-      timer = setTimeout(() => reject(DEADLINE), Math.max(0, deadline - Date.now()));
+  const budget = createBudget(timeoutMs, signal);
+  const budgeted = budget.race;
+  const { deadline, isPastDeadline } = budget;
+  // Stopped by the caller: what finished before it goes with the error.
+  const stopped = () =>
+    new RunAbortedError('Group wait aborted', {
+      ...(signal.reason !== undefined ? { cause: signal.reason } : {}),
+      context: { reason: errorText(signal.reason ?? 'aborted'), groupId, finished: [...results] },
     });
-    return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
-  };
-  const isPastDeadline = () => deadline !== undefined && Date.now() >= deadline;
 
   /**
    * The typed code a failed job reported in its progress — what a caller
@@ -116,18 +162,24 @@ const waitForGroup = async ({
       );
     } catch (error) {
       if (error instanceof QueueJobFailedError) throw error;
+      if (error === ABORTED) throw stopped();
       // Decided by the clock, not by how BullMQ happens to word its timeout.
       if (error === DEADLINE || isPastDeadline()) throw outOfTime();
       throw fail(redactOutbound(errorText(error)), false, await failureCode(id), error);
     }
   };
 
-  for (const { id, migration } of jobs) {
-    results.push(await finish(id, `Migration job failed: ${migration}`, { migration, direction }));
+  try {
+    for (const { id, migration } of jobs) {
+      const fields = { migration, direction };
+      results.push(await finish(id, `Migration job failed: ${migration}`, fields));
+    }
+    if (!converge) return { groupId, direction, batch, results };
+    const converged = await finish(converge.id, 'Converge job failed', { kind: 'converge' });
+    return { groupId, direction, batch, results, converge: converged };
+  } finally {
+    budget.dispose();
   }
-  if (!converge) return { groupId, direction, batch, results };
-  const converged = await finish(converge.id, 'Converge job failed', { kind: 'converge' });
-  return { groupId, direction, batch, results, converge: converged };
 };
 
 module.exports = { waitForGroup };

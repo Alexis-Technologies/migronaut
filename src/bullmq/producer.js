@@ -347,6 +347,7 @@ const makeWait = (queue, group, { queueEvents, getQueueEvents } = {}) => {
         (waitsForSomething ? getQueueEvents?.() : undefined),
       ...group,
       timeoutMs: waitOptions.timeoutMs,
+      signal: waitOptions.signal,
     });
   };
 };

@@ -7,6 +7,7 @@ const {
 const {
   ConfigInvalidError,
   LockLostError,
+  MigrationLoadFailedError,
   QueueJobInvalidError,
 } = require('../../src/errors/index.js');
 const { stubKit } = require('../helpers/stub-kit.js');
@@ -390,7 +391,9 @@ describe('background lane jobs', () => {
     const before = Date.now();
     assert.strictEqual((await moved(processor, job)).name, 'DelayedError');
     assert.strictEqual(job.data.retry, 2);
-    assert.ok(job.delayedUntil >= before + 2000, 'the backoff doubles');
+    // 1000 · 2, jittered down to half of it at most.
+    assert.ok(job.delayedUntil >= before + 1000, 'the backoff doubles, jittered');
+    assert.ok(job.delayedUntil <= Date.now() + 2000, 'never past the doubled backoff');
     const last = laneJob({ retry: 2 });
     assert.deepStrictEqual(await processor(last, 'token'), {
       kind: 'background-lane',
@@ -399,6 +402,18 @@ describe('background lane jobs', () => {
       code: 'ALX_ERR_LOCK_LOST',
     });
     assert.match(last.logs.at(-1), /gave up after 2 retries/);
+  });
+
+  it('should give up at once on a failure no retry fixes', async () => {
+    const kit = backgroundKit({
+      runBackgroundSlice: mock.fn(async () => {
+        throw new MigrationLoadFailedError('broken file');
+      }),
+    });
+    const processor = createBackgroundProcessor({ kit, queue: fakeQueue(), maxLaneRetries: 5 });
+    const result = await processor(laneJob({ retry: 0 }), 'token');
+    assert.strictEqual(result.outcome, 'gave-up');
+    assert.strictEqual(result.code, 'ALX_ERR_MIGRATION_LOAD_FAILED');
   });
 
   it('should go back to the queue on shutdown — before it starts, or once its slice stops', async () => {

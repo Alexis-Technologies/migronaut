@@ -4,7 +4,8 @@ const {
   IrreversibleMigrationError,
   RunAbortedError,
 } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
+const { jitter } = require('../utils/concurrency.js');
+const { FATAL_SLICE_CODES, errorText } = require('../utils/error.js');
 const {
   control,
   coordinate,
@@ -29,19 +30,6 @@ const { sleep } = require('./background-throttle.js');
  * the queue job a run driving it inline works for), `registered` the state or
  * NotAppliedError, `status` the public view.
  */
-
-/**
- * Slice errors no retry fixes: the file changed or is gone or invalid, the
- * configuration or the deployment cannot run it. A lane ends on them.
- */
-const FATAL_SLICE_CODES = new Set([
-  'ALX_ERR_CHECKSUM_MISMATCH',
-  'ALX_ERR_MIGRATION_FILE_NOT_FOUND',
-  'ALX_ERR_MIGRATION_INVALID_EXPORT',
-  'ALX_ERR_MIGRATION_INVALID_NAME',
-  'ALX_ERR_CONFIG_INVALID',
-  'ALX_ERR_TRANSACTIONS_UNSUPPORTED',
-]);
 
 /** Failed slices in a row after which a lane of runBackground gives up */
 const MAX_LANE_FAILURES = 10;
@@ -161,7 +149,7 @@ const lane = async (host, name, { signal, sliceMs, untilDone, jobOption = {} }) 
       );
       if (!untilDone) return;
       try {
-        await sleep(Math.min(MAX_LANE_BACKOFF_MS, 250 * 2 ** failures), signal);
+        await sleep(jitter(Math.min(MAX_LANE_BACKOFF_MS, 250 * 2 ** failures)), signal);
       } catch {
         return;
       }

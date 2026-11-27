@@ -939,6 +939,31 @@ describe('createMigrationProcessor', () => {
       assert.strictEqual(finished, true);
       assert.strictEqual((await pending).status, 'applied');
     });
+
+    it('should stop waiting for a job past close({ timeoutMs }), and disconnect once it ends', async () => {
+      let release;
+      const kit = stubKit({
+        up: mock.fn(async (name) => {
+          await new Promise((resolve) => {
+            release = resolve;
+          });
+          return [{ file: name, status: 'applied' }];
+        }),
+      });
+      const processor = createMigrationProcessor({ kit });
+      const pending = processor(upJob());
+      await new Promise((resolve) => setImmediate(resolve));
+      const started = Date.now();
+      await processor.close({ timeoutMs: 20 });
+      assert.ok(Date.now() - started < 1000, 'close did not wait for the job');
+      // Still listening: the job in flight is not cut off.
+      assert.ok(kit.listenerCount('run:start') > 0);
+      release();
+      await pending;
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.strictEqual(kit.listenerCount('run:start'), 0);
+      await assert.rejects(processor.close({ timeoutMs: -1 }), { code: 'ALX_ERR_CONFIG_INVALID' });
+    });
   });
 
   describe('converge jobs', () => {

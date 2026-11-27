@@ -288,8 +288,10 @@ describe('bullmq adapter layering', () => {
     assert.ok(files.length >= 6, 'expected the adapter sources');
     for (const file of files) {
       for (const target of requiresOf(file)) {
+        // Node's built-ins are no layer: the rule is about the engine below.
         assert.ok(
-          /^\.\/[\w-]+\.js$/.test(target) ||
+          target.startsWith('node:') ||
+            /^\.\/[\w-]+\.js$/.test(target) ||
             /^\.\.\/utils\/[\w-]+\.js$/.test(target) ||
             target === '../errors/index.js' ||
             target === '../core/migrator.js' ||
@@ -337,10 +339,9 @@ describe('versioning subpath', () => {
     assert.ok(files.length >= 6, 'expected the versioning sources');
     for (const file of files) {
       for (const target of requiresOf(file)) {
-        assert.ok(
-          /^\.\/[\w-]+\.js$/.test(target) || target === '../errors/index.js',
-          `${file} requires ${target}`,
-        );
+        // Node's built-ins cost nothing to load and are no part of the engine.
+        const isOwn = /^\.\/[\w-]+\.js$/.test(target) || target === '../errors/index.js';
+        assert.ok(target.startsWith('node:') || isOwn, `${file} requires ${target}`);
       }
     }
   });

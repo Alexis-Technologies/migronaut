@@ -95,10 +95,12 @@ const abortedError = (signal, extra) => {
   const reason = signal.reason;
   if (reason instanceof MigronautError) return reason;
   // The reason itself is the cause: a timeout and a shutdown read the same as text.
-  return new RunAbortedError('Lock wait aborted', {
-    ...(reason !== undefined ? { cause: reason } : {}),
-    context: { reason: errorText(reason ?? 'aborted'), ...extra },
-  });
+  const text = errorText(reason ?? 'aborted');
+  const options =
+    reason === undefined
+      ? { context: { reason: text, ...extra } }
+      : { cause: reason, context: { reason: text, ...extra, cause: text } };
+  return new RunAbortedError('Lock wait aborted', options);
 };
 
 /**

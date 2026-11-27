@@ -1,3 +1,5 @@
+const { addAbortListener } = require('node:events');
+
 const { errorText } = require('../utils/error.js');
 const { isUnauthorized } = require('./shard-info.js');
 
@@ -48,23 +50,21 @@ const NO_REPLICATION = new Set([
   115, // CommandNotSupported
 ]);
 
-/** `ms`, jittered down to half of it — so processes that start together drift apart */
-const jitter = (ms) => Math.round(ms * (0.5 + Math.random() / 2));
-
 /** Sleep `ms`, cut short (rejecting with the reason) when `signal` aborts */
 const sleep = (ms, signal) => {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return void reject(signal.reason);
     if (ms <= 0) return void resolve();
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
+    let listening = null;
     const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
+      listening?.[Symbol.dispose]();
       resolve();
     }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal === undefined || signal === null) return;
+    listening = addAbortListener(signal, () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    });
   });
 };
 
@@ -339,7 +339,6 @@ module.exports = {
   createAdaptive,
   createThrottle,
   excludedMembers,
-  jitter,
   replicationLagMs,
   sleep,
 };

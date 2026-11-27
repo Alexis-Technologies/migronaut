@@ -91,6 +91,22 @@ const codeOf = (error) => {
 };
 
 /**
+ * Slice errors of a background migration no retry fixes: the file changed or
+ * is gone or invalid, the configuration or the deployment cannot run it. The
+ * kit's lane ends on them, the queue's lane gives up on them, and the runner
+ * backs off at its longest.
+ */
+const FATAL_SLICE_CODES = new Set([
+  'ALX_ERR_CHECKSUM_MISMATCH',
+  'ALX_ERR_MIGRATION_FILE_NOT_FOUND',
+  'ALX_ERR_MIGRATION_INVALID_EXPORT',
+  'ALX_ERR_MIGRATION_LOAD_FAILED',
+  'ALX_ERR_MIGRATION_INVALID_NAME',
+  'ALX_ERR_CONFIG_INVALID',
+  'ALX_ERR_TRANSACTIONS_UNSUPPORTED',
+]);
+
+/**
  * Whether the MongoDB driver threw this: every error class of `mongodb` is
  * named `Mongo…` (a duck test — the driver is not required here, and a kit
  * built on another copy of it must still be recognized).
@@ -98,6 +114,7 @@ const codeOf = (error) => {
 const isDriverError = (error) => error instanceof Error && `${error.name}`.startsWith('Mongo');
 
 module.exports = {
+  FATAL_SLICE_CODES,
   codeOf,
   contextPath,
   documentErrorText,

@@ -1,3 +1,5 @@
+const { ConfigInvalidError } = require('../errors/index.js');
+
 /**
  * The longest delay a Node timer honours: anything above it (or `Infinity`)
  * fires after 1ms, with only a TimeoutOverflowWarning to say so — a timeout or
@@ -7,16 +9,24 @@
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
+ * `ms`, jittered down to half of it — so processes that start together, or
+ * that one failover failed together, drift apart instead of retrying in step.
+ */
+const jitter = (ms) => Math.round(ms * (0.5 + Math.random() / 2));
+
+/**
  * Map `items` through `fn` with at most `limit` calls in flight, preserving
  * input order in the result.
  *
  * `Promise.all` over a whole list starts everything at once. For per-file
  * reads that means thousands of simultaneous open descriptors (EMFILE) once a
  * project has thousands of migrations; for writes it means an unbounded fan-out
- * at one connection pool. Failures still reject on the first error, matching
- * `Promise.all` — the point here is pacing, not error handling.
+ * at one connection pool. Failures reject on the first error, matching
+ * `Promise.all` — and nothing more is handed out after it, nor after `signal`
+ * aborts: the calls in flight finish, the rest never start (a checksum
+ * mismatch no longer hashed the other thousand files first).
  */
-const mapLimit = async (items, limit, fn) => {
+const mapLimit = async (items, limit, fn, signal) => {
   // Workers fill it out of order: every slot exists before the first one lands.
   const results = [];
   for (let i = 0; i < items.length; i++) results.push(undefined);
@@ -24,12 +34,20 @@ const mapLimit = async (items, limit, fn) => {
 
   const width = Math.max(1, Math.min(limit, items.length));
   let next = 0;
+  let hasFailed = false;
 
   const worker = async () => {
     for (;;) {
+      if (hasFailed) return;
+      signal?.throwIfAborted();
       const index = next++;
       if (index >= items.length) return;
-      results[index] = await fn(items[index], index);
+      try {
+        results[index] = await fn(items[index], index);
+      } catch (error) {
+        hasFailed = true;
+        throw error;
+      }
     }
   };
 
@@ -64,4 +82,23 @@ const settledWithin = async (promise, ms) => {
   }
 };
 
-module.exports = { MAX_TIMER_MS, mapLimit, settledWithin };
+/**
+ * {@link settledWithin} for a bound the caller may leave out: no `timeoutMs`
+ * waits for good. A `timeoutMs` that is not a duration a timer honours is a
+ * caller's mistake, refused.
+ */
+const waitAtMost = async (promise, timeoutMs) => {
+  if (timeoutMs === undefined) {
+    // Settled either way: the caller asks whether, not how — its own await says how.
+    await Promise.resolve(promise).catch(() => undefined);
+    return true;
+  }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_TIMER_MS) {
+    throw new ConfigInvalidError(`timeoutMs must be an integer from 0 to ${MAX_TIMER_MS}`, {
+      context: { timeoutMs },
+    });
+  }
+  return settledWithin(promise, timeoutMs);
+};
+
+module.exports = { MAX_TIMER_MS, jitter, mapLimit, settledWithin, waitAtMost };

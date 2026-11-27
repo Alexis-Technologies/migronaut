@@ -1,4 +1,4 @@
-const { EventEmitter } = require('node:events');
+const { EventEmitter, addAbortListener } = require('node:events');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -549,6 +549,13 @@ class MigratorKit extends EventEmitter {
    * everything else using it.
    */
   async disconnect() {
+    // Closing the client under a run fails its lock release, and the lock
+    // lingers until its TTL: await the run, or stop() it, first.
+    if (this.#runId) {
+      throw new RunInFlightError('Cannot disconnect while a run is in flight — await it first', {
+        context: { runId: this.#runId },
+      });
+    }
     // Whatever connect() is still loading its config must not open after this.
     this.#connectEpoch += 1;
     if (!this.#client) return;
@@ -656,6 +663,15 @@ class MigratorKit extends EventEmitter {
       this.#stopRequested = null;
       this.#abort(pending);
     }
+    // The caller's own signal stops the run as stop() does — the migration in
+    // flight finishes, the rest are skipped — with the signal's reason as the
+    // cause. One that aborted while config loaded or the client connected
+    // stops it here, before the lock.
+    const external = options.signal;
+    const abortFromSignal = () =>
+      this.#abort({ reason: errorText(external.reason ?? 'Aborted'), cause: external.reason });
+    const listening = external === undefined ? null : addAbortListener(external, abortFromSignal);
+    if (external?.aborted) abortFromSignal();
     const recorder = new RunRecorder({
       info,
       runId: this.#runId,
@@ -699,6 +715,7 @@ class MigratorKit extends EventEmitter {
       failure = typedRunFailure(error, info.command);
       throw failure;
     } finally {
+      listening?.[Symbol.dispose]();
       recorder.finish(result, failure);
       this.#abort = undefined;
       this.#runId = undefined;
@@ -1340,7 +1357,7 @@ class MigratorKit extends EventEmitter {
     // Pending files are the only bulk targets, so the per-target checksum
     // check below can never see an applied one. Verify them up front instead,
     // otherwise `up --strict` over a bulk run would police nothing.
-    if (strictBulk) await this.#assertNoChecksumDrift(appliedRecords);
+    if (strictBulk) await this.#assertNoChecksumDrift(appliedRecords, signal);
     // An ordered run is a step of the sequence, so its target must be a file
     // of the sequence: an existing dotfile, declaration file or helper module
     // next to the migrations is never one — and importing it would run its
@@ -1505,29 +1522,34 @@ class MigratorKit extends EventEmitter {
    * Takes the already-fetched applied records — no extra round trips — and
    * hashes with bounded concurrency, since this runs while holding the lock.
    */
-  async #assertNoChecksumDrift(records) {
-    await mapLimit(records, FS_CONCURRENCY, async (record) => {
-      const filepath = this.#filepath(record.name);
-      let actual = '';
-      try {
-        // Through the instance cache: a long-lived process running strict ups
-        // repeatedly must not re-hash the whole applied history every time —
-        // the same mtime+size trust status() already applies to this verdict.
-        actual = await this.#cachedChecksum(filepath);
-      } catch (error) {
-        // A deleted file has no checksum to compare; status() reports it as
-        // missing, which is a separate concern from drift. Hashing directly
-        // and catching ENOENT beats an access() probe: half the syscalls and
-        // no TOCTOU window.
-        if (error.code === 'ENOENT') return;
-        throw error;
-      }
-      if (record.checksum !== actual) {
-        throw new ChecksumMismatchError(`Checksum mismatch for ${record.name}`, {
-          context: { name: record.name, expected: record.checksum, actual },
-        });
-      }
-    });
+  async #assertNoChecksumDrift(records, signal) {
+    await mapLimit(
+      records,
+      FS_CONCURRENCY,
+      async (record) => {
+        const filepath = this.#filepath(record.name);
+        let actual = '';
+        try {
+          // Through the instance cache: a long-lived process running strict ups
+          // repeatedly must not re-hash the whole applied history every time —
+          // the same mtime+size trust status() already applies to this verdict.
+          actual = await this.#cachedChecksum(filepath);
+        } catch (error) {
+          // A deleted file has no checksum to compare; status() reports it as
+          // missing, which is a separate concern from drift. Hashing directly
+          // and catching ENOENT beats an access() probe: half the syscalls and
+          // no TOCTOU window.
+          if (error.code === 'ENOENT') return;
+          throw error;
+        }
+        if (record.checksum !== actual) {
+          throw new ChecksumMismatchError(`Checksum mismatch for ${record.name}`, {
+            context: { name: record.name, expected: record.checksum, actual },
+          });
+        }
+      },
+      signal,
+    );
   }
 
   /**
@@ -2551,10 +2573,16 @@ class MigratorKit extends EventEmitter {
    * drives it inline): it goes on the lane's log lines and `migration:log`
    * events.
    */
-  #backgroundDeps(owner, { job } = {}) {
+  #backgroundDeps(owner, { job, outsideRun = false } = {}) {
     const config = this.#config;
     const db = this.#requireDb();
     const stamp = owner ? { runId: owner } : {};
+    // Work of no run — a verify tick, a control action — must not carry the
+    // id of whatever run this kit has in flight: in the queue one kit serves
+    // the migration worker and the background worker side by side.
+    const send = outsideRun
+      ? (event, payload) => this.#deliver(event, payload)
+      : (event, payload) => this.#emit(event, payload);
     const lineStamp = job ? { ...stamp, ...jobFields(job) } : stamp;
     return {
       db,
@@ -2568,7 +2596,7 @@ class MigratorKit extends EventEmitter {
       logs: backgroundLogs({ sink: this.#logger, emitter: this.#logEmitter() }),
       ...(job ? { job } : {}),
       fields: (extra) => ({ ...lineStamp, ...extra }),
-      emit: (event, payload) => this.#emit(event, { ...stamp, ...payload }),
+      emit: (event, payload) => send(event, { ...stamp, ...payload }),
       lockFor: (name) =>
         new MigrationLock(db, config.lockCollection, config.lockTTLSeconds, {
           id: `background:${name}`,
@@ -2731,7 +2759,7 @@ class MigratorKit extends EventEmitter {
     // alone a collection whose watcher is streaming and alive.
     const streaming =
       this.#config.backgroundDrift === 'stream' ? await this.#streamingCollections() : undefined;
-    return verifyDrift(this.#backgroundDeps(), {
+    return verifyDrift(this.#backgroundDeps(undefined, { outsideRun: true }), {
       onDrift,
       ...(options.collections !== undefined ? { collections: options.collections } : {}),
       ...(streaming !== undefined ? { streaming } : {}),
@@ -3019,7 +3047,7 @@ class MigratorKit extends EventEmitter {
     assertActorValid(options);
     await this.#backgroundReady(name);
     await this.#registered(name);
-    const deps = this.#backgroundDeps();
+    const deps = this.#backgroundDeps(undefined, { outsideRun: true });
     const result = await controlBackground(deps, name, action, options);
     if (options.wait === true && (action === 'pause' || action === 'cancel')) {
       result.stopped = await waitForLanes(deps, name, { signal: options.signal });

@@ -534,7 +534,42 @@ describe('one run at a time (integration)', () => {
       // The first run holds the instance once its run window opens.
       await new Promise((resolve) => kit.once('migration:start', resolve));
       await assert.rejects(kit.up(), { code: 'ALX_ERR_RUN_IN_FLIGHT' });
+      // Nor is the client closed under it: the lock release would fail.
+      await assert.rejects(kit.disconnect(), { code: 'ALX_ERR_RUN_IN_FLIGHT' });
       await first;
+    } finally {
+      await kit.disconnect();
+    }
+  });
+});
+
+describe('a run method stopped by its signal (integration)', () => {
+  it('should finish the migration in flight, skip the rest, and carry the reason', async () => {
+    project.write(
+      '0001-slow.ts',
+      'export async function up() { await new Promise((resolve) => setTimeout(resolve, 300)); }\n' +
+        'export async function down() {}\n',
+    );
+    project.write('0002-a.ts', insertMigration('things', 'a'));
+    const kit = migrator();
+    try {
+      const controller = new AbortController();
+      kit.once('migration:start', () => controller.abort('deploy'));
+      await assert.rejects(kit.up(undefined, { signal: controller.signal }), (error) => {
+        assert.strictEqual(error.code, 'ALX_ERR_RUN_ABORTED');
+        assert.strictEqual(error.cause, 'deploy');
+        assert.deepStrictEqual(
+          error.context.results.map((row) => row.file),
+          ['0001-slow.ts'],
+        );
+        return true;
+      });
+      assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+      // An aborted signal stops the next run before the lock; a non-signal is refused.
+      await assert.rejects(kit.up(undefined, { signal: AbortSignal.abort('later') }), {
+        code: 'ALX_ERR_RUN_ABORTED',
+      });
+      await assert.rejects(kit.down(undefined, { signal: 'stop' }), ConfigInvalidError);
     } finally {
       await kit.disconnect();
     }

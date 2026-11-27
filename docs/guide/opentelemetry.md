@@ -60,7 +60,7 @@ your own "application startup" span shows up as part of it.
 
 | Span | Emitted | Attributes |
 |---|---|---|
-| `migronaut.run` | Once per `up` / `down` / `redo` / `baseline` / `import` / `converge` that acquired the lock | `migronaut.run.id`, `migronaut.run.command`, `migronaut.run.direction`, `migronaut.job.id` and `migronaut.job.group_id` when the run names a queue job (the [`job` option](/guide/migration-logs#ctx-run), set by the BullMQ adapter), `migronaut.lock.acquire_ms` (or `migronaut.lock.skipped` under `--no-lock`); at the end `migronaut.run.applied`, `migronaut.run.reverted`, `migronaut.run.skipped`, `migronaut.run.total`, and `migronaut.lock.lost_reason` if the lock was lost |
+| `migronaut.run` | Once per `up` / `down` / `redo` / `baseline` / `import` / `converge` that acquired the lock | `migronaut.run.id`, `migronaut.run.command`, `migronaut.run.direction`, `migronaut.job.id` and `migronaut.job.group_id` when the run names a queue job (the [`job` option](/guide/migration-logs#ctx-run), set by the BullMQ adapter), `migronaut.lock.acquire.duration` — seconds to take the lock — (or `migronaut.lock.skipped` under `--no-lock`); at the end `migronaut.run.applied`, `migronaut.run.reverted`, `migronaut.run.skipped`, `migronaut.run.total`, `migronaut.lock.lost_reason` if the lock was lost, and `migronaut.run.stopped` for a run stopped on request |
 | `migronaut.migration` | Once per migration executed, as a child of the run | `migronaut.migration.name`, `migronaut.migration.direction`, `migronaut.migration.batch`, `migronaut.migration.index`, `migronaut.migration.total`, `migronaut.migration.transaction`, and `migronaut.run.id`; at the end `migronaut.migration.attempts` — how many times the body ran (more than 1 when the driver retried the transaction) |
 | `migronaut.background.slice` | Once per [background migration](/guide/background-migrations) slice that held a partition lease — the active span for its batches | `migronaut.background.name`; at the end `migronaut.background.outcome` (`yielded`, `exhausted`, `paused`, …) |
 | `migronaut.background.coordinate` | Once per coordinator step that held the coordinator lock — planning (its `$sample` scans) and finalizing nest under it | `migronaut.background.name`; at the end `migronaut.background.outcome` (`process`, `wait`, `done`, …) |
@@ -68,7 +68,10 @@ your own "application startup" span shows up as part of it.
 A failure sets the span's status to `ERROR` with the failure message, and `error.type` to the
 [error code](/reference/error-codes) (`ALX_ERR_MIGRATION_EXECUTION_FAILED`, `ALX_ERR_LOCK_LOST`, …) — or, for an
 error that is not migronaut's (a `TypeError` thrown by a migration), to its class name, and
-`_OTHER` when it has none. A success leaves the status unset, as OpenTelemetry asks of libraries.
+`_OTHER` when it has none. A success leaves the status unset, as OpenTelemetry asks of libraries,
+and so does a run stopped on request (`stop()`, an abort signal, a shutdown that puts a queue job
+back): it ended as asked, so it carries `migronaut.run.stopped = true` instead of an error status
+— on the span and on its `migronaut.run.duration` point.
 A converge run is an ordinary `migronaut.run` with `migronaut.run.command = converge`; the
 driver's index commands nest under it.
 

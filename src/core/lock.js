@@ -83,6 +83,15 @@ class MigrationLock {
     return this.#db.collection(this.#collectionName, BOOKKEEPING_OPTIONS);
   }
 
+  /**
+   * How long the server may spend on one operation of this lock: its TTL. An
+   * operation that outlasts it is worthless — the lock it was about is stale —
+   * and before the lock is held nothing else bounds a stalled one.
+   */
+  get #timeLimit() {
+    return { maxTimeMS: this.ttlMs };
+  }
+
   /** The lock document's `_id` */
   get id() {
     return this.#id;
@@ -158,14 +167,16 @@ class MigrationLock {
             },
           },
         ],
-        { upsert: true },
+        { upsert: true, ...this.#timeLimit },
       );
     } catch (error) {
       if (isDuplicateKeyError(error)) {
         // Two processes raced the very first insert; the loser lands here.
         // The holder is only said in the error: a read that fails must not
         // turn "the lock is held" into a driver error.
-        const holder = await collection.findOne({ _id: this.#id }).catch(() => null);
+        const holder = await collection
+          .findOne({ _id: this.#id }, this.#timeLimit)
+          .catch(() => null);
         throw new LockAlreadyHeldError(`${sentence(this.#label)} is already held`, {
           context: { holder: toLockInfo(holder) ?? undefined, ttlMs: this.ttlMs },
         });
@@ -190,12 +201,14 @@ class MigrationLock {
     // that hold when both carry the same owner token.
     let current = null;
     try {
-      current = await collection.findOne({ _id: this.#id });
+      current = await collection.findOne({ _id: this.#id }, this.#timeLimit);
     } catch (error) {
       // The update above may have been ours. Left as it is, the document
       // would hold the lock for no one — this instance never learned it owns
       // it, so nothing would renew or release it — until its TTL ran out.
-      await collection.deleteOne({ _id: this.#id, owner, nonce }).catch(() => undefined);
+      await collection
+        .deleteOne({ _id: this.#id, owner, nonce }, this.#timeLimit)
+        .catch(() => undefined);
       throw error;
     }
     if (!current || current.owner !== owner || current.nonce !== nonce) {
@@ -220,13 +233,14 @@ class MigrationLock {
     const result = await this.#coll().updateOne(
       { _id: this.#id, owner: this.#owner, nonce: this.#nonce },
       [{ $set: { lockedAt: '$$NOW' } }],
+      this.#timeLimit,
     );
     return result.matchedCount === 1;
   }
 
   /** Read the current lock document, or null when no lock is held */
   async inspect() {
-    return this.#coll().findOne({ _id: this.#id });
+    return this.#coll().findOne({ _id: this.#id }, this.#timeLimit);
   }
 
   /**
@@ -237,10 +251,10 @@ class MigrationLock {
    */
   async inspectWithAge() {
     const docs = await this.#coll()
-      .aggregate([
-        { $match: { _id: this.#id } },
-        { $set: { ageMs: { $subtract: ['$$NOW', '$lockedAt'] } } },
-      ])
+      .aggregate(
+        [{ $match: { _id: this.#id } }, { $set: { ageMs: { $subtract: ['$$NOW', '$lockedAt'] } } }],
+        this.#timeLimit,
+      )
       .toArray();
     return docs[0] ?? null;
   }
@@ -257,7 +271,7 @@ class MigrationLock {
     // in the same shape (5.x has no other).
     const result = await this.#coll().findOneAndDelete(
       { _id: this.#id },
-      { includeResultMetadata: true },
+      { includeResultMetadata: true, ...this.#timeLimit },
     );
     return result?.value ?? null;
   }
@@ -276,7 +290,7 @@ class MigrationLock {
     if (!this.#owner) return;
     const filter = { _id: this.#id, owner: this.#owner, nonce: this.#nonce };
     try {
-      await this.#coll().deleteOne(filter);
+      await this.#coll().deleteOne(filter, this.#timeLimit);
       this.#owner = undefined;
       this.#nonce = undefined;
     } catch (error) {

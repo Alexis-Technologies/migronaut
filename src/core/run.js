@@ -85,10 +85,8 @@ const runMigrations = async (config = {}, options = {}) => {
   kit.on('background:waiting', onWaiting);
 
   // An abort reaches the run wherever it is: the wait loop sees the signal
-  // between polls, and kit.stop() stops a run that is setting up or between
-  // migrations (one already executing finishes — as stop() always has).
-  const onAbort = () => kit.stop(errorText(signal.reason ?? 'Aborted'), { cause: signal.reason });
-  signal?.addEventListener('abort', onAbort, { once: true });
+  // between polls, and `up` stops between migrations (one already executing
+  // finishes — as stop() always has), its cause the signal's reason.
   try {
     if (signal?.aborted) {
       throw new RunAbortedError('Aborted before the run started', {
@@ -106,6 +104,7 @@ const runMigrations = async (config = {}, options = {}) => {
         kit.up(undefined, {
           ...(noLock ? { noLock: true } : {}),
           ...(onBackgroundPending !== undefined ? { onBackgroundPending } : {}),
+          ...(signal ? { signal } : {}),
         }),
       {
         onLockHeld,
@@ -129,7 +128,6 @@ const runMigrations = async (config = {}, options = {}) => {
       ...(converge ? { converge } : {}),
     };
   } finally {
-    signal?.removeEventListener('abort', onAbort);
     // onKit may have handed the kit out: it leaves without this call's listeners.
     kit.off('converge:end', onConverge);
     kit.off('background:waiting', onWaiting);

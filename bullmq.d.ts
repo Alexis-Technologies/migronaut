@@ -689,6 +689,12 @@ export interface EnqueueDownOptions {
 export interface WaitOptions {
   /** One budget (ms) for the whole group. Default: no limit */
   timeoutMs?: number;
+  /**
+   * Stop waiting when it aborts — the jobs go on: the wait rejects with a
+   * `RunAbortedError` whose `cause` is the signal's `reason` and whose
+   * `context.finished` lists the jobs that finished before it.
+   */
+  signal?: AbortSignal;
   /** A QueueEvents instance to listen on, when the facade was not given one */
   queueEvents?: BullMQQueueEventsLike;
 }
@@ -905,8 +911,12 @@ export interface MigrationProcessor {
    * job put back must not be fetched again by the same worker.
    */
   shutdown(reason?: string): void;
-  /** `shutdown()`, let the job in flight settle, disconnect a kit the processor created */
-  close(): Promise<void>;
+  /**
+   * `shutdown()`, let the job in flight settle, disconnect a kit the processor
+   * created. `timeoutMs` bounds the wait: a job still running then is left to
+   * end on its own, and the kit is disconnected once it does.
+   */
+  close(options?: { timeoutMs?: number }): Promise<void>;
 }
 
 /**
@@ -967,8 +977,13 @@ export interface BackgroundProcessor {
    * comes back. Irreversible.
    */
   shutdown(reason?: string): void;
-  /** `shutdown()`, let the jobs in flight settle, disconnect a kit the processor created */
-  close(): Promise<void>;
+  /**
+   * `shutdown()`, let the jobs in flight settle, disconnect a kit the processor
+   * created. `timeoutMs` bounds the wait: lanes still at work then are left to
+   * end on their own (their leases expire), and the kit is disconnected once
+   * they do.
+   */
+  close(options?: { timeoutMs?: number }): Promise<void>;
   /** A coordinator for every background migration with work to do — what a worker does at start */
   heal(): Promise<BackgroundEnqueueResult>;
 }
@@ -1074,6 +1089,7 @@ export function waitForGroup(options: {
   /** The group's converge job, waited for last */
   converge?: { id: string };
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<GroupWaitResult>;
 
 // ─── Facade ────────────────────────────────────────────────────────────────────

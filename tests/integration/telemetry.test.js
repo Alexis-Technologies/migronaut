@@ -107,8 +107,9 @@ describe('telemetry — spans (integration)', () => {
       assert.strictEqual(span.spanContext().traceId, run.spanContext().traceId);
     }
 
-    const { 'migronaut.lock.acquire_ms': acquireMs, ...runAttributes } = run.attributes;
-    assert.strictEqual(typeof acquireMs, 'number');
+    const { 'migronaut.lock.acquire.duration': acquireSeconds, ...runAttributes } = run.attributes;
+    assert.strictEqual(typeof acquireSeconds, 'number');
+    assert.ok(acquireSeconds < 60, 'seconds, not milliseconds');
     assert.deepStrictEqual(runAttributes, {
       // Which database — one process may migrate many.
       'db.namespace': DB,
@@ -284,8 +285,24 @@ export async function down() {}
     await kit.disconnect();
     const [run] = runSpans();
     assert.strictEqual(run.attributes['migronaut.lock.skipped'], true);
-    assert.ok(!('migronaut.lock.acquire_ms' in run.attributes));
+    assert.ok(!('migronaut.lock.acquire.duration' in run.attributes));
     assert.strictEqual(migrationSpans().length, 1);
+  });
+
+  it('should end a run stopped on request without an error status, and say it was stopped', async () => {
+    project.write('0001-a.ts', probedMigration('a'));
+    project.write('0002-b.ts', probedMigration('b'));
+    const kit = migrator();
+    kit.once('migration:start', () => kit.stop('deploying'));
+    try {
+      await assert.rejects(kit.up(), { code: 'ALX_ERR_RUN_ABORTED' });
+    } finally {
+      await kit.disconnect();
+    }
+    const [run] = runSpans();
+    assert.strictEqual(run.status.code, 0, 'a requested stop is no error');
+    assert.strictEqual(run.attributes['migronaut.run.stopped'], true);
+    assert.ok(!('error.type' in run.attributes));
   });
 
   it('should count a skipped migration on the run, without a span of its own', async () => {

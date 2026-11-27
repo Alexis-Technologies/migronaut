@@ -914,6 +914,12 @@ export type CollectionDefinitionFile = Omit<CollectionDefinition, 'name'> & { na
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
 export interface ConvergeOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Plan without writing: no lock, no events. The result's rows are `'planned'` */
   dryRun?: boolean;
   /** Drop undeclared indexes in collections whose definition does not set `prune` */
@@ -1544,6 +1550,12 @@ export type ConfigFormat = 'ts' | 'js' | 'json';
 
 /** Options for {@link MigratorKit.up} */
 export interface UpOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Skip lock acquisition (dev only) */
   noLock?: boolean;
   /**
@@ -1634,6 +1646,12 @@ export interface JobRef {
 
 /** Options for {@link MigratorKit.down} */
 export interface DownOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Skip lock acquisition (dev only) */
   noLock?: boolean;
   /** Revert a specific batch number instead of the last batch */
@@ -1997,6 +2015,12 @@ export interface StatusOptions {
 
 /** Options for {@link MigratorKit.redo} */
 export interface RedoOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Skip lock acquisition (dev only) */
   noLock?: boolean;
   /** Who asked — stamped on the revert and on the re-apply */
@@ -2043,6 +2067,12 @@ export interface InitOptions {
 
 /** Options for {@link MigratorKit.baseline} */
 export interface BaselineOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Baseline pending files up to and including this one, instead of all */
   to?: string;
   /** Skip lock acquisition (dev only) */
@@ -2061,6 +2091,12 @@ export interface BaselineSummary {
 
 /** Options for {@link MigratorKit.import} */
 export interface ImportOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Source collection to read. Default: `changelog` (migrate-mongo's default) */
   from?: string;
   /** Target collection to write. Default: the config's `migrationsCollection` */
@@ -2118,7 +2154,10 @@ export class MigratorKit extends EventEmitter {
    * after `connect()` (before it, a config file's logger is not loaded yet).
    */
   readonly logger: MigronautLogger;
-  /** Disconnect from MongoDB */
+  /**
+   * Disconnect from MongoDB. Rejects with {@link RunInFlightError} while a run
+   * is in flight: closing the client under it would fail its lock release.
+   */
   disconnect(): Promise<void>;
   /**
    * Inspect the current migration lock without modifying it. Returns the holder,

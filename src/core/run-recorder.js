@@ -74,7 +74,9 @@ class RunRecorder {
       [ATTRIBUTES.RUN_DIRECTION]: this.#info.direction,
       [ATTRIBUTES.JOB_ID]: this.#job.jobId,
       [ATTRIBUTES.JOB_GROUP_ID]: this.#job.groupId,
-      [ATTRIBUTES.LOCK_ACQUIRE_MS]: this.#acquired?.acquireMs,
+      // Seconds, as every duration migronaut reports; the unit is the metadata's.
+      [ATTRIBUTES.LOCK_ACQUIRE_DURATION]:
+        typeof this.#acquired?.acquireMs === 'number' ? this.#acquired.acquireMs / 1000 : undefined,
       [ATTRIBUTES.LOCK_SKIPPED]: this.#acquired?.skipped,
     };
   }
@@ -92,6 +94,10 @@ class RunRecorder {
     const { summary, skipped } = countRows(rowsOf(result, failure));
     const durationMs = Date.now() - this.#startedAt;
     const telemetry = this.#telemetry;
+    // A run stopped on request — stop(), a signal, a shutdown that puts the
+    // job back — ended as asked: no error status, or every rolling deploy is
+    // an error-rate spike. `migronaut.run.stopped` says it instead.
+    const stopped = failure?.code === 'ALX_ERR_RUN_ABORTED';
     if (this.#span) {
       this.#span.finish(
         {
@@ -99,11 +105,12 @@ class RunRecorder {
           [ATTRIBUTES.RUN_REVERTED]: summary.reverted,
           [ATTRIBUTES.RUN_SKIPPED]: skipped,
           [ATTRIBUTES.RUN_TOTAL]: summary.total,
+          [ATTRIBUTES.RUN_STOPPED]: stopped ? true : undefined,
           [ATTRIBUTES.LOCK_LOST_REASON]: this.#lostReason,
         },
-        failure,
+        stopped ? undefined : failure,
       );
-      telemetry.runEnded({ ...this.#info, durationMs, error: failure });
+      telemetry.runEnded({ ...this.#info, durationMs, error: failure, stopped });
     } else if (failure instanceof LockAlreadyHeldError) {
       // Never held the lock, so there is no run to time — only a refusal to
       // count. Any other failure this early (an unreachable database) is the

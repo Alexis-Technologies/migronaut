@@ -1,7 +1,9 @@
+const { addAbortListener } = require('node:events');
+
 const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
-const { MAX_TIMER_MS } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
-const { jitter, sleep } = require('./background-throttle.js');
+const { MAX_TIMER_MS, jitter } = require('../utils/concurrency.js');
+const { FATAL_SLICE_CODES, errorText } = require('../utils/error.js');
+const { sleep } = require('./background-throttle.js');
 const { assertSliceMs } = require('./background-spec.js');
 const { watchOptions } = require('./background-watch.js');
 const { MigratorKit } = require('./migrator.js');
@@ -98,7 +100,7 @@ const startBackgroundRunner = (options = {}) => {
     controller.abort(options.signal.reason);
     stopOnSignal();
   };
-  options.signal?.addEventListener('abort', onOuterAbort, { once: true });
+  const outer = options.signal ? addAbortListener(options.signal, onOuterAbort) : null;
   if (options.signal?.aborted) controller.abort(options.signal.reason);
 
   const report = (error, migration) => {
@@ -183,7 +185,10 @@ const startBackgroundRunner = (options = {}) => {
         const failures = (shared.failures.get(name) ?? 0) + 1;
         shared.failures.set(name, failures);
         report(error, name);
-        backOff(name, Math.min(MAX_BACKOFF_MS, 1000 * 2 ** failures));
+        // A failure no retry fixes waits at the longest from the first: it is
+        // the next deploy that fixes it, and the runner keeps watching for it.
+        const isFatal = FATAL_SLICE_CODES.has(error?.code);
+        backOff(name, isFatal ? MAX_BACKOFF_MS : Math.min(MAX_BACKOFF_MS, 1000 * 2 ** failures));
       } finally {
         shared.active.set(name, shared.active.get(name) - 1);
       }
@@ -319,7 +324,7 @@ const startBackgroundRunner = (options = {}) => {
             );
           }
         }
-        options.signal?.removeEventListener('abort', onOuterAbort);
+        outer?.[Symbol.dispose]();
         if (ownsKit) {
           await kit.disconnect().catch((error) => {
             // The stop is done either way; a failed close is said at debug.

@@ -1,3 +1,5 @@
+const { addAbortListener } = require('node:events');
+
 const { ConfigInvalidError, RevisionConflictError } = require('../errors/index.js');
 const {
   resolveFieldNames,
@@ -264,15 +266,16 @@ const jitter = ({ baseMs = 10, maxMs = 1000 } = {}) => {
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
     if (signal?.aborted) return void reject(signal.reason);
+    let listening = null;
     const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
+      listening?.[Symbol.dispose]();
       resolve();
     }, ms);
-    const onAbort = () => {
+    if (signal === undefined || signal === null) return;
+    listening = addAbortListener(signal, () => {
       clearTimeout(timer);
       reject(signal.reason);
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
+    });
   });
 
 /**

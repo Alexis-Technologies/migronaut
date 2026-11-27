@@ -126,6 +126,7 @@ expectAssignable<MigronautError>(new HookFailedError('hook failed'));
 expectType<void>(kit.stop());
 expectType<void>(kit.stop('deploy', { cause: AbortSignal.timeout(1).reason }));
 expectType<Promise<RunResult[]>>(kit.redo(undefined, { noLock: true }));
+expectType<Promise<RunResult[]>>(kit.up(undefined, { signal: AbortSignal.timeout(60_000) }));
 
 // Resilience/audit config keys
 expectAssignable<Partial<MigronautConfig>>({ onLockLost: 'warn', environment: 'staging' });

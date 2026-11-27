@@ -169,6 +169,7 @@ describe('runMigrations signal (integration)', () => {
         assert.strictEqual(error.context.reason, 'SIGTERM');
         // The signal's reason itself, so a timeout is told from a shutdown.
         assert.strictEqual(error.cause, 'SIGTERM');
+        assert.strictEqual(error.context.cause, 'SIGTERM');
         return true;
       },
     );

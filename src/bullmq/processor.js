@@ -1,9 +1,11 @@
+const { addAbortListener } = require('node:events');
+
 const { MigratorKit, RECORD_LOCK_WAIT } = require('../core/migrator.js');
 const { assertLockWaitOptions, withLockWait } = require('../core/lock-wait.js');
 const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
 const { pickActor } = require('../utils/actor.js');
 const { isPlainObject } = require('../utils/canonical.js');
-const { settledWithin } = require('../utils/concurrency.js');
+const { settledWithin, waitAtMost } = require('../utils/concurrency.js');
 const { codeOf, errorText } = require('../utils/error.js');
 const { jobRefIssue } = require('../utils/job-ref.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
@@ -940,6 +942,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     // is what leaves a database half-migrated.
     const onAbort = () =>
       kit.stop(errorText(abort.reason ?? 'Queue job cancelled'), { cause: abort.reason });
+    let listening = null;
     try {
       // Validated before anything connects: a payload that fails the contract
       // must not reach the kit, let alone the filesystem.
@@ -950,7 +953,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       current = ctx;
       // A job fetched while this process shuts down goes straight back.
       if (shutdownController.signal.aborted) throw shutdownController.signal.reason;
-      abort.addEventListener('abort', onAbort, { once: true });
+      listening = addAbortListener(abort, onAbort);
       kit.logger.debug(`▶ Job ${job?.id} (${describeJob(ctx.data)})`, {
         ...jobIds(ctx),
         ...jobSummary(ctx.data),
@@ -993,7 +996,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       await flush(ctx);
       throw error;
     } finally {
-      abort.removeEventListener('abort', onAbort);
+      listening?.[Symbol.dispose]();
       current = null;
     }
   };
@@ -1016,12 +1019,29 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     }
   };
 
-  /** Shut down, let the job in flight settle, and disconnect a kit this processor created */
-  processor.close = async () => {
+  /**
+   * Shut down, let the job in flight settle, and disconnect a kit this
+   * processor created. `timeoutMs` bounds the wait: a job still running then
+   * is left to end on its own, and the kit is disconnected once it does.
+   */
+  processor.close = async (closeOptions = {}) => {
     processor.shutdown();
-    await chain;
-    for (let i = 0; i < events.length; i++) kit.off(events[i], listeners[events[i]]);
-    if (ownsKit) await kit.disconnect();
+    const settled = await waitAtMost(chain, closeOptions.timeoutMs);
+    const finish = async () => {
+      for (let i = 0; i < events.length; i++) kit.off(events[i], listeners[events[i]]);
+      if (ownsKit) await kit.disconnect();
+    };
+    if (settled) return finish();
+    kit.logger.warn(
+      `⚠ Migration processor: a job still running after ${closeOptions.timeoutMs}ms`,
+      {
+        timeoutMs: closeOptions.timeoutMs,
+      },
+    );
+    chain.then(finish).catch((error) => {
+      kit.logger.debug(`Migration processor: could not disconnect — ${errorText(error)}`);
+    });
+    return undefined;
   };
 
   Object.defineProperty(processor, 'kit', { value: kit, enumerable: true });

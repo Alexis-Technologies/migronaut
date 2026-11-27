@@ -47,7 +47,8 @@ describe('MigrationLock.acquire', () => {
     assert.strictEqual(collection.updateOne.mock.callCount(), 1);
     const [filter, , options] = collection.updateOne.mock.calls[0].arguments;
     assert.strictEqual(filter._id, LOCK_ID);
-    assert.deepStrictEqual(options, { upsert: true });
+    // Bounded by the TTL on the server: a stalled acquire is not waited for good.
+    assert.deepStrictEqual(options, { upsert: true, maxTimeMS: 60_000 });
   });
 
   it('should throw LockAlreadyHeldError on a duplicate-key error', async () => {
@@ -241,7 +242,7 @@ describe('MigrationLock.inspect / forceRelease', () => {
     // deleted, not a holder that took the lock in between.
     assert.deepStrictEqual(collection.findOneAndDelete.mock.calls[0].arguments, [
       { _id: LOCK_ID },
-      { includeResultMetadata: true },
+      { includeResultMetadata: true, maxTimeMS: 60_000 },
     ]);
     assert.strictEqual(collection.findOne.mock.callCount(), 0);
     assert.strictEqual(collection.deleteOne.mock.callCount(), 0);
@@ -345,6 +346,7 @@ describe('MigrationLock.release', () => {
     await lock.release();
     assert.deepStrictEqual(collection.deleteOne.mock.calls[0].arguments, [
       { _id: LOCK_ID, owner: 'run-1', nonce: held.nonce },
+      { maxTimeMS: 60_000 },
     ]);
   });
 

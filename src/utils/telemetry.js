@@ -26,7 +26,8 @@ const ATTRIBUTES = {
   RUN_REVERTED: 'migronaut.run.reverted',
   RUN_SKIPPED: 'migronaut.run.skipped',
   RUN_TOTAL: 'migronaut.run.total',
-  LOCK_ACQUIRE_MS: 'migronaut.lock.acquire_ms',
+  RUN_STOPPED: 'migronaut.run.stopped',
+  LOCK_ACQUIRE_DURATION: 'migronaut.lock.acquire.duration',
   LOCK_SKIPPED: 'migronaut.lock.skipped',
   LOCK_LOST_REASON: 'migronaut.lock.lost_reason',
   LOCK_WAIT_OUTCOME: 'migronaut.lock.wait.outcome',
@@ -424,11 +425,11 @@ const createTelemetry = (telemetry, { dbName } = {}) => {
   return {
     open,
     wrap,
-    runEnded({ command, direction, durationMs, error }) {
+    runEnded({ command, direction, durationMs, error, stopped }) {
       record(runDuration, durationMs, {
         [ATTRIBUTES.RUN_COMMAND]: command,
         [ATTRIBUTES.RUN_DIRECTION]: direction,
-        ...failure(error),
+        ...(stopped ? { [ATTRIBUTES.RUN_STOPPED]: true } : failure(error)),
       });
     },
     migrationEnded({ direction, durationMs, error }) {

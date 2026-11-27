@@ -1,8 +1,11 @@
+const { addAbortListener } = require('node:events');
+
 const { ConfigInvalidError, LockAlreadyHeldError, RunAbortedError } = require('../errors/index.js');
+const { jitter } = require('../utils/concurrency.js');
 const { errorText } = require('../utils/error.js');
 const { belowVersionFilter, versionOf } = require('../versioning/document.js');
 const { applyBatch, transactionOptions } = require('./background-engine.js');
-const { jitter, sleep } = require('./background-throttle.js');
+const { sleep } = require('./background-throttle.js');
 const {
   classifyStreamError,
   isEnding,
@@ -162,7 +165,7 @@ const startWatch = (deps, options = {}) => {
   const controller = new AbortController();
   const signal = controller.signal;
   const onOuterAbort = () => controller.abort(options.signal.reason);
-  options.signal?.addEventListener('abort', onOuterAbort, { once: true });
+  const outer = options.signal ? addAbortListener(options.signal, onOuterAbort) : null;
   if (options.signal?.aborted) controller.abort(options.signal.reason);
   const owner = deps.owner;
   /** collection → { controller, done, state, leading, counters, lastEventAt } */
@@ -331,7 +334,8 @@ const startWatch = (deps, options = {}) => {
       }
       failures += 1;
       report(outcome.error, collection);
-      await sleep(Math.min(MAX_BACKOFF_MS, 250 * 2 ** failures), leadSignal).catch(() => undefined);
+      const backoffMs = jitter(Math.min(MAX_BACKOFF_MS, 250 * 2 ** failures));
+      await sleep(backoffMs, leadSignal).catch(() => undefined);
     }
     return 'stopped';
   };
@@ -628,7 +632,7 @@ const startWatch = (deps, options = {}) => {
         const done = [];
         for (const follower of followers.values()) done.push(follower.done);
         await Promise.allSettled(done);
-        options.signal?.removeEventListener('abort', onOuterAbort);
+        outer?.[Symbol.dispose]();
       })();
       return stopping;
     },

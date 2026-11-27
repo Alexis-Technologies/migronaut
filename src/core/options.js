@@ -170,6 +170,15 @@ const assertFlags = (options, keys) => {
   }
 };
 
+/** `signal`: an AbortSignal, or nothing — what stops the run as `stop()` does */
+const assertSignalValid = (signal) => {
+  if (signal !== undefined && !(signal instanceof AbortSignal)) {
+    throw new ConfigInvalidError('signal must be an AbortSignal', {
+      context: { signal: typeof signal },
+    });
+  }
+};
+
 const UP_FLAGS = Object.freeze(['noLock', 'force', 'step']);
 const LOCK_FLAGS = Object.freeze(['noLock']);
 const IMPORT_FLAGS = Object.freeze(['noLock', 'dryRun', 'force', 'trustHash']);
@@ -234,6 +243,7 @@ const assertUpOptions = (filename, options) => {
   assertBackgroundPendingValid(options.onBackgroundPending);
   assertActorValid(options);
   assertJobValid(options.job);
+  assertSignalValid(options.signal);
 };
 
 /** `down(filename, options)` */
@@ -246,6 +256,7 @@ const assertDownOptions = (filename, options) => {
   assertOrderedValid(options.ordered, filename);
   assertActorValid(options);
   assertJobValid(options.job);
+  assertSignalValid(options.signal);
 };
 
 /** `redo(filename, options)` */
@@ -254,6 +265,7 @@ const assertRedoOptions = (filename, options) => {
   assertFlags(options, LOCK_FLAGS);
   assertActorValid(options);
   assertJobValid(options.job);
+  assertSignalValid(options.signal);
 };
 
 /** `dryRun(direction, filename, options)` */
@@ -277,6 +289,7 @@ const assertConvergeOptions = (options) => {
     });
   }
   assertActorValid(options);
+  assertSignalValid(options.signal);
 };
 
 /** `convergeHistory({ limit })` */
@@ -306,6 +319,7 @@ const assertListOptions = (filter, options) => {
 const assertBaselineOptions = (options) => {
   assertFilename(options.to);
   assertFlags(options, LOCK_FLAGS);
+  assertSignalValid(options.signal);
 };
 
 /** `runMigrations(config, options)`: its own `noLock`, before a kit is built */
@@ -319,6 +333,7 @@ const assertRunFlags = (options) => {
  */
 const assertImportOptions = (options) => {
   assertFlags(options, IMPORT_FLAGS);
+  assertSignalValid(options.signal);
   if (options.from !== undefined && !isCollectionName(options.from)) {
     throw new ConfigInvalidError('Invalid source collection name', {
       context: { from: options.from },

@@ -1,8 +1,7 @@
 const { MigratorKit } = require('../core/migrator.js');
 const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
-const { settledWithin } = require('../utils/concurrency.js');
-const { MAX_TIMER_MS } = require('../utils/concurrency.js');
-const { codeOf, errorText } = require('../utils/error.js');
+const { MAX_TIMER_MS, jitter, settledWithin, waitAtMost } = require('../utils/concurrency.js');
+const { FATAL_SLICE_CODES, codeOf, errorText } = require('../utils/error.js');
 const { redactOutbound } = require('../utils/redact.js');
 const {
   JOB_NAMES,
@@ -430,7 +429,8 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
       // fails the partition after `maxSliceFailures`; this lane only backs off.
       const retry = data.retry + 1;
       const message = errorText(error);
-      if (retry > settings.maxLaneRetries) {
+      // A failure no retry fixes gives up at once, as the kit's own lane does.
+      if (retry > settings.maxLaneRetries || FATAL_SLICE_CODES.has(codeOf(error))) {
         kit.logger.warn(`⚠ Background lane of ${name} gave up: ${message}`, {
           background: name,
           error: message,
@@ -454,7 +454,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
       );
       return later(
         ctx,
-        Math.min(MAX_LANE_BACKOFF_MS, 1000 * 2 ** (retry - 1)),
+        jitter(Math.min(MAX_LANE_BACKOFF_MS, 1000 * 2 ** (retry - 1))),
         { ...base, outcome: 'retry' },
         { ...job.data, retry },
       );
@@ -541,12 +541,31 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
     }
   };
 
-  /** Shut down, let the jobs in flight settle, disconnect a kit the processor created */
-  processor.close = async () => {
+  /**
+   * Shut down, let the jobs in flight settle, disconnect a kit the processor
+   * created. `timeoutMs` bounds the wait: lanes still at work then are left to
+   * end on their own (their leases expire), and the kit is disconnected once
+   * they do.
+   */
+  processor.close = async (closeOptions = {}) => {
     processor.shutdown();
-    await Promise.allSettled(inFlight);
-    if (typeof kit.off === 'function') kit.off('migration:log', onUserland);
-    if (ownsKit) await kit.disconnect();
+    const draining = Promise.allSettled(inFlight);
+    const settled = await waitAtMost(draining, closeOptions.timeoutMs);
+    const finish = async () => {
+      if (typeof kit.off === 'function') kit.off('migration:log', onUserland);
+      if (ownsKit) await kit.disconnect();
+    };
+    if (settled) return finish();
+    kit.logger.warn(
+      `⚠ Background processor: jobs still running after ${closeOptions.timeoutMs}ms`,
+      {
+        timeoutMs: closeOptions.timeoutMs,
+      },
+    );
+    draining.then(finish).catch((error) => {
+      kit.logger.debug(`Background processor: could not disconnect — ${errorText(error)}`);
+    });
+    return undefined;
   };
 
   /** Heal from MongoDB now — what a worker does when it starts */

@@ -72,6 +72,13 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 - **A lost lock that stops the run is said at `error`** (under `onLockLost: 'warn'` it stays a
   warning), as is a queue job BullMQ gave up on (every migration job — it has one attempt); both
   were warnings. A job with attempts left is still a warning.
+- **`disconnect()` under a run in flight rejects with `ALX_ERR_RUN_IN_FLIGHT`**: it closed the
+  client under the run, whose lock release then failed and left the lock to its TTL.
+- **The run span's `migronaut.lock.acquire_ms` is `migronaut.lock.acquire.duration`, in
+  seconds**, as every duration migronaut reports (the unit is no part of an attribute's name).
+- **A run stopped on request is no error in telemetry**: its span ends without the ERROR status and
+  its `migronaut.run.duration` point without `error.type`, both with `migronaut.run.stopped = true`
+  — every rolling deploy was an error-rate spike.
 - **`EXIT_CODES` is frozen, with no prototype.** The CLI reads the same object, so a consumer's
   write changed its exit codes for the whole process.
 
@@ -81,6 +88,12 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
   `runMigrations` and the queue processor pass their abort signal's `reason`, so an
   `AbortSignal.timeout` is told from a shutdown.
 - **`logger: false`** silences migronaut as `null` does; it did so by accident and was not typed.
+- **`signal` on the run methods** — `up`, `down`, `redo`, `baseline`, `import`, `converge` — and
+  on a queue group's `wait()`: a run stops as `stop()` stops it, with the signal's reason as the
+  cause; a wait stops waiting (the jobs go on) with what finished in `context.finished`.
+  `runMigrations` hands its own signal to `up` this way.
+- **`close({ timeoutMs })` on both queue processors**: a job still running then is left to end on
+  its own, and a kit the processor created is disconnected once it does.
 
 ### Changed
 
@@ -114,6 +127,17 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
   message only where a server does not name the key; and its `lastError` goes through the driver
   error's own text, as its partition's does.
 - **`MigrationQueue.close()` says every failure after the first** at `warn`; they were dropped.
+- **Every backoff is jittered** — the kit's lanes, the drift watcher, the queue's lanes — so the
+  pods a failover failed together do not all come back at once; a failure no retry fixes
+  (`ALX_ERR_MIGRATION_LOAD_FAILED`, a changed checksum, an invalid file or config) gives up a
+  queue lane at once and holds the in-process runner at its longest backoff, where both went on
+  retrying it on the usual schedule. An unknown commit result is retried after a pause too.
+- **A failure, or a stop, ends a bounded fan-out**: `up --strict` no longer hashes every other
+  applied file after the first checksum mismatch, and `stop()` cuts the pass short.
+- **Every operation of a lock is bounded on the server by its TTL** (`maxTimeMS`): before the lock
+  is held, nothing else bounded a stalled one.
+- **A verify tick or a control action no longer carries the id of the run in flight** on its
+  events, as it did on a queue whose kit served both workers.
 - **The drift watcher loads a file that would not load once per refresh**, not once per write
   of a busy collection (each with a warning and a reopening write).
 - **An error that escapes the CLI stops the run in flight.** After an unhandled rejection (a

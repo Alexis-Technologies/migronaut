@@ -622,8 +622,11 @@ const commit = async (session) => {
       await session.commitTransaction();
       return;
     } catch (error) {
-      // The commit may have landed: commit again — it is idempotent.
+      // The commit may have landed: commit again — it is idempotent — after
+      // the same jittered pause a transaction retry takes: an unknown result
+      // is most often a failover, which a commit at once only runs into.
       if (!isUnknownCommit(error) || attempt >= 2) throw error;
+      await sleep(backoffMs(attempt + 1));
     }
   }
 };

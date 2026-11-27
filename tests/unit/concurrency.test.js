@@ -16,6 +16,39 @@ describe('mapLimit', () => {
     assert.deepStrictEqual(out, [50, 10, 40, 20, 30]);
   });
 
+  it('should hand out nothing more after the first failure', async () => {
+    const started = [];
+    await assert.rejects(
+      mapLimit([1, 2, 3, 4, 5, 6, 7, 8], 2, async (n) => {
+        started.push(n);
+        await tick();
+        if (n === 2) throw new Error('checksum mismatch');
+      }),
+      /checksum mismatch/,
+    );
+    // The two in flight, maybe the one the first worker took meanwhile — never all eight.
+    assert.ok(started.length <= 4, `started ${started.length}`);
+  });
+
+  it('should stop handing out work once its signal aborts', async () => {
+    const controller = new AbortController();
+    const started = [];
+    await assert.rejects(
+      mapLimit(
+        [1, 2, 3, 4, 5, 6],
+        1,
+        async (n) => {
+          started.push(n);
+          if (n === 2) controller.abort(new Error('stopped'));
+          await tick();
+        },
+        controller.signal,
+      ),
+      /stopped/,
+    );
+    assert.deepStrictEqual(started, [1, 2]);
+  });
+
   it('should never exceed the concurrency limit', async () => {
     let inFlight = 0;
     let peak = 0;

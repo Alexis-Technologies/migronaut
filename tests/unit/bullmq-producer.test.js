@@ -780,6 +780,43 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
       assert.ok(Date.now() - started < 1000);
     });
 
+    it("should stop waiting when the caller's signal aborts, keeping what finished", async () => {
+      let calls = 0;
+      const queue = {
+        getJob: async () => ({
+          // The first job finishes; the second never does.
+          waitUntilFinished: () =>
+            ++calls === 1 ? Promise.resolve('done') : new Promise(() => {}),
+        }),
+      };
+      const controller = new AbortController();
+      setTimeout(() => controller.abort('client went away'), 20);
+      await assert.rejects(
+        waitForGroup({
+          queue,
+          queueEvents: { waitUntilReady: async () => undefined },
+          groupId: 'g',
+          direction: 'up',
+          batch: 1,
+          jobs: [
+            { id: '1', migration: 'a.js' },
+            { id: '2', migration: 'b.js' },
+          ],
+          signal: controller.signal,
+        }),
+        (error) => {
+          assert.strictEqual(error.code, 'ALX_ERR_RUN_ABORTED');
+          assert.strictEqual(error.cause, 'client went away');
+          assert.strictEqual(error.context.finished.length, 1);
+          return true;
+        },
+      );
+      await assert.rejects(
+        waitForGroup({ queue, queueEvents: {}, groupId: 'g', jobs: [], signal: 'stop' }),
+        ConfigInvalidError,
+      );
+    });
+
     it("should carry a failed job's typed code, so callers need not parse the reason", async () => {
       const queue = {
         getJob: async () => ({
