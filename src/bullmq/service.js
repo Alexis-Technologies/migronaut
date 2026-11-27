@@ -69,6 +69,9 @@ const BACKGROUND_KEYS = new Set([
   'maxLaneRetries',
 ]);
 
+/** How long a `close({ force: true })` on top of a close under way still gives it */
+const FORCE_CLOSE_GRACE_MS = 1_000;
+
 /** An interval a schedule accepts: whole milliseconds, a second at least */
 const isScheduleInterval = (ms) => Number.isSafeInteger(ms) && ms >= MIN_SCHEDULE_EVERY_MS;
 
@@ -77,7 +80,7 @@ const isScheduleInterval = (ms) => Number.isSafeInteger(ms) && ms >= MIN_SCHEDUL
  * queue has no background side. `true` takes every default.
  */
 const resolveBackground = (background, { queueName, QueueSource }) => {
-  if (background === undefined || background === false) return undefined;
+  if (background === undefined || background === false) return null;
   const options = background === true ? {} : background;
   if (!isObjectLike(options)) {
     throw new ConfigInvalidError('background must be true or an object');
@@ -186,8 +189,53 @@ const assertName = (value, name) => {
   }
 };
 
-/** How long a `close({ force: true })` on top of a close under way still gives it */
-const FORCE_CLOSE_GRACE_MS = 1_000;
+/** The background processor's options out of the resolved `background` option */
+const backgroundProcessorOptions = (settings) => {
+  const picked = {};
+  for (const key of [
+    'jobOptions',
+    'sliceMs',
+    'children',
+    'pollIntervalMs',
+    'stallMs',
+    'maxLaneRetries',
+  ]) {
+    if (settings[key] !== undefined) picked[key] = settings[key];
+  }
+  return picked;
+};
+
+/** What every coordinator enqueue from this object carries */
+const backgroundEnqueueOptions = (settings) => {
+  return {
+    ...(settings.jobOptions !== undefined ? { jobOptions: settings.jobOptions } : {}),
+    stallMs: settings.stallMs ?? DEFAULT_STALL_MS,
+  };
+};
+
+/** An injected instance must be on the queue this object is configured for */
+const assertSameQueue = (label, instance, name, prefix) => {
+  if (typeof instance.name === 'string' && instance.name !== name) {
+    throw new ConfigInvalidError(`${label} is on queue "${instance.name}", not "${name}"`, {
+      context: { queueName: name },
+    });
+  }
+  const instancePrefix = instance.opts?.prefix;
+  if (instancePrefix !== undefined && prefix !== undefined && instancePrefix !== prefix) {
+    throw new ConfigInvalidError(`${label} uses prefix "${instancePrefix}", not "${prefix}"`, {
+      context: { prefix },
+    });
+  }
+};
+
+const assertConcurrency = (concurrency) => {
+  if (concurrency !== undefined && concurrency !== 1) {
+    throw new ConfigInvalidError(
+      'Worker concurrency must be 1 — migrations run one at a time, in order',
+      { context: { concurrency } },
+    );
+  }
+};
 
 /**
  * Migrations as a queue: one database's migrations, enqueued as one BullMQ job
@@ -206,7 +254,7 @@ class MigrationQueue {
   #ownsQueue;
   #WorkerClass;
   #worker;
-  #workerStarting;
+  #workerStarting = null;
   #queueEventsSource;
   #queueEvents;
   #ownsQueueEvents = false;
@@ -219,15 +267,15 @@ class MigrationQueue {
   #telemetry;
   #globalConcurrency;
   #allow;
-  #closing;
+  #closing = null;
   /** Whether a close asked for `force` — at once, or on top of one under way */
   #forced = false;
-  #background;
+  #background = null;
   #backgroundQueue;
   #ownsBackgroundQueue = false;
   #backgroundProcessor;
   #backgroundWorker;
-  #backgroundStarting;
+  #backgroundStarting = null;
   #backgroundWatcher;
   /** Every listener `#listen` added — what close takes off a caller's own emitters */
   #subscriptions = [];
@@ -299,21 +347,16 @@ class MigrationQueue {
     const resolvedPrefix = prefix ?? (queueIsInstance ? Queue.opts?.prefix : undefined);
     if (resolvedPrefix !== undefined) assertName(resolvedPrefix, 'prefix');
     if (queueIsInstance) {
-      MigrationQueue.#assertSameQueue('bullmq.Queue', Queue, resolvedName, resolvedPrefix);
+      assertSameQueue('bullmq.Queue', Queue, resolvedName, resolvedPrefix);
     }
     if (eventsIsInstance) {
-      MigrationQueue.#assertSameQueue(
-        'bullmq.QueueEvents',
-        QueueEvents,
-        resolvedName,
-        resolvedPrefix,
-      );
+      assertSameQueue('bullmq.QueueEvents', QueueEvents, resolvedName, resolvedPrefix);
     }
     assertJobOptions(jobOptions);
     if (!isObjectLike(workerOptions)) {
       throw new ConfigInvalidError('workerOptions must be an object');
     }
-    MigrationQueue.#assertConcurrency(workerOptions.concurrency);
+    assertConcurrency(workerOptions.concurrency);
     if (typeof globalConcurrency !== 'boolean') {
       throw new ConfigInvalidError('globalConcurrency must be a boolean', {
         context: { globalConcurrency },
@@ -349,17 +392,17 @@ class MigrationQueue {
     if (backgroundSettings?.queueIsInstance) {
       // The same check as the migration queue's: a Worker built here on
       // another name or prefix would listen to an empty queue.
-      MigrationQueue.#assertSameQueue(
+      assertSameQueue(
         'background.queue',
         backgroundSettings.queue,
         backgroundSettings.name,
         resolvedPrefix,
       );
     }
-    if (backgroundSettings !== undefined) {
+    if (backgroundSettings !== null) {
       // Validated against a stand-in queue: the real one does not exist yet.
       resolveBackgroundProcessorOptions({
-        ...MigrationQueue.#backgroundProcessorOptions(backgroundSettings),
+        ...backgroundProcessorOptions(backgroundSettings),
         queue: { addBulk() {} },
       });
     }
@@ -375,13 +418,13 @@ class MigrationQueue {
           ...(resolvedPrefix !== undefined ? { prefix: resolvedPrefix } : {}),
           ...(telemetry !== undefined ? { telemetry } : {}),
         });
-    this.#listen(this.#queue, 'error', (error) =>
-      this.#kit.logger.error(`✖ Migration queue error: ${errorText(error)}`, {
+    this.#listen(this.#queue, 'error', (error) => {
+      return this.#kit.logger.error(`✖ Migration queue error: ${errorText(error)}`, {
         queue: resolvedName,
         error: errorText(error),
-      }),
-    );
-    if (backgroundSettings !== undefined) {
+      });
+    });
+    if (backgroundSettings !== null) {
       this.#background = backgroundSettings;
       this.#ownsBackgroundQueue = !backgroundSettings.queueIsInstance;
       this.#backgroundQueue = backgroundSettings.queueIsInstance
@@ -391,16 +434,16 @@ class MigrationQueue {
             ...(resolvedPrefix !== undefined ? { prefix: resolvedPrefix } : {}),
             ...(telemetry !== undefined ? { telemetry } : {}),
           });
-      this.#listen(this.#backgroundQueue, 'error', (error) =>
-        this.#kit.logger.error(`✖ Background queue error: ${errorText(error)}`, {
+      this.#listen(this.#backgroundQueue, 'error', (error) => {
+        return this.#kit.logger.error(`✖ Background queue error: ${errorText(error)}`, {
           queue: backgroundSettings.name,
           error: errorText(error),
-        }),
-      );
+        });
+      });
       this.#backgroundProcessor = createBackgroundProcessor({
         kit: this.#kit,
         queue: this.#backgroundQueue,
-        ...MigrationQueue.#backgroundProcessorOptions(backgroundSettings),
+        ...backgroundProcessorOptions(backgroundSettings),
         ...(userlandLogRows !== undefined ? { userlandLogRows } : {}),
       });
     }
@@ -418,7 +461,7 @@ class MigrationQueue {
         ? {
             background: {
               queue: this.#backgroundQueue,
-              ...MigrationQueue.#backgroundEnqueueOptions(backgroundSettings),
+              ...backgroundEnqueueOptions(backgroundSettings),
             },
           }
         : {}),
@@ -438,32 +481,8 @@ class MigrationQueue {
     return false;
   }
 
-  /** The background processor's options out of the resolved `background` option */
-  static #backgroundProcessorOptions(settings) {
-    const picked = {};
-    for (const key of [
-      'jobOptions',
-      'sliceMs',
-      'children',
-      'pollIntervalMs',
-      'stallMs',
-      'maxLaneRetries',
-    ]) {
-      if (settings[key] !== undefined) picked[key] = settings[key];
-    }
-    return picked;
-  }
-
-  /** What every coordinator enqueue from this object carries */
-  static #backgroundEnqueueOptions(settings) {
-    return {
-      ...(settings.jobOptions !== undefined ? { jobOptions: settings.jobOptions } : {}),
-      stallMs: settings.stallMs ?? DEFAULT_STALL_MS,
-    };
-  }
-
   #assertBackground(method) {
-    if (this.#background === undefined) {
+    if (this.#background === null) {
       throw new ConfigInvalidError(
         `${method} needs the background queue — pass background: true to createMigrationQueue`,
       );
@@ -484,30 +503,6 @@ class MigrationQueue {
           { context: { permission } },
         );
       }
-    }
-  }
-
-  /** An injected instance must be on the queue this object is configured for */
-  static #assertSameQueue(label, instance, name, prefix) {
-    if (typeof instance.name === 'string' && instance.name !== name) {
-      throw new ConfigInvalidError(`${label} is on queue "${instance.name}", not "${name}"`, {
-        context: { queueName: name },
-      });
-    }
-    const instancePrefix = instance.opts?.prefix;
-    if (instancePrefix !== undefined && prefix !== undefined && instancePrefix !== prefix) {
-      throw new ConfigInvalidError(`${label} uses prefix "${instancePrefix}", not "${prefix}"`, {
-        context: { prefix },
-      });
-    }
-  }
-
-  static #assertConcurrency(concurrency) {
-    if (concurrency !== undefined && concurrency !== 1) {
-      throw new ConfigInvalidError(
-        'Worker concurrency must be 1 — migrations run one at a time, in order',
-        { context: { concurrency } },
-      );
     }
   }
 
@@ -597,12 +592,12 @@ class MigrationQueue {
       ...(this.#prefix !== undefined ? { prefix: this.#prefix } : {}),
     });
     this.#ownsQueueEvents = true;
-    this.#listen(this.#queueEvents, 'error', (error) =>
-      this.#kit.logger.error(`✖ Migration queue events error: ${errorText(error)}`, {
+    this.#listen(this.#queueEvents, 'error', (error) => {
+      return this.#kit.logger.error(`✖ Migration queue events error: ${errorText(error)}`, {
         queue: this.#queueName,
         error: errorText(error),
-      }),
-    );
+      });
+    });
     return this.#queueEvents;
   }
 
@@ -678,7 +673,7 @@ class MigrationQueue {
       throw new ConfigInvalidError('enqueueBackground options must be an object');
     }
     return enqueueBackground(this.#backgroundQueue, this.#kit, {
-      ...MigrationQueue.#backgroundEnqueueOptions(this.#background),
+      ...backgroundEnqueueOptions(this.#background),
       ...options,
       ...(name !== undefined ? { migration: name } : {}),
     });
@@ -698,11 +693,11 @@ class MigrationQueue {
   async verifyBackground(options = {}) {
     this.#assertOpen();
     const result = await this.#kit.verifyBackground(options);
-    if (this.#background !== undefined && result.drift.length > 0) {
+    if (this.#background !== null && result.drift.length > 0) {
       await enqueueBackground(
         this.#backgroundQueue,
         this.#kit,
-        MigrationQueue.#backgroundEnqueueOptions(this.#background),
+        backgroundEnqueueOptions(this.#background),
       );
     }
     return result;
@@ -744,7 +739,7 @@ class MigrationQueue {
     if (!isObjectLike(overrides)) {
       throw new ConfigInvalidError('startWorker options must be an object');
     }
-    MigrationQueue.#assertConcurrency(overrides.concurrency);
+    assertConcurrency(overrides.concurrency);
     if (!this.#WorkerClass) {
       throw new ConfigInvalidError(
         'startWorker() needs the Worker class — pass bullmq: { Queue, Worker }',
@@ -753,7 +748,7 @@ class MigrationQueue {
     // A failed start is not cached: a database or Redis that was briefly
     // unreachable at boot must not leave this object unable to ever start.
     this.#workerStarting ??= this.#startWorker(overrides).catch((error) => {
-      this.#workerStarting = undefined;
+      this.#workerStarting = null;
       throw error;
     });
     return this.#workerStarting;
@@ -789,24 +784,24 @@ class MigrationQueue {
     });
     this.#worker = worker;
     const fields = { queue: this.#queueName };
-    this.#listen(worker, 'error', (error) =>
-      this.#kit.logger.error(`✖ Migration worker error: ${errorText(error)}`, {
+    this.#listen(worker, 'error', (error) => {
+      return this.#kit.logger.error(`✖ Migration worker error: ${errorText(error)}`, {
         ...fields,
         error: errorText(error),
-      }),
-    );
-    this.#listen(worker, 'failed', (job, error) =>
-      this.#kit.logger[failedLevel(job)](
+      });
+    });
+    this.#listen(worker, 'failed', (job, error) => {
+      return this.#kit.logger[failedLevel(job)](
         `✖ Migration job failed${job?.id !== undefined ? ` (${job.id})` : ''}: ${errorText(error)}`,
         { ...fields, ...failedJobFields(job, error), error: errorText(error) },
-      ),
-    );
-    this.#listen(worker, 'stalled', (jobId) =>
-      this.#kit.logger.warn(`⚠ Migration job stalled (${jobId}) — it will be re-run`, {
+      );
+    });
+    this.#listen(worker, 'stalled', (jobId) => {
+      return this.#kit.logger.warn(`⚠ Migration job stalled (${jobId}) — it will be re-run`, {
         ...fields,
         jobId: `${jobId}`,
-      }),
-    );
+      });
+    });
     await worker.waitUntilReady?.();
     return worker;
   }
@@ -832,7 +827,7 @@ class MigrationQueue {
       );
     }
     this.#backgroundStarting ??= this.#startBackgroundWorker(overrides).catch((error) => {
-      this.#backgroundStarting = undefined;
+      this.#backgroundStarting = null;
       throw error;
     });
     return this.#backgroundStarting;
@@ -867,24 +862,24 @@ class MigrationQueue {
     });
     this.#backgroundWorker = worker;
     const fields = { queue: this.#background.name };
-    this.#listen(worker, 'error', (error) =>
-      this.#kit.logger.error(`✖ Background worker error: ${errorText(error)}`, {
+    this.#listen(worker, 'error', (error) => {
+      return this.#kit.logger.error(`✖ Background worker error: ${errorText(error)}`, {
         ...fields,
         error: errorText(error),
-      }),
-    );
-    this.#listen(worker, 'failed', (job, error) =>
-      this.#kit.logger[failedLevel(job)](
+      });
+    });
+    this.#listen(worker, 'failed', (job, error) => {
+      return this.#kit.logger[failedLevel(job)](
         `✖ Background job failed${job?.id !== undefined ? ` (${job.id})` : ''}: ${errorText(error)}`,
         { ...fields, ...failedJobFields(job, error), error: errorText(error) },
-      ),
-    );
-    this.#listen(worker, 'stalled', (jobId) =>
-      this.#kit.logger.warn(`⚠ Background job stalled (${jobId}) — it will be re-run`, {
+      );
+    });
+    this.#listen(worker, 'stalled', (jobId) => {
+      return this.#kit.logger.warn(`⚠ Background job stalled (${jobId}) — it will be re-run`, {
         ...fields,
         jobId: `${jobId}`,
-      }),
-    );
+      });
+    });
     await worker.waitUntilReady?.();
     // Closing meanwhile: close() takes it from here — nothing more to start.
     if (this.#closing) return worker;
@@ -908,15 +903,16 @@ class MigrationQueue {
     try {
       this.#backgroundWatcher = await this.#kit.watchBackground({
         ...(typeof wanted === 'object' ? wanted : {}),
-        onError: (error, collection) =>
-          logger.warn(
+        onError: (error, collection) => {
+          return logger.warn(
             `⚠ Drift watcher${collection ? ` (${collection})` : ''}: ${errorText(error)}`,
             {
               queue: this.#background.name,
               ...(collection ? { collection } : {}),
               error: errorText(error),
             },
-          ),
+          );
+        },
       });
     } catch (error) {
       logger.warn(`⚠ The live drift watcher did not start: ${errorText(error)}`, {
@@ -1072,7 +1068,7 @@ class MigrationQueue {
    */
   async close(options = {}) {
     const force = options?.force === true;
-    if (this.#closing === undefined) {
+    if (this.#closing === null) {
       this.#forced = force;
       this.#closing = this.#close(force);
       return this.#closing;
@@ -1173,8 +1169,6 @@ class MigrationQueue {
   }
 }
 
-const createMigrationQueue = (options) => {
-  return new MigrationQueue(options);
-};
+const createMigrationQueue = (options) => new MigrationQueue(options);
 
 module.exports = { MigrationQueue, createMigrationQueue };

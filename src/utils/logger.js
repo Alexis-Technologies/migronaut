@@ -15,6 +15,9 @@ const silentLogger = {
   error: () => {},
 };
 
+/** Adapters are cached per user logger so pino's child() binds only once */
+const adapters = new WeakMap();
+
 const noop = () => {};
 
 /** warn/error always go to stderr, whatever stream debug/info write to */
@@ -73,18 +76,17 @@ const isUsableSink = (value) => {
  * and its ecosystem expect for structured logging; everyone else gets
  * `(msg, fields)` so a plain `(msg) => …` logger keeps working unchanged.
  */
-const guard = (fn, pinoStyle) => (msg, fields) => {
-  try {
-    if (fields === undefined) fn(msg);
-    else if (pinoStyle) fn(fields, msg);
-    else fn(msg, fields);
-  } catch {
-    // Logging must never break a migration run.
-  }
+const guard = (fn, pinoStyle) => {
+  return (msg, fields) => {
+    try {
+      if (fields === undefined) fn(msg);
+      else if (pinoStyle) fn(fields, msg);
+      else fn(msg, fields);
+    } catch {
+      // Logging must never break a migration run.
+    }
+  };
 };
-
-/** Adapters are cached per user logger so pino's child() binds only once */
-const adapters = new WeakMap();
 
 /**
  * Resolve the effective logger from a config value: `null` → silent,

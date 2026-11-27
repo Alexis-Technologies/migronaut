@@ -1,4 +1,5 @@
 const { setTimeout: delay } = require('node:timers/promises');
+
 const {
   ConfigInvalidError,
   LockAlreadyHeldError,
@@ -32,13 +33,13 @@ const POLL_JITTER_RATIO = 0.25;
  */
 const TTL_PATIENCE_FACTOR = 1.5;
 
+/** Polls that must fit in one wait budget: enough to see a live holder's heartbeat move */
+const POLLS_PER_BUDGET = 4;
+
 const jitteredDelay = (baseMs) => {
   const spread = baseMs * POLL_JITTER_RATIO;
   return Math.max(1, Math.round(baseMs - spread + Math.random() * spread * 2));
 };
-
-/** Polls that must fit in one wait budget: enough to see a live holder's heartbeat move */
-const POLLS_PER_BUDGET = 4;
 
 /**
  * The sleep before poll number `attempt` (1-based): doubling from `baseMs`,
@@ -60,11 +61,14 @@ const backoffDelay = (baseMs, attempt, budgetMs = Number.POSITIVE_INFINITY) => {
  * largest timer would fire after 1ms: the same storm. `lockWaitTimeoutMs` may
  * be left out — the default then follows the holder's TTL.
  */
-const assertLockWaitOptions = ({
-  onLockHeld,
-  lockWaitTimeoutMs,
-  lockPollIntervalMs = DEFAULT_LOCK_POLL_INTERVAL_MS,
-} = {}) => {
+const assertLockWaitOptions = (options = {}) => {
+  const { onLockHeld, lockWaitTimeoutMs } = options;
+  // `undefined` alone takes the default: a `null` from the caller is refused below.
+  const lockPollIntervalMs =
+    options.lockPollIntervalMs === undefined
+      ? DEFAULT_LOCK_POLL_INTERVAL_MS
+      : options.lockPollIntervalMs;
+
   if (onLockHeld !== undefined && onLockHeld !== 'wait' && onLockHeld !== 'throw') {
     throw new ConfigInvalidError("onLockHeld must be 'wait' or 'throw'", {
       context: { onLockHeld },
@@ -257,12 +261,12 @@ const withLockWait = async (attempt, options = {}) => {
 };
 
 module.exports = {
-  DEFAULT_LOCK_POLL_INTERVAL_MS,
   DEFAULT_LOCK_WAIT_TIMEOUT_MS,
+  DEFAULT_LOCK_POLL_INTERVAL_MS,
   MAX_LOCK_POLL_INTERVAL_MS,
-  assertLockWaitOptions,
-  backoffDelay,
   jitteredDelay,
+  backoffDelay,
+  assertLockWaitOptions,
   waitBudget,
   withLockWait,
 };

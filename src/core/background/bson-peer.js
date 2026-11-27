@@ -20,4 +20,4 @@ const bsonSize = (value) => loadBson().calculateObjectSize(value);
 /** `value` as relaxed EJSON — plain JSON a person can read, types tagged where JSON has none */
 const toRelaxedEjson = (value) => loadBson().EJSON.serialize(value, { relaxed: true });
 
-module.exports = { bsonSize, loadBson, toRelaxedEjson };
+module.exports = { loadBson, bsonSize, toRelaxedEjson };

@@ -15,11 +15,10 @@ const { errorText, serverErrorOf } = require('../utils/error.js');
 const isTransactionsUnsupported = (error) => {
   const refusal = serverErrorOf(error);
   if (typeof refusal !== 'object' || refusal === null) return false;
-  return (
-    refusal.code === 20 ||
-    (typeof refusal.message === 'string' &&
-      refusal.message.includes('Transaction numbers are only allowed'))
-  );
+  if (refusal.code === 20) return true;
+  // Servers before the code: the message is all there is.
+  const message = typeof refusal.message === 'string' ? refusal.message : '';
+  return message.includes('Transaction numbers are only allowed');
 };
 
 /**
@@ -110,12 +109,14 @@ const runMigration = async (params) => {
   // A fresh context per attempt, not one mutated in place: a body from an
   // earlier attempt that is still running (a timeout does not stop it) keeps
   // the attempt it started with.
-  const contextOf = (attemptSession, attempt) => ({
-    ...context,
-    signal,
-    ...(attemptSession ? { session: attemptSession } : {}),
-    ...attemptContext?.(attempt),
-  });
+  const contextOf = (attemptSession, attempt) => {
+    return {
+      ...context,
+      signal,
+      ...(attemptSession ? { session: attemptSession } : {}),
+      ...attemptContext?.(attempt),
+    };
+  };
   let attempts = 0;
   // The context the body last ran with — what onError gets.
   let runtimeContext = null;

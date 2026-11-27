@@ -31,8 +31,8 @@ const TEST_ARGS = ['--setParameter', 'enableTestCommands=1'];
  */
 const startTestMongo = async (dbName = 'migronaut_test', options = {}) => {
   const sharedUri = options.dedicated ? undefined : process.env.MIGRONAUT_TEST_MONGO_URI;
-  let replSet;
-  let uri;
+  let replSet = null;
+  let uri = null;
   if (sharedUri) {
     uri = sharedUri;
   } else {

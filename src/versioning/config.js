@@ -145,11 +145,11 @@ const versioningOf = (definitions, collection) => {
 };
 
 module.exports = {
-  MAX_FIELD_NAME,
-  VERSIONING_DEFAULTS,
   VERSIONING_KEYS,
+  VERSIONING_DEFAULTS,
+  MAX_FIELD_NAME,
   fieldNameIssue,
-  resolveVersioning,
   versioningIssues,
+  resolveVersioning,
   versioningOf,
 };

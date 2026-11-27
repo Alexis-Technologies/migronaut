@@ -19,7 +19,7 @@ const {
   makeProject,
 } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_features_test';
 
 before(async () => {
@@ -30,7 +30,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();
@@ -251,7 +251,7 @@ describe('lifecycle events (integration)', () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     project.write('0002-bad.ts', failingMigration());
     const kit = migrator();
-    let end;
+    let end = null;
     kit.on('run:end', (event) => (end = event));
 
     await assert.rejects(kit.up());
@@ -265,7 +265,7 @@ describe('lifecycle events (integration)', () => {
   it('should carry ttlMs and acquireMs on lock:acquired and owner on lock events', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     const kit = migrator();
-    let acquired;
+    let acquired = null;
     kit.on('lock:acquired', (event) => (acquired = event));
 
     await kit.up();

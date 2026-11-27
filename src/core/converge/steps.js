@@ -72,7 +72,7 @@ const runRebuild = async (db, collection, step, settle) => {
     created.add(spec.name);
     settle(action, Date.now() - startedAt);
   }
-  return undefined;
+  return null;
 };
 
 /**
@@ -104,7 +104,7 @@ const convertToUnique = async (db, collection, step) => {
   if (Object.keys(step.rest).length > 0) {
     await db.command({ collMod: collection, index: { name: step.name, ...step.rest } });
   }
-  return undefined;
+  return null;
 };
 
 /**
@@ -168,7 +168,7 @@ const runStep = async (db, collection, step, settle, search) => {
     }
     const durationMs = Date.now() - startedAt;
     for (const action of step.actions) settle(action, durationMs);
-    return undefined;
+    return null;
   } catch (error) {
     // One command for several indexes fails (or succeeds) for all of them.
     const together = step.op === 'createIndexes' || step.op === 'createSearchIndexes';

@@ -95,7 +95,7 @@ describe('MigrationQueue.close — force on top of a close that hangs', () => {
     const worker = await mq.startWorker();
     // A job that will not end, or a Redis that is away: the graceful close
     // never returns.
-    let release;
+    let release = null;
     worker.close = () =>
       new Promise((resolve) => {
         release = resolve;
@@ -909,8 +909,8 @@ describe('createMigrationQueue', () => {
         connection: spiedConnection(),
         config: { uri: 'mongodb://127.0.0.1:1/never', dbName: 'never', logger: null },
       });
-      let release;
-      let started;
+      let release = null;
+      let started = null;
       const running = new Promise((resolve) => (started = resolve));
       mock.method(mq.kit, 'connect', async () => {});
       mock.method(mq.kit, 'dryRun', async () => pendingRows('0001-a.js'));

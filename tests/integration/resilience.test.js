@@ -17,7 +17,7 @@ const {
   makeProject,
 } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_resilience_test';
 const LOCK_COLLECTION = '_migronaut_locks';
 
@@ -29,7 +29,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();
@@ -73,7 +73,7 @@ const stealLock = async () => {
 
 /** A deferred resolved from inside the locked body, so tests know it started */
 const deferred = () => {
-  let settle;
+  let settle = null;
   const promise = new Promise((resolve) => {
     settle = resolve;
   });
@@ -223,7 +223,7 @@ describe('MigratorKit.stop (integration)', () => {
     await seed.up();
     await seed.disconnect();
 
-    let sawSignal;
+    let sawSignal = null;
     const kit = migrator({
       hooks: {
         beforeEach: async (_name, ctx) => {
@@ -342,7 +342,7 @@ describe('hook guarantees (integration)', () => {
   it('should report success and the applied count to afterAll', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     project.write('0002-b.ts', insertMigration('things', 'b'));
-    let summary;
+    let summary = null;
     const kit = migrator({
       hooks: {
         afterAll: async (_ctx, s) => {
@@ -574,7 +574,7 @@ describe('run correlation (integration)', () => {
 
     // Sample the lock's owner while the run is in flight; afterwards the lock
     // is gone, so this is the only chance to compare it with the records.
-    let lockOwner;
+    let lockOwner = null;
     const kit = makeMigrator(
       mongo.uri,
       DB,
@@ -583,7 +583,7 @@ describe('run correlation (integration)', () => {
       {
         progress: {
           onStart: () => {
-            if (lockOwner === undefined) {
+            if (lockOwner === null) {
               lockOwner = mongo.db
                 .collection(LOCK_COLLECTION)
                 .findOne({ _id: LOCK_ID })
@@ -625,7 +625,7 @@ describe('run correlation (integration)', () => {
 describe('custom id format — generateId (integration)', () => {
   /** The lock document, sampled once while a run holds it */
   const lockSampler = () => {
-    let sample;
+    let sample = null;
     return {
       progress: {
         onStart: () => {
@@ -780,7 +780,7 @@ describe('custom id format — generateId (integration)', () => {
     const second = migrator({ generateId });
 
     const running = first.up();
-    let results;
+    let results = null;
     try {
       await started.promise;
       const held = await mongo.db.collection(LOCK_COLLECTION).findOne({ _id: LOCK_ID });

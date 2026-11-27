@@ -38,6 +38,18 @@ const BOOKKEEPING_OPTIONS = Object.freeze({
 /** listIndexes calls in flight while reading many collections — a pace, not a pool */
 const READ_CONCURRENCY = 8;
 
+const NAMESPACE_NOT_FOUND = 26;
+
+const INDEX_NOT_FOUND = 27;
+
+/** Whether `version` (`{ major, minor, patch? }`, or undefined when unknown) is at least `major.minor.patch` */
+const isVersionAtLeast = (version, major, minor, patch = 0) => {
+  if (version === undefined) return false;
+  if (version.major !== major) return version.major > major;
+  if (version.minor !== minor) return version.minor > minor;
+  return (version.patch ?? 0) >= patch;
+};
+
 /**
  * What the server is: a mongos in front of shards (its shard keys matter to
  * prune), its topology (`replicaSet`, `sharded`, `standalone` — transactions
@@ -73,15 +85,12 @@ const readServer = async (db) => {
   return server;
 };
 
-const NAMESPACE_NOT_FOUND = 26;
-
-const INDEX_NOT_FOUND = 27;
-
 module.exports = {
-  BOOKKEEPING_OPTIONS,
-  INDEX_NOT_FOUND,
-  NAMESPACE_NOT_FOUND,
-  READ_CONCURRENCY,
   READ_OPTIONS,
+  BOOKKEEPING_OPTIONS,
+  isVersionAtLeast,
+  READ_CONCURRENCY,
+  NAMESPACE_NOT_FOUND,
+  INDEX_NOT_FOUND,
   readServer,
 };

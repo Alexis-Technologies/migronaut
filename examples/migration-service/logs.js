@@ -22,7 +22,7 @@ const createLogStore = ({ client, dbName, collection = 'migration_logs' }) => {
   let buffer = [];
   const writing = new Set();
   let dropped = 0;
-  let timer;
+  let timer = null;
 
   /** Write what is buffered: one batch, never awaited by a migration */
   const flush = () => {

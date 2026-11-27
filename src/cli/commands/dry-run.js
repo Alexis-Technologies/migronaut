@@ -24,12 +24,13 @@ const registerDryRun = (program) => {
         });
       }
     },
-    run: (migrator, opts, positionals) =>
-      migrator.dryRun(positionals[0], positionals[1], {
+    run: (migrator, opts, positionals) => {
+      return migrator.dryRun(positionals[0], positionals[1], {
         ...(opts.steps !== undefined ? { steps: Number(opts.steps) } : {}),
         ...(opts.batch !== undefined ? { batch: Number(opts.batch) } : {}),
         ...(opts.to ? { to: opts.to } : {}),
-      }),
+      });
+    },
     render: (rows, { logger }) => {
       if (rows.length > 0) logger.info(renderStatusTable(rows));
     },

@@ -1,5 +1,5 @@
 const { ConfigInvalidError, MigrationInvalidNameError } = require('../errors/index.js');
-const { actorIssue } = require('../utils/actor.js');
+const { ACTOR_FIELDS, actorIssue } = require('../utils/actor.js');
 const { isPlainObject } = require('../utils/canonical.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { jobRefIssue } = require('../utils/job-ref.js');
@@ -14,6 +14,21 @@ const { jobRefIssue } = require('../utils/job-ref.js');
  * Each `assert*Options` is the whole preamble of one method, its checks in
  * the order that decides which error a caller sees when several apply.
  */
+
+const UP_FLAGS = Object.freeze(['noLock', 'force', 'step']);
+
+const LOCK_FLAGS = Object.freeze(['noLock']);
+
+const IMPORT_FLAGS = Object.freeze(['noLock', 'dryRun', 'force', 'trustHash']);
+
+const CONVERGE_FLAGS = Object.freeze([
+  'dryRun',
+  'prune',
+  'noLock',
+  'ordered',
+  'rebuildUnique',
+  'waitForSearchIndexes',
+]);
 
 /**
  * Reject non-string filenames before they reach a changelog query or a path
@@ -94,7 +109,7 @@ const assertBatchValid = (batch) => {
  * the container's, which is why the requester has a field of its own.
  */
 const assertActorValid = (options) => {
-  for (const key of ['requestedBy', 'reason']) {
+  for (const key of ACTOR_FIELDS) {
     const issue = actorIssue(key, options?.[key]);
     if (issue) {
       throw new ConfigInvalidError(issue, {
@@ -178,18 +193,6 @@ const assertSignalValid = (signal) => {
     });
   }
 };
-
-const UP_FLAGS = Object.freeze(['noLock', 'force', 'step']);
-const LOCK_FLAGS = Object.freeze(['noLock']);
-const IMPORT_FLAGS = Object.freeze(['noLock', 'dryRun', 'force', 'trustHash']);
-const CONVERGE_FLAGS = Object.freeze([
-  'dryRun',
-  'prune',
-  'noLock',
-  'ordered',
-  'rebuildUnique',
-  'waitForSearchIndexes',
-]);
 
 /** `up`'s `converge` option: a boolean, and only for a bulk run that reaches the head */
 const assertConvergeAfterUpValid = (converge, filename, to) => {
@@ -345,17 +348,17 @@ const assertImportOptions = (options) => {
 };
 
 module.exports = {
+  assertFilename,
   assertActorValid,
   assertJobValid,
-  assertBaselineOptions,
-  assertConvergeOptions,
-  assertDownOptions,
-  assertDryRunOptions,
-  assertFilename,
-  assertHistoryLimit,
-  assertImportOptions,
-  assertListOptions,
-  assertRedoOptions,
-  assertRunFlags,
   assertUpOptions,
+  assertDownOptions,
+  assertRedoOptions,
+  assertDryRunOptions,
+  assertConvergeOptions,
+  assertHistoryLimit,
+  assertListOptions,
+  assertBaselineOptions,
+  assertRunFlags,
+  assertImportOptions,
 };

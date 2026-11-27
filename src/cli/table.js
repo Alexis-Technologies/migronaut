@@ -8,12 +8,6 @@ const { formatDateTime } = require('../utils/date.js');
 const { sanitize } = require('../utils/sanitize.js');
 
 /**
- * Resolved per render rather than once at import: color depends on NO_COLOR /
- * FORCE_COLOR / TTY, and `--no-color` is applied after this module is loaded.
- */
-const palette = () => createColors(process.stdout);
-
-/**
  * Codepoint ranges the terminal renders two columns wide (East Asian Wide and
  * Fullwidth). Counting them as one — which `String.length` does — misaligns
  * every column to the right of a CJK filename.
@@ -35,6 +29,43 @@ const WIDE_RANGES = [
   [0x1f900, 0x1f9ff],
   [0x20000, 0x3fffd],
 ];
+
+/** Longest description rendered before it is ellipsized */
+const MAX_DESCRIPTION_WIDTH = 40;
+
+/** Longest migration filename rendered before it is ellipsized */
+const MAX_MIGRATION_WIDTH = 60;
+
+/** Longest index or collection name rendered before it is ellipsized */
+const MAX_NAME_WIDTH = 48;
+
+/** Longest converge detail rendered before it is ellipsized */
+const MAX_DETAIL_WIDTH = 72;
+
+/** The color of each converge action: what changes stands out, what does not recedes */
+const ACTION_COLORS = {
+  __proto__: null,
+  create: 'green',
+  modify: 'cyan',
+  recreate: 'yellow',
+  drop: 'yellow',
+  conflict: 'red',
+};
+
+/** What a search index's build state reads as in the table; FAILED adds its message */
+const BUILD_DETAILS = {
+  __proto__: null,
+  serving: '',
+  failed: 'FAILED',
+  updating: 'updating',
+  stale: 'STALE — not replicating',
+};
+
+/**
+ * Resolved per render rather than once at import: color depends on NO_COLOR /
+ * FORCE_COLOR / TTY, and `--no-color` is applied after this module is loaded.
+ */
+const palette = () => createColors(process.stdout);
 
 /** Terminal columns a single codepoint occupies (0 for combining marks) */
 const charWidth = (codepoint) => {
@@ -59,9 +90,7 @@ const widthOfPlain = (plain) => {
 };
 
 /** Number of terminal columns a cell occupies, ignoring ANSI color codes */
-const visibleWidth = (text) => {
-  return widthOfPlain(stripAnsi(text));
-};
+const visibleWidth = (text) => widthOfPlain(stripAnsi(text));
 
 /**
  * Shorten `text` to at most `max` visible columns, ending with an ellipsis.
@@ -152,12 +181,6 @@ const checksumCell = (colors, value) => {
 const statusCell = (colors, status) => {
   return status === 'applied' ? colors.green('applied') : colors.yellow('pending');
 };
-
-/** Longest description rendered before it is ellipsized */
-const MAX_DESCRIPTION_WIDTH = 40;
-
-/** Longest migration filename rendered before it is ellipsized */
-const MAX_MIGRATION_WIDTH = 60;
 
 /**
  * Width budgets for the two truncatable columns, shrunk to fit the terminal.
@@ -252,44 +275,15 @@ const renderImportTable = (rows) => {
   return renderTable(head, cells);
 };
 
-/** Longest index or collection name rendered before it is ellipsized */
-const MAX_NAME_WIDTH = 48;
-
-/** Longest converge detail rendered before it is ellipsized */
-const MAX_DETAIL_WIDTH = 72;
-
-/** Render a converge action cell: what changes stands out, what does not recedes */
-const convergeActionCell = (colors, action) => {
-  switch (action) {
-    case 'create':
-      return colors.green(action);
-    case 'modify':
-      return colors.cyan(action);
-    case 'recreate':
-    case 'drop':
-      return colors.yellow(action);
-    case 'conflict':
-      return colors.red(action);
-    default:
-      return colors.dim(action);
-  }
-};
+/** Render a converge action cell */
+const convergeActionCell = (colors, action) => colors[ACTION_COLORS[action] ?? 'dim'](action);
 
 /** Where the server is with a search index, when it is not simply serving it */
 const searchBuildDetail = (build) => {
   if (build === undefined) return '';
-  switch (searchBuildState(build)) {
-    case 'serving':
-      return '';
-    case 'failed':
-      return `FAILED${build.message ? `: ${build.message}` : ''}`;
-    case 'updating':
-      return 'updating';
-    case 'stale':
-      return 'STALE — not replicating';
-    default:
-      return build.status;
-  }
+  const state = searchBuildState(build);
+  const detail = BUILD_DETAILS[state] ?? build.status;
+  return state === 'failed' && build.message ? `${detail}: ${build.message}` : detail;
 };
 
 /** Whether a search index row is one worth showing even when nothing changes: not serving yet */
@@ -418,14 +412,14 @@ const renderConvergeHistory = (entries) => {
 };
 
 module.exports = {
-  charWidth,
   sanitize,
+  charWidth,
   visibleWidth,
   truncate,
   renderTable,
   renderStatusTable,
-  renderImportTable,
   renderRowsOrEmpty,
+  renderImportTable,
   renderConvergeTable,
   renderConvergeHistory,
 };

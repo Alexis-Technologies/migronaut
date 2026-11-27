@@ -1,7 +1,13 @@
 const { ConfigInvalidError, QueueJobInvalidError } = require('../errors/index.js');
-const { actorIssue, pickActor } = require('../utils/actor.js');
+const { ACTOR_FIELDS, actorIssue, pickActor } = require('../utils/actor.js');
 const { MAX_ID_LENGTH } = require('../utils/id.js');
 const { isBareFilename } = require('../utils/migration-name.js');
+
+/** What a lane job must carry */
+const LANE_REQUIRED_FIELDS = Object.freeze(['generation', 'round', 'spawn']);
+
+/** A lane job's counters: absent, or a non-negative integer */
+const LANE_COUNT_FIELDS = Object.freeze(['round', 'spawn', 'generation', 'retry']);
 
 /**
  * The job contract between whoever enqueues migrations and the worker that
@@ -144,18 +150,106 @@ const BACKGROUND_QUEUE_JOBS = new Set([
 const MAX_GROUP_ID_LENGTH = MAX_ID_LENGTH;
 
 /**
+ * What a worker accepts from the queue by default. Anything that can write to
+ * Redis can enqueue, so the requests a payload can make that go beyond "apply
+ * what is pending, in order" are opt-in: re-running an applied migration
+ * (`force`) and skipping the order guard (`ordered: false`). A rollback is
+ * allowed — it is the queue's other everyday job — but can be switched off.
+ */
+const DEFAULT_ALLOW = Object.freeze({ down: true, force: false, unordered: false });
+
+/** What was already said about options nobody reads, per kit — once, not on every call */
+const saidUnknown = new WeakMap();
+
+/** The options each entry point reads — what warnUnknownOptions measures a call against */
+const KNOWN_OPTIONS = Object.freeze({
+  up: new Set([
+    'filename',
+    'to',
+    'force',
+    'ordered',
+    'converge',
+    'requestedBy',
+    'reason',
+    'jobOptions',
+  ]),
+  down: new Set([
+    'filename',
+    'batch',
+    'steps',
+    'to',
+    'ordered',
+    'requestedBy',
+    'reason',
+    'jobOptions',
+  ]),
+  converge: new Set(['ordered', 'requestedBy', 'reason', 'jobOptions', 'queueEvents']),
+  schedule: new Set(['job', 'every', 'pattern', 'tz', 'to', 'id']),
+  queue: new Set([
+    'config',
+    'kit',
+    'kitOptions',
+    'bullmq',
+    'connection',
+    'queueName',
+    'prefix',
+    'jobOptions',
+    'workerOptions',
+    'globalConcurrency',
+    'lockWait',
+    'allow',
+    'background',
+    'userlandLogRows',
+  ]),
+  processor: new Set([
+    'config',
+    'kit',
+    'kitOptions',
+    'queue',
+    'lockWait',
+    'ordered',
+    'jobOptions',
+    'allow',
+    'userlandLogRows',
+    'background',
+  ]),
+});
+
+/**
+ * How long a job waits for its own log rows and progress updates before it
+ * settles without them. They are best-effort, and with Redis away they do not
+ * settle at all (BullMQ's connections queue commands without a limit): a job
+ * that waited for them would hold the jobs behind it — and a graceful close —
+ * for as long as the outage lasts, with its migration long since committed.
+ */
+const JOB_WRITE_WAIT_MS = 5_000;
+
+/**
+ * How many finished scheduler ticks are kept when the caller's `jobOptions`
+ * say nothing. BullMQ keeps every finished job by default, and a schedule
+ * mints one per tick forever — `every: 60_000` alone is 1,440 jobs a day, in
+ * a Redis that usually runs with `noeviction`.
+ */
+const TICK_RETENTION = Object.freeze({
+  removeOnComplete: Object.freeze({ count: 100 }),
+  removeOnFail: Object.freeze({ count: 500 }),
+});
+
+/**
  * An object that is not an array — class instances included: a Queue the
  * caller hands over is one (not a "plain object" in versioning/'s sense).
  */
-const isObjectLike = (value) =>
-  value !== null && typeof value === 'object' && !Array.isArray(value);
+const isObjectLike = (value) => {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+};
 const isPositiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
 const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
 const isChecksum = (value) => typeof value === 'string' && CHECKSUM_PATTERN.test(value);
 
 /** A job's place in its group: `index` of `total` */
-const isPosition = (index, total) =>
-  Number.isSafeInteger(index) && Number.isSafeInteger(total) && index >= 0 && index < total;
+const isPosition = (index, total) => {
+  return Number.isSafeInteger(index) && Number.isSafeInteger(total) && index >= 0 && index < total;
+};
 
 /**
  * A migration name as an id fragment: letters, digits, `.`, `_` and `-` as
@@ -198,17 +292,9 @@ const convergeDedupId = (after) => {
   return after === undefined ? 'converge' : `converge-after-${idFragment(after)}`;
 };
 
-const isGroupId = (value) =>
-  typeof value === 'string' && value.length > 0 && value.length <= MAX_GROUP_ID_LENGTH;
-
-/**
- * What a worker accepts from the queue by default. Anything that can write to
- * Redis can enqueue, so the requests a payload can make that go beyond "apply
- * what is pending, in order" are opt-in: re-running an applied migration
- * (`force`) and skipping the order guard (`ordered: false`). A rollback is
- * allowed — it is the queue's other everyday job — but can be switched off.
- */
-const DEFAULT_ALLOW = Object.freeze({ down: true, force: false, unordered: false });
+const isGroupId = (value) => {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_GROUP_ID_LENGTH;
+};
 
 /** Validate an `allow` option and fill in the defaults */
 const resolveAllow = (allow) => {
@@ -299,7 +385,7 @@ const parseJobData = (job) => {
       );
     }
   }
-  for (const key of ['requestedBy', 'reason']) {
+  for (const key of ACTOR_FIELDS) {
     const issue = actorIssue(key, data[key]);
     if (issue) throw invalid(job, issue);
   }
@@ -402,13 +488,13 @@ const parseBackgroundJobData = (job) => {
   if (!isBareFilename(data.migration) || data.migration.length > MAX_MIGRATION_NAME_LENGTH) {
     throw invalid(job, 'migration is not a bare filename');
   }
-  for (const key of ['round', 'spawn', 'generation', 'retry']) {
+  for (const key of LANE_COUNT_FIELDS) {
     if (data[key] !== undefined && !isCount(data[key])) {
       throw invalid(job, `${key} is not a non-negative integer`);
     }
   }
   if (name === JOB_NAMES.BACKGROUND) {
-    for (const key of ['requestedBy', 'reason']) {
+    for (const key of ACTOR_FIELDS) {
       const issue = actorIssue(key, data[key]);
       if (issue) throw invalid(job, issue);
     }
@@ -425,7 +511,7 @@ const parseBackgroundJobData = (job) => {
     };
   }
   if (!isGroupId(data.registration)) throw invalid(job, 'registration is not a short string');
-  for (const key of ['generation', 'round', 'spawn']) {
+  for (const key of LANE_REQUIRED_FIELDS) {
     if (data[key] === undefined) throw invalid(job, `${key} is missing`);
   }
   if (!Number.isSafeInteger(data.lane) || data.lane < 0 || data.lane >= MAX_LANES) {
@@ -448,19 +534,21 @@ const parseBackgroundJobData = (job) => {
  * always written: a job must say how it is to run, not leave it to whatever
  * default the worker that picks it up was configured with.
  */
-const buildMigrationJob = ({
-  direction,
-  migration,
-  groupId,
-  index,
-  total,
-  batch,
-  force,
-  ordered = true,
-  checksum,
-  requestedBy,
-  reason,
-}) => {
+const buildMigrationJob = (options) => {
+  const {
+    direction,
+    migration,
+    groupId,
+    index,
+    total,
+    batch,
+    force,
+    checksum,
+    requestedBy,
+    reason,
+  } = options;
+  const ordered = options.ordered ?? true;
+
   const hasBatch = batch !== undefined && batch !== null;
   return {
     name: direction,
@@ -513,9 +601,6 @@ const buildConvergeJob = ({ groupId, ordered, after, jobOptions, requestedBy, re
   };
 };
 
-/** What was already said about options nobody reads, per kit — once, not on every call */
-const saidUnknown = new WeakMap();
-
 /**
  * Say which keys of `options` nobody reads at `where`. A warning, not a
  * refusal: these calls have always taken a wider object, and code that passes
@@ -543,80 +628,6 @@ const warnUnknownOptions = (kit, where, options, known) => {
     );
   }
 };
-
-/** The options each entry point reads — what warnUnknownOptions measures a call against */
-const KNOWN_OPTIONS = Object.freeze({
-  up: new Set([
-    'filename',
-    'to',
-    'force',
-    'ordered',
-    'converge',
-    'requestedBy',
-    'reason',
-    'jobOptions',
-  ]),
-  down: new Set([
-    'filename',
-    'batch',
-    'steps',
-    'to',
-    'ordered',
-    'requestedBy',
-    'reason',
-    'jobOptions',
-  ]),
-  converge: new Set(['ordered', 'requestedBy', 'reason', 'jobOptions', 'queueEvents']),
-  schedule: new Set(['job', 'every', 'pattern', 'tz', 'to', 'id']),
-  queue: new Set([
-    'config',
-    'kit',
-    'kitOptions',
-    'bullmq',
-    'connection',
-    'queueName',
-    'prefix',
-    'jobOptions',
-    'workerOptions',
-    'globalConcurrency',
-    'lockWait',
-    'allow',
-    'background',
-    'userlandLogRows',
-  ]),
-  processor: new Set([
-    'config',
-    'kit',
-    'kitOptions',
-    'queue',
-    'lockWait',
-    'ordered',
-    'jobOptions',
-    'allow',
-    'userlandLogRows',
-    'background',
-  ]),
-});
-
-/**
- * How long a job waits for its own log rows and progress updates before it
- * settles without them. They are best-effort, and with Redis away they do not
- * settle at all (BullMQ's connections queue commands without a limit): a job
- * that waited for them would hold the jobs behind it — and a graceful close —
- * for as long as the outage lasts, with its migration long since committed.
- */
-const JOB_WRITE_WAIT_MS = 5_000;
-
-/**
- * How many finished scheduler ticks are kept when the caller's `jobOptions`
- * say nothing. BullMQ keeps every finished job by default, and a schedule
- * mints one per tick forever — `every: 60_000` alone is 1,440 jobs a day, in
- * a Redis that usually runs with `noeviction`.
- */
-const TICK_RETENTION = Object.freeze({
-  removeOnComplete: Object.freeze({ count: 100 }),
-  removeOnFail: Object.freeze({ count: 500 }),
-});
 
 /**
  * The options every scheduler tick carries: the caller's `jobOptions`
@@ -657,9 +668,7 @@ const buildConvergeJobTemplate = ({ jobOptions } = {}) => {
 };
 
 /** The background queue that serves a migration queue */
-const backgroundQueueName = (queueName) => {
-  return `${queueName}${BACKGROUND_QUEUE_SUFFIX}`;
-};
+const backgroundQueueName = (queueName) => `${queueName}${BACKGROUND_QUEUE_SUFFIX}`;
 
 /**
  * Options of a background queue's own jobs: the caller's passthrough, then a
@@ -709,16 +718,9 @@ const buildBackgroundJob = ({ migration, takeoverOf, jobOptions, requestedBy, re
  * another parent, and a job it already finished would never wake this one;
  * with no parent (`children: false`) the id is deduplicated per lane slot.
  */
-const buildLaneJob = ({
-  migration,
-  registration,
-  generation,
-  round,
-  spawn,
-  lane,
-  parent,
-  jobOptions,
-}) => {
+const buildLaneJob = (options) => {
+  const { migration, registration, generation, round, spawn, lane, parent, jobOptions } = options;
+
   const base = `bgl-${idFragment(migration)}-${idFragment(registration)}-g${generation}`;
   return {
     name: JOB_NAMES.BACKGROUND_LANE,
@@ -758,40 +760,40 @@ const buildBackgroundVerifyJobTemplate = ({ jobOptions } = {}) => {
 };
 
 module.exports = {
-  BACKGROUND_FORBIDDEN_JOB_OPTIONS,
-  BACKGROUND_QUEUE_SUFFIX,
-  DEFAULT_ALLOW,
-  DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
-  DEFAULT_CONVERGE_SCHEDULER_ID,
+  JOB_DATA_VERSION,
+  MIN_JOB_DATA_VERSION,
+  JOB_NAMES,
   DEFAULT_QUEUE_NAME,
   DEFAULT_SCHEDULER_ID,
-  FORBIDDEN_JOB_OPTIONS,
-  JOB_DATA_VERSION,
-  JOB_FIELDS,
-  JOB_NAMES,
-  MIN_JOB_DATA_VERSION,
+  DEFAULT_CONVERGE_SCHEDULER_ID,
+  DEFAULT_BACKGROUND_VERIFY_SCHEDULER_ID,
+  BACKGROUND_QUEUE_SUFFIX,
   MIGRATION_JOB_OPTIONS,
-  JOB_WRITE_WAIT_MS,
-  KNOWN_OPTIONS,
-  TICK_RETENTION,
+  FORBIDDEN_JOB_OPTIONS,
+  BACKGROUND_FORBIDDEN_JOB_OPTIONS,
   MAX_LANES,
+  JOB_FIELDS,
+  DEFAULT_ALLOW,
+  KNOWN_OPTIONS,
+  JOB_WRITE_WAIT_MS,
+  TICK_RETENTION,
+  isObjectLike,
+  idFragment,
+  dedupId,
+  convergeDedupId,
+  resolveAllow,
+  permissionsNeeded,
   assertAllowed,
+  parseJobData,
+  parseBackgroundJobData,
+  buildMigrationJob,
+  migrationJobOptions,
+  buildConvergeJob,
+  warnUnknownOptions,
+  buildSyncJobTemplate,
+  buildConvergeJobTemplate,
   backgroundQueueName,
   buildBackgroundJob,
-  buildBackgroundVerifyJobTemplate,
-  buildConvergeJob,
-  buildConvergeJobTemplate,
-  buildMigrationJob,
   buildLaneJob,
-  buildSyncJobTemplate,
-  convergeDedupId,
-  dedupId,
-  idFragment,
-  isObjectLike,
-  migrationJobOptions,
-  parseBackgroundJobData,
-  parseJobData,
-  permissionsNeeded,
-  resolveAllow,
-  warnUnknownOptions,
+  buildBackgroundVerifyJobTemplate,
 };

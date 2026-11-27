@@ -37,16 +37,16 @@ describe('createLogger', () => {
   });
 
   it('should keep errors at the quiet level but drop info', () => {
-    const out = mock.method(process.stdout, 'write', () => true);
-    const err = mock.method(process.stderr, 'write', () => true);
+    const stdout = mock.method(process.stdout, 'write', () => true);
+    const stderr = mock.method(process.stderr, 'write', () => true);
     const logger = createLogger(process.stdout, 'error');
     logger.info('chatter');
     logger.warn('careful');
     logger.error('boom');
     // --quiet silences the commentary; a failure must still be reported.
-    assert.strictEqual(out.mock.callCount(), 0);
-    assert.strictEqual(err.mock.callCount(), 1);
-    assert.match(err.mock.calls[0].arguments[0], /boom/);
+    assert.strictEqual(stdout.mock.callCount(), 0);
+    assert.strictEqual(stderr.mock.callCount(), 1);
+    assert.match(stderr.mock.calls[0].arguments[0], /boom/);
   });
 
   it('should ignore the structured fields argument', () => {

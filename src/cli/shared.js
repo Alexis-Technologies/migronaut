@@ -1,9 +1,26 @@
 const { createInterface } = require('node:readline/promises');
+
 const { createSpinner } = require('./spinner.js');
+const { EXIT_CODES } = require('./exit-codes.js');
 const { ConfigInvalidError, MigronautError, RunAbortedError } = require('../errors/index.js');
 const { errorText } = require('../utils/error.js');
 const { createLogger } = require('../utils/logger.js');
 const { redactDeep, redactUris } = require('../utils/redact.js');
+
+/** Exit code convention for a process killed by a signal: 128 + signal number */
+const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
+
+/** The signals a command answers: Ctrl-C, and a container's stop */
+const STOP_SIGNALS = Object.freeze(Object.keys(SIGNAL_EXIT_CODES));
+
+/**
+ * The migrators of this process's mutating commands, while they run: what
+ * bin/migronaut.js stops when something escaped every handler — a rejection no
+ * one awaited, a throw from a timer. Stopped, a run ends after the migration
+ * in flight and releases its lock, instead of applying the rest in a state no
+ * one can vouch for, or exiting with the lock left to its TTL.
+ */
+const activeMigrators = new Set();
 
 /** Write a value as pretty JSON to stdout, followed by a newline */
 const emitJson = (value) => {
@@ -22,8 +39,6 @@ const partialFromOpts = (opts) => {
   return partial;
 };
 
-const { EXIT_CODES } = require('./exit-codes.js');
-
 /** The exit code for a failure — see {@link EXIT_CODES} */
 const exitCodeFor = (error) => {
   if (!(error instanceof MigronautError)) return 1;
@@ -39,9 +54,6 @@ const resolveLevel = (opts) => {
   if (opts.quiet) return 'error';
   return 'info';
 };
-
-/** Exit code convention for a process killed by a signal: 128 + signal number */
-const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
 
 /**
  * Turn SIGINT/SIGTERM into a graceful stop: the migration in flight finishes,
@@ -59,7 +71,7 @@ const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
 const attachSignalHandlers = (migrator, spinner, logger) => {
   let stopping = false;
   const handlers = [];
-  for (const signal of ['SIGINT', 'SIGTERM']) {
+  for (const signal of STOP_SIGNALS) {
     const handler = () => {
       if (stopping) {
         spinner?.stop();
@@ -90,15 +102,6 @@ const attachSignalHandlers = (migrator, spinner, logger) => {
   return detach;
 };
 
-/**
- * The migrators of this process's mutating commands, while they run: what
- * bin/migronaut.js stops when something escaped every handler — a rejection no
- * one awaited, a throw from a timer. Stopped, a run ends after the migration
- * in flight and releases its lock, instead of applying the rest in a state no
- * one can vouch for, or exiting with the lock left to its TTL.
- */
-const activeMigrators = new Set();
-
 /** Ask every running migrator of this process to stop (see activeMigrators); how many there were */
 const stopActiveMigrators = (reason) => {
   for (const migrator of activeMigrators) migrator.stop(reason);
@@ -115,7 +118,7 @@ const stopActiveMigrators = (reason) => {
 const attachCleanupHandlers = (spinner) => {
   if (!spinner) return () => undefined;
   const handlers = [];
-  for (const signal of ['SIGINT', 'SIGTERM']) {
+  for (const signal of STOP_SIGNALS) {
     const handler = () => {
       spinner.stop();
       process.off(signal, handler);
@@ -137,8 +140,9 @@ const attachCleanupHandlers = (spinner) => {
  * of splicing into the middle of its frame.
  */
 const spinnerAwareLogger = (logger, spinner) => {
-  const wrap = (method) => (message, fields) =>
-    spinner.interrupt(() => logger[method](message, fields));
+  const wrap = (method) => {
+    return (message, fields) => spinner.interrupt(() => logger[method](message, fields));
+  };
   return { debug: wrap('debug'), info: wrap('info'), warn: wrap('warn'), error: wrap('error') };
 };
 
@@ -233,8 +237,9 @@ const withMigrator = async (opts, fn, options = {}) => {
   };
   if (spinner) {
     const reporter = {
-      onStart: (name, direction) =>
-        spinner.start(`${direction === 'up' ? 'Applying' : 'Reverting'} ${name}…`),
+      onStart: (name, direction) => {
+        return spinner.start(`${direction === 'up' ? 'Applying' : 'Reverting'} ${name}…`);
+      },
       // Stop (not succeed) — core logs the ✔/↩/✖ result line right after, so
       // the outcome argument is deliberately unused here.
       onStop: () => spinner.stop(),
@@ -393,16 +398,16 @@ const defineCommand = (program, spec) => {
 };
 
 module.exports = {
+  EXIT_CODES,
   emitJson,
   partialFromOpts,
-  withMigrator,
-  confirm,
-  defineCommand,
-  reportError,
-  reportUsageError,
   exitCodeFor,
   resolveLevel,
   attachSignalHandlers,
   stopActiveMigrators,
-  EXIT_CODES,
+  reportError,
+  reportUsageError,
+  withMigrator,
+  confirm,
+  defineCommand,
 };

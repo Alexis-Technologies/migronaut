@@ -65,8 +65,9 @@ const countOf = (doc, field) => {
 const versionOf = (doc, field = VERSIONING_DEFAULTS.field) => countOf(doc, field);
 
 /** The revision of `doc` — 0 when the field is missing, `null` when it is not a count */
-const revisionOf = (doc, revisionField = VERSIONING_DEFAULTS.revisionField) =>
-  countOf(doc, revisionField);
+const revisionOf = (doc, revisionField = VERSIONING_DEFAULTS.revisionField) => {
+  return countOf(doc, revisionField);
+};
 
 /**
  * Whether `doc` is at exactly `version` — a missing or `null` field is
@@ -307,24 +308,25 @@ const stampDocument = (doc, names, version) => {
 };
 
 module.exports = {
-  assertPlainDocument,
-  belowVersionFilter,
-  cloneDocument,
   fieldNameIssue,
-  isVersion,
-  nextRevision,
-  occFilter,
-  refuseTouch,
-  resolveFieldNames,
-  resolveRevisionField,
-  revisionFilter,
-  revisionOf,
-  sameValue,
-  stampDocument,
-  stampedDiff,
-  stampedUpdate,
-  versionFilter,
-  versionIndexKey,
-  versionOf,
   versioningOf,
+  cloneDocument,
+  sameValue,
+  resolveFieldNames,
+  versionOf,
+  revisionOf,
+  isVersion,
+  assertPlainDocument,
+  resolveRevisionField,
+  nextRevision,
+  assertCount,
+  versionFilter,
+  revisionFilter,
+  belowVersionFilter,
+  versionIndexKey,
+  occFilter,
+  stampedDiff,
+  refuseTouch,
+  stampedUpdate,
+  stampDocument,
 };

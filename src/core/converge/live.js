@@ -52,9 +52,9 @@ const probeVersionFloor = async (db, definition, live) => {
 
 /** Probe every versioned collection whose floor would rise — a few at a time */
 const probeVersionFloors = async (db, definitions, live) => {
-  await mapLimit(definitions, READ_CONCURRENCY, (definition, position) =>
-    probeVersionFloor(db, definition, live[position]),
-  );
+  await mapLimit(definitions, READ_CONCURRENCY, (definition, position) => {
+    return probeVersionFloor(db, definition, live[position]);
+  });
 };
 
 /** Shard key of each named collection, behind a mongos — when `config.collections` may be read */
@@ -79,9 +79,7 @@ const readShardKeys = async (deps, names) => {
 };
 
 /** The server's refusal to drop the index that backs a shard key */
-const isShardKeyRefusal = (error) => {
-  return /shard key/i.test(errorText(error));
-};
+const isShardKeyRefusal = (error) => /shard key/i.test(errorText(error));
 
 /**
  * Every named collection's live state, in order: one `listCollections` for

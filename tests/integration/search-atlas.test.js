@@ -30,9 +30,9 @@ describe(
     timeout: 900_000,
   },
   () => {
-    let client;
-    let db;
-    let project;
+    let client = null;
+    let db = null;
+    let project = null;
     const kits = [];
     let counter = 0;
     /** A collection name of its own per scenario: a dropped index's name stays taken a while */
@@ -273,7 +273,7 @@ describe(
         },
       ];
       await convergeToFixedPoint(declare('cosine'));
-      let result;
+      let result = null;
       try {
         ({ result } = await convergeToFixedPoint(declare('dotProduct')));
       } catch (error) {

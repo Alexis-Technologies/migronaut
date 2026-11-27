@@ -768,7 +768,7 @@ describe('createMigrationProcessor', () => {
   describe('cancellation and shutdown', () => {
     it("should stop the kit's run when the job's signal aborts mid-run", async () => {
       const controller = new AbortController();
-      let release;
+      let release = null;
       const kit = stubKit({
         up: mock.fn(
           (name) =>
@@ -941,7 +941,7 @@ describe('createMigrationProcessor', () => {
     });
 
     it('should stop waiting for a job past close({ timeoutMs }), and disconnect once it ends', async () => {
-      let release;
+      let release = null;
       const kit = stubKit({
         up: mock.fn(async (name) => {
           await new Promise((resolve) => {
@@ -1431,7 +1431,7 @@ describe('userland lines in the job log', () => {
   });
 
   it('should write nothing once the job settled, nor between jobs', async () => {
-    let late;
+    let late = null;
     const kit = stubKit({
       up: mock.fn(async (name, options) => {
         late = () => kit.emit('migration:log', userland(options.job.id, { msg: 'late' }));
@@ -1563,7 +1563,7 @@ describe('ownLine', () => {
     assert.strictEqual(ownLine(ctx, line({ runId: 'run-0' })), false);
     assert.strictEqual(ownLine(ctx, line({ jobId: '8' })), false);
     assert.strictEqual(ownLine({ jobRef: ctx.jobRef }, line()), false, 'no run yet');
-    assert.strictEqual(ownLine({ runId: 'run-1' }, line({ jobId: undefined })), true);
+    assert.strictEqual(ownLine({ runId: 'run-1', jobRef: null }, line({ jobId: undefined })), true);
     assert.strictEqual(ownLine(ctx, line({ kind: 'other' })), false);
   });
 
@@ -1585,9 +1585,9 @@ describe('jobRefOf', () => {
   });
 
   it('should drop what the kit would refuse', () => {
-    assert.strictEqual(jobRefOf({}), undefined);
-    assert.strictEqual(jobRefOf({ id: null }), undefined);
-    assert.strictEqual(jobRefOf({ id: 'x'.repeat(1025) }), undefined);
+    assert.strictEqual(jobRefOf({}), null);
+    assert.strictEqual(jobRefOf({ id: null }), null);
+    assert.strictEqual(jobRefOf({ id: 'x'.repeat(1025) }), null);
     assert.deepStrictEqual(jobRefOf({ id: '11' }, 'g'.repeat(200)), { id: '11' });
   });
 });

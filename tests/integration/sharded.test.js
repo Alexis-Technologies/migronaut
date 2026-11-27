@@ -31,11 +31,11 @@ describe(
     timeout: 600_000,
   },
   () => {
-    let mongodb;
-    let client;
-    let db;
-    let admin;
-    let shards;
+    let mongodb = null;
+    let client = null;
+    let db = null;
+    let admin = null;
+    let shards = null;
 
     before(async () => {
       mongodb = require('mongodb');
@@ -50,7 +50,7 @@ describe(
     });
 
     const kits = [];
-    let project;
+    let project = null;
 
     /** A kit on the cluster, declaring `collections` — as root, or as the user in `uri` */
     const kitWith = (collections, uri = SHARDED_URI) => {

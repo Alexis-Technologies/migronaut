@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { describe, it, mock } = require('node:test');
-const { isUnauthorized, readChunks, readShardKey } = require('../../src/core/shard-info.js');
+const { readChunks, readShardKey } = require('../../src/core/shard-info.js');
+const { isUnauthorized } = require('../../src/utils/error.js');
 
 const unauthorized = () => Object.assign(new Error('not authorized on config'), { code: 13 });
 

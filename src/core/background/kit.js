@@ -38,12 +38,13 @@ const PAUSABLE = new Set(['blocked', 'pending', 'running']);
 const STREAMING_FRESH_MS = 60_000;
 
 /** A background migration that has rewritten documents and declares no way back */
-const irreversibleBackground = (name) =>
-  new IrreversibleMigrationError(
+const irreversibleBackground = (name) => {
+  return new IrreversibleMigrationError(
     `Background migration ${name} has already rewritten documents and declares no revert — ` +
       'write a background migration back instead',
     { context: { names: [name] } },
   );
+};
 
 // ─── Driving it from this process ─────────────────────────────────────────────
 
@@ -55,17 +56,21 @@ const irreversibleBackground = (name) =>
  * run is the deploy — so it fails instead. `job`: the queue job that run works
  * for, named on every lane's lines and `migration:log` events.
  */
-const drive = async (
-  host,
-  name,
-  { signal, sliceMs, untilDone = true, concurrency = 1, inline, job },
-) => {
+const drive = async (host, name, options) => {
+  const { signal, sliceMs, inline, job } = options;
+  const untilDone = options.untilDone ?? true;
+  const concurrency = options.concurrency ?? 1;
+
   const jobOption = job ? { job } : {};
   const deps = host.deps(host.newId(), jobOption);
-  const stopped = () =>
-    new RunAbortedError(`Stopped driving background migration ${name} — it goes on from here`, {
-      context: { migration: name },
-    });
+  const stopped = () => {
+    return new RunAbortedError(
+      `Stopped driving background migration ${name} — it goes on from here`,
+      {
+        context: { migration: name },
+      },
+    );
+  };
   for (;;) {
     if (signal?.aborted) throw stopped();
     const answer = await coordinate(deps, name, {
@@ -402,13 +407,13 @@ const watchRow = (row) => {
 
 module.exports = {
   STREAMING_FRESH_MS,
+  irreversibleBackground,
   drive,
   hasRewritten,
-  irreversibleBackground,
+  withdraw,
+  unsatisfied,
+  stateView,
   partitionView,
   runnable,
-  stateView,
-  unsatisfied,
   watchRow,
-  withdraw,
 };

@@ -2,6 +2,7 @@ const { realpathSync } = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+
 const {
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
@@ -36,9 +37,7 @@ const TS_EXTENSIONS = new Set(['.ts', '.mts', '.cts']);
 let reloadCounter = 0;
 
 /** Narrow an unknown value to a function */
-const isFunction = (value) => {
-  return typeof value === 'function';
-};
+const isFunction = (value) => typeof value === 'function';
 
 /** True when an import failed because Node cannot load the file's extension */
 const isUnknownExtensionError = (error) => {
@@ -314,10 +313,10 @@ const loadMigrationFile = async (filepath, options = {}) => {
 };
 
 module.exports = {
-  importMigrationModule,
-  importUserFile,
-  loadMigrationFile,
-  resolveMigrationExports,
-  tsLoadErrorOrNull,
   tsLoadMessageOrNull,
+  tsLoadErrorOrNull,
+  importUserFile,
+  importMigrationModule,
+  resolveMigrationExports,
+  loadMigrationFile,
 };

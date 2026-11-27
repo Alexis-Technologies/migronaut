@@ -47,6 +47,37 @@ const RETRYABLE_CODES = Object.freeze([
   'ALX_ERR_RUN_IN_FLIGHT',
 ]);
 
+/** {@link RETRYABLE_CODES}, to look up */
+const RETRYABLE_CODE_SET = new Set(RETRYABLE_CODES);
+
+/** The least time between two `lock-wait` progress updates of one job */
+const WAIT_PROGRESS_INTERVAL_MS = 2000;
+
+/** What BullMQ checks (by name, not only by class) to fail a job without retrying it */
+const UNRECOVERABLE_ERROR_NAME = 'UnrecoverableError';
+
+/**
+ * What BullMQ checks (by name) for a job the processor has moved back to the
+ * wait list itself: neither failed nor completed, nothing more to record.
+ */
+const WAITING_ERROR_NAME = 'WaitingError';
+
+/** The longest row a `migration:log` event becomes in a job's log */
+const USERLAND_ROW_MAX = 1024;
+
+/**
+ * How many `migration:log` rows one job's log takes by default (a lane: one
+ * slice) — the rest are counted in one closing row. A migration that logs in
+ * a loop must not write tens of thousands of entries into Redis per job.
+ */
+const DEFAULT_USERLAND_LOG_ROWS = 1000;
+
+/** Line breaks: a row is one line of the job's log, so they are shown, never acted on */
+const ROW_BREAKS = /\r\n|[\r\n\u2028\u2029]/g;
+
+/** Stops {@link boundedJson} once the row has what it can show */
+const ROW_FULL = Symbol('row full');
+
 /**
  * What a job waits out instead of failing: a held lock — and a block by
  * migrations that have not failed. With more than one worker taking jobs
@@ -63,26 +94,11 @@ const isTransientForJob = (error) => {
   return code === 'ALX_ERR_MIGRATION_BLOCKED' && Array.isArray(failed) && failed.length === 0;
 };
 
-/** {@link RETRYABLE_CODES}, to look up */
-const RETRYABLE_CODE_SET = new Set(RETRYABLE_CODES);
-
 /** Not one of ours (unknown origin), or one of ours a retry can get past */
 const isRetryableError = (error) => {
   const code = codeOf(error);
   return code === undefined || RETRYABLE_CODE_SET.has(code);
 };
-
-/** The least time between two `lock-wait` progress updates of one job */
-const WAIT_PROGRESS_INTERVAL_MS = 2000;
-
-/** What BullMQ checks (by name, not only by class) to fail a job without retrying it */
-const UNRECOVERABLE_ERROR_NAME = 'UnrecoverableError';
-
-/**
- * What BullMQ checks (by name) for a job the processor has moved back to the
- * wait list itself: neither failed nor completed, nothing more to record.
- */
-const WAITING_ERROR_NAME = 'WaitingError';
 
 /** The correlation ids of a job, for its error context and log lines */
 const jobIds = (ctx) => {
@@ -100,34 +116,18 @@ const jobIds = (ctx) => {
  * group the kit would refuse is left out rather than the whole reference.
  */
 const jobRefOf = (job, groupId) => {
-  if (job?.id === undefined || job.id === null) return undefined;
+  if (job?.id === undefined || job.id === null) return null;
   const id = `${job.id}`;
   const ref = groupId !== undefined ? { id, groupId } : { id };
   if (jobRefIssue(ref) === null) return ref;
-  return jobRefIssue({ id }) === null ? { id } : undefined;
+  return jobRefIssue({ id }) === null ? { id } : null;
 };
-
-/** The longest row a `migration:log` event becomes in a job's log */
-const USERLAND_ROW_MAX = 1024;
-
-/**
- * How many `migration:log` rows one job's log takes by default (a lane: one
- * slice) — the rest are counted in one closing row. A migration that logs in
- * a loop must not write tens of thousands of entries into Redis per job.
- */
-const DEFAULT_USERLAND_LOG_ROWS = 1000;
-
-/** Line breaks: a row is one line of the job's log, so they are shown, never acted on */
-const ROW_BREAKS = /\r\n|[\r\n\u2028\u2029]/g;
 
 /** Text as part of one row: line breaks shown as ⏎, control characters dropped */
 const oneLine = (text) => sanitize(text.replace(ROW_BREAKS, '⏎'));
 
 /** BigInts have no JSON form of their own; a log row shows their digits */
-const jsonValue = (_key, value) => (typeof value === 'bigint' ? value.toString() : value);
-
-/** Stops {@link boundedJson} once the row has what it can show */
-const ROW_FULL = Symbol('row full');
+const jsonValue = (_key, value) => (typeof value === 'bigint' ? `${value}` : value);
 
 /**
  * `data` as JSON, written only until `max` characters — never the whole of
@@ -179,8 +179,8 @@ const boundedJson = (data, max) => {
 /** Whether `data` has a key to show — without listing them all */
 const hasEntries = (data) => {
   if (data === null || typeof data !== 'object') return false;
-  for (const key in data) return true;
-  return false;
+  // The caller's own keys only: `for...in` would walk its prototype too.
+  return Object.keys(data).length > 0;
 };
 
 /**
@@ -238,7 +238,7 @@ const ownLine = (ctx, event) => {
   }
   if (event.kind !== 'migration') return false;
   if (ctx.runId === undefined || event.runId !== ctx.runId) return false;
-  return ref === undefined || event.jobId === ref.id;
+  return ref === null || event.jobId === ref.id;
 };
 
 /** A job in a few words, for log lines: `up 20260101-x.js (1/3)`, `converge`, `sync` */
@@ -370,9 +370,9 @@ const writeToJob = (ctx, action) => {
 const log = (ctx, row) => writeToJob(ctx, (job) => job.log?.(redactOutbound(row)));
 
 /** The job's progress: the phase, what the job is about, and `extra` */
-const progress = (ctx, phase, extra) =>
-  writeToJob(ctx, (job) =>
-    job.updateProgress?.({
+const progress = (ctx, phase, extra) => {
+  return writeToJob(ctx, (job) => {
+    return job.updateProgress?.({
       phase,
       ...(ctx.data.kind === 'migration'
         ? {
@@ -384,8 +384,9 @@ const progress = (ctx, phase, extra) =>
           }
         : { kind: ctx.data.kind }),
       ...extra,
-    }),
-  );
+    });
+  });
+};
 
 /** What a converge action works on, in a log row */
 const convergeTarget = (event) => {
@@ -554,10 +555,12 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
   for (let i = 0; i < events.length; i++) kit.on(events[i], listeners[events[i]]);
 
   /** The background queue options every enqueue from here shares */
-  const backgroundOptions = () => ({
-    ...(background.jobOptions !== undefined ? { jobOptions: background.jobOptions } : {}),
-    ...(background.stallMs !== undefined ? { stallMs: background.stallMs } : {}),
-  });
+  const backgroundOptions = () => {
+    return {
+      ...(background.jobOptions !== undefined ? { jobOptions: background.jobOptions } : {}),
+      ...(background.stallMs !== undefined ? { stallMs: background.stallMs } : {}),
+    };
+  };
 
   /**
    * Hand what this job registered to the background queue. Never fails the
@@ -606,14 +609,14 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     // The run's correlation names this job, so what the migration logs can be
     // joined to it (and its userland lines routed into its log).
     ctx.jobRef = jobRefOf(ctx.job, data.groupId);
-    if (ctx.jobRef === undefined) {
+    if (ctx.jobRef === null) {
       kit.logger.debug(`Job ${ctx.job?.id} has no id the run can carry — its lines name no job`, {
         ...jobIds(ctx),
       });
     }
     const jobField = ctx.jobRef ? { job: ctx.jobRef } : {};
-    const attempt = () =>
-      data.direction === JOB_NAMES.UP
+    const attempt = () => {
+      return data.direction === JOB_NAMES.UP
         ? kit.up(data.migration, {
             batch: data.batch,
             ...(ordered ? { ordered: true } : {}),
@@ -627,6 +630,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
             ...pickActor(data),
             ...jobField,
           });
+    };
 
     try {
       const { result, waitedMs } = await waitForLock(ctx, attempt, signal);
@@ -712,12 +716,12 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
    * which never consults this). Returns `{ migration, reason, failedAt? }`.
    */
   const heldFailure = async (first, to) => {
-    if (!first || (to !== undefined && first.file > to)) return undefined;
-    if (typeof kit.list !== 'function' || typeof kit.dryRun !== 'function') return undefined;
+    if (!first || (to !== undefined && first.file > to)) return null;
+    if (typeof kit.list !== 'function' || typeof kit.dryRun !== 'function') return null;
     const row = rowOf(await kit.list('all', { checksums: false }), first.file);
-    if (row?.status !== 'failed' || typeof row.failedChecksum !== 'string') return undefined;
+    if (row?.status !== 'failed' || typeof row.failedChecksum !== 'string') return null;
     const planned = (await kit.dryRun('up', first.file))[0];
-    if (planned?.checksum !== row.failedChecksum) return undefined;
+    if (planned?.checksum !== row.failedChecksum) return null;
     return {
       migration: first.file,
       reason: 'failed, and unchanged since',
@@ -741,12 +745,12 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
    */
   const heldConverge = async (plan) => {
     if (plan.fingerprint === undefined || typeof kit.convergeHistory !== 'function') {
-      return undefined;
+      return null;
     }
     const last = (await kit.convergeHistory({ limit: 1 }))[0];
     if (last?.success !== false || last.fingerprint !== plan.fingerprint) {
       saidHeldConverge = '';
-      return undefined;
+      return null;
     }
     if (saidHeldConverge !== plan.fingerprint) {
       saidHeldConverge = plan.fingerprint;
@@ -798,7 +802,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       const canConverge = to === undefined && typeof kit.convergesAfterUp === 'function';
       if (canConverge && (await kit.convergesAfterUp())) {
         const plan = await kit.converge({ dryRun: true });
-        const held = plan.inSync ? undefined : await heldConverge(plan);
+        const held = plan.inSync ? null : await heldConverge(plan);
         if (held) {
           result.convergeHeld = held;
         } else if (!plan.inSync) {
@@ -891,9 +895,9 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
    */
   const requeueOnShutdown = async (ctx, error, token) => {
     const isStop = codeOf(error) === 'ALX_ERR_RUN_ABORTED';
-    if (!isStop || !shutdownController.signal.aborted) return undefined;
+    if (!isStop || !shutdownController.signal.aborted) return null;
     if (ctx.started || typeof ctx.job?.moveToWait !== 'function' || typeof token !== 'string') {
-      return undefined;
+      return null;
     }
     const reason = errorText(shutdownController.signal.reason ?? 'shutting down');
     log(ctx, `↩ Returned to the queue: ${reason}`);
@@ -902,7 +906,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       await ctx.job.moveToWait(token);
     } catch {
       // The lock is gone (a stall already moved it) or Redis is: fail as usual.
-      return undefined;
+      return null;
     }
     kit.logger.debug(`↩ Returned job ${ctx.job.id} to the queue: ${reason}`, {
       ...jobIds(ctx),
@@ -926,6 +930,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       job,
       data: undefined,
       runId: undefined,
+      jobRef: null,
       started: false,
       writes: new Set(),
       registered: [],
@@ -940,8 +945,9 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     // Reaches a run that is setting up or between migrations; one already
     // executing a migration body finishes it — interrupting a body mid-write
     // is what leaves a database half-migrated.
-    const onAbort = () =>
-      kit.stop(errorText(abort.reason ?? 'Queue job cancelled'), { cause: abort.reason });
+    const onAbort = () => {
+      return kit.stop(errorText(abort.reason ?? 'Queue job cancelled'), { cause: abort.reason });
+    };
     let listening = null;
     try {
       // Validated before anything connects: a payload that fails the contract
@@ -988,11 +994,11 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
           ...(ctx.runId ? { runId: ctx.runId } : {}),
         });
       }
-      writeToJob(ctx, (target) =>
-        target.log?.(
+      writeToJob(ctx, (target) => {
+        return target.log?.(
           redactOutbound(`✖ ${errorText(error)}${ctx.runId ? ` [run ${ctx.runId}]` : ''}`),
-        ),
-      );
+        );
+      });
       await flush(ctx);
       throw error;
     } finally {
@@ -1053,14 +1059,14 @@ module.exports = {
   UNRECOVERABLE_ERROR_NAME,
   WAITING_ERROR_NAME,
   DEFAULT_USERLAND_LOG_ROWS,
-  assertUserlandLogRows,
-  createMigrationProcessor,
   isTransientForJob,
   isRetryableError,
   jobRefOf,
+  userlandRow,
+  userlandOverflowRow,
+  assertUserlandLogRows,
   ownLine,
   prepareErrorForQueue,
   resolveProcessorOptions,
-  userlandOverflowRow,
-  userlandRow,
+  createMigrationProcessor,
 };

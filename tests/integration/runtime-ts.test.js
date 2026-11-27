@@ -40,7 +40,7 @@ export async function down({ db }: MigrationContext): Promise<void> {
 }
 `;
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_runtime_test';
 
 before(async () => {
@@ -53,7 +53,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();

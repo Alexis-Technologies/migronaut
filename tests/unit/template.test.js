@@ -35,7 +35,7 @@ const {
   slugify,
 } = require('../../src/utils/template.js');
 
-let tmp;
+let tmp = null;
 
 beforeEach(() => {
   tmp = mkdtempSync(path.join(tmpdir(), 'migronaut-template-'));

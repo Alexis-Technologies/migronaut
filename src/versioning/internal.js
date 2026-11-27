@@ -5,6 +5,17 @@
  * application's repository layer pays for nothing else (pinned by a test).
  */
 
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+const PIPELINE_FIELD_STAGES = new Set(['$set', '$addFields']);
+
+const PIPELINE_WHOLE_STAGES = new Set(['$project', '$replaceRoot', '$replaceWith']);
+
+const LOGICAL = new Set(['$and', '$or', '$nor']);
+
+/** `"$__rev"` or `"$__rev.x"` inside a serialized `$expr` — not `"$__revision"` */
+const references = new Map();
+
 const isPlainObject = (value) => {
   if (value === null || typeof value !== 'object') return false;
   const proto = Object.getPrototypeOf(value);
@@ -12,12 +23,11 @@ const isPlainObject = (value) => {
 };
 
 /** A BSON value class from the driver (`Int32`, `Long`, `ObjectId`, …) */
-const bsonType = (value) =>
-  value !== null && typeof value === 'object' && typeof value._bsontype === 'string'
+const bsonType = (value) => {
+  return value !== null && typeof value === 'object' && typeof value._bsontype === 'string'
     ? value._bsontype
     : undefined;
-
-const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+};
 
 /**
  * A non-negative safe integer from whatever the driver handed back — a plain
@@ -47,8 +57,9 @@ const bytesEqual = (a, b) => {
   return true;
 };
 
-const binaryBytes = (value) =>
-  value.buffer.subarray(0, typeof value.position === 'number' ? value.position : undefined);
+const binaryBytes = (value) => {
+  return value.buffer.subarray(0, typeof value.position === 'number' ? value.position : undefined);
+};
 
 /**
  * Two BSON values of the same class. `undefined` means "cannot tell" — the
@@ -81,12 +92,8 @@ const sameBsonValue = (type, a, b) => {
     case 'Code':
       return a.code === b.code && sameValue(a.scope ?? null, b.scope ?? null);
     case 'DBRef':
-      return (
-        a.collection === b.collection &&
-        a.db === b.db &&
-        sameValue(a.oid, b.oid) &&
-        sameValue(a.fields ?? {}, b.fields ?? {})
-      );
+      if (a.collection !== b.collection || a.db !== b.db) return false;
+      return sameValue(a.oid, b.oid) && sameValue(a.fields ?? {}, b.fields ?? {});
     default:
       return undefined;
   }
@@ -177,18 +184,13 @@ const setOwn = (target, key, value) => {
  * namespace (`import * as orders`, or `require` of an ES module) carries it
  * as its `default`.
  */
-const unwrapDefinition = (value) => {
-  return isPlainObject(value?.default) ? value.default : value;
-};
+const unwrapDefinition = (value) => (isPlainObject(value?.default) ? value.default : value);
 
 /** `a.b.c` → `a`; `$[]`-style paths keep their first segment too */
 const topField = (path) => {
   const dot = path.indexOf('.');
   return dot === -1 ? path : path.slice(0, dot);
 };
-
-const PIPELINE_FIELD_STAGES = new Set(['$set', '$addFields']);
-const PIPELINE_WHOLE_STAGES = new Set(['$project', '$replaceRoot', '$replaceWith']);
 
 /** The top field of every string path in `paths` */
 const addTopFields = (fields, paths) => {
@@ -258,10 +260,6 @@ const touchedFields = (update) => {
   return plain.size > 0 ? { fields: plain, whole: true } : { fields, whole: false };
 };
 
-const LOGICAL = new Set(['$and', '$or', '$nor']);
-
-/** `"$__rev"` or `"$__rev.x"` inside a serialized `$expr` — not `"$__revision"` */
-const references = new Map();
 const fieldReference = (field) => {
   // Built once per field: every guarded write asks.
   let pattern = references.get(field);
@@ -291,14 +289,14 @@ const filterTouches = (filter, field) => {
 };
 
 module.exports = {
-  bsonType,
-  cloneDocument,
-  filterTouches,
   isPlainObject,
-  sameValue,
-  setOwn,
+  bsonType,
   toCount,
+  sameValue,
+  cloneDocument,
+  setOwn,
+  unwrapDefinition,
   topField,
   touchedFields,
-  unwrapDefinition,
+  filterTouches,
 };

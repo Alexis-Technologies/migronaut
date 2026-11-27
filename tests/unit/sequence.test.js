@@ -7,7 +7,7 @@ const { listMigrationFiles } = require('../../src/core/sequence.js');
 
 const EXTENSIONS = ['.ts', '.js'];
 
-let dir;
+let dir = null;
 
 beforeEach(() => {
   dir = mkdtempSync(path.join(tmpdir(), 'migronaut-sequence-'));

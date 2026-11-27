@@ -291,7 +291,7 @@ describe('normalizeDefinition', () => {
 });
 
 describe('collection definition files', () => {
-  let dir;
+  let dir = null;
   const write = (file, body) => writeFileSync(path.join(dir, file), body, 'utf8');
 
   beforeEach(() => {

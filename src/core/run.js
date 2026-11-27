@@ -100,12 +100,13 @@ const runMigrations = async (config = {}, options = {}) => {
       waitedMs,
       attempts,
     } = await withLockWait(
-      () =>
-        kit.up(undefined, {
+      () => {
+        return kit.up(undefined, {
           ...(noLock ? { noLock: true } : {}),
           ...(onBackgroundPending !== undefined ? { onBackgroundPending } : {}),
           ...(signal ? { signal } : {}),
-        }),
+        });
+      },
       {
         onLockHeld,
         ...(lockWaitTimeoutMs !== undefined ? { lockWaitTimeoutMs } : {}),

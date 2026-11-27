@@ -24,6 +24,36 @@ const { verify } = require('./drift.js');
 const { runWithLock } = require('../lock.js');
 const { READ_OPTIONS } = require('../server-info.js');
 
+const DEFAULTS = Object.freeze({
+  upgrade: true,
+  refreshMs: 30_000,
+  checkpointMs: 5_000,
+  leaderRetryMs: 10_000,
+  maxCollections: 16,
+  maxLagMs: 60_000,
+});
+
+/**
+ * The integer options: `[key, min, max]`. The floor of `refreshMs` keeps a
+ * watcher from re-listing every state and reopening its streams in a loop.
+ */
+const BOUNDS = [
+  ['refreshMs', 100, 3_600_000],
+  ['checkpointMs', 10, 3_600_000],
+  ['leaderRetryMs', 10, 3_600_000],
+  ['maxCollections', 1, 1_000],
+  ['maxLagMs', 1, 86_400_000],
+];
+
+/** Every option watchBackground takes — anything else is refused, not ignored */
+const OPTION_KEYS = new Set();
+
+/** Hops one event may take up a chain (v1 → v2 → v3 …) */
+const MAX_HOPS = 16;
+
+/** The longest a failing stream backs off before it reopens */
+const MAX_BACKOFF_MS = 30_000;
+
 /** Why a follower or the watcher stopped — a typed abort reason, never a bare Error */
 const stopReason = (reason) => new RunAbortedError(reason, { context: { reason } });
 
@@ -50,36 +80,8 @@ const stopReason = (reason) => new RunAbortedError(reason, { context: { reason }
  * rather than become a slow background migration of its own.
  */
 
-const DEFAULTS = Object.freeze({
-  upgrade: true,
-  refreshMs: 30_000,
-  checkpointMs: 5_000,
-  leaderRetryMs: 10_000,
-  maxCollections: 16,
-  maxLagMs: 60_000,
-});
-
-/**
- * The integer options: `[key, min, max]`. The floor of `refreshMs` keeps a
- * watcher from re-listing every state and reopening its streams in a loop.
- */
-const BOUNDS = [
-  ['refreshMs', 100, 3_600_000],
-  ['checkpointMs', 10, 3_600_000],
-  ['leaderRetryMs', 10, 3_600_000],
-  ['maxCollections', 1, 1_000],
-  ['maxLagMs', 1, 86_400_000],
-];
-
-/** Every option watchBackground takes — anything else is refused, not ignored */
-const OPTION_KEYS = new Set();
 for (let i = 0; i < BOUNDS.length; i++) OPTION_KEYS.add(BOUNDS[i][0]);
 OPTION_KEYS.add('upgrade').add('collections').add('signal').add('onError');
-
-/** Hops one event may take up a chain (v1 → v2 → v3 …) */
-const MAX_HOPS = 16;
-/** The longest a failing stream backs off before it reopens */
-const MAX_BACKOFF_MS = 30_000;
 
 /** Validate the watcher's options and fill in the defaults */
 const watchOptions = (options) => {
@@ -392,9 +394,9 @@ const startWatch = (deps, options = {}) => {
       let held = await stream.tryNext();
       if (context.token === undefined) {
         await setState(collection, 'catching-up', { leading: true });
-        await verify(deps, { onDrift: deps.onDrift, collections: [collection] }).catch((error) =>
-          report(error, collection),
-        );
+        await verify(deps, { onDrift: deps.onDrift, collections: [collection] }).catch((error) => {
+          return report(error, collection);
+        });
       }
       await setState(collection, 'streaming', { leading: true });
       while (!serveSignal.aborted) {
@@ -644,4 +646,4 @@ const startWatch = (deps, options = {}) => {
   };
 };
 
-module.exports = { WATCH_DEFAULTS: DEFAULTS, startWatch, watchOptions };
+module.exports = { WATCH_DEFAULTS: DEFAULTS, watchOptions, startWatch };

@@ -1,6 +1,7 @@
 const { EventEmitter, addAbortListener } = require('node:events');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+
 // `mongodb` is required lazily inside connect(): loading the driver costs ~60ms
 // and pulls in ~150 modules, which `--help`, `--version`, `init` and `create`
 // have no use for.
@@ -25,7 +26,13 @@ const {
 const { actorFields, pickActor } = require('../utils/actor.js');
 const { computeChecksum } = require('../utils/checksum.js');
 const { mapLimit } = require('../utils/concurrency.js');
-const { errorText, errorWithCause, isDriverError, serverErrorOf } = require('../utils/error.js');
+const {
+  errorText,
+  errorWithCause,
+  isDriverError,
+  isDuplicateKey,
+  serverErrorOf,
+} = require('../utils/error.js');
 const { createIdGenerator } = require('../utils/id.js');
 const { loadMigrationFile } = require('../utils/loader.js');
 const { resolveLogger } = require('../utils/logger.js');
@@ -76,6 +83,33 @@ const {
 /** Simultaneous file reads — keeps a large migrations dir clear of EMFILE */
 const FS_CONCURRENCY = 16;
 
+/**
+ * The main orchestration class. Every CLI command delegates here. Holds a
+ * partial config that is resolved (merged with env/file/defaults) on first use.
+ *
+ * Also an EventEmitter: subscribe with `kit.on('migration:success', …)` to feed
+ * metrics or alerting without parsing log lines. Events complement
+ * {@link MigrationHooks} — hooks are configured up front and run user database
+ * logic in the migration's flow; listeners attach from outside, may be several,
+ * and a listener that throws is contained rather than failing the run.
+ */
+/**
+ * How a lock-wait loop outside the kit (`runMigrations`, the queue processor)
+ * reports a finished wait to the kit's telemetry. A symbol, and not exported
+ * from the package: the loop is migronaut's own, and so is this channel.
+ */
+const RECORD_LOCK_WAIT = Symbol('migronaut.recordLockWait');
+
+/** The client options that switch TLS verification off */
+const WEAK_TLS_OPTIONS = Object.freeze([
+  'tlsInsecure',
+  'tlsAllowInvalidCertificates',
+  'tlsAllowInvalidHostnames',
+]);
+
+/** What `fs.access` says when a named migration is simply not there */
+const MISSING_FILE_CODES = new Set(['ENOENT', 'ENOTDIR']);
+
 /** The label of a migration's success line, by its kind and direction */
 const successLabel = (kind, direction) => {
   if (kind === 'background') return direction === 'up' ? '⧗ Registered' : '⧗ Reverting';
@@ -103,26 +137,6 @@ const migrationsOf = (entries) => {
 const emptyConverge = (dryRun) => ({ dryRun, changed: 0, inSync: true, collections: [] });
 
 /**
- * The main orchestration class. Every CLI command delegates here. Holds a
- * partial config that is resolved (merged with env/file/defaults) on first use.
- *
- * Also an EventEmitter: subscribe with `kit.on('migration:success', …)` to feed
- * metrics or alerting without parsing log lines. Events complement
- * {@link MigrationHooks} — hooks are configured up front and run user database
- * logic in the migration's flow; listeners attach from outside, may be several,
- * and a listener that throws is contained rather than failing the run.
- */
-/**
- * How a lock-wait loop outside the kit (`runMigrations`, the queue processor)
- * reports a finished wait to the kit's telemetry. A symbol, and not exported
- * from the package: the loop is migronaut's own, and so is this channel.
- */
-const RECORD_LOCK_WAIT = Symbol('migronaut.recordLockWait');
-
-/** What `fs.access` says when a named migration is simply not there */
-const MISSING_FILE_CODES = new Set(['ENOENT', 'ENOTDIR']);
-
-/**
  * The error a run leaves with. A driver error that got this far — a changelog
  * read, the lock, a background migration's indexes — is typed on the way out:
  * raw, it carried no code, so `--json` lost the rows applied before it, the
@@ -142,16 +156,28 @@ const typedRunFailure = (error, operation) => {
   });
 };
 
+/**
+ * A row's rendered status: 'applied', 'failed' (a recorded failed attempt —
+ * the file still counts as pending for every run path, but the operator
+ * deserves to see the failure), or 'pending' (including reverted history —
+ * the `revertedAt` field carries that story).
+ */
+const rowStatus = (record) => {
+  if (record?.status === 'applied') return 'applied';
+  if (record?.status === 'failed') return 'failed';
+  return 'pending';
+};
+
 class MigratorKit extends EventEmitter {
   #partialConfig;
   #configPath;
   #progress;
-  #config;
-  #client;
-  #db;
-  #changelog;
+  #config = null;
+  #client = null;
+  #db = null;
+  #changelog = null;
   /** Set while a locked run is in flight, so stop() can interrupt it */
-  #abort;
+  #abort = null;
   /** A stop requested before the run reached its lock — consumed when it does */
   #stopRequested = null;
   /** >0 while a run method is setting up or executing — the stop() latch window */
@@ -163,30 +189,30 @@ class MigratorKit extends EventEmitter {
    * job and actor, `ctx.run`, `ctx.logger`, the `migration:log` counter. Set
    * and cleared with #runId; a logger keeps what it was made with.
    */
-  #runLog;
+  #runLog = null;
   /** The `migration:log` channel handed to migration loggers — made once */
-  #logEmitterInstance;
+  #logEmitterInstance = null;
   /** Mints an id in the configured format (`generateId`, else a UUID); set with the config */
-  #newId;
+  #newId = null;
   /** Spans and metrics through the injected `telemetry` (a no-op without one); set with the config */
-  #telemetry;
+  #telemetry = null;
   /** Whether changelog indexes have already been ensured on this instance */
   #indexesEnsured = false;
   /** Memoized resolved logger — resolveLogger allocates on every call otherwise */
-  #resolvedLogger;
+  #resolvedLogger = null;
   /** Used only when the resolved config supplies no `logger` of its own (CLI injection) */
   #fallbackLogger;
   /** False when the client was injected by the caller, who keeps ownership of it */
   #ownsClient = true;
   /** The connect() in flight, so overlapping callers share one client instead of racing */
-  #connecting;
+  #connecting = null;
   /** Bumped by disconnect(): a connect() begun before it opens nothing after it */
   #connectEpoch = 0;
   /**
    * The config load in flight, so overlapping first callers share one — a
    * config factory may fetch secrets, and must not run twice.
    */
-  #configLoading;
+  #configLoading = null;
   /**
    * Project root this instance resolves against — config discovery, the .env
    * file and a relative migrationsDir. Defaults to process.cwd(); an explicit
@@ -202,11 +228,11 @@ class MigratorKit extends EventEmitter {
    * every definition file — under `reloadMigrations`, a module per file per
    * poll that the module cache never frees. Cleared by any other outcome.
    */
-  #upDefinitions;
+  #upDefinitions = null;
   /** Migration modules read ahead of a run (requires, kind), by checksum */
   #moduleCache = new Map();
   /** The sequence's files, read once per run — see #sequenceFiles */
-  #runFiles;
+  #runFiles = null;
   /** The background migrations of this kit (background/host.js) */
   #background;
   /** The declared collections' converge deps and history (converge/host.js) */
@@ -302,9 +328,9 @@ class MigratorKit extends EventEmitter {
       try {
         const returned = listeners[i].call(this, payload);
         if (typeof returned?.then === 'function') {
-          returned.then(undefined, (error) =>
-            this[EventEmitter.captureRejectionSymbol](error, event),
-          );
+          returned.then(undefined, (error) => {
+            return this[EventEmitter.captureRejectionSymbol](error, event);
+          });
         }
       } catch (error) {
         // A listener's failure is its own problem — but an invisible one is
@@ -379,7 +405,7 @@ class MigratorKit extends EventEmitter {
   async #ensureConfig(requireDb = true, lenient = false) {
     if (this.#config) return this.#config;
     this.#configLoading ??= this.#loadConfig(requireDb, lenient).finally(() => {
-      this.#configLoading = undefined;
+      this.#configLoading = null;
     });
     return this.#configLoading;
   }
@@ -469,7 +495,7 @@ class MigratorKit extends EventEmitter {
     // queue job starts). Without this, each would open its own MongoClient
     // and all but the last would leak their pools.
     this.#connecting ??= this.#openConnection(config).finally(() => {
-      this.#connecting = undefined;
+      this.#connecting = null;
     });
     return this.#connecting;
   }
@@ -526,9 +552,9 @@ class MigratorKit extends EventEmitter {
       // Close and forget the half-built client. Leaving it assigned would leak
       // its connection pool, since a retry of connect() overwrites the field.
       const dangling = this.#ownsClient ? this.#client : undefined;
-      this.#client = undefined;
-      this.#db = undefined;
-      this.#changelog = undefined;
+      this.#client = null;
+      this.#db = null;
+      this.#changelog = null;
       await dangling?.close().catch((closeError) => {
         // The connect failure is what this call reports; the close is said at debug.
         this.#logger.debug(`Could not close the half-built client: ${errorText(closeError)}`);
@@ -564,9 +590,9 @@ class MigratorKit extends EventEmitter {
     const owned = this.#ownsClient;
     // Restore the full pre-connect invariant: every connection-scoped field is
     // cleared together, so nothing half-connected survives a disconnect.
-    this.#client = undefined;
-    this.#db = undefined;
-    this.#changelog = undefined;
+    this.#client = null;
+    this.#db = null;
+    this.#changelog = null;
     // The background stores bind the Db they were made with, and what was read
     // through it: a later connect() reads them anew, maybe of another deployment.
     this.#background.reset();
@@ -581,7 +607,7 @@ class MigratorKit extends EventEmitter {
   #warnOnWeakTls(clientOptions) {
     if (!clientOptions) return;
     const weakening = [];
-    for (const key of ['tlsInsecure', 'tlsAllowInvalidCertificates', 'tlsAllowInvalidHostnames']) {
+    for (const key of WEAK_TLS_OPTIONS) {
       if (clientOptions[key]) weakening.push(key);
     }
     if (weakening.length > 0) {
@@ -616,6 +642,40 @@ class MigratorKit extends EventEmitter {
    * `lock.release()` gives the lock up before `fn` returns, for a tail that
    * only reads (see runWithLock) — the run, its id and its span go on.
    */
+  /**
+   * The run's stop: a controller layered over the lock's own signal, so
+   * stop(), the caller's `signal` and a lost lock abort through the path the
+   * run loops already watch — the migration in flight finishes, the rest are
+   * skipped, and what stopped it is the RunAbortedError's cause. A stop that
+   * landed before the run (config load, connect) is honored here, before the
+   * lock. Returns the signal, and the listener to dispose when the run ends.
+   */
+  #armStop(external) {
+    const stopper = new AbortController();
+    this.#abort = ({ reason, cause }) => {
+      if (stopper.signal.aborted) return;
+      const errorOptions =
+        cause === undefined
+          ? { context: { reason } }
+          : { cause, context: { reason, cause: errorText(cause) } };
+      stopper.abort(new RunAbortedError(reason, errorOptions));
+    };
+    if (this.#stopRequested !== null) {
+      const pending = this.#stopRequested;
+      this.#stopRequested = null;
+      this.#abort(pending);
+    }
+    const abortFromSignal = () => {
+      return this.#abort({
+        reason: errorText(external.reason ?? 'Aborted'),
+        cause: external.reason,
+      });
+    };
+    const listening = external === undefined ? null : addAbortListener(external, abortFromSignal);
+    if (external?.aborted) abortFromSignal();
+    return { signal: stopper.signal, listening };
+  }
+
   async #withLock(options, info, fn) {
     // Not reentrant: a second overlapping run on this instance would clobber
     // the first one's runId/abort state in its `finally`. The DB lock already
@@ -638,32 +698,7 @@ class MigratorKit extends EventEmitter {
       sink: this.#logger,
       emitter: this.#logEmitter(),
     });
-    // A second controller layered over the lock's own signal, so stop() and a
-    // lost lock abort through the same path the run loops already watch.
-    const stopper = new AbortController();
-    this.#abort = ({ reason, cause }) => {
-      if (stopper.signal.aborted) return;
-      const errorOptions =
-        cause === undefined
-          ? { context: { reason } }
-          : { cause, context: { reason, cause: errorText(cause) } };
-      stopper.abort(new RunAbortedError(reason, errorOptions));
-    };
-    // Honor a stop that landed before we got here (config load / connect).
-    if (this.#stopRequested !== null) {
-      const pending = this.#stopRequested;
-      this.#stopRequested = null;
-      this.#abort(pending);
-    }
-    // The caller's own signal stops the run as stop() does — the migration in
-    // flight finishes, the rest are skipped — with the signal's reason as the
-    // cause. One that aborted while config loaded or the client connected
-    // stops it here, before the lock.
-    const external = options.signal;
-    const abortFromSignal = () =>
-      this.#abort({ reason: errorText(external.reason ?? 'Aborted'), cause: external.reason });
-    const listening = external === undefined ? null : addAbortListener(external, abortFromSignal);
-    if (external?.aborted) abortFromSignal();
+    const stop = this.#armStop(options.signal);
     const recorder = new RunRecorder({
       info,
       runId: this.#runId,
@@ -691,28 +726,29 @@ class MigratorKit extends EventEmitter {
           onLockLostEvent: (reason) => recorder.lockLost(reason),
           ...(options.noLock ? { noLock: true } : {}),
         },
-        (lockSignal, lockControl) =>
+        (lockSignal, lockControl) => {
           // The run's span exists only once the lock is held: a caller polling
           // for a busy lock retries the whole run every few hundred
           // milliseconds, and a span per refusal would bury the one run that
           // did the work. Active around the unit of work only, and ended by the
           // recorder after the release, so the span's outcome is the run's.
-          this.#telemetry.open(SPANS.RUN, recorder.spanAttributes(), (span) => {
+          return this.#telemetry.open(SPANS.RUN, recorder.spanAttributes(), (span) => {
             recorder.spanOpened(span);
-            return fn(AbortSignal.any([lockSignal, stopper.signal]), lockControl);
-          }),
+            return fn(AbortSignal.any([lockSignal, stop.signal]), lockControl);
+          });
+        },
       );
       return result;
     } catch (error) {
       failure = typedRunFailure(error, info.command);
       throw failure;
     } finally {
-      listening?.[Symbol.dispose]();
+      stop.listening?.[Symbol.dispose]();
       recorder.finish(result, failure);
-      this.#abort = undefined;
+      this.#abort = null;
       this.#runId = undefined;
-      this.#runLog = undefined;
-      this.#runFiles = undefined;
+      this.#runLog = null;
+      this.#runFiles = null;
     }
   }
 
@@ -1070,18 +1106,19 @@ class MigratorKit extends EventEmitter {
    * result row, afterEach — and the mirrored error path. Shared verbatim by
    * `up` and `down`, so a fix to one direction cannot silently miss the other.
    */
-  async #executeMigrationSteps(
-    { name, direction, context, index, total, results, batch, onSuccess, failureFields },
-    span,
-  ) {
+  async #executeMigrationSteps(options, span) {
+    const { name, direction, context, index, total, results, batch, onSuccess, failureFields } =
+      options;
+
     const config = this.#config;
     const logger = this.#logger;
     const batchField = batch !== undefined ? { batch } : {};
     // What each attempt adds to the context — ctx.run and ctx.logger — made
     // anew per attempt, so a retried transaction's body knows it is one.
     const runLog = this.#runLog;
-    const attemptContext = (attempt) =>
-      runLog.attempt(direction, { migration: name, batch, attempt });
+    const attemptContext = (attempt) => {
+      return runLog.attempt(direction, { migration: name, batch, attempt });
+    };
 
     await this.#runHook(config.hooks?.beforeEach, 'beforeEach', [
       name,
@@ -1229,7 +1266,7 @@ class MigratorKit extends EventEmitter {
           // the expected case, and silent. Anything else — the database itself
           // is unreachable — is still best-effort, but said: "no failed trace"
           // must be explainable from the log.
-          if (traceError?.code !== 11000) {
+          if (!isDuplicateKey(traceError)) {
             logger.debug(
               `Could not record the failed attempt of ${name}: ${errorText(traceError)}`,
               this.#fields({ migration: name, error: errorText(traceError) }),
@@ -1302,10 +1339,10 @@ class MigratorKit extends EventEmitter {
   async #keepDefinitionsWhileRefused(fn) {
     try {
       const result = await fn();
-      this.#upDefinitions = undefined;
+      this.#upDefinitions = null;
       return result;
     } catch (error) {
-      if (!(error instanceof LockAlreadyHeldError)) this.#upDefinitions = undefined;
+      if (!(error instanceof LockAlreadyHeldError)) this.#upDefinitions = null;
       throw error;
     }
   }
@@ -1475,8 +1512,8 @@ class MigratorKit extends EventEmitter {
           batch,
           // No appliedAt: the changelog stamps it in server time, so the
           // revert-selection sorts are immune to this host's clock skew.
-          onSuccess: (migration, elapsed, session) =>
-            changelog.markApplied(
+          onSuccess: (migration, elapsed, session) => {
+            return changelog.markApplied(
               db,
               {
                 name,
@@ -1492,7 +1529,8 @@ class MigratorKit extends EventEmitter {
                 ...actorFields(options),
               },
               session,
-            ),
+            );
+          },
           // What a failed attempt's trace records besides the failure: the
           // version of the file that failed (a breaker compares it), and who
           // asked for the run.
@@ -1566,9 +1604,9 @@ class MigratorKit extends EventEmitter {
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();
-      return this.#withLock(options, { command: 'down', direction: 'down' }, (signal) =>
-        this.#runDown(filename, options, signal),
-      );
+      return this.#withLock(options, { command: 'down', direction: 'down' }, (signal) => {
+        return this.#runDown(filename, options, signal);
+      });
     });
   }
 
@@ -1761,11 +1799,11 @@ class MigratorKit extends EventEmitter {
           // error a `--json` consumer sees.
           if (error instanceof MigronautError) {
             const existing = Array.isArray(error.context.results) ? error.context.results : [];
-            this.#attachResults(error, [...downResults, ...existing]);
+            this.#attachResults(error, downResults.concat(existing));
           }
           throw error;
         }
-        return [...downResults, ...upResults];
+        return downResults.concat(upResults);
       });
     });
   }
@@ -1903,9 +1941,9 @@ class MigratorKit extends EventEmitter {
     sortedNames.sort();
     // Each row may read and hash a file; unbounded fan-out over thousands of
     // migrations exhausts the descriptor limit.
-    const rows = await mapLimit(sortedNames, FS_CONCURRENCY, (name) =>
-      this.#buildStatusRow(name, recordByName.get(name), options),
-    );
+    const rows = await mapLimit(sortedNames, FS_CONCURRENCY, (name) => {
+      return this.#buildStatusRow(name, recordByName.get(name), options);
+    });
     // Mark late arrivals: a not-yet-applied row sorting before the newest
     // applied name will run after migrations authored later — the same signal
     // #assertOrderIntact acts on, surfaced here as data.
@@ -1939,11 +1977,12 @@ class MigratorKit extends EventEmitter {
         return auditFindings({
           ...deps,
           checksumOf: (name) => computeChecksum(this.#filepath(name)),
-          backgroundRecords: () =>
-            this.#requireDb()
+          backgroundRecords: () => {
+            return this.#requireDb()
               .collection(this.#config.migrationsCollection)
               .find({ kind: 'background', status: 'applied' }, { projection: { name: 1 } })
-              .toArray(),
+              .toArray();
+          },
           // Only where drift is streamed: a watcher's record is not a finding otherwise.
           ...(this.#config.backgroundDrift !== 'poll'
             ? { watchRows: () => this.#background.watchStore().status() }
@@ -2044,22 +2083,10 @@ class MigratorKit extends EventEmitter {
     };
   }
 
-  /**
-   * A row's rendered status: 'applied', 'failed' (a recorded failed attempt —
-   * the file still counts as pending for every run path, but the operator
-   * deserves to see the failure), or 'pending' (including reverted history —
-   * the `revertedAt` field carries that story).
-   */
-  static #rowStatus(record) {
-    if (record?.status === 'applied') return 'applied';
-    if (record?.status === 'failed') return 'failed';
-    return 'pending';
-  }
-
   /** Build a StatusRow for a migration, verifying checksum when possible */
   async #buildStatusRow(name, record, { checksums = true } = {}) {
     const isApplied = record?.status === 'applied';
-    const status = MigratorKit.#rowStatus(record);
+    const status = rowStatus(record);
     let filepath = '';
     try {
       filepath = this.#filepath(name);
@@ -2185,8 +2212,8 @@ class MigratorKit extends EventEmitter {
     return this.#runWindow(async () => {
       await this.#ensureConfig();
       await this.connect();
-      return this.#withLock(options, { command: 'baseline' }, (signal) =>
-        runBaseline(
+      return this.#withLock(options, { command: 'baseline' }, (signal) => {
+        return runBaseline(
           {
             db: this.#requireDb(),
             changelog: this.#requireChangelog(),
@@ -2203,8 +2230,8 @@ class MigratorKit extends EventEmitter {
           },
           options,
           signal,
-        ),
-      );
+        );
+      });
     });
   }
 
@@ -2222,8 +2249,8 @@ class MigratorKit extends EventEmitter {
       await this.connect();
       // See runImport in import-runner.js for the mechanics; this wires in the
       // kit's capabilities, including the abort signal for long imports.
-      return this.#withLock(options, { command: 'import' }, (signal) =>
-        runImport(
+      return this.#withLock(options, { command: 'import' }, (signal) => {
+        return runImport(
           {
             config: this.#config,
             db: this.#requireDb(),
@@ -2235,8 +2262,8 @@ class MigratorKit extends EventEmitter {
           },
           options,
           signal,
-        ),
-      );
+        );
+      });
     });
   }
 
@@ -2315,10 +2342,8 @@ class MigratorKit extends EventEmitter {
    */
   async convergesAfterUp() {
     const config = await this.#ensureConfig();
-    return (
-      config.convergeAfterUp === true &&
-      ((config.collections?.length ?? 0) > 0 || config.collectionsDir !== undefined)
-    );
+    const declares = (config.collections?.length ?? 0) > 0 || config.collectionsDir !== undefined;
+    return config.convergeAfterUp === true && declares;
   }
 
   /** Every declared collection, normalized — the config key first, then `collectionsDir` */
@@ -2476,4 +2501,4 @@ class MigratorKit extends EventEmitter {
   }
 }
 
-module.exports = { MigratorKit, RECORD_LOCK_WAIT };
+module.exports = { RECORD_LOCK_WAIT, MigratorKit };

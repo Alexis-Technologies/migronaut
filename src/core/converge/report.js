@@ -9,6 +9,16 @@ const { whatOf } = require('./failure.js');
  * totals, the lines that announce a step, and the history entry a run appends.
  */
 
+/** Steps that build an index — the ones that can take minutes or hours */
+const BUILD_STEPS = new Set(['createIndexes', 'rebuild']);
+
+const STARTING = {
+  create: 'Creating',
+  modify: 'Modifying',
+  recreate: 'Rebuilding',
+  drop: 'Dropping',
+};
+
 /** Mark every row that never ran, once a run stops early */
 const settleRest = (result) => {
   for (const collection of result.collections) {
@@ -86,15 +96,6 @@ const finalize = (result, search, settle = false) => {
     result.inSync = conflicts === 0 && applied === changes && !(result.unstable?.length > 0);
   }
   return totals;
-};
-
-/** Steps that build an index — the ones that can take minutes or hours */
-const BUILD_STEPS = new Set(['createIndexes', 'rebuild']);
-const STARTING = {
-  create: 'Creating',
-  modify: 'Modifying',
-  recreate: 'Rebuilding',
-  drop: 'Dropping',
 };
 
 /**

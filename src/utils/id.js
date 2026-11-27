@@ -1,4 +1,5 @@
 const { randomUUID } = require('node:crypto');
+
 const { ConfigInvalidError } = require('../errors/index.js');
 const { errorText } = require('./error.js');
 
@@ -75,4 +76,4 @@ const createIdGenerator = (generateId) => {
   };
 };
 
-module.exports = { MAX_ID_LENGTH, assertId, createIdGenerator, randomId };
+module.exports = { MAX_ID_LENGTH, randomId, assertId, createIdGenerator };

@@ -1,19 +1,20 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+
 const { ConfigInvalidError } = require('../errors/index.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { MAX_TIMER_MS } = require('../utils/concurrency.js');
-const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
-
-/** The keys a `telemetry` object may hold — a Set, read once per key */
-const TELEMETRY_KEY_SET = new Set(TELEMETRY_KEYS);
 const { applyEnvFile } = require('../utils/env.js');
 const { contextPath, errorText } = require('../utils/error.js');
 const { readSmallFile } = require('../utils/file.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { redactDeep } = require('../utils/redact.js');
+const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
 const { collectionsIssues } = require('./converge/collections.js');
+
+/** The keys a `telemetry` object may hold — a Set, read once per key */
+const TELEMETRY_KEY_SET = new Set(TELEMETRY_KEYS);
 
 /**
  * Default values applied when no flag, env var, or config-file value is
@@ -50,15 +51,66 @@ const DEFAULT_CONFIG = {
 /** Candidate config file names, checked in priority order within the cwd */
 const CONFIG_FILE_NAMES = ['migronaut.config.ts', 'migronaut.config.js', 'migronaut.config.json'];
 
+/** The lock TTL in seconds whose milliseconds a timer still honours */
+const MAX_LOCK_TTL_SECONDS = Math.floor(MAX_TIMER_MS / 1000);
+
+/**
+ * The values of every enum key, once: what the config table checks, what the
+ * env table parses, and what migronaut.schema.json lists (a test holds the
+ * schema's `enum` to these).
+ */
+const CREATE_EXTENSIONS = ['ts', 'js'];
+
+const ON_LOCK_LOST = ['abort', 'warn'];
+
+const ON_OUT_OF_ORDER = ['warn', 'error', 'allow'];
+
+const ON_SEARCH_UNAVAILABLE = ['fail', 'skip'];
+
+const ON_DRIFT = ['reopen', 'report'];
+
+const DRIFT_MODES = ['poll', 'stream', 'both'];
+
+const SHARD_AWARE = ['auto', 'off'];
+
+/**
+ * Every key the merged config legitimately carries: the validated ones plus
+ * the code-only ones (the live instances, `generateId` and `telemetry`). Used
+ * only to *mention* typos (`migrationsDirectory`, `useTransactions`) at debug
+ * level — unknown keys stay allowed, matching the documented non-strict
+ * contract.
+ */
+const KNOWN_CONFIG_KEYS = new Set([
+  'logger',
+  'hooks',
+  'mongoose',
+  'client',
+  'generateId',
+  'telemetry',
+  // What `init --format json` writes at the top of the file, for editors.
+  '$schema',
+]);
+
+const TRUE_BOOLEAN_STRINGS = new Set(['true', '1', 'yes']);
+
+const FALSE_BOOLEAN_STRINGS = new Set(['false', '0', 'no']);
+
+/**
+ * Keys never copied from parsed input: JSON.parse creates `__proto__` as an own
+ * enumerable property, so merging it would poison the prototype of the merged
+ * config and let a JSON config file override values it never declared.
+ */
+const UNSAFE_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** What loadConfigFile answers for a factory that failed in a lenient run — never a config value */
+const LENIENT_FAILURE = Symbol('lenient-failure');
+
 const isNonEmptyString = (value) => typeof value === 'string' && value.length > 0;
 const isBoolean = (value) => typeof value === 'boolean';
 const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
 
 /** A duration that ends in a timer: above MAX_TIMER_MS, Node fires it after 1ms */
 const isTimerMs = (value) => isPositiveInteger(value) && value <= MAX_TIMER_MS;
-
-/** The lock TTL in seconds whose milliseconds a timer still honours */
-const MAX_LOCK_TTL_SECONDS = Math.floor(MAX_TIMER_MS / 1000);
 
 /** A lock TTL the heartbeat and the deadline can arm */
 const isLockTtl = (value) => isPositiveInteger(value) && value <= MAX_LOCK_TTL_SECONDS;
@@ -87,27 +139,16 @@ const quoted = (values, separator = ', ') => {
   return text;
 };
 
-/**
- * The values of every enum key, once: what the config table checks, what the
- * env table parses, and what migronaut.schema.json lists (a test holds the
- * schema's `enum` to these).
- */
-const CREATE_EXTENSIONS = ['ts', 'js'];
-const ON_LOCK_LOST = ['abort', 'warn'];
-const ON_OUT_OF_ORDER = ['warn', 'error', 'allow'];
-const ON_SEARCH_UNAVAILABLE = ['fail', 'skip'];
-const ON_DRIFT = ['reopen', 'report'];
-const DRIFT_MODES = ['poll', 'stream', 'both'];
-const SHARD_AWARE = ['auto', 'off'];
-
 /** A CONFIG_KEYS row for an enum key: its values, the check and the message from them */
-const enumKey = (key, values) => ({
-  path: key,
-  check: oneOf(values),
-  message: `must be ${choices(values)}`,
-  optional: true,
-  values,
-});
+const enumKey = (key, values) => {
+  return {
+    path: key,
+    check: oneOf(values),
+    message: `must be ${choices(values)}`,
+    optional: true,
+    values,
+  };
+};
 
 /**
  * The collections a background migration keeps its state in: the state
@@ -248,23 +289,6 @@ const CONFIG_KEYS = [
   enumKey('backgroundShardAware', SHARD_AWARE),
 ];
 
-/**
- * Every key the merged config legitimately carries: the validated ones plus
- * the code-only ones (the live instances, `generateId` and `telemetry`). Used
- * only to *mention* typos (`migrationsDirectory`, `useTransactions`) at debug
- * level — unknown keys stay allowed, matching the documented non-strict
- * contract.
- */
-const KNOWN_CONFIG_KEYS = new Set([
-  'logger',
-  'hooks',
-  'mongoose',
-  'client',
-  'generateId',
-  'telemetry',
-  // What `init --format json` writes at the top of the file, for editors.
-  '$schema',
-]);
 for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
 
 /**
@@ -352,9 +376,6 @@ const bookkeepingCollections = (config) => {
   return entries;
 };
 
-const TRUE_BOOLEAN_STRINGS = new Set(['true', '1', 'yes']);
-const FALSE_BOOLEAN_STRINGS = new Set(['false', '0', 'no']);
-
 /**
  * Parse a string into a boolean. Unrecognized values throw instead of silently
  * becoming false — a typo like MIGRONAUT_STRICT=on must never disable a safety
@@ -367,13 +388,6 @@ const parseBoolean = (value, name) => {
   const issue = "must be 'true'/'1'/'yes' or 'false'/'0'/'no'";
   throw new ConfigInvalidError(`${name} ${issue}`, { context: { name, value, issue } });
 };
-
-/**
- * Keys never copied from parsed input: JSON.parse creates `__proto__` as an own
- * enumerable property, so merging it would poison the prototype of the merged
- * config and let a JSON config file override values it never declared.
- */
-const UNSAFE_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /** Copy only the defined keys from `source` onto `target`, mutating and returning target */
 const mergeDefined = (target, source) => {
@@ -546,9 +560,6 @@ const discoverConfigFile = async (cwd) => {
   return null;
 };
 
-/** What loadConfigFile answers for a factory that failed in a lenient run — never a config value */
-const LENIENT_FAILURE = Symbol('lenient-failure');
-
 /** What a config file came to, in a word — `object` is the one shape that is a config */
 const shapeOf = (value) => {
   if (value === null) return 'null';
@@ -644,8 +655,9 @@ const loadConfig = async (options = {}) => {
   // The CLI's console logger, used only when neither flags nor the config file
   // supply one — so this module's own lines honor `--verbose`/`--quiet` while
   // a user's configured logger still wins.
-  const effectiveLogger = (value) =>
-    resolveLogger(value !== undefined ? value : options.fallbackLogger);
+  const effectiveLogger = (value) => {
+    return resolveLogger(value !== undefined ? value : options.fallbackLogger);
+  };
 
   // Resolved before the merge, because loading the .env file is what supplies
   // the MIGRONAUT_* variables the merge then reads. `false` opts out entirely —

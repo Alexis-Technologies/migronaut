@@ -49,6 +49,29 @@ const FLAGS = {
   watch: ['report'],
 };
 
+/** What `run --all` drives */
+const RUNNABLE = new Set(['blocked', 'pending', 'running']);
+
+/** Actions a name is required for */
+const NEEDS_NAME = new Set(['pause', 'resume', 'cancel', 'retry', 'repin', 'dry-run', 'unlock']);
+
+/** Controls that cannot be taken back, so they ask first (and `retry --from-start`) */
+const ASKS_FIRST = new Set(['cancel', 'repin', 'unlock']);
+
+/** The signals a foreground action ends on */
+const SIGNALS = ['SIGINT', 'SIGTERM'];
+
+const STATUS_COLORS = {
+  __proto__: null,
+  completed: 'green',
+  running: 'cyan',
+  pending: 'yellow',
+  blocked: 'yellow',
+  paused: 'yellow',
+  failed: 'red',
+  cancelled: 'dim',
+};
+
 /** Every flag of a `FLAGS`-shaped table, in table order */
 const flagsOf = (table) => {
   const flags = new Set();
@@ -61,18 +84,6 @@ const flagsOf = (table) => {
 };
 
 const ALL_FLAGS = flagsOf(FLAGS);
-
-/** What `run --all` drives */
-const RUNNABLE = new Set(['blocked', 'pending', 'running']);
-
-/** Actions a name is required for */
-const NEEDS_NAME = new Set(['pause', 'resume', 'cancel', 'retry', 'repin', 'dry-run', 'unlock']);
-
-/** Controls that cannot be taken back, so they ask first (and `retry --from-start`) */
-const ASKS_FIRST = new Set(['cancel', 'repin', 'unlock']);
-
-/** The signals a foreground action ends on */
-const SIGNALS = ['SIGINT', 'SIGTERM'];
 
 const flagName = (key) => `--${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
 
@@ -177,17 +188,20 @@ const watchAction = async (migrator, opts, collection, { logger, json }) => {
     migrator.on('background:drift', onDrift);
   }
   const { promise: stopped, resolve: stop } = Promise.withResolvers();
-  const detachSignals = onSignals(() => () => {
-    controller.abort();
-    stop();
+  const detachSignals = onSignals(() => {
+    return () => {
+      controller.abort();
+      stop();
+    };
   });
   try {
     const watcher = await migrator.watchBackground({
       ...(collection !== undefined ? { collections: [collection] } : {}),
       ...(opts.report ? { upgrade: false } : {}),
       signal: controller.signal,
-      onError: (error, where) =>
-        logger.warn(`⚠ Drift watcher${where ? ` (${where})` : ''}: ${errorText(error)}`),
+      onError: (error, where) => {
+        return logger.warn(`⚠ Drift watcher${where ? ` (${where})` : ''}: ${errorText(error)}`);
+      },
     });
     if (!json) logger.info('Watching for old-shape writes — Ctrl-C to stop');
     await stopped;
@@ -268,17 +282,6 @@ const runAction = async (migrator, opts, name, { logger }) => {
   } finally {
     detachSignals();
   }
-};
-
-const STATUS_COLORS = {
-  __proto__: null,
-  completed: 'green',
-  running: 'cyan',
-  pending: 'yellow',
-  blocked: 'yellow',
-  paused: 'yellow',
-  failed: 'red',
-  cancelled: 'dim',
 };
 
 const renderStatuses = (states) => {

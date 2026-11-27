@@ -10,7 +10,7 @@ const {
 } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
+let mongo = null;
 const COLLECTION = 'tx_items';
 
 before(async () => {
@@ -180,8 +180,8 @@ describe('runMigration transactions (integration)', () => {
 });
 
 describe('runMigration on a standalone server (integration)', () => {
-  let standalone;
-  let client;
+  let standalone = null;
+  let client = null;
 
   before(async () => {
     standalone = await MongoMemoryServer.create();

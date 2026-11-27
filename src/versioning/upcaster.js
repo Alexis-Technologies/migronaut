@@ -20,9 +20,7 @@ const { isPlainObject, unwrapDefinition } = require('./internal.js');
 
 const NEWER = new Set(['throw', 'keep']);
 
-const shapeError = (message, context) => {
-  return new ShapeVersionError(message, { context });
-};
+const shapeError = (message, context) => new ShapeVersionError(message, { context });
 
 /** The steps, validated against the versioning: `Map<from, fn>` */
 const readSteps = (steps, versioning, label) => {

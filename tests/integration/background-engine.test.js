@@ -17,8 +17,8 @@ const { silentLogger } = require('../../src/utils/logger.js');
 const { updateWithRevision } = require('../../versioning.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
-let store;
+let mongo = null;
+let store = null;
 const DB = 'migronaut_background_engine_test';
 const NAME = '0001-orders.js';
 const HINT = { __v: 1, _id: 1 };
@@ -351,7 +351,7 @@ describe('background engine (integration)', () => {
       partitioner: idRangePartitioner,
     };
     const session = mongo.client.startSession();
-    let result;
+    let result = null;
     try {
       session.startTransaction();
       const docs = await orders.find({ __v: 1 }, { session }).toArray();

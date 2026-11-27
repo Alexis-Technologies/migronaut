@@ -7,8 +7,8 @@ const { LockLostError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
-let store;
+let mongo = null;
+let store = null;
 const DB = 'migronaut_background_store_test';
 const NAME = '0001-orders.js';
 

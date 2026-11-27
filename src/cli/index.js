@@ -84,9 +84,9 @@ const run = async (argv) => {
   // Read from the tokens, like --no-color: a command line that does not parse
   // has no parsed options to ask.
   const json = flagTokens.includes('--json');
-  const program = buildProgram().onUsageError((message, help) =>
-    reportUsageError(message, { json, help }),
-  );
+  const program = buildProgram().onUsageError((message, help) => {
+    return reportUsageError(message, { json, help });
+  });
   try {
     await program.parseAsync(argv);
   } finally {

@@ -6,7 +6,7 @@ const { afterEach, beforeEach, describe, it } = require('node:test');
 const { applyEnvFile } = require('../../src/utils/env.js');
 
 describe('applyEnvFile', () => {
-  let tmp;
+  let tmp = null;
 
   beforeEach(() => {
     tmp = mkdtempSync(path.join(tmpdir(), 'migronaut-env-'));

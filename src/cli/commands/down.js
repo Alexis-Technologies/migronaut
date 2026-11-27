@@ -15,8 +15,8 @@ const registerDown = (program) => {
     ],
     lockable: true,
     mutating: true,
-    run: (migrator, opts, positionals) =>
-      migrator.down(positionals[0], {
+    run: (migrator, opts, positionals) => {
+      return migrator.down(positionals[0], {
         noLock: opts.noLock,
         // `!== undefined`, not truthiness: `--batch 0` is a mistake worth
         // reporting, not one to silently drop. Core validates the value.
@@ -24,7 +24,8 @@ const registerDown = (program) => {
         ...(opts.steps !== undefined ? { steps: Number(opts.steps) } : {}),
         ...(opts.to ? { to: opts.to } : {}),
         ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
-      }),
+      });
+    },
     // No render: core logs every ↩ Reverted line itself.
   });
 };

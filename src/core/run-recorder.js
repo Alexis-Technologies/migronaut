@@ -25,11 +25,11 @@ class RunRecorder {
   #fields;
   #startedAt;
   /** What the lock reported when it was acquired — the run span's lock attributes */
-  #acquired;
+  #acquired = null;
   /** The first reason the lock was lost */
   #lostReason;
   /** Set once the lock is held and the run span is open */
-  #span;
+  #span = null;
 
   constructor({ info, runId, job = {}, telemetry, emit, logger, fields }) {
     this.#info = info;

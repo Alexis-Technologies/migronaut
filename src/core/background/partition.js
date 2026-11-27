@@ -27,6 +27,13 @@ const SAMPLE_TIMEOUT_MS = 30_000;
 /** Ids sampled at most, whatever the settings say */
 const MAX_SAMPLE = 100_000;
 
+/**
+ * `$sample` walks a random cursor only while it asks for less than 5% of the
+ * collection; at 5% or more it scans the collection and sorts it at random —
+ * every document. A sample-first request stays under it.
+ */
+const RANDOM_CURSOR_SHARE = 0.04;
+
 /** The number of partitions to aim for: one per lane with no parallelism, a few per lane otherwise */
 const targetPartitions = (settings, maxParallel) => {
   if (maxParallel === 1) return 1;
@@ -52,13 +59,6 @@ const presentBrackets = async (collection, match, hint) => {
   for (const name of found) if (name !== null) names.push(name);
   return names;
 };
-
-/**
- * `$sample` walks a random cursor only while it asks for less than 5% of the
- * collection; at 5% or more it scans the collection and sorts it at random —
- * every document. A sample-first request stays under it.
- */
-const RANDOM_CURSOR_SHARE = 0.04;
 
 /** How many documents a sample-first pass asks for: `size` matches' worth, within the random cursor */
 const sampleRequest = (size, ratio, total) => {
@@ -142,9 +142,7 @@ const perBracket = (brackets, estimate) => {
 };
 
 /** Largest first: a lane starts on the work that would otherwise finish last */
-const largestFirst = (partitions) => {
-  return partitions.toSorted((a, b) => b.estimate - a.estimate);
-};
+const largestFirst = (partitions) => partitions.toSorted((a, b) => b.estimate - a.estimate);
 
 /**
  * Plan the partitions of one pass. `ctx`:
@@ -273,9 +271,7 @@ const idRangeAdvance = (cursor, docs, { limit }) => {
 };
 
 /** The cursor just past `docs` — where a batch cut short (or a document stepped over) ends */
-const idRangePast = (cursor, docs) => {
-  return { ...cursor, lastId: docs[docs.length - 1]._id };
-};
+const idRangePast = (cursor, docs) => ({ ...cursor, lastId: docs[docs.length - 1]._id });
 
 const idRangePartitioner = Object.freeze({
   id: 'id',
@@ -294,11 +290,11 @@ const idRangePartitioner = Object.freeze({
 
 module.exports = {
   MAX_TIME_EXPIRED,
-  RANDOM_CURSOR_SHARE,
   SAMPLE_TIMEOUT_MS,
-  idRangePartitioner,
-  largestFirst,
+  RANDOM_CURSOR_SHARE,
+  targetPartitions,
   sampleRequest,
   sliceBracket,
-  targetPartitions,
+  largestFirst,
+  idRangePartitioner,
 };

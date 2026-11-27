@@ -13,8 +13,8 @@ const { afterEach, beforeEach, describe, it } = require('node:test');
  * `bullmq()`, `connection()`, `prefix()`, `obliterate(queue)`).
  */
 const defineBullMQFidelityScenarios = (harness) => {
-  let connection;
-  let prefix;
+  let connection = null;
+  let prefix = null;
   const queues = [];
   const workers = [];
 
@@ -320,7 +320,7 @@ const defineBullMQFidelityScenarios = (harness) => {
       const { fakeBullmq } = require('./fake-bullmq.js');
       const bare = fakeBullmq({ flows: false });
       const jobs = queue('bare', bare);
-      let seen;
+      let seen = null;
       worker(
         'bare',
         async (job) => {

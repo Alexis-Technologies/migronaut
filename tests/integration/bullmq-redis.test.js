@@ -28,9 +28,9 @@ describe(
   'BullMQ adapter (integration, real bullmq + Redis)',
   { skip: REDIS_URL ? false : 'set MIGRONAUT_TEST_REDIS_URL to run against a real Redis' },
   () => {
-    let mongo;
-    let connection;
-    let bullmq;
+    let mongo = null;
+    let connection = null;
+    let bullmq = null;
 
     before(async () => {
       // Required here, not at module top: the skipped path must not need
@@ -152,9 +152,9 @@ describe(
     // propagation, so only the real library can say whether the trace joins up.
 
     describe('with OpenTelemetry', () => {
-      let tracing;
-      let telemetry;
-      let parentIdOf;
+      let tracing = null;
+      let telemetry = null;
+      let parentIdOf = null;
 
       before(() => {
         // `register()` installs the propagator as well as the context manager:

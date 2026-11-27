@@ -54,6 +54,32 @@ const TARGET_LABELS = Object.freeze({ searchIndex: 'search index' });
 /** Server defaults for a collection that has a validator but did not say how to apply it */
 const VALIDATOR_DEFAULTS = { validationLevel: 'strict', validationAction: 'error' };
 
+/**
+ * The reason a rebuild is refused: it drops a unique index and builds a
+ * unique one back, so the constraint is gone until the build ends. A write in
+ * between can add a duplicate — and then neither the new index nor the old
+ * one can be built again, leaving the collection with no unique index at all.
+ */
+const UNIQUE_REBUILD_REASON =
+  'rebuilding drops the unique constraint until the new index is built — a duplicate written ' +
+  'in between leaves neither index buildable; declare it under a new name (converge, then ' +
+  'remove the old declaration and converge with prune), or converge with rebuildUnique ' +
+  '(CLI: --rebuild-unique)';
+
+/** Why the ordinary version index stays on a sharded collection whose version index replaced it */
+const DISPLACED_REASON =
+  'replaced by the shard-key-prefixed version index — drop it once nothing hints it ' +
+  '(prune does, when the indexes are declared)';
+
+/** The way out of a change a search index cannot make in place */
+const NEW_NAME_RECIPE =
+  'declare it under a new name, converge, then remove the old declaration and converge with prune';
+
+/** Why a declared search index is not planned on a server without Atlas Search */
+const SEARCH_UNAVAILABLE_REASON = 'Atlas Search is not available on this server';
+
+const SEARCH_AVAILABLE = Object.freeze({ available: true, onUnavailable: 'fail' });
+
 /** Append every item of `items` to `target` */
 const pushAll = (target, items) => {
   for (let i = 0; i < items.length; i++) target.push(items[i]);
@@ -96,13 +122,18 @@ const indexValue = (spec) => {
   return { key: key instanceof Map ? Object.fromEntries(key) : { ...key }, ...rest };
 };
 
-const isEmptyValidator = (validator) =>
-  validator === null || (typeof validator === 'object' && Object.keys(validator).length === 0);
+const isEmptyValidator = (validator) => {
+  return (
+    validator === null || (typeof validator === 'object' && Object.keys(validator).length === 0)
+  );
+};
 
-/** The validator state a definition asks for: `undefined` = unmanaged, `null` = none */
+/** Whether a definition manages its collection's validator at all — one that names none does not */
+const managesValidator = (definition) => definition.validator !== undefined;
+
+/** The validator a managing definition asks for — `null` for none (an empty one) */
 const desiredValidator = (definition) => {
-  if (definition.validator === undefined) return undefined;
-  if (isEmptyValidator(definition.validator)) return null;
+  if (definition.validator === undefined || isEmptyValidator(definition.validator)) return null;
   return {
     validator: definition.validator,
     validationLevel: definition.validationLevel ?? VALIDATOR_DEFAULTS.validationLevel,
@@ -147,18 +178,6 @@ const planValidator = (name, desired, current, row, steps) => {
   steps.push({ op: 'collMod', command: { ...desired }, actions: [action] });
 };
 
-/**
- * The reason a rebuild is refused: it drops a unique index and builds a
- * unique one back, so the constraint is gone until the build ends. A write in
- * between can add a duplicate — and then neither the new index nor the old
- * one can be built again, leaving the collection with no unique index at all.
- */
-const UNIQUE_REBUILD_REASON =
-  'rebuilding drops the unique constraint until the new index is built — a duplicate written ' +
-  'in between leaves neither index buildable; declare it under a new name (converge, then ' +
-  'remove the old declaration and converge with prune), or converge with rebuildUnique ' +
-  '(CLI: --rebuild-unique)';
-
 /** Whether a rebuild would open a window without a uniqueness the declaration keeps */
 const dropsUniqueConstraint = (declared, drops) => {
   if (declared.options.unique !== true) return false;
@@ -184,14 +203,7 @@ const backsShardKey = (index, shardKey) => {
 };
 
 /** `first; second`, or `second` alone when there is no first */
-const joinReasons = (first, second) => {
-  return first ? `${first}; ${second}` : second;
-};
-
-/** Why the ordinary version index stays on a sharded collection whose version index replaced it */
-const DISPLACED_REASON =
-  'replaced by the shard-key-prefixed version index — drop it once nothing hints it ' +
-  '(prune does, when the indexes are declared)';
+const joinReasons = (first, second) => (first ? `${first}; ${second}` : second);
 
 /**
  * The declared indexes as they apply to this live collection: on a sharded
@@ -226,13 +238,10 @@ const indexesFor = (definition, live) => {
  * collection's own list) the other live indexes are not managed at all: never
  * listed, never dropped — prune does not reach them.
  */
-const planIndexes = (
-  declaredIndexes,
-  live,
-  { prune: pruneOption, rebuildUnique, capabilities, partial = false, displaced },
-  row,
-  steps,
-) => {
+const planIndexes = (declaredIndexes, live, options, row, steps) => {
+  const { prune: pruneOption, rebuildUnique, capabilities, displaced } = options;
+  const partial = options.partial ?? false;
+
   const prune = pruneOption && !partial;
   const defaultCollation = live.options?.collation;
   const liveIndexes = [];
@@ -310,8 +319,9 @@ const planIndexes = (
     }
   }
 
-  const collides = (declared, index) =>
-    sameSignature(declared, index, defaultCollation) || (declared.isText && index.isText);
+  const collides = (declared, index) => {
+    return sameSignature(declared, index, defaultCollation) || (declared.isText && index.isText);
+  };
 
   // A declaration that the server would refuse next to an undeclared index:
   // same key, filter and collation under another name, or a second text index.
@@ -464,13 +474,6 @@ const planIndexes = (
   }
 };
 
-/** The way out of a change a search index cannot make in place */
-const NEW_NAME_RECIPE =
-  'declare it under a new name, converge, then remove the old declaration and converge with prune';
-
-/** Why a declared search index is not planned on a server without Atlas Search */
-const SEARCH_UNAVAILABLE_REASON = 'Atlas Search is not available on this server';
-
 const typeChangeReason = (from, to) => {
   return `the type cannot change in place (${from} → ${to}) — ${NEW_NAME_RECIPE}`;
 };
@@ -480,9 +483,7 @@ const autoEmbedReason = (changes) => {
 };
 
 /** `mappings.fields.title.norms, storedSource (+2 more)` */
-const diffReason = (paths, more) => {
-  return `${paths.join(', ')}${more > 0 ? ` (+${more} more)` : ''}`;
-};
+const diffReason = (paths, more) => `${paths.join(', ')}${more > 0 ? ` (+${more} more)` : ''}`;
 
 const deletingReason = (status) => {
   return `is being deleted on the server (${status}) — converge again once it is gone`;
@@ -660,13 +661,12 @@ const planCollection = (definition, live, options = {}) => {
   return { ...plan, steps: batchCreates(plan.steps) };
 };
 
-const SEARCH_AVAILABLE = Object.freeze({ available: true, onUnavailable: 'fail' });
+const planCollectionSteps = (definition, live, settings = {}) => {
+  const prune = settings.prune ?? false;
+  const rebuildUnique = settings.rebuildUnique ?? false;
+  const capabilities = settings.capabilities ?? {};
+  const search = settings.search ?? SEARCH_AVAILABLE;
 
-const planCollectionSteps = (
-  definition,
-  live,
-  { prune = false, rebuildUnique = false, capabilities = {}, search = SEARCH_AVAILABLE } = {},
-) => {
   const name = definition.name;
   const actions = [];
   const steps = [];
@@ -727,7 +727,7 @@ const planCollectionSteps = (
     return { name, actions, steps };
   }
 
-  if (desired !== undefined) {
+  if (managesValidator(definition)) {
     // Raising versioning.min over documents still below it: refused, so the
     // whole run stops before its first write (see versionFloorToCheck).
     const refused = versionFloorConflict(live.versionFloor);
@@ -760,16 +760,18 @@ const planCollectionSteps = (
 
 module.exports = {
   CHANGE_ACTIONS,
-  SEARCH_UNAVAILABLE_REASON,
   SERVED_ACTIONS,
   TARGET_LABELS,
-  UNIQUE_REBUILD_REASON,
   VALIDATOR_DEFAULTS,
-  desiredValidator,
-  indexValue,
+  UNIQUE_REBUILD_REASON,
+  SEARCH_UNAVAILABLE_REASON,
+  pushAll,
   isDestructive,
-  isEmptyValidator,
   needsConfirmation,
+  indexValue,
+  isEmptyValidator,
+  managesValidator,
+  desiredValidator,
   liveValidator,
   planCollection,
 };

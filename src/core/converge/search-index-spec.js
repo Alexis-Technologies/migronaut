@@ -7,6 +7,9 @@ const {
   unsendable,
 } = require('../../utils/canonical.js');
 
+/** The keys of a search field mapping that hold field mappings of their own */
+const FIELD_MAP_KEYS = Object.freeze(['fields', 'multi']);
+
 /**
  * One declared Atlas Search / Vector Search index against one live index:
  * validation, normalization, and the comparison the converge planner builds
@@ -98,6 +101,15 @@ const VECTOR_FIELD_DEFAULTS_BY_TYPE = new Map([
   [VECTOR, VECTOR_FIELD_DEFAULTS],
   [AUTO_EMBED, AUTO_EMBED_FIELD_DEFAULTS],
 ]);
+
+/**
+ * The longest build message kept — mongot's reasons are a line or two, and a
+ * longer one would go whole into every log line, table cell and history entry
+ */
+const MAX_BUILD_MESSAGE_LENGTH = 500;
+
+/** How many differing paths a comparison names — enough to tell what differs */
+const MAX_DIFF_PATHS = 5;
 
 /** Validate one search index declaration, returning `{ path, message }` issues (empty when valid) */
 const searchIndexIssues = (index, path) => {
@@ -201,11 +213,10 @@ const vectorDefinitionIssues = (definition, base, issues) => {
  * indexes of a server that does not report a type (a self-managed `mongot`).
  */
 const inferSearchIndexType = (definition) => {
-  return isPlainObject(definition) &&
-    Array.isArray(definition.fields) &&
-    definition.mappings === undefined
-    ? 'vectorSearch'
-    : DEFAULT_SEARCH_INDEX_TYPE;
+  if (!isPlainObject(definition) || definition.mappings !== undefined) {
+    return DEFAULT_SEARCH_INDEX_TYPE;
+  }
+  return Array.isArray(definition.fields) ? 'vectorSearch' : DEFAULT_SEARCH_INDEX_TYPE;
 };
 
 /** A declaration in comparable form — assumes {@link searchIndexIssues} passed */
@@ -231,16 +242,11 @@ const isUpdating = (raw, version) => {
   return false;
 };
 
-/**
- * The longest build message kept — mongot's reasons are a line or two, and a
- * longer one would go whole into every log line, table cell and history entry
- */
-const MAX_BUILD_MESSAGE_LENGTH = 500;
-
-const shortMessage = (message) =>
-  message.length > MAX_BUILD_MESSAGE_LENGTH
+const shortMessage = (message) => {
+  return message.length > MAX_BUILD_MESSAGE_LENGTH
     ? `${message.slice(0, MAX_BUILD_MESSAGE_LENGTH - 1)}…`
     : message;
+};
 
 /** A `$listSearchIndexes` document in comparable form */
 const normalizeLiveSearchIndex = (raw) => {
@@ -263,9 +269,7 @@ const normalizeLiveSearchIndex = (raw) => {
 };
 
 /** Whether the server is removing this index (its name is not free yet) */
-const isBeingRemoved = (live) => {
-  return ABSENT_STATUSES.has(live.status);
-};
+const isBeingRemoved = (live) => ABSENT_STATUSES.has(live.status);
 
 /**
  * `defaults` under `value`: what `value` leaves out takes the default. Keys
@@ -324,8 +328,9 @@ const compareText = (a, b) => {
   return 0;
 };
 
-const byTypePathText = (a, b) =>
-  compareText(a.type, b.type) || compareText(a.path, b.path) || compareText(a.text, b.text);
+const byTypePathText = (a, b) => {
+  return compareText(a.type, b.type) || compareText(a.path, b.path) || compareText(a.text, b.text);
+};
 
 const byText = (a, b) => compareText(a.text, b.text);
 
@@ -517,7 +522,7 @@ const trimFieldMapping = (want, have, path, ignored) => {
   }
   if (!isPlainObject(want) || !isPlainObject(have) || want.type !== have.type) return have;
   const out = trimOptions(want, have, path, ignored);
-  for (const key of ['fields', 'multi']) {
+  for (const key of FIELD_MAP_KEYS) {
     if (isPlainObject(out[key])) {
       out[key] = trimFieldMap(want[key], out[key], joinPath(path, key), ignored);
     }
@@ -596,9 +601,6 @@ const tolerateServerOptions = (type, want, have) => {
       : trimSearchDefinition(want, have, ignored);
   return { have: trimmed, ignored };
 };
-
-/** How many differing paths a comparison names — enough to tell what differs */
-const MAX_DIFF_PATHS = 5;
 
 /** The keys of `a` and `b`, once each, sorted */
 const unionKeys = (a, b) => {
@@ -758,25 +760,25 @@ const searchIndexSpec = (declared) => {
 };
 
 module.exports = {
-  ABSENT_STATUSES,
-  AUTO_EMBED_IMMUTABLE,
-  DEFAULT_SEARCH_INDEX_NAME,
-  FIELD_DEFAULTS,
-  MAX_BUILD_MESSAGE_LENGTH,
-  SEARCH_DEFAULTS,
   SEARCH_INDEX_KEYS,
   SEARCH_INDEX_TYPES,
-  compareSearchIndex,
-  effectiveDefinition,
+  DEFAULT_SEARCH_INDEX_NAME,
+  ABSENT_STATUSES,
+  SEARCH_DEFAULTS,
+  FIELD_DEFAULTS,
+  AUTO_EMBED_IMMUTABLE,
+  MAX_BUILD_MESSAGE_LENGTH,
+  searchIndexIssues,
   inferSearchIndexType,
-  isBeingRemoved,
-  isSearchIndexReady,
   normalizeDeclaredSearchIndex,
   normalizeLiveSearchIndex,
-  searchBuild,
-  searchBuildState,
-  searchIndexIssues,
-  searchIndexSpec,
-  searchIndexValue,
+  isBeingRemoved,
+  effectiveDefinition,
   tolerateServerOptions,
+  compareSearchIndex,
+  searchBuildState,
+  isSearchIndexReady,
+  searchBuild,
+  searchIndexValue,
+  searchIndexSpec,
 };

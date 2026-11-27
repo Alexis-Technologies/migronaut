@@ -139,7 +139,7 @@ describe('open', () => {
 
   it('should leave ending the span to the caller', () => {
     const tracer = fakeTracer();
-    let held;
+    let held = null;
     createTelemetry({ tracer }).open(SPANS.RUN, {}, (span) => {
       held = span;
     });
@@ -151,7 +151,7 @@ describe('open', () => {
 
   it('should end a span once, however often it is finished', () => {
     const tracer = fakeTracer();
-    let held;
+    let held = null;
     createTelemetry({ tracer }).open(SPANS.RUN, {}, (span) => {
       held = span;
     });
@@ -258,7 +258,7 @@ describe('open — a tracer that misbehaves', () => {
   });
 
   it('should not run the work again for a tracer that calls back late', () => {
-    let late;
+    let late = null;
     const tracer = {
       startActiveSpan(_name, _options, fn) {
         late = () => fn({});
@@ -722,7 +722,7 @@ describe('metrics', () => {
 });
 
 describe('createTelemetry — against the real OpenTelemetry SDK', () => {
-  let tracing;
+  let tracing = null;
 
   before(() => {
     tracing = startTracing();
@@ -734,7 +734,7 @@ describe('createTelemetry — against the real OpenTelemetry SDK', () => {
 
   it('should nest a migration span under the run span that is active around it', async () => {
     const telemetry = createTelemetry({ tracer: tracing.tracer });
-    let run;
+    let run = null;
     await telemetry.open(SPANS.RUN, { [ATTRIBUTES.RUN_COMMAND]: 'up' }, async (span) => {
       run = span;
       await telemetry.wrap(SPANS.MIGRATION, { [ATTRIBUTES.MIGRATION_NAME]: '0001-a.js' }, () =>

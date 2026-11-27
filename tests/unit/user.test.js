@@ -3,16 +3,14 @@ const assert = require('node:assert/strict');
 const { afterEach, describe, it } = require('node:test');
 const { safeUsername } = require('../../src/utils/user.js');
 
-let saved;
+const original = process.env.MIGRONAUT_USER;
 
 afterEach(() => {
-  if (saved === undefined) delete process.env.MIGRONAUT_USER;
-  else process.env.MIGRONAUT_USER = saved;
-  saved = undefined;
+  if (original === undefined) delete process.env.MIGRONAUT_USER;
+  else process.env.MIGRONAUT_USER = original;
 });
 
 const setOverride = (value) => {
-  saved = process.env.MIGRONAUT_USER;
   if (value === undefined) delete process.env.MIGRONAUT_USER;
   else process.env.MIGRONAUT_USER = value;
 };

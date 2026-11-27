@@ -87,7 +87,7 @@ const mergeVersioningValidator = (validator, versioning) => {
   const schema = validator.$jsonSchema;
   if (!isPlainObject(schema)) return { ...validator, $jsonSchema: rules };
   const merged = { ...schema };
-  if (rules.required) merged.required = [...(schema.required ?? []), ...rules.required];
+  if (rules.required) merged.required = (schema.required ?? []).concat(rules.required);
   merged.properties = { ...schema.properties, ...rules.properties };
   return { ...validator, $jsonSchema: merged };
 };
@@ -172,13 +172,13 @@ const versionFloorConflict = (floor) => {
 };
 
 module.exports = {
-  isVersioningIndexKey,
-  shardedVersionIndexKey,
-  liveVersionFloor,
-  versionFloorConflict,
-  versionFloorToCheck,
-  mergeVersioningValidator,
-  validatorVersioningIssues,
-  versioningIndex,
   versioningRules,
+  validatorVersioningIssues,
+  mergeVersioningValidator,
+  versioningIndex,
+  shardedVersionIndexKey,
+  isVersioningIndexKey,
+  liveVersionFloor,
+  versionFloorToCheck,
+  versionFloorConflict,
 };

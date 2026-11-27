@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+
 const { MigrationBlockedError, MigrationFileNotFoundError } = require('../errors/index.js');
 
 /**
@@ -22,11 +23,12 @@ const endsWithAny = (file, suffixes) => {
 };
 
 /** Whether a symlink in `dir` leads to a regular file — a broken one leads nowhere */
-const linksToFile = (dir, name) =>
-  fs.stat(path.join(dir, name)).then(
+const linksToFile = (dir, name) => {
+  return fs.stat(path.join(dir, name)).then(
     (stat) => stat.isFile(),
     () => false,
   );
+};
 
 /** The migration files in `dir`, sorted ascending — empty when the directory does not exist */
 const listMigrationFiles = async (dir, extensions) => {
@@ -141,11 +143,11 @@ const blockedError = (subject, what, context) => {
 };
 
 module.exports = {
-  blockedError,
-  lateArrivals,
   listMigrationFiles,
-  newestOf,
   pendingIn,
-  revertOrder,
   truncateAtTarget,
+  newestOf,
+  lateArrivals,
+  revertOrder,
+  blockedError,
 };

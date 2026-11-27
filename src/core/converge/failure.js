@@ -13,6 +13,7 @@ const NAMESPACE_EXISTS = 48;
 
 /** What usually fixes the server error behind a failed step */
 const HINTS = {
+  __proto__: null,
   11000:
     'existing documents hold duplicate values for this unique index — deduplicate them in a ' +
     'migration first',
@@ -26,6 +27,31 @@ const HINTS = {
     'first',
 };
 
+const VERBS = { create: 'create', modify: 'modify', recreate: 'rebuild', drop: 'drop' };
+
+const LABELS = {
+  create: '✔ Created ',
+  modify: '✔ Modified',
+  recreate: '✔ Rebuilt ',
+  drop: '✔ Dropped ',
+};
+
+/**
+ * Errors that leave it unknown what the server did: the connection broke, or
+ * a client-side deadline ran out, while the server may well still be building.
+ * After one of these, nothing is "put back" — a restore would race a build the
+ * server is still running; the next converge reads what actually happened.
+ */
+const CONNECTION_ERROR_NAMES = new Set([
+  'MongoNetworkError',
+  'MongoNetworkTimeoutError',
+  'MongoServerSelectionError',
+  'MongoOperationTimeoutError',
+  'MongoTopologyClosedError',
+]);
+
+const CONNECTION_ERROR_CODES = new Set([50, 89, 91, 189, 10107, 11600, 11602, 13435]);
+
 /** A failed conversion to unique: what became of the index (`prepareUnique` taken back off, or not) */
 const uniqueLeftover = (mongoCode, extra) => {
   if (extra.prepareUniqueLeft) {
@@ -35,14 +61,6 @@ const uniqueLeftover = (mongoCode, extra) => {
     );
   }
   return mongoCode === 359 ? ' (the index was left as it was)' : '';
-};
-
-const VERBS = { create: 'create', modify: 'modify', recreate: 'rebuild', drop: 'drop' };
-const LABELS = {
-  create: '✔ Created ',
-  modify: '✔ Modified',
-  recreate: '✔ Rebuilt ',
-  drop: '✔ Dropped ',
 };
 
 /** A row's target as a log line names it, and what it is on */
@@ -86,21 +104,6 @@ const describeAll = (actions) => {
   }
   return actions[0].target === 'searchIndex' ? `search indexes ${names}` : `indexes ${names}`;
 };
-
-/**
- * Errors that leave it unknown what the server did: the connection broke, or
- * a client-side deadline ran out, while the server may well still be building.
- * After one of these, nothing is "put back" — a restore would race a build the
- * server is still running; the next converge reads what actually happened.
- */
-const CONNECTION_ERROR_NAMES = new Set([
-  'MongoNetworkError',
-  'MongoNetworkTimeoutError',
-  'MongoServerSelectionError',
-  'MongoOperationTimeoutError',
-  'MongoTopologyClosedError',
-]);
-const CONNECTION_ERROR_CODES = new Set([50, 89, 91, 189, 10107, 11600, 11602, 13435]);
 
 const isConnectionTrouble = (error) => {
   return CONNECTION_ERROR_NAMES.has(error?.name) || CONNECTION_ERROR_CODES.has(error?.code);

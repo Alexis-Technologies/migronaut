@@ -6,7 +6,7 @@ const { ConfigInvalidError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_watch_test';
 const NAME = '0001-orders.js';
 const WATCH = '_migronaut_background_watch';
@@ -26,7 +26,7 @@ beforeEach(async () => {
 
 const kits = [];
 const watchers = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const watcher of watchers.splice(0)) await watcher.stop();
@@ -369,7 +369,7 @@ describe('live drift watcher (integration)', () => {
 });
 
 describe('live drift watcher on a standalone server (integration)', () => {
-  let standalone;
+  let standalone = null;
 
   before(async () => {
     standalone = await MongoMemoryServer.create();

@@ -1,3 +1,5 @@
+const { UNAUTHORIZED } = require('../../utils/error.js');
+
 /**
  * The live drift watcher's decisions, kept pure: which background migrations
  * a collection's watcher upgrades with, what its change stream asks the
@@ -11,8 +13,6 @@ const HISTORY_LOST = new Set([
   280, // ChangeStreamFatalError
   136, // CappedPositionLost
 ]);
-/** Not authorized to open (or keep) a change stream there */
-const UNAUTHORIZED = 13;
 /** "The $changeStream stage is only supported on replica sets" — a standalone */
 const UNSUPPORTED = 40573;
 
@@ -126,10 +126,10 @@ const watchView = (states, collection) => {
 
 module.exports = {
   HISTORY_LOST,
+  watchPipeline,
   classifyStreamError,
   isEnding,
   lagOf,
   tokenDue,
-  watchPipeline,
   watchView,
 };

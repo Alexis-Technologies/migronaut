@@ -51,9 +51,9 @@ export async function down() {}
  * - `obliterate(queue)` — drop the queue's keys after the test
  */
 const defineBullMQScenarios = (harness) => {
-  let project;
-  let connection;
-  let prefix;
+  let project = null;
+  let connection = null;
+  let prefix = null;
   const opened = [];
 
   beforeEach(async () => {

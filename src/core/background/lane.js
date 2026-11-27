@@ -102,8 +102,8 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
       partition: `${partition._id}`,
       slot: partition.lease.slot,
     });
-    const runLease = () =>
-      runWithLock(lease, { logger: deps.logger, owner }, (leaseSignal) => {
+    const runLease = () => {
+      return runWithLock(lease, { logger: deps.logger, owner }, (leaseSignal) => {
         job.signal = anySignal(signal, leaseSignal);
         return processPartition(job, {
           store,
@@ -117,14 +117,13 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
           adaptive,
           now,
           // Every batch of every lane asks: only what it decides on is read.
-          readControl: () =>
-            store
-              .get(name, { projection: CONTROL_FIELDS })
-              .then((current) =>
-                current === null
-                  ? null
-                  : { status: current.status, generation: current.generation, plan: current.plan },
-              ),
+          readControl: () => {
+            return store.get(name, { projection: CONTROL_FIELDS }).then((current) => {
+              return current === null
+                ? null
+                : { status: current.status, generation: current.generation, plan: current.plan };
+            });
+          },
           onBatch: (info) => {
             deps.telemetry?.backgroundBatchWritten({
               name,
@@ -138,8 +137,13 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
               ...info,
             });
           },
-          onTransactionRetries: (count) =>
-            deps.telemetry?.backgroundTransactionRetried({ name, reason: 'transient', count }),
+          onTransactionRetries: (count) => {
+            return deps.telemetry?.backgroundTransactionRetried({
+              name,
+              reason: 'transient',
+              count,
+            });
+          },
           onThrottle: (change) => {
             deps.telemetry?.backgroundThrottled({ name, reason: change.reason });
             deps.emit('background:throttle', {
@@ -150,6 +154,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
           },
         });
       });
+    };
     let result = null;
     const sliceStarted = now();
     try {

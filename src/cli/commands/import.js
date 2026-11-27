@@ -15,15 +15,16 @@ const registerImport = (program) => {
     ],
     lockable: true,
     mutating: true,
-    run: (migrator, opts) =>
-      migrator.import({
+    run: (migrator, opts) => {
+      return migrator.import({
         noLock: opts.noLock,
         ...(opts.from ? { from: opts.from } : {}),
         ...(opts.to ? { to: opts.to } : {}),
         ...(opts.dryRun ? { dryRun: true } : {}),
         ...(opts.trustHash ? { trustHash: true } : {}),
         ...(opts.force ? { force: true } : {}),
-      }),
+      });
+    },
     render: (result, { logger }) => {
       if (result.rows.length > 0) logger.info(renderImportTable(result.rows));
     },

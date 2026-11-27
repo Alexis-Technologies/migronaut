@@ -4,7 +4,7 @@ const { excludeBadIds, matchOf } = require('./engine.js');
 const { idRangePartitioner } = require('./partition.js');
 const { createShardPartitioner, withShardKey } = require('./shard.js');
 const { NAMESPACE_NOT_FOUND, READ_OPTIONS } = require('../server-info.js');
-const { isUnauthorized } = require('../shard-info.js');
+const { isUnauthorized } = require('../../utils/error.js');
 const { shardedVersionIndexKey } = require('../converge/versioning-spec.js');
 
 /**
@@ -39,6 +39,7 @@ const STATE_SUMMARY = Object.freeze({ history: 0, docErrors: 0 });
 
 /** What a degraded plan means, for its warning */
 const DEGRADED = {
+  __proto__: null,
   'sample-timeout': 'the sample ran out of time — some ranges stay whole this pass (fewer lanes)',
   ungrouped:
     'more runs of chunks than maxPartitions — merged blocks span shards and are not capped by ' +
@@ -48,12 +49,20 @@ const DEGRADED = {
 /** How long a coordinator waits before it looks at its lanes again, without a driver that wakes it */
 const POLL_MS = 5_000;
 
+/** What a replan says, by what set the plan aside */
+const REPLAN_REASONS = {
+  partitioner: 'its plan was split another way than this collection is read now',
+  epoch: 'it was resharded since its plan',
+};
+
 /** What a coordinator says when a plan, a lock or a deploy is in the way */
-const retrySoon = (deps, reason) => ({
-  next: 'wait',
-  reason,
-  retryAfterMs: Math.max(1, Math.floor(deps.ttlMs / 2)),
-});
+const retrySoon = (deps, reason) => {
+  return {
+    next: 'wait',
+    reason,
+    retryAfterMs: Math.max(1, Math.floor(deps.ttlMs / 2)),
+  };
+};
 
 /**
  * The keys of a collection's indexes — none for one that does not exist yet,
@@ -239,11 +248,13 @@ const jobFor = async (deps, name, state, { direction } = {}) => {
  */
 const partitionerFor = async (deps, spec, direction, planned) => {
   const keys = spec.mode === 'step' ? [] : await indexKeys(deps, spec.collection);
-  const byId = async (mode) => ({
-    partitioner: idRangePartitioner,
-    hint: await versionHint(deps, spec, keys),
-    sharding: { mode },
-  });
+  const byId = async (mode) => {
+    return {
+      partitioner: idRangePartitioner,
+      hint: await versionHint(deps, spec, keys),
+      sharding: { mode },
+    };
+  };
   if (spec.mode === 'step' || deps.shardAware === 'off' || deps.shardKeyOf === undefined) {
     return byId('off');
   }
@@ -317,15 +328,9 @@ const planMismatch = (job, plan) => {
   return job.partitioner.stale?.(plan.epoch) ? 'epoch' : undefined;
 };
 
-/** What a replan says, by what set the plan aside */
-const REPLAN_REASONS = {
-  partitioner: 'its plan was split another way than this collection is read now',
-  epoch: 'it was resharded since its plan',
-};
-
 /** The shard-aware facts a plan records, for status: how it split, by which key, into how many groups */
 const shardingOf = (job, plan) => {
-  if (job.sharding === undefined || job.sharding.mode === 'off') return undefined;
+  if (job.sharding === undefined || job.sharding.mode === 'off') return null;
   if (job.sharding.mode === 'untargeted') {
     return { mode: 'untargeted', ...(job.sharding.key ? { key: job.sharding.key } : {}) };
   }
@@ -341,14 +346,14 @@ module.exports = {
   STATE_SUMMARY,
   DEGRADED,
   POLL_MS,
+  REPLAN_REASONS,
   retrySoon,
   probeHint,
-  versionHint,
   warnOnce,
+  versionHint,
   assertTransactions,
   jobFor,
   partitionerFor,
   planMismatch,
-  REPLAN_REASONS,
   shardingOf,
 };

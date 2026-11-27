@@ -1,4 +1,5 @@
 const { setTimeout: sleepFor } = require('node:timers/promises');
+
 const { ConvergeFailedError, MigronautError } = require('../../errors/index.js');
 const { mapLimit } = require('../../utils/concurrency.js');
 const { errorText } = require('../../utils/error.js');
@@ -24,6 +25,16 @@ const { READ_CONCURRENCY, READ_OPTIONS } = require('../server-info.js');
  */
 const SEARCH_SETTLE_DELAYS_MS = [250, 500, 1000];
 
+/** How often a wait for search indexes says it is still waiting */
+const WAIT_PROGRESS_MS = 30_000;
+
+/** What a build state adds to an index's status in {@link describeNotReady} */
+const STATE_NOTES = Object.freeze({
+  __proto__: null,
+  updating: ', updating',
+  stale: ', not replicating',
+});
+
 /** Sleep `ms` — less, when `signal` aborts: the caller's next abort check says why */
 const pause = async (ms, signal) => {
   try {
@@ -40,9 +51,9 @@ const pause = async (ms, signal) => {
  * pass over them.
  */
 const notReadyEntry = (collection, action) => {
-  if (action.target !== 'searchIndex' || action.build === undefined) return undefined;
-  if (!SERVED_ACTIONS.has(action.action)) return undefined;
-  if (searchBuildState(action.build) === 'serving') return undefined;
+  if (action.target !== 'searchIndex' || action.build === undefined) return null;
+  if (!SERVED_ACTIONS.has(action.action)) return null;
+  if (searchBuildState(action.build) === 'serving') return null;
   return { collection, name: action.name, ...action.build };
 };
 
@@ -197,9 +208,6 @@ const refreshBuilds = (rows, fresh) => {
   }
 };
 
-/** How often a wait for search indexes says it is still waiting */
-const WAIT_PROGRESS_MS = 30_000;
-
 /**
  * Every declared search index a wait is for: the ones that exist (or were
  * just created) — with, for one this run updated, the definition version the
@@ -237,9 +245,6 @@ const waitTargets = (run) => {
   }
   return targets;
 };
-
-/** What a build state adds to an index's status in {@link describeNotReady} */
-const STATE_NOTES = Object.freeze({ updating: ', updating', stale: ', not replicating' });
 
 /** `movies.default (BUILDING), shows.plot (FAILED: …)` */
 const describeNotReady = (notReady) => {
@@ -438,13 +443,13 @@ const reportNotReady = (deps, result) => {
 
 module.exports = {
   SEARCH_SETTLE_DELAYS_MS,
-  notReadyEntry,
   pause,
+  notReadyEntry,
+  searchSummary,
+  warnIgnored,
   readSearch,
   readSearchIndexes,
   refreshBuilds,
-  reportNotReady,
-  searchSummary,
   waitPhase,
-  warnIgnored,
+  reportNotReady,
 };

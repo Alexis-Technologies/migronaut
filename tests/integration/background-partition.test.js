@@ -5,7 +5,7 @@ const { idRangePartitioner, sliceBracket } = require('../../src/core/background/
 const { scopeFilter } = require('../../src/core/background/spec.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_partition_test';
 
 before(async () => {
@@ -147,7 +147,7 @@ describe('idRangePartitioner (integration)', () => {
       mode: { skip: 1 },
       data: { failCommands: ['aggregate'], errorCode: 50 },
     });
-    let result;
+    let result = null;
     try {
       result = await plan();
     } finally {

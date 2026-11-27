@@ -323,11 +323,12 @@ class BackgroundHost {
       ...(job ? { job } : {}),
       fields: (extra) => ({ ...lineStamp, ...extra }),
       emit: (event, payload) => send(event, { ...stamp, ...payload }),
-      lockFor: (name) =>
-        new MigrationLock(db, config.lockCollection, config.lockTTLSeconds, {
+      lockFor: (name) => {
+        return new MigrationLock(db, config.lockCollection, config.lockTTLSeconds, {
           id: `background:${name}`,
           label: 'background coordinator lock',
-        }),
+        });
+      },
       load: (name, options) => this.#loadBackground(name, options),
       ttlMs: config.lockTTLSeconds * 1000,
       ownerOf: () => owner,
@@ -339,8 +340,8 @@ class BackgroundHost {
       telemetry: this.#kit.telemetry,
       // The third wrap site: a span per lease held (slice) and per coordinator
       // step — each opened only once the lease or the lock is held.
-      span: (kind, name, fn) =>
-        this.#kit.telemetry.wrap(
+      span: (kind, name, fn) => {
+        return this.#kit.telemetry.wrap(
           kind === 'slice' ? SPANS.BACKGROUND_SLICE : SPANS.BACKGROUND_COORDINATE,
           { [ATTRIBUTES.BACKGROUND_NAME]: name },
           async (span) => {
@@ -348,14 +349,16 @@ class BackgroundHost {
             span.set({ [ATTRIBUTES.BACKGROUND_OUTCOME]: result?.outcome ?? result?.next });
             return result;
           },
-        ),
+        );
+      },
       onCompleted: (name) => this.#unblockDependents(name),
       adoptedOf: (names) => this.#kit.requireChangelog().getAdoptedNames(db, names),
       topology: () => this.#serverTopology(db),
       shardAware: config.backgroundShardAware,
       shardKeyOf: (collection) => readShardKey(this.#kit.client, db.databaseName, collection),
-      chunksOf: (collection, sharding) =>
-        readChunks(this.#kit.client, db.databaseName, collection, sharding),
+      chunksOf: (collection, sharding) => {
+        return readChunks(this.#kit.client, db.databaseName, collection, sharding);
+      },
       versioningOf: (collection) => this.#versioningOf(collection),
     };
   }
@@ -431,11 +434,12 @@ class BackgroundHost {
       {
         ...this.deps(owner),
         watchStore: this.watchStore(),
-        watchLockFor: (collection) =>
-          new MigrationLock(db, config.lockCollection, config.lockTTLSeconds, {
+        watchLockFor: (collection) => {
+          return new MigrationLock(db, config.lockCollection, config.lockTTLSeconds, {
             id: `watch:${collection}`,
             label: 'drift watcher lock',
-          }),
+          });
+        },
         owner,
         onDrift: config.backgroundOnDrift,
       },

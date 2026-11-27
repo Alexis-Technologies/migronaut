@@ -129,8 +129,9 @@ const defineShapes = (...args) => {
       return (schema) => applyVersioningPlugin(schema, versioning);
     },
     /** An upcaster over this collection's versioning — see upcaster.js */
-    upcaster: (name, steps, options) =>
-      createUpcaster(get(name), steps, { ...options, collection: name }),
+    upcaster: (name, steps, options) => {
+      return createUpcaster(get(name), steps, { ...options, collection: name });
+    },
     /**
      * The revision guards bound to this collection's field names, so no call
      * can forget them — a custom `revisionField` left out of one write would
@@ -152,12 +153,15 @@ const defineShapes = (...args) => {
       };
       return Object.freeze({
         // Async, like the helpers: a refused option rejects, it does not throw.
-        updateWithRevision: async (collection, filter, expected, update, options) =>
-          updateWithRevision(collection, filter, expected, update, bound(options)),
-        replaceWithRevision: async (collection, filter, expected, replacement, options) =>
-          replaceWithRevision(collection, filter, expected, replacement, bound(options)),
-        findOneAndUpdateWithRevision: async (collection, filter, expected, update, options) =>
-          findOneAndUpdateWithRevision(collection, filter, expected, update, bound(options)),
+        updateWithRevision: async (collection, filter, expected, update, options) => {
+          return updateWithRevision(collection, filter, expected, update, bound(options));
+        },
+        replaceWithRevision: async (collection, filter, expected, replacement, options) => {
+          return replaceWithRevision(collection, filter, expected, replacement, bound(options));
+        },
+        findOneAndUpdateWithRevision: async (collection, filter, expected, update, options) => {
+          return findOneAndUpdateWithRevision(collection, filter, expected, update, bound(options));
+        },
         bumpRevision: (update) => bumpRevision(update, { revisionField }),
       });
     },

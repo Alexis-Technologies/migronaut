@@ -54,7 +54,7 @@ describe('Command routing and options', () => {
   });
 
   it('should merge global options given before the command name', async () => {
-    let seen;
+    let seen = null;
     const program = buildFixture((_, payload) => {
       seen = payload.command.optsWithGlobals();
     });
@@ -64,7 +64,7 @@ describe('Command routing and options', () => {
   });
 
   it('should merge global options given after the command name', async () => {
-    let seen;
+    let seen = null;
     const program = buildFixture((_, payload) => {
       seen = payload.command.optsWithGlobals();
     });
@@ -74,7 +74,7 @@ describe('Command routing and options', () => {
   });
 
   it('should default a negatable option to true and flip it when passed', async () => {
-    let seen;
+    let seen = null;
     const program = buildFixture((_, payload) => {
       seen = payload.command.optsWithGlobals();
     });
@@ -85,7 +85,7 @@ describe('Command routing and options', () => {
   });
 
   it('should leave a --x / --no-x pair unset until one of them is passed', async () => {
-    let seen;
+    let seen = null;
     const program = new Command();
     program
       .command('up')
@@ -103,7 +103,7 @@ describe('Command routing and options', () => {
   });
 
   it('should resolve short aliases', async () => {
-    let seen;
+    let seen = null;
     const program = buildFixture((_, payload) => {
       seen = payload.command.optsWithGlobals();
     });
@@ -113,7 +113,7 @@ describe('Command routing and options', () => {
   });
 
   it('should accept --option=value syntax', async () => {
-    let seen;
+    let seen = null;
     const program = buildFixture((_, payload) => {
       seen = payload.command.optsWithGlobals();
     });
@@ -123,7 +123,7 @@ describe('Command routing and options', () => {
   });
 
   it('should camelize kebab-case option names', async () => {
-    let seen;
+    let seen = null;
     const program = buildFixture((_, payload) => {
       seen = payload.command.optsWithGlobals();
     });
@@ -133,7 +133,7 @@ describe('Command routing and options', () => {
   });
 
   it('should leave unset boolean options undefined', async () => {
-    let seen;
+    let seen = null;
     const program = buildFixture((_, payload) => {
       seen = payload.command.optsWithGlobals();
     });
@@ -143,7 +143,7 @@ describe('Command routing and options', () => {
   });
 
   it('should pass local opts as the action opts parameter', async () => {
-    let localOpts;
+    let localOpts = null;
     const program = buildFixture((_, payload) => {
       localOpts = payload.opts;
     });
@@ -155,7 +155,7 @@ describe('Command routing and options', () => {
 
 describe('Command positional arguments', () => {
   it('should pass an optional positional as undefined when omitted', async () => {
-    let seen;
+    let seen = null;
     await parse(
       buildFixture((_, payload) => (seen = payload)),
       ['up'],
@@ -164,7 +164,7 @@ describe('Command positional arguments', () => {
   });
 
   it('should bind two positionals in order', async () => {
-    let seen;
+    let seen = null;
     const program = buildFixture((name, payload) => {
       if (name === 'dry-run') seen = payload;
     });
@@ -174,7 +174,7 @@ describe('Command positional arguments', () => {
   });
 
   it('should mix positionals with options in any order', async () => {
-    let seen;
+    let seen = null;
     const program = buildFixture((_, payload) => (seen = payload));
     await parse(program, ['up', '0001-a.js', '--force']);
     assert.strictEqual(seen.file, '0001-a.js');
@@ -306,7 +306,7 @@ describe('Command error handling', () => {
   it('should accept a negative number as an option value', async () => {
     // `--steps -1` must reach the command (whose validator rejects it with an
     // actionable message), not die in the parser as "argument missing".
-    let seen;
+    let seen = null;
     await parse(
       buildFixture((_name, { opts }) => {
         seen = opts.steps;

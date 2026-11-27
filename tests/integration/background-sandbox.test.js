@@ -4,7 +4,7 @@ const { runSandbox } = require('../../src/core/background/sandbox.js');
 const { SandboxRefusedError, TransactionsUnsupportedError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_sandbox_test';
 
 before(async () => {

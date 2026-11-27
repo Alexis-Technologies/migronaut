@@ -4,7 +4,7 @@ const {
   MigrationBlockedError,
   NotAppliedError,
 } = require('../errors/index.js');
-const { actorIssue, pickActor } = require('../utils/actor.js');
+const { ACTOR_FIELDS, actorIssue, pickActor } = require('../utils/actor.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { assertId, randomId } = require('../utils/id.js');
 const { assertMigrationName } = require('../utils/migration-name.js');
@@ -24,6 +24,18 @@ const { waitForGroup } = require('./wait.js');
 
 /** Job lookups in flight while checking a group for deduplicated adds */
 const LOOKUP_CONCURRENCY = 16;
+
+/** How long a running background migration may show no sign of life before a takeover */
+const DEFAULT_STALL_MS = 15 * 60_000;
+
+/** Every option enqueueBackground takes — a typo (`stalMs`) is refused, not a silent default */
+const ENQUEUE_BACKGROUND_KEYS = new Set([
+  'migration',
+  'jobOptions',
+  'stallMs',
+  'requestedBy',
+  'reason',
+]);
 
 /**
  * `jobOptions` is a passthrough for retention and logging knobs
@@ -72,7 +84,7 @@ const assertBackgroundJobOptions = (jobOptions) => {
 
 /** Validate the `requestedBy` / `reason` of an enqueue call, and return them */
 const actorOf = (options) => {
-  for (const key of ['requestedBy', 'reason']) {
+  for (const key of ACTOR_FIELDS) {
     const issue = actorIssue(key, options[key]);
     if (issue) throw new ConfigInvalidError(issue, { context: { [key]: typeof options[key] } });
   }
@@ -493,9 +505,6 @@ const enqueueUp = async (queue, kit, options = {}, internals = {}) => {
   });
 };
 
-/** How long a running background migration may show no sign of life before a takeover */
-const DEFAULT_STALL_MS = 15 * 60_000;
-
 /** The latest sign of life of a background migration: a checkpoint, a coordinator step, its start */
 const lastActivity = (status) => {
   let latest = 0;
@@ -510,15 +519,6 @@ const lastActivity = (status) => {
   }
   return latest;
 };
-
-/** Every option enqueueBackground takes — a typo (`stalMs`) is refused, not a silent default */
-const ENQUEUE_BACKGROUND_KEYS = new Set([
-  'migration',
-  'jobOptions',
-  'stallMs',
-  'requestedBy',
-  'reason',
-]);
 
 /**
  * Enqueue the coordinator of one background migration — or, with no
@@ -618,12 +618,12 @@ const enqueueDown = async (queue, kit, options = {}, internals = {}) => {
 
 module.exports = {
   DEFAULT_STALL_MS,
-  assertBackgroundJobOptions,
   assertJobOptions,
-  enqueueBackground,
-  enqueueConverge,
-  enqueueDown,
-  enqueueUp,
-  planDownJobs,
+  assertBackgroundJobOptions,
   planUpJobs,
+  planDownJobs,
+  enqueueConverge,
+  enqueueUp,
+  enqueueBackground,
+  enqueueDown,
 };

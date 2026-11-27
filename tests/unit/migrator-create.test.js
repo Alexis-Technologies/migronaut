@@ -7,7 +7,7 @@ const { makeProject } = require('../helpers/project.js');
 
 const customTemplate = path.join(__dirname, '..', 'fixtures', 'templates', 'custom.js');
 
-let project;
+let project = null;
 afterEach(() => project?.cleanup());
 
 /** Build a MigratorKit pointed at a fresh throwaway dir (no DB needed for create) */

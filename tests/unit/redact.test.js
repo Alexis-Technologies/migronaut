@@ -336,7 +336,7 @@ describe('redactBounded', () => {
     // not pay for the rest.
     const blob = `http://x ${'a'.repeat(400_000)}`;
     const rows = Array.from({ length: BOUNDS.entries - 10 }, () => blob);
-    let copy;
+    let copy = null;
     const ms = elapsedMs(() => {
       copy = redactBounded({ rows });
     });

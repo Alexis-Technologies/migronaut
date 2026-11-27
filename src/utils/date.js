@@ -1,7 +1,5 @@
 /** Zero-pad a number to two digits */
-const pad = (n) => {
-  return `${n}`.padStart(2, '0');
-};
+const pad = (n) => `${n}`.padStart(2, '0');
 
 /**
  * Local-time compact timestamp, e.g. `20240526143021`.

@@ -27,7 +27,7 @@ const validConfig = (overrides = {}) => ({
 // appended because it is read outside the table, before the .env load.
 const MIGRONAUT_ENV_KEYS = [...ENV_KEYS.map((spec) => spec.env), 'MIGRONAUT_ENV_FILE'];
 
-let tmp;
+let tmp = null;
 const savedEnv = {};
 
 beforeEach(() => {

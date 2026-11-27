@@ -73,17 +73,10 @@ const createBudget = (timeoutMs, signal) => {
  * Finished jobs must still exist in the queue when this attaches: a
  * `removeOnComplete: true` queue gives it nothing to read.
  */
-const waitForGroup = async ({
-  queue,
-  queueEvents,
-  groupId,
-  direction,
-  batch,
-  jobs,
-  converge,
-  timeoutMs,
-  signal,
-}) => {
+const waitForGroup = async (options) => {
+  const { queue, queueEvents, groupId, direction, batch, jobs, converge, timeoutMs, signal } =
+    options;
+
   if (signal !== undefined && !(signal instanceof AbortSignal)) {
     throw new ConfigInvalidError('signal must be an AbortSignal', {
       context: { signal: typeof signal },
@@ -112,11 +105,12 @@ const waitForGroup = async ({
   const budgeted = budget.race;
   const { deadline, isPastDeadline } = budget;
   // Stopped by the caller: what finished before it goes with the error.
-  const stopped = () =>
-    new RunAbortedError('Group wait aborted', {
+  const stopped = () => {
+    return new RunAbortedError('Group wait aborted', {
       ...(signal.reason !== undefined ? { cause: signal.reason } : {}),
       context: { reason: errorText(signal.reason ?? 'aborted'), groupId, finished: [...results] },
     });
+  };
 
   /**
    * The typed code a failed job reported in its progress — what a caller
@@ -134,8 +128,8 @@ const waitForGroup = async ({
 
   /** Wait for one job; `message` and `fields` say which one in a failure */
   const finish = async (id, message, fields) => {
-    const fail = (failedReason, timedOut, code, cause) =>
-      new QueueJobFailedError(message, {
+    const fail = (failedReason, timedOut, code, cause) => {
+      return new QueueJobFailedError(message, {
         ...(cause !== undefined ? { cause } : {}),
         context: {
           groupId,
@@ -147,6 +141,7 @@ const waitForGroup = async ({
           results: [...results],
         },
       });
+    };
 
     const outOfTime = () => fail(`wait timed out after ${timeoutMs}ms`, true);
     try {

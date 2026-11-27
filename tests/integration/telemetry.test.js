@@ -13,8 +13,8 @@ const { startTestMongo } = require('../helpers/mongo.js');
 const { parentIdOf, startMetrics, startTracing } = require('../helpers/otel.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
-let tracing;
+let mongo = null;
+let tracing = null;
 const DB = 'migronaut_telemetry_test';
 const LOCK_COLLECTION = '_migronaut_locks';
 
@@ -29,8 +29,8 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
-let metrics;
+let project = null;
+let metrics = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();
@@ -402,7 +402,7 @@ export async function down() {}
       },
       onStop: () => undefined,
     };
-    let stolen;
+    let stolen = null;
     const kit = migrator({ lockTTLSeconds: 2 }, { progress });
     await assert.rejects(kit.up(), LockLostError);
     assert.strictEqual((await stolen).matchedCount, 1);
@@ -484,7 +484,7 @@ describe('telemetry — metrics (integration)', () => {
       executedBy: 'peer',
       owner: 'peer-run',
     });
-    let release;
+    let release = null;
     const summary = await runMigrations(
       {
         uri: mongo.uri,

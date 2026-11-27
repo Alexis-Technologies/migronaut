@@ -23,12 +23,58 @@ const USERINFO = /([^:@/\s]*):[^@/\s]+@/y;
 /** The same cut short: a text that ends inside the secret, its `@` past the cut */
 const CUT_USERINFO = /([^:@/\s]*):[^@/\s]+$/y;
 
+/** `+`, `-` and `.`: the punctuation a URI scheme may hold */
+const SCHEME_PUNCTUATION = new Set([43, 45, 46]);
+
+/**
+ * Query parameters whose value is a secret. The userinfo form is not the only
+ * place a MongoDB URI carries credentials: TLS key passphrases and proxy
+ * passwords travel as plain query parameters and would otherwise survive
+ * redaction into logs, error context and `--json` output.
+ */
+const URI_QUERY_SECRETS =
+  /([?&](?:tlsCertificateKeyFilePassword|proxyPassword|sslKeyPassword)=)[^&\s]+/gi;
+
+/**
+ * `authMechanismProperties` is a comma-separated `KEY:VALUE` list; only the
+ * values of secret-bearing keys (AWS_SESSION_TOKEN et al.) are masked, so
+ * non-secret properties (SERVICE_NAME, …) stay readable.
+ */
+const AUTH_MECHANISM_PROPS = /([?&]authMechanismProperties=)([^&\s]+)/gi;
+
+const SENSITIVE_PROP_KEY = /TOKEN|SECRET|PASSWORD/i;
+
+/**
+ * The document values a server error can quote: an E11000 duplicate-key
+ * message ends with the offending key's values — an email, a phone number —
+ * which is the database's data, not an error's. Everything from `dup key: {`
+ * to the last `}` on that line is masked; the index name before it still says
+ * which constraint was violated.
+ */
+const DUPLICATE_KEY_VALUES = /(dup key: )\{[^\n]*\}/g;
+
+/**
+ * A duplicate key whose closing brace was past a cut: the pattern above
+ * would stop at an inner brace and leave the rest, so the unfinished tail of
+ * the last line is masked as a whole.
+ */
+const CUT_DUPLICATE_KEY_VALUES = /(dup key: )\{[^\n]*$/;
+
+/**
+ * How much of a value {@link redactBounded} copies: nesting, entries in all,
+ * the length of one string and of one piece of binary data. What a migration
+ * hands to `ctx.logger` is the application's own data, of any size and shape —
+ * a cycle included — and a subscriber stores it; these keep one call's copy
+ * small and finite.
+ */
+const BOUNDS = Object.freeze({ depth: 8, entries: 1000, string: 4096, bytes: 4096 });
+
+/** Stands in for what {@link redactBounded} left out */
+const TRUNCATED = '[truncated]';
+
 const isLetter = (code) => (code >= 97 && code <= 122) || (code >= 65 && code <= 90);
 
 const isDigit = (code) => code >= 48 && code <= 57;
-
-/** `+`, `-` and `.`: the punctuation a URI scheme may hold */
-const SCHEME_PUNCTUATION = new Set([43, 45, 46]);
 
 /** A character a URI scheme may hold after its first letter: a letter, a digit, `+`, `-`, `.` */
 const isSchemeChar = (code) => isLetter(code) || isDigit(code) || SCHEME_PUNCTUATION.has(code);
@@ -77,23 +123,6 @@ const maskCredentials = (text, cut = false) => {
 };
 
 /**
- * Query parameters whose value is a secret. The userinfo form is not the only
- * place a MongoDB URI carries credentials: TLS key passphrases and proxy
- * passwords travel as plain query parameters and would otherwise survive
- * redaction into logs, error context and `--json` output.
- */
-const URI_QUERY_SECRETS =
-  /([?&](?:tlsCertificateKeyFilePassword|proxyPassword|sslKeyPassword)=)[^&\s]+/gi;
-
-/**
- * `authMechanismProperties` is a comma-separated `KEY:VALUE` list; only the
- * values of secret-bearing keys (AWS_SESSION_TOKEN et al.) are masked, so
- * non-secret properties (SERVICE_NAME, …) stay readable.
- */
-const AUTH_MECHANISM_PROPS = /([?&]authMechanismProperties=)([^&\s]+)/gi;
-const SENSITIVE_PROP_KEY = /TOKEN|SECRET|PASSWORD/i;
-
-/**
  * Mask credentials anywhere in `text`: `scheme://user:secret@` (an empty
  * username still hides the password), secret-bearing query parameters, and
  * secret values inside `authMechanismProperties`.
@@ -115,15 +144,6 @@ const redactUris = (text) => {
 };
 
 /**
- * The document values a server error can quote: an E11000 duplicate-key
- * message ends with the offending key's values — an email, a phone number —
- * which is the database's data, not an error's. Everything from `dup key: {`
- * to the last `}` on that line is masked; the index name before it still says
- * which constraint was violated.
- */
-const DUPLICATE_KEY_VALUES = /(dup key: )\{[^\n]*\}/g;
-
-/**
  * For text that leaves the process for a third party — a tracing backend, a
  * queue that keeps failed jobs and serves them to dashboards: credentials
  * masked (as everywhere) and the data values a server error quotes, too.
@@ -133,13 +153,6 @@ const redactOutbound = (text) => {
   if (typeof text !== 'string') return text;
   return redactUris(text).replace(DUPLICATE_KEY_VALUES, '$1{ <redacted> }');
 };
-
-/**
- * A duplicate key whose closing brace was past a cut: the pattern above
- * would stop at an inner brace and leave the rest, so the unfinished tail of
- * the last line is masked as a whole.
- */
-const CUT_DUPLICATE_KEY_VALUES = /(dup key: )\{[^\n]*$/;
 
 /**
  * {@link redactOutbound} for a text that is kept only up to `limit`
@@ -178,18 +191,6 @@ const redactDeep = (value) => {
   }
   return value;
 };
-
-/**
- * How much of a value {@link redactBounded} copies: nesting, entries in all,
- * the length of one string and of one piece of binary data. What a migration
- * hands to `ctx.logger` is the application's own data, of any size and shape —
- * a cycle included — and a subscriber stores it; these keep one call's copy
- * small and finite.
- */
-const BOUNDS = Object.freeze({ depth: 8, entries: 1000, string: 4096, bytes: 4096 });
-
-/** Stands in for what {@link redactBounded} left out */
-const TRUNCATED = '[truncated]';
 
 /** The size of binary data — a Buffer or another Uint8Array, a BSON Binary — or undefined */
 const byteLength = (item) => {
@@ -296,11 +297,4 @@ const redactBounded = (value, { omit } = {}) => {
   return { value: result, truncated };
 };
 
-module.exports = {
-  BOUNDS,
-  redactBounded,
-  redactDeep,
-  redactOutbound,
-  redactUris,
-  redactWithin,
-};
+module.exports = { BOUNDS, redactUris, redactOutbound, redactWithin, redactDeep, redactBounded };

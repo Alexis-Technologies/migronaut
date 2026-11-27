@@ -11,11 +11,12 @@ const registerRedo = (program) => {
     ],
     lockable: true,
     mutating: true,
-    run: (migrator, opts, positionals) =>
-      migrator.redo(positionals[0], {
+    run: (migrator, opts, positionals) => {
+      return migrator.redo(positionals[0], {
         noLock: opts.noLock,
         ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
-      }),
+      });
+    },
     // No render: core logs the ↩/✔ lines itself.
   });
 };

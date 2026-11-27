@@ -2,6 +2,9 @@ const { ConfigInvalidError } = require('../errors/index.js');
 const { resolveVersioning } = require('./config.js');
 const { isPlainObject, topField, unwrapDefinition } = require('./internal.js');
 
+/** What a value must have to be taken for a Mongoose schema */
+const SCHEMA_METHODS = Object.freeze(['set', 'get', 'add', 'path', 'pre']);
+
 /**
  * A Mongoose schema plugin for a versioned collection — it never requires
  * mongoose: the schema is the caller's, used only through its own methods.
@@ -27,7 +30,7 @@ const { isPlainObject, topField, unwrapDefinition } = require('./internal.js');
 const UPDATE_HOOKS = ['updateOne', 'updateMany', 'findOneAndUpdate'];
 
 const assertSchema = (schema) => {
-  for (const method of ['set', 'get', 'add', 'path', 'pre']) {
+  for (const method of SCHEMA_METHODS) {
     if (typeof schema?.[method] !== 'function') {
       throw new ConfigInvalidError('versioningPlugin takes a Mongoose schema');
     }

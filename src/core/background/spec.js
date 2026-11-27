@@ -1,4 +1,5 @@
 const crypto = require('node:crypto');
+
 const {
   BackgroundConflictError,
   ConfigInvalidError,
@@ -9,6 +10,9 @@ const { isCollectionName } = require('../../utils/collection-name.js');
 const { fieldNameIssue } = require('../../versioning/config.js');
 const { resolveFieldNames } = require('../../versioning/document.js');
 const { filterTouches } = require('../../versioning/internal.js');
+
+/** The spec keys that name a document field */
+const FIELD_NAME_KEYS = Object.freeze(['versionField', 'revisionField']);
 
 /**
  * Background migrations, declared: what a migration file's
@@ -68,6 +72,92 @@ const SCAFFOLD_PLACEHOLDER = 'TODO';
 /** Operators that run JavaScript on the server */
 const SERVER_JS = new Set(['$where', '$function', '$accumulator']);
 
+const PARTITION_SETTINGS = [
+  ['overPartition', 1, 64],
+  ['maxPartitions', 1, 4_096],
+  ['minPartitionDocs', 1, Number.MAX_SAFE_INTEGER],
+  ['sampleSize', 1, 100_000],
+];
+
+const TRANSACTION_SETTINGS = [
+  ['timeoutMs', 1, 50_000],
+  ['maxRetries', 0, 20],
+];
+
+const ADAPTIVE_SETTINGS = [
+  ['targetLatencyMs', 1, 600_000],
+  ['minBatchSize', 1, 10_000],
+  ['maxBatchSize', 1, 10_000],
+  ['maxPauseMs', 0, 3_600_000],
+];
+
+const SETTING_KEYS = ['description'];
+
+/** Keys a later release may give meaning to — refused now, not silently ignored */
+const RESERVED_KEYS = new Map([
+  ['partitioner', 'is not supported yet — partitions follow _id (or the shard key) automatically'],
+]);
+
+const FUNCTION_KEYS = [
+  'migrate',
+  'migrateBatch',
+  'revert',
+  'revertBatch',
+  'step',
+  'revertStep',
+  'throttle',
+];
+
+const OCC_MODES = new Set(['revision', 'version-only']);
+
+/** A checkpoint a step returns is stored on the partition — kept small */
+const MAX_CHECKPOINT_BYTES = 64 * 1024;
+
+const STATUSES = Object.freeze([
+  'blocked',
+  'pending',
+  'running',
+  'paused',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
+/** Done: nothing will change it without a deliberate retry or reopen */
+const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+
+/**
+ * The BSON comparison brackets an `_id` can fall in, in server sort order.
+ * `$gt`/`$lt` compare only within one bracket, so a range never spans two:
+ * each partition lives in one, filtered by `$type`. Only the brackets whose
+ * values sort the same way in a sample and on the server are split into
+ * several partitions — never `object` (JavaScript reorders integer-like keys)
+ * and never the mixed `exotic` one.
+ */
+const ID_BRACKETS = Object.freeze([
+  { name: 'minKey', aliases: ['minKey'], splittable: false },
+  { name: 'null', aliases: ['null'], splittable: false },
+  { name: 'number', aliases: ['int', 'long', 'double', 'decimal'], splittable: true },
+  { name: 'string', aliases: ['string', 'symbol'], splittable: true },
+  { name: 'object', aliases: ['object'], splittable: false },
+  { name: 'binData', aliases: ['binData'], splittable: true },
+  { name: 'objectId', aliases: ['objectId'], splittable: true },
+  { name: 'bool', aliases: ['bool'], splittable: false },
+  { name: 'date', aliases: ['date'], splittable: true },
+  { name: 'timestamp', aliases: ['timestamp'], splittable: true },
+  {
+    name: 'exotic',
+    aliases: ['regex', 'dbPointer', 'javascript', 'javascriptWithScope'],
+    splittable: false,
+  },
+  { name: 'maxKey', aliases: ['maxKey'], splittable: false },
+]);
+
+const BRACKETS_BY_NAME = new Map();
+
+/** `$type` names (as `$type` reports them) → their bracket */
+const BRACKET_OF_TYPE = new Map();
+
 /** Whether a filter runs JavaScript on the server, anywhere in it ($expr included) */
 const usesServerJs = (value) => {
   if (Array.isArray(value)) {
@@ -107,26 +197,6 @@ const assertSliceMs = (sliceMs) => {
   }
 };
 
-const PARTITION_SETTINGS = [
-  ['overPartition', 1, 64],
-  ['maxPartitions', 1, 4_096],
-  ['minPartitionDocs', 1, Number.MAX_SAFE_INTEGER],
-  ['sampleSize', 1, 100_000],
-];
-
-const TRANSACTION_SETTINGS = [
-  ['timeoutMs', 1, 50_000],
-  ['maxRetries', 0, 20],
-];
-
-const ADAPTIVE_SETTINGS = [
-  ['targetLatencyMs', 1, 600_000],
-  ['minBatchSize', 1, 10_000],
-  ['maxBatchSize', 1, 10_000],
-  ['maxPauseMs', 0, 3_600_000],
-];
-
-const SETTING_KEYS = ['description'];
 for (let i = 0; i < INTEGER_SETTINGS.length; i++) SETTING_KEYS.push(INTEGER_SETTINGS[i][0]);
 SETTING_KEYS.push(
   'writeConcern',
@@ -153,26 +223,6 @@ const DECLARATIVE_KEYS = new Set([
 ]);
 
 const STEP_KEYS = new Set([...SETTING_KEYS, 'collection', 'step', 'revertStep']);
-
-/** Keys a later release may give meaning to — refused now, not silently ignored */
-const RESERVED_KEYS = new Map([
-  ['partitioner', 'is not supported yet — partitions follow _id (or the shard key) automatically'],
-]);
-
-const FUNCTION_KEYS = [
-  'migrate',
-  'migrateBatch',
-  'revert',
-  'revertBatch',
-  'step',
-  'revertStep',
-  'throttle',
-];
-
-const OCC_MODES = new Set(['revision', 'version-only']);
-
-/** A checkpoint a step returns is stored on the partition — kept small */
-const MAX_CHECKPOINT_BYTES = 64 * 1024;
 
 const inRange = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 
@@ -311,7 +361,7 @@ const backgroundIssues = (spec, { versioning } = {}) => {
   if (spec.occ !== undefined && !OCC_MODES.has(spec.occ)) {
     report('occ', "must be 'revision' or 'version-only'");
   }
-  for (const key of ['versionField', 'revisionField']) {
+  for (const key of FIELD_NAME_KEYS) {
     if (spec[key] === undefined) continue;
     const issue = fieldNameIssue(spec[key]);
     if (issue) report(key, issue);
@@ -487,19 +537,6 @@ const matchHash = (spec, direction = 'forward') => {
 
 // ─── State transitions ────────────────────────────────────────────────────────
 
-const STATUSES = Object.freeze([
-  'blocked',
-  'pending',
-  'running',
-  'paused',
-  'completed',
-  'failed',
-  'cancelled',
-]);
-
-/** Done: nothing will change it without a deliberate retry or reopen */
-const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
-
 /**
  * Every control action: the statuses it applies to, what it moves them to,
  * and the statuses in which it is already done (`unchanged`, not an error —
@@ -545,37 +582,6 @@ const transition = (status, action, { migration } = {}) => {
 
 // ─── _id brackets and partition scopes ────────────────────────────────────────
 
-/**
- * The BSON comparison brackets an `_id` can fall in, in server sort order.
- * `$gt`/`$lt` compare only within one bracket, so a range never spans two:
- * each partition lives in one, filtered by `$type`. Only the brackets whose
- * values sort the same way in a sample and on the server are split into
- * several partitions — never `object` (JavaScript reorders integer-like keys)
- * and never the mixed `exotic` one.
- */
-const ID_BRACKETS = Object.freeze([
-  { name: 'minKey', aliases: ['minKey'], splittable: false },
-  { name: 'null', aliases: ['null'], splittable: false },
-  { name: 'number', aliases: ['int', 'long', 'double', 'decimal'], splittable: true },
-  { name: 'string', aliases: ['string', 'symbol'], splittable: true },
-  { name: 'object', aliases: ['object'], splittable: false },
-  { name: 'binData', aliases: ['binData'], splittable: true },
-  { name: 'objectId', aliases: ['objectId'], splittable: true },
-  { name: 'bool', aliases: ['bool'], splittable: false },
-  { name: 'date', aliases: ['date'], splittable: true },
-  { name: 'timestamp', aliases: ['timestamp'], splittable: true },
-  {
-    name: 'exotic',
-    aliases: ['regex', 'dbPointer', 'javascript', 'javascriptWithScope'],
-    splittable: false,
-  },
-  { name: 'maxKey', aliases: ['maxKey'], splittable: false },
-]);
-
-const BRACKETS_BY_NAME = new Map();
-
-/** `$type` names (as `$type` reports them) → their bracket */
-const BRACKET_OF_TYPE = new Map();
 for (const bracket of ID_BRACKETS) {
   BRACKETS_BY_NAME.set(bracket.name, bracket);
   for (const alias of bracket.aliases) BRACKET_OF_TYPE.set(alias, bracket.name);
@@ -598,18 +604,18 @@ const keysetFilter = (lastId) => (lastId === undefined ? {} : { _id: { $gt: last
 
 module.exports = {
   BACKGROUND_DEFAULTS: DEFAULTS,
-  ID_BRACKETS,
   MAX_BAD_IDS,
   MAX_CHECKPOINT_BYTES,
   STATUSES,
   TERMINAL,
-  TRANSITIONS,
+  ID_BRACKETS,
   assertSliceMs,
   backgroundIssues,
-  bracketOfType,
-  keysetFilter,
-  matchHash,
   resolveBackgroundSpec,
-  scopeFilter,
+  matchHash,
+  TRANSITIONS,
   transition,
+  bracketOfType,
+  scopeFilter,
+  keysetFilter,
 };

@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+
 const { ConfigInvalidError } = require('../../errors/index.js');
 const { isPlainObject, toWire, unsendable } = require('../../utils/canonical.js');
 const { isCollectionName } = require('../../utils/collection-name.js');
@@ -7,6 +8,7 @@ const { mapLimit } = require('../../utils/concurrency.js');
 const { contextPath, errorText } = require('../../utils/error.js');
 const { importUserFile, tsLoadMessageOrNull } = require('../../utils/loader.js');
 const { indexIssues, normalizeDeclaredIndex, sameDeclaredSignature } = require('./index-spec.js');
+const { pushAll } = require('./plan.js');
 const { normalizeDeclaredSearchIndex, searchIndexIssues } = require('./search-index-spec.js');
 const { resolveVersioning, versioningIssues } = require('../../versioning/config.js');
 const {
@@ -42,6 +44,9 @@ const DEFINITION_KEY_SET = new Set(DEFINITION_KEYS);
 const VALIDATION_LEVELS = ['off', 'strict', 'moderate'];
 const VALIDATION_ACTIONS = ['error', 'warn', 'errorAndLog'];
 
+/** Simultaneous definition-file loads — the same EMFILE bound as every other multi-file path */
+const FS_CONCURRENCY = 16;
+
 /** `'a', 'b', 'c'` */
 const quotedList = (items) => {
   let text = '';
@@ -66,20 +71,10 @@ const VALIDATION_OPTIONS = [
   },
 ];
 
-/** Simultaneous definition-file loads — the same EMFILE bound as every other multi-file path */
-const FS_CONCURRENCY = 16;
-
 /** `collections[2]` + `indexes` → `collections[2].indexes`; `users.ts:` + `indexes` → `users.ts: indexes` */
-const join = (base, key) => {
-  return base.endsWith(':') ? `${base} ${key}` : `${base}.${key}`;
-};
+const join = (base, key) => (base.endsWith(':') ? `${base} ${key}` : `${base}.${key}`);
 
 const isEmptyObject = (value) => isPlainObject(value) && Object.keys(value).length === 0;
-
-/** Append every item of `items` to `target` */
-const pushAll = (target, items) => {
-  for (let i = 0; i < items.length; i++) target.push(items[i]);
-};
 
 const indexListIssues = (indexes, base, issues) => {
   if (!Array.isArray(indexes)) {
@@ -475,13 +470,11 @@ const loadCollectionsDir = async (dir, { extensions, reload = false }) => {
  * @throws {ConfigInvalidError} on a missing directory, a file that does not
  *   load, or invalid definitions (all issues at once, in `context.issues`)
  */
-const resolveDefinitions = async ({
-  inline,
-  dir,
-  extensions = ['.ts', '.js'],
-  reload,
-  reserved = [],
-}) => {
+const resolveDefinitions = async (options) => {
+  const { inline, dir, reload } = options;
+  const extensions = options.extensions ?? ['.ts', '.js'];
+  const reserved = options.reserved ?? [];
+
   const definitions = [];
   const declaredBy = new Map();
   const list = inline ?? [];
@@ -523,9 +516,9 @@ const resolveDefinitions = async ({
 
 module.exports = {
   DEFINITION_KEYS,
-  collectionsIssues,
   definitionIssues,
-  loadCollectionsDir,
+  collectionsIssues,
   normalizeDefinition,
+  loadCollectionsDir,
   resolveDefinitions,
 };

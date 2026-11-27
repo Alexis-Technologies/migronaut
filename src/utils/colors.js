@@ -1,3 +1,7 @@
+const ESC = String.fromCharCode(27);
+
+const ANSI_PATTERN = new RegExp(`${ESC}\\[[0-9;]*m`, 'g');
+
 /**
  * Decide whether ANSI colors should be emitted to `stream`.
  *
@@ -30,13 +34,8 @@ const supportsColor = (stream, env = process.env) => {
 const paint = (open, close) => (text) => `\x1b[${open}m${text}\x1b[${close}m`;
 const identity = (text) => text;
 
-const ESC = String.fromCharCode(27);
-const ANSI_PATTERN = new RegExp(`${ESC}\\[[0-9;]*m`, 'g');
-
 /** Remove ANSI SGR color codes from a string */
-const stripAnsi = (text) => {
-  return text.replace(ANSI_PATTERN, '');
-};
+const stripAnsi = (text) => text.replace(ANSI_PATTERN, '');
 
 /**
  * Create the color palette for writing to `stream`: green/yellow/red/cyan/dim
@@ -65,4 +64,4 @@ const createColors = (stream, env = process.env) => {
   };
 };
 
-module.exports = { supportsColor, createColors, stripAnsi };
+module.exports = { supportsColor, stripAnsi, createColors };

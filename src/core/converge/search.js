@@ -1,12 +1,12 @@
 const { mapLimit } = require('../../utils/concurrency.js');
-const { errorText } = require('../../utils/error.js');
+const { errorText, isUnauthorized } = require('../../utils/error.js');
 const {
   isSearchIndexReady,
   normalizeLiveSearchIndex,
   searchBuild,
   searchBuildState,
 } = require('./search-index-spec.js');
-const { INDEX_NOT_FOUND, NAMESPACE_NOT_FOUND } = require('../server-info.js');
+const { INDEX_NOT_FOUND, NAMESPACE_NOT_FOUND, isVersionAtLeast } = require('../server-info.js');
 
 /**
  * Atlas Search for converge: the commands that create, update, list and drop
@@ -57,6 +57,40 @@ const VECTOR_UPDATE_HINT =
   'this server cannot update a vector search index in place (Atlas can) — declare the changed ' +
   'index under a new name, converge, then remove the old declaration and converge with prune';
 
+/** The search index step ops converge.js hands over */
+const SEARCH_STEPS = new Set(['createSearchIndexes', 'updateSearchIndex', 'dropSearchIndex']);
+
+/** Search index lists read at once while waiting — one per collection */
+const WAIT_READ_CONCURRENCY = 8;
+
+/** Failed reads in a row a wait rides out — when each is a connection or failover blip */
+const WAIT_READ_ATTEMPTS = 3;
+
+/**
+ * Server codes of a read worth trying again: the retryable-read set of the
+ * drivers' specification (host unreachable, primary stepped down, shutdown,
+ * a time limit…).
+ */
+const TRANSIENT_CODES = new Set([
+  6, 7, 89, 91, 134, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436,
+]);
+
+const TRANSIENT_NAMES = new Set([
+  'MongoNetworkError',
+  'MongoNetworkTimeoutError',
+  'MongoServerSelectionError',
+  'MongoPoolClearedError',
+]);
+
+// The pool's label is `PoolRequestedRetry` in driver 7 and was misspelled
+// `PoolRequstedRetry` before it: both, for the whole peer range.
+const TRANSIENT_LABELS = [
+  'ResetPool',
+  'RetryableWriteError',
+  'PoolRequestedRetry',
+  'PoolRequstedRetry',
+];
+
 /** Whether an error from a search command means the server has no Atlas Search */
 const isSearchUnavailable = (error) => {
   if (SEARCH_UNAVAILABLE_CODES.has(error?.code)) return true;
@@ -69,7 +103,7 @@ const searchHint = (error) => {
   if (isSearchUnavailable(error)) return SEARCH_UNAVAILABLE_HINT;
   const text = errorText(error);
   if (NEEDS_TYPE.test(text)) return VECTOR_UPDATE_HINT;
-  if (error?.code === 13) {
+  if (isUnauthorized(error)) {
     return (
       'not authorized — search indexes need the createSearchIndexes, updateSearchIndex, ' +
       'dropSearchIndex and listSearchIndexes actions (readWrite on Atlas)'
@@ -101,14 +135,6 @@ const listSearchIndexes = async (db, collection, readOptions) => {
     if (error?.code === NAMESPACE_NOT_FOUND) return [];
     throw error;
   }
-};
-
-/** Whether `version` (`{ major, minor, patch? }`) is at least `major.minor.patch` */
-const atLeast = (version, major, minor, patch) => {
-  if (version === undefined) return false;
-  if (version.major !== major) return version.major > major;
-  if (version.minor !== minor) return version.minor > minor;
-  return (version.patch ?? 0) >= patch;
 };
 
 /**
@@ -164,7 +190,7 @@ const probeSearch = async (db, server, { collection, readOptions }) => {
     if (!isSearchUnavailable(error)) throw error;
     return { available: false, evidence: 'error', reason: errorText(error) };
   }
-  if (listed.length > 0 || atLeast(version, 7, 2, 1)) {
+  if (listed.length > 0 || isVersionAtLeast(version, 7, 2, 1)) {
     return { available: true, evidence: 'listed', listed };
   }
   const managed = await searchManagement(db);
@@ -213,9 +239,6 @@ const dropSearchIndex = async (db, collection, name) => {
   }
 };
 
-/** The search index step ops converge.js hands over */
-const SEARCH_STEPS = new Set(['createSearchIndexes', 'updateSearchIndex', 'dropSearchIndex']);
-
 /**
  * Carry out one search index step. The server only accepts the work here —
  * a created or updated index builds in the background, so this returns in
@@ -230,35 +253,6 @@ const runSearchStep = async (db, collection, step) => {
     await dropSearchIndex(db, collection, step.name);
   }
 };
-
-/** Search index lists read at once while waiting — one per collection */
-const WAIT_READ_CONCURRENCY = 8;
-
-/** Failed reads in a row a wait rides out — when each is a connection or failover blip */
-const WAIT_READ_ATTEMPTS = 3;
-
-/**
- * Server codes of a read worth trying again: the retryable-read set of the
- * drivers' specification (host unreachable, primary stepped down, shutdown,
- * a time limit…).
- */
-const TRANSIENT_CODES = new Set([
-  6, 7, 89, 91, 134, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436,
-]);
-const TRANSIENT_NAMES = new Set([
-  'MongoNetworkError',
-  'MongoNetworkTimeoutError',
-  'MongoServerSelectionError',
-  'MongoPoolClearedError',
-]);
-// The pool's label is `PoolRequestedRetry` in driver 7 and was misspelled
-// `PoolRequstedRetry` before it: both, for the whole peer range.
-const TRANSIENT_LABELS = [
-  'ResetPool',
-  'RetryableWriteError',
-  'PoolRequestedRetry',
-  'PoolRequstedRetry',
-];
 
 /** Whether a driver error carries one of {@link TRANSIENT_LABELS} */
 const hasTransientLabel = (error) => {
@@ -328,16 +322,13 @@ const readAll = async (collections, read) => {
  * waitedMs }`, `notReady` holding `{ collection, name, ...build }` (the
  * failed ones first — and, on `'failed'`, in `failed` too).
  */
-const awaitSearchIndexes = async ({
-  targets,
-  read,
-  timeoutMs,
-  sleep,
-  now = Date.now,
-  beforePoll = () => undefined,
-  onPoll = () => undefined,
-  onReadError = () => undefined,
-}) => {
+const awaitSearchIndexes = async (options) => {
+  const { targets, read, timeoutMs, sleep } = options;
+  const now = options.now ?? Date.now;
+  const beforePoll = options.beforePoll ?? (() => undefined);
+  const onPoll = options.onPoll ?? (() => undefined);
+  const onReadError = options.onReadError ?? (() => undefined);
+
   const startedAt = now();
   // Each collection once, in the order the targets name them.
   const seen = new Set();
@@ -388,7 +379,7 @@ const awaitSearchIndexes = async ({
     if (failed.length > 0) {
       return {
         outcome: 'failed',
-        notReady: [...failed, ...notReady],
+        notReady: failed.concat(notReady),
         failed,
         preexisting,
         waitedMs,
@@ -402,14 +393,14 @@ const awaitSearchIndexes = async ({
 };
 
 module.exports = {
-  SEARCH_STEPS,
   SEARCH_UNAVAILABLE_HINT,
-  awaitSearchIndexes,
+  SEARCH_STEPS,
   isSearchUnavailable,
-  isTransientError,
+  searchHint,
   listSearchIndexes,
-  nextPollDelay,
   probeSearch,
   runSearchStep,
-  searchHint,
+  isTransientError,
+  nextPollDelay,
+  awaitSearchIndexes,
 };

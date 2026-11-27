@@ -9,7 +9,7 @@ const {
   makeProject,
 } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_hooks_test';
 
 before(async () => {
@@ -24,8 +24,8 @@ beforeEach(async () => {
   await mongo.db.dropDatabase();
 });
 
-let project;
-let migrator;
+let project = null;
+let migrator = null;
 
 afterEach(async () => {
   await migrator?.disconnect();

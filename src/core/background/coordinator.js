@@ -43,11 +43,15 @@ const {
 const coordinate = async (deps, name, { signal, driver = { kind: 'local' } } = {}) => {
   const lock = deps.lockFor(name);
   try {
-    return await runWithLock(lock, { logger: deps.logger, owner: deps.ownerOf?.() }, (lockSignal) =>
-      // The span opens once the lock is held: a busy coordinator makes none.
-      withSpan(deps, 'coordinate', name, () =>
-        coordinateStep(deps, name, { signal: anySignal(signal, lockSignal), driver }),
-      ),
+    return await runWithLock(
+      lock,
+      { logger: deps.logger, owner: deps.ownerOf?.() },
+      (lockSignal) => {
+        // The span opens once the lock is held: a busy coordinator makes none.
+        return withSpan(deps, 'coordinate', name, () => {
+          return coordinateStep(deps, name, { signal: anySignal(signal, lockSignal), driver });
+        });
+      },
     );
   } catch (error) {
     if (error instanceof LockAlreadyHeldError) {
@@ -125,10 +129,9 @@ const coordinatePass = async (deps, name, initial, { signal }) => {
   try {
     job = await jobFor(deps, name, state);
   } catch (error) {
-    if (
-      error instanceof ChecksumMismatchError ||
-      error?.code === 'ALX_ERR_MIGRATION_FILE_NOT_FOUND'
-    ) {
+    const isOtherVersion =
+      error instanceof ChecksumMismatchError || error?.code === 'ALX_ERR_MIGRATION_FILE_NOT_FOUND';
+    if (isOtherVersion) {
       // Mid-deploy: an older or newer pod holds the other version of the file.
       deps.logger.warn(`⚠ ${errorText(error)}`, deps.fields({ background: name }));
       return retrySoon(deps, 'checksum');
@@ -233,7 +236,7 @@ const planPass = async (deps, job, state, hash, { newPass = true } = {}) => {
     });
   }
   const pass = (state.pass ?? 0) + (newPass ? 1 : 0);
-  const sharding = spec.mode === 'step' ? undefined : shardingOf(job, plan);
+  const sharding = spec.mode === 'step' ? null : shardingOf(job, plan);
   const committed = await store.commitPlan(state._id, {
     generation: state.generation,
     previousToken: state.plan?.token,
@@ -251,7 +254,8 @@ const planPass = async (deps, job, state, hash, { newPass = true } = {}) => {
       match: hash,
       ...(plan.degraded ? { degraded: plan.degraded } : {}),
       ...(plan.epoch ? { epoch: plan.epoch } : {}),
-      ...(sharding !== undefined ? { sharding } : {}),
+      // Left out of the stored plan when there is none — an absent key, not null.
+      ...(sharding !== null ? { sharding } : {}),
     },
     partitions: plan.partitions,
     fields: {
@@ -497,9 +501,9 @@ module.exports = {
   coordinate,
   withSpan,
   anySignal,
-  tryUnblock,
-  failState,
   finalize,
+  failState,
   requiresStatus,
   waitingFor,
+  tryUnblock,
 };

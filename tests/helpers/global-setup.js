@@ -19,7 +19,7 @@ const TEST_ARGS = ['--setParameter', 'enableTestCommands=1'];
  * `startTestMongo(db, { dedicated: true })`.
  */
 
-let replSet;
+let replSet = null;
 
 const globalSetup = async () => {
   // Local runs and CI must test the same server version — CI's explicit

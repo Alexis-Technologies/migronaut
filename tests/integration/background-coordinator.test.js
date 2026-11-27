@@ -12,7 +12,7 @@ const { BackgroundConflictError, ChecksumMismatchError } = require('../../src/er
 const { silentLogger } = require('../../src/utils/logger.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_coordinator_test';
 const NAME = '0001-orders.js';
 
@@ -87,7 +87,7 @@ const drive = async (deps, name, { lanes = 2, maxSteps = 50, tolerate = false } 
       await Promise.all(
         Array.from({ length: lanes }, async () => {
           for (;;) {
-            let slice;
+            let slice = null;
             try {
               slice = await runSlice(deps, name, { sliceMs: 60_000 });
             } catch (error) {

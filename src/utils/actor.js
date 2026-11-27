@@ -10,6 +10,9 @@
  */
 const ACTOR_LIMITS = Object.freeze({ requestedBy: 128, reason: 512 });
 
+/** The actor fields, in order — one list for every reader of them */
+const ACTOR_FIELDS = Object.freeze(Object.keys(ACTOR_LIMITS));
+
 /** The problem with an actor field, or null when it is absent or valid */
 const actorIssue = (key, value) => {
   if (value === undefined) return null;
@@ -23,7 +26,7 @@ const actorIssue = (key, value) => {
 /** Just the actor fields of `source` that are set */
 const pickActor = (source) => {
   const actor = {};
-  for (const key of Object.keys(ACTOR_LIMITS)) {
+  for (const key of ACTOR_FIELDS) {
     if (source?.[key] !== undefined) actor[key] = source[key];
   }
   return actor;
@@ -45,4 +48,4 @@ const actorFields = (options, prefix) => {
   return fields;
 };
 
-module.exports = { ACTOR_LIMITS, actorFields, actorIssue, pickActor };
+module.exports = { ACTOR_LIMITS, ACTOR_FIELDS, actorIssue, pickActor, actorFields };

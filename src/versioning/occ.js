@@ -7,6 +7,7 @@ const {
   revisionFilter,
   revisionOf,
   stampedUpdate,
+  assertCount,
 } = require('./document.js');
 const { filterTouches, isPlainObject, toCount } = require('./internal.js');
 
@@ -31,6 +32,13 @@ const OWN_OPTIONS = new Set(['field', 'revisionField', 'version', 'verify']);
 
 /** The write's options its explaining re-read takes along, to match the same way */
 const REREAD_OPTIONS = ['session', 'collation', 'hint', 'let'];
+
+/**
+ * The longest one backoff waits. A `backoff` function is the caller's: past
+ * 2³¹−1 ms (or `Infinity`) Node fires a timer after 1 ms, so the longest
+ * wait asked for would be the shortest one given.
+ */
+const MAX_BACKOFF_MS = 3_600_000;
 
 /** `{ names, version, verify, driverOptions }` from the caller's options */
 const splitOptions = (options = {}) => {
@@ -61,12 +69,6 @@ const splitOptions = (options = {}) => {
       : resolveFieldNames({ field: options.field, revisionField: options.revisionField });
   if (options.version !== undefined) assertCount(options.version, 'version');
   return { names, version: options.version, verify: options.verify !== false, driverOptions };
-};
-
-const assertCount = (value, what) => {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new ConfigInvalidError(`${what} must be an integer ≥ 0`, { context: { [what]: value } });
-  }
 };
 
 /**
@@ -235,15 +237,9 @@ const replaceWithRevision = async (collection, filter, expectedRevision, replace
  *
  * @throws {RevisionConflictError} when nothing matched
  */
-const findOneAndUpdateWithRevision = async (
-  collection,
-  filter,
-  expectedRevision,
-  update,
-  options,
-) => {
+const findOneAndUpdateWithRevision = async (collection, filter, revision, update, options) => {
   const { names, version, verify, driverOptions } = splitOptions(options);
-  const expected = expectedOf(expectedRevision);
+  const expected = expectedOf(revision);
   const guarded = guardedFilter(filter, names, expected);
   const stamped = stampedUpdate(names, { to: version, update });
   const result = await collection.findOneAndUpdate(guarded, stamped, {
@@ -263,8 +259,8 @@ const jitter = ({ baseMs = 10, maxMs = 1000 } = {}) => {
   return (attempt) => Math.random() * Math.min(maxMs, baseMs * 2 ** attempt);
 };
 
-const sleep = (ms, signal) =>
-  new Promise((resolve, reject) => {
+const sleep = (ms, signal) => {
+  return new Promise((resolve, reject) => {
     if (signal?.aborted) return void reject(signal.reason);
     let listening = null;
     const timer = setTimeout(() => {
@@ -277,13 +273,7 @@ const sleep = (ms, signal) =>
       reject(signal.reason);
     });
   });
-
-/**
- * The longest one backoff waits. A `backoff` function is the caller's: past
- * 2³¹−1 ms (or `Infinity`) Node fires a timer after 1 ms, so the longest
- * wait asked for would be the shortest one given.
- */
-const MAX_BACKOFF_MS = 3_600_000;
+};
 
 /** What a backoff's answer means in ms — nothing for a negative or `NaN` */
 const backoffMs = (ms) => (ms > 0 ? Math.min(ms, MAX_BACKOFF_MS) : 0);
@@ -331,9 +321,9 @@ const bumpRevision = (update, { revisionField } = {}) => {
 };
 
 module.exports = {
-  bumpRevision,
-  findOneAndUpdateWithRevision,
-  replaceWithRevision,
-  retryOnConflict,
   updateWithRevision,
+  replaceWithRevision,
+  findOneAndUpdateWithRevision,
+  retryOnConflict,
+  bumpRevision,
 };

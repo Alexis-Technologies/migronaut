@@ -3,8 +3,36 @@ const path = require('node:path');
 const { MigronautError } = require('../errors/index.js');
 const { redactOutbound, redactUris } = require('./redact.js');
 
+/** The server's duplicate key (E11000): a unique index refused the write */
+const DUPLICATE_KEY = 11000;
+
+/** The server's "not authorized" — a read or command the user's role may not make */
+const UNAUTHORIZED = 13;
+
 /** A write conflict, a transaction the server no longer knows, a lock not taken in time */
 const TRANSIENT_TRANSACTION_CODES = new Set([112, 251, 24]);
+
+/**
+ * Slice errors of a background migration no retry fixes: the file changed or
+ * is gone or invalid, the configuration or the deployment cannot run it. The
+ * kit's lane ends on them, the queue's lane gives up on them, and the runner
+ * backs off at its longest.
+ */
+const FATAL_SLICE_CODES = new Set([
+  'ALX_ERR_CHECKSUM_MISMATCH',
+  'ALX_ERR_MIGRATION_FILE_NOT_FOUND',
+  'ALX_ERR_MIGRATION_INVALID_EXPORT',
+  'ALX_ERR_MIGRATION_LOAD_FAILED',
+  'ALX_ERR_MIGRATION_INVALID_NAME',
+  'ALX_ERR_CONFIG_INVALID',
+  'ALX_ERR_TRANSACTIONS_UNSUPPORTED',
+]);
+
+/** Whether `error` is the server's duplicate key */
+const isDuplicateKey = (error) => error?.code === DUPLICATE_KEY;
+
+/** Whether `error` is the server's "not authorized" */
+const isUnauthorized = (error) => error?.code === UNAUTHORIZED;
 
 /**
  * The server's own error behind what the driver threw. From 7.x the driver
@@ -17,8 +45,9 @@ const TRANSIENT_TRANSACTION_CODES = new Set([112, 251, 24]);
  * server's says what happened. (6.x did this only on a retried write, never
  * inside a transaction.) Any other error is its own.
  */
-const serverErrorOf = (error) =>
-  error?.originalError instanceof Error ? error.originalError : error;
+const serverErrorOf = (error) => {
+  return error?.originalError instanceof Error ? error.originalError : error;
+};
 
 /**
  * Human-readable message from any thrown value, with URI credentials masked.
@@ -28,8 +57,9 @@ const serverErrorOf = (error) =>
  * in the server's words where the driver put its own over them
  * ({@link serverErrorOf}).
  */
-const errorText = (error) =>
-  redactUris(error instanceof Error ? serverErrorOf(error).message : String(error));
+const errorText = (error) => {
+  return redactUris(error instanceof Error ? serverErrorOf(error).message : String(error));
+};
 
 /**
  * {@link errorText} joined with the wrapped cause: "Migration up failed: X"
@@ -91,22 +121,6 @@ const codeOf = (error) => {
 };
 
 /**
- * Slice errors of a background migration no retry fixes: the file changed or
- * is gone or invalid, the configuration or the deployment cannot run it. The
- * kit's lane ends on them, the queue's lane gives up on them, and the runner
- * backs off at its longest.
- */
-const FATAL_SLICE_CODES = new Set([
-  'ALX_ERR_CHECKSUM_MISMATCH',
-  'ALX_ERR_MIGRATION_FILE_NOT_FOUND',
-  'ALX_ERR_MIGRATION_INVALID_EXPORT',
-  'ALX_ERR_MIGRATION_LOAD_FAILED',
-  'ALX_ERR_MIGRATION_INVALID_NAME',
-  'ALX_ERR_CONFIG_INVALID',
-  'ALX_ERR_TRANSACTIONS_UNSUPPORTED',
-]);
-
-/**
  * Whether the MongoDB driver threw this: every error class of `mongodb` is
  * named `Mongo…` (a duck test — the driver is not required here, and a kit
  * built on another copy of it must still be recognized).
@@ -114,13 +128,17 @@ const FATAL_SLICE_CODES = new Set([
 const isDriverError = (error) => error instanceof Error && `${error.name}`.startsWith('Mongo');
 
 module.exports = {
+  DUPLICATE_KEY,
+  UNAUTHORIZED,
+  isDuplicateKey,
+  isUnauthorized,
   FATAL_SLICE_CODES,
-  codeOf,
-  contextPath,
-  documentErrorText,
+  serverErrorOf,
   errorText,
   errorWithCause,
-  isDriverError,
+  documentErrorText,
   isTransientTransaction,
-  serverErrorOf,
+  contextPath,
+  codeOf,
+  isDriverError,
 };

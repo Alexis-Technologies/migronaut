@@ -62,7 +62,7 @@ const runCli = (args, env = {}, cwd = project?.dir ?? repoRoot, input) => {
 const ESC = String.fromCharCode(27);
 const hasAnsi = (text) => text.includes(`${ESC}[`);
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_cli_test';
 
 before(async () => {
@@ -73,7 +73,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();

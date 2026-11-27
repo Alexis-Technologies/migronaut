@@ -1,3 +1,4 @@
+const { bsonType } = require('../../utils/canonical.js');
 const { mapLimit } = require('../../utils/concurrency.js');
 const { sameValue } = require('../../versioning/internal.js');
 const {
@@ -50,8 +51,11 @@ const SAMPLE_FIRST_FACTOR = 20;
 const HASH_MIN = -(2n ** 63n);
 const HASH_END = 2n ** 63n;
 
-const isMinKey = (value) => value?._bsontype === 'MinKey';
-const isMaxKey = (value) => value?._bsontype === 'MaxKey';
+/** Numbers wider than a double, written in full rather than through `Number` */
+const WIDE_NUMBER_TYPES = new Set(['Long', 'Decimal128']);
+
+const isMinKey = (value) => bsonType(value) === 'MinKey';
+const isMaxKey = (value) => bsonType(value) === 'MaxKey';
 const isBound = (value) => isMinKey(value) || isMaxKey(value);
 
 /** A value's comparison class — two values of one class compare the way MQL's `$gte`/`$lt` do */
@@ -138,10 +142,10 @@ const sameKeyValue = (a, b) => {
   return sameValue(a, b);
 };
 
-const numberText = (value) =>
-  typeof value === 'bigint' || value?._bsontype === 'Long' || value?._bsontype === 'Decimal128'
-    ? value.toString()
-    : `${Number(value)}`;
+const numberText = (value) => {
+  const isWide = typeof value === 'bigint' || WIDE_NUMBER_TYPES.has(bsonType(value));
+  return isWide ? `${value}` : `${Number(value)}`;
+};
 
 /** Whether a plan's epoch is not the collection's any more — resharded, or its key refined */
 const staleEpoch = (planned, current) => {
@@ -223,7 +227,7 @@ const hashAt = (value) => {
   if (isMinKey(value)) return HASH_MIN;
   if (isMaxKey(value)) return HASH_END;
   if (typeof value === 'bigint') return value;
-  if (value?._bsontype === 'Long') return value.toBigInt();
+  if (bsonType(value) === 'Long') return value.toBigInt();
   return BigInt(Math.trunc(Number(value)));
 };
 
@@ -543,17 +547,17 @@ const sortOf = (indexKey) => {
 };
 
 module.exports = {
-  MAX_STUCK,
   PARTITIONS_PER_SHARD,
-  capRuns,
+  MAX_STUCK,
   classOf,
-  createShardPartitioner,
-  hashAt,
-  runsOf,
+  valueAt,
   shardKeyFilter,
   shardKeyGuard,
   staleEpoch,
   withShardKey,
+  runsOf,
+  capRuns,
+  hashAt,
   splitHashed,
-  valueAt,
+  createShardPartitioner,
 };

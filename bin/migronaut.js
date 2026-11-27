@@ -2,15 +2,15 @@
 const { errorText } = require('../src/utils/error.js');
 const { sanitizeTerminal } = require('../src/utils/sanitize.js');
 
+/** How long a run stopped by an uncaught throw gets to release its lock before the exit */
+const UNCAUGHT_DRAIN_MS = 10_000;
+
 // Same hygiene as the default logger: these last-resort handlers are the only
 // paths that write to the TTY directly, and an escaped error message can embed
 // DB-derived text — sanitized by construction, like every other output path.
 const writeError = (error) => {
   process.stderr.write(`✖ ${sanitizeTerminal(errorText(error))}\n`);
 };
-
-/** How long a run stopped by an uncaught throw gets to release its lock before the exit */
-const UNCAUGHT_DRAIN_MS = 10_000;
 
 /**
  * Stop the runs in flight: after an error escaped every handler, what they do
@@ -60,6 +60,8 @@ process.on('uncaughtException', (error) => {
   setTimeout(() => process.exit(1), UNCAUGHT_DRAIN_MS).unref();
 });
 
+// Required after the handlers above, on purpose: an error thrown while the CLI
+// loads is reported by them, in the project's format, not as a raw stack.
 const { run } = require('../src/cli/index.js');
 
 run(process.argv).catch((error) => {

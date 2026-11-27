@@ -45,7 +45,7 @@ const runCli = (args, { input, onLine } = {}) => {
   });
 };
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_cli_background_test';
 const NAME = '0001-orders.js';
 
@@ -57,7 +57,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();
@@ -306,7 +306,7 @@ export const background = {
 });
 
 describe('migronaut background on a standalone server (CLI)', () => {
-  let standalone;
+  let standalone = null;
 
   before(async () => {
     standalone = await MongoMemoryServer.create();

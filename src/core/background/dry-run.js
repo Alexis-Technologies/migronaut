@@ -39,6 +39,19 @@ const { READ_OPTIONS } = require('../server-info.js');
 
 const MAX_SAMPLE = 1000;
 
+/** A match of this many documents or more is sampled collection-first — see sampleDocuments */
+const MATCH_FIRST_CAP = 20_000;
+
+/**
+ * Each document through the real write path in the sandbox, one at a time.
+ * A write error aborts the sandbox's transaction on the server — so the rest
+ * go on in a fresh sandbox, one transaction per failure, not per document.
+ */
+/** The longest a sandbox runs — under the server's 60-second transaction limit */
+const MAX_DEADLINE_MS = 50_000;
+
+const MAX_STEPS = 50;
+
 /** `value` as relaxed EJSON — what a person (or `--json`) can read */
 const ejson = (value) => {
   try {
@@ -102,16 +115,17 @@ const dryJob = (name, loaded, direction, logger, partitioner) => {
  * mongos; a key that cannot be read is left to the server to judge.
  */
 const shardedCheck = (deps) => {
-  return async (name) =>
-    (await deps.topology()) === 'sharded' && Boolean(await deps.shardKeyOf?.(name));
+  return async (name) => {
+    return (await deps.topology()) === 'sharded' && Boolean(await deps.shardKeyOf?.(name));
+  };
 };
 
-/** A match of this many documents or more is sampled collection-first — see sampleDocuments */
-const MATCH_FIRST_CAP = 20_000;
-
 /** The first `n` matched documents by `_id` */
-const firstDocuments = (collection, match, n, extra = {}) =>
-  collection.find(match, { sort: { _id: 1 }, limit: n, ...extra, ...READ_OPTIONS }).toArray();
+const firstDocuments = (collection, match, n, extra = {}) => {
+  return collection
+    .find(match, { sort: { _id: 1 }, limit: n, ...extra, ...READ_OPTIONS })
+    .toArray();
+};
 
 /**
  * `n` matched documents at random, at a cost that follows `n` rather than the
@@ -126,8 +140,9 @@ const firstDocuments = (collection, match, n, extra = {}) =>
  */
 const sampleDocuments = async (collection, match, n) => {
   const options = { maxTimeMS: SAMPLE_TIMEOUT_MS, ...READ_OPTIONS };
-  const matchFirst = () =>
-    collection.aggregate([{ $match: match }, { $sample: { size: n } }], options).toArray();
+  const matchFirst = () => {
+    return collection.aggregate([{ $match: match }, { $sample: { size: n } }], options).toArray();
+  };
   try {
     const count = await collection.countDocuments(match, { limit: MATCH_FIRST_CAP, ...options });
     if (count < MATCH_FIRST_CAP) return { docs: await matchFirst() };
@@ -244,14 +259,6 @@ const tally = (rows) => {
   return { migrated, failed };
 };
 
-/**
- * Each document through the real write path in the sandbox, one at a time.
- * A write error aborts the sandbox's transaction on the server — so the rest
- * go on in a fresh sandbox, one transaction per failure, not per document.
- */
-/** The longest a sandbox runs — under the server's 60-second transaction limit */
-const MAX_DEADLINE_MS = 50_000;
-
 /** `deadlineMs`, checked: 1 to 50 000 (the default) */
 const deadlineOf = (options) => {
   const ms = options.deadlineMs ?? MAX_DEADLINE_MS;
@@ -349,8 +356,6 @@ const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
     attempts,
   };
 };
-
-const MAX_STEPS = 50;
 
 /**
  * Dry-run a step migration: up to `steps` calls of `step` in one sandbox —
@@ -450,10 +455,10 @@ const previewSteps = async (deps, name, loaded, options = {}) => {
 };
 
 module.exports = {
-  MATCH_FIRST_CAP,
   MAX_SAMPLE,
+  MATCH_FIRST_CAP,
   MAX_STEPS,
+  sampleDocuments,
   previewSample,
   previewSteps,
-  sampleDocuments,
 };

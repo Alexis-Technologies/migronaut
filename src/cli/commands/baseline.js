@@ -33,11 +33,12 @@ const registerBaseline = (program) => {
       }
       return undefined;
     },
-    run: (migrator, opts) =>
-      migrator.baseline({
+    run: (migrator, opts) => {
+      return migrator.baseline({
         noLock: opts.noLock,
         ...(opts.to ? { to: opts.to } : {}),
-      }),
+      });
+    },
     // No render: core logs the ✔ Baselined summary itself.
   });
 };

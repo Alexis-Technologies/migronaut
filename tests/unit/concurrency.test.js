@@ -125,7 +125,7 @@ describe('settledWithin', () => {
   });
 
   it('should stop waiting after the time it was given, leaving the promise alone', async () => {
-    let finish;
+    let finish = null;
     const slow = new Promise((resolve) => {
       finish = resolve;
     });

@@ -9,18 +9,12 @@ const CHECKSUM_CONCURRENCY = 16;
 
 /** Returns true when a value looks like a usable migrate-mongo changelog doc */
 const isMigrateMongoDoc = (value) => {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof value.fileName === 'string' &&
-    value.fileName.length > 0
-  );
+  if (typeof value !== 'object' || value === null) return false;
+  return typeof value.fileName === 'string' && value.fileName.length > 0;
 };
 
 /** Apply-order sort key for a doc — its run timestamp, falling back to apply time */
-const orderKey = (doc) => {
-  return doc.migrationBlock ?? new Date(doc.appliedAt).getTime();
-};
+const orderKey = (doc) => doc.migrationBlock ?? new Date(doc.appliedAt).getTime();
 
 /**
  * Map migrate-mongo changelog docs into migronaut MigrationRecords.
@@ -41,9 +35,9 @@ const mapMigrateMongoDocs = async (docs, options) => {
 
   // Independent per-doc disk reads — resolved concurrently, but bounded:
   // mapLimit preserves input order exactly like Promise.all would.
-  const resolutions = await mapLimit(sorted, CHECKSUM_CONCURRENCY, (doc) =>
-    options.resolveChecksum(doc.fileName, doc.fileHash),
-  );
+  const resolutions = await mapLimit(sorted, CHECKSUM_CONCURRENCY, (doc) => {
+    return options.resolveChecksum(doc.fileName, doc.fileHash);
+  });
 
   const records = [];
   for (let index = 0; index < sorted.length; index++) {

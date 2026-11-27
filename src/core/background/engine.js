@@ -4,7 +4,12 @@ const {
   LockLostError,
 } = require('../../errors/index.js');
 const { canonical, isPlainObject } = require('../../utils/canonical.js');
-const { documentErrorText, errorText, isTransientTransaction } = require('../../utils/error.js');
+const {
+  DUPLICATE_KEY,
+  documentErrorText,
+  errorText,
+  isTransientTransaction,
+} = require('../../utils/error.js');
 const {
   cloneDocument,
   occFilter,
@@ -17,6 +22,9 @@ const { MAX_CHECKPOINT_BYTES } = require('./spec.js');
 const { bsonSize } = require('./bson-peer.js');
 const { sleep } = require('./throttle.js');
 const { READ_OPTIONS } = require('../server-info.js');
+
+/** The counters a step result may report */
+const STEP_COUNTERS = Object.freeze(['processed', 'migrated']);
 
 /**
  * The batch engine: one background migration's documents rewritten, batch
@@ -38,12 +46,37 @@ const { READ_OPTIONS } = require('../server-info.js');
 
 /** Server errors that fail just the document, not the batch */
 const DOCUMENT_ERRORS = new Set([
-  11000, // duplicate key
+  DUPLICATE_KEY,
   121, // document failed validation
   72, // invalid options — a shard key change through mongos
   66, // immutable field
   17280, // key too large to index
 ]);
+
+/** A transaction's retry backoff: full jitter, up to 50 ms · 2ⁿ, never past 2 s */
+const TXN_BACKOFF_BASE_MS = 50;
+
+const TXN_BACKOFF_MAX_MS = 2_000;
+
+/** A transactional batch halved on trouble grows back ×1.5 after this many clean ones */
+const CLEAN_BATCHES_TO_GROW = 5;
+
+const BATCH_GROWTH = 1.5;
+
+/** The server's ceiling on what one batch reads into a transaction — well under 16 MiB */
+const MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
+
+/** Errors that mean "the batch took too long or grew too big" — halve it and retry */
+const TIME_OR_SIZE = new Set([50, 262, 290, 334, 10334, 17419]);
+
+/** What the state's controls mean for a lane on this partition — `undefined`: go on */
+/** What a lane does when its state is not `running` any more: stop as the state says */
+const STOPPED_OUTCOMES = {
+  __proto__: null,
+  paused: 'paused',
+  cancelled: 'cancelled',
+  failed: 'failed',
+};
 
 /** A stable string for an `_id`, whatever BSON type it is — a Map key */
 const idKey = (id) => JSON.stringify(canonical(id));
@@ -119,11 +152,13 @@ const withWriteFilter = (filter, partitioner, doc) => {
   return filter;
 };
 
-const docError = (doc, error, reason) => ({
-  id: doc._id,
-  error: documentErrorText(error),
-  ...(reason !== undefined ? { reason } : {}),
-});
+const docError = (doc, error, reason) => {
+  return {
+    id: doc._id,
+    error: documentErrorText(error),
+    ...(reason !== undefined ? { reason } : {}),
+  };
+};
 
 /**
  * Transform `docs` (each on a copy): `[{ doc, next, error }]`, aligned — one
@@ -272,11 +307,12 @@ const byIds = (docs, partitioner) => {
  * every write joins it (the transactional mode, the sandbox) and a document
  * a concurrent write moved aborts the batch instead (`abortOnConflict`).
  */
-const applyBatch = async (
-  job,
-  docs,
-  { db, session, ctxExtra, abortOnConflict = false, strict = false, bare = false, attempt } = {},
-) => {
+const applyBatch = async (job, docs, options = {}) => {
+  const { db, session, ctxExtra, attempt } = options;
+  const abortOnConflict = options.abortOnConflict ?? false;
+  const strict = options.strict ?? false;
+  const bare = options.bare ?? false;
+
   const spec = job.spec;
   const collection = db.collection(spec.collection);
   const { source, target } = directionOf(spec, job.fns, job.direction);
@@ -388,10 +424,9 @@ const documentError = (entry) => {
  * (and, in a transaction or a dry run, the session), its last checkpoint,
  * and the deadline it should return by.
  */
-const buildStepContext = (
-  job,
-  { db, client, session, checkpoint, deadline, dryRun, attempt } = {},
-) => {
+const buildStepContext = (job, options = {}) => {
+  const { db, client, session, checkpoint, deadline, dryRun, attempt } = options;
+
   return {
     ...transformContext(job, {}, attempt),
     db,
@@ -415,7 +450,7 @@ const readStepResult = (result) => {
     );
   }
   const counters = {};
-  for (const key of ['processed', 'migrated']) {
+  for (const key of STEP_COUNTERS) {
     if (Number.isSafeInteger(result[key]) && result[key] > 0) counters[key] = result[key];
   }
   return {
@@ -496,8 +531,8 @@ const runStep = async (job, ctx, cursor) => {
     );
     return { next, counts };
   };
-  const stepContext = (session, attempt) =>
-    buildStepContext(job, {
+  const stepContext = (session, attempt) => {
+    return buildStepContext(job, {
       db,
       client,
       checkpoint: cursor.checkpoint,
@@ -505,6 +540,7 @@ const runStep = async (job, ctx, cursor) => {
       attempt,
       ...(session ? { session } : {}),
     });
+  };
   if (!job.spec.transaction) return save(readStepResult(await fn(stepContext(undefined, 1))));
   for (let attempt = 0; ; attempt++) {
     const session = client.startSession();
@@ -601,24 +637,13 @@ const plainBatch = async (job, ctx, cursor, batchSize) => {
   return { result, next, counts };
 };
 
-/** A transaction's retry backoff: full jitter, up to 50 ms · 2ⁿ, never past 2 s */
-const TXN_BACKOFF_BASE_MS = 50;
-const TXN_BACKOFF_MAX_MS = 2_000;
-const backoffMs = (attempt) =>
-  Math.random() * Math.min(TXN_BACKOFF_MAX_MS, TXN_BACKOFF_BASE_MS * 2 ** attempt);
+const backoffMs = (attempt) => {
+  return Math.random() * Math.min(TXN_BACKOFF_MAX_MS, TXN_BACKOFF_BASE_MS * 2 ** attempt);
+};
 
-/** A transactional batch halved on trouble grows back ×1.5 after this many clean ones */
-const CLEAN_BATCHES_TO_GROW = 5;
-const BATCH_GROWTH = 1.5;
-
-/** The server's ceiling on what one batch reads into a transaction — well under 16 MiB */
-const MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
-
-/** Errors that mean "the batch took too long or grew too big" — halve it and retry */
-const TIME_OR_SIZE = new Set([50, 262, 290, 334, 10334, 17419]);
-
-const isUnknownCommit = (error) =>
-  error?.hasErrorLabel?.('UnknownTransactionCommitResult') === true;
+const isUnknownCommit = (error) => {
+  return error?.hasErrorLabel?.('UnknownTransactionCommitResult') === true;
+};
 
 /** The leading documents of `docs` whose BSON fits in `bytes` — at least one */
 const fitting = (docs, bytes) => {
@@ -882,33 +907,27 @@ const processPartition = async (job, ctx) => {
   }
 };
 
-/** What the state's controls mean for a lane on this partition — `undefined`: go on */
 const controlOutcome = (control, job, partition) => {
   if (control === null) return 'cancelled';
-  if (control.status === 'paused') return 'paused';
-  if (control.status === 'cancelled') return 'cancelled';
-  if (control.status === 'failed') return 'failed';
-  if (control.status !== 'running') return 'stale';
-  if (control.generation !== job.generation || control.plan?.token !== partition.plan) {
-    return 'stale';
-  }
-  return undefined;
+  if (control.status !== 'running') return STOPPED_OUTCOMES[control.status] ?? 'stale';
+  const isCurrent = control.generation === job.generation && control.plan?.token === partition.plan;
+  return isCurrent ? undefined : 'stale';
 };
 
 module.exports = {
   DOCUMENT_ERRORS,
-  applyBatch,
-  transformAll,
-  isOverload,
-  buildStepContext,
-  controlOutcome,
-  addCounters,
-  directionOf,
-  excludeBadIds,
   idKey,
+  directionOf,
   matchOf,
-  processPartition,
+  excludeBadIds,
+  transformContext,
+  transformAll,
+  applyBatch,
+  buildStepContext,
   readStepResult,
   transactionOptions,
-  transformContext,
+  isOverload,
+  addCounters,
+  processPartition,
+  controlOutcome,
 };

@@ -320,7 +320,7 @@ class FakeJob {
     if (state.failed.has(jobId)) throw new Error(stored.failedReason);
 
     return new Promise((resolve, reject) => {
-      let timer;
+      let timer = null;
       const cleanup = () => {
         clearTimeout(timer);
         queueEvents.off('completed', onCompleted);
@@ -427,7 +427,7 @@ class FakeQueue extends EventEmitter {
     const merged = { ...this.opts.defaultJobOptions, ...opts };
     const detached = (id) => new FakeJob(state, { id, name, data, opts: merged });
 
-    let parent;
+    let parent = null;
     if (merged.parent !== undefined) {
       parent = parentOf(state, merged.parent);
       if (parent.job === undefined) {
@@ -436,7 +436,7 @@ class FakeQueue extends EventEmitter {
       }
     }
     if (merged.jobId !== undefined && state.jobs.has(merged.jobId)) {
-      if (parent !== undefined) bindExisting(state, state.jobs.get(merged.jobId), merged.parent);
+      if (parent !== null) bindExisting(state, state.jobs.get(merged.jobId), merged.parent);
       state.bus.emit('duplicated', { jobId: merged.jobId });
       return detached(merged.jobId);
     }
@@ -454,7 +454,7 @@ class FakeQueue extends EventEmitter {
     const id = merged.jobId ?? String(state.nextId++);
     state.jobs.set(id, new FakeJob(state, { id, name, data, opts: merged }));
     if (dedupId !== undefined) state.dedup.set(dedupId, id);
-    if (parent !== undefined) parent.job.dependencies.set(`${state.key}:${id}`, 'unprocessed');
+    if (parent !== null) parent.job.dependencies.set(`${state.key}:${id}`, 'unprocessed');
     if (merged.delay > 0) delay(state, id, Date.now() + merged.delay);
     else enqueue(state, id);
     return detached(id);

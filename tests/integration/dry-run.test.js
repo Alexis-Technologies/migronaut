@@ -4,7 +4,7 @@ const { ConfigInvalidError, IrreversibleMigrationError } = require('../../src/er
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_dryrun_test';
 
 before(async () => {
@@ -19,8 +19,8 @@ beforeEach(async () => {
   await mongo.db.dropDatabase();
 });
 
-let project;
-let migrator;
+let project = null;
+let migrator = null;
 
 afterEach(async () => {
   await migrator?.disconnect();

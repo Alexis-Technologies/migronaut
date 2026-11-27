@@ -209,7 +209,7 @@ describe('runMigration', () => {
     // timeout timer is the only pending handle — see tests/helpers/event-loop.js.
     const release = keepEventLoopAlive();
     try {
-      let rejectLater;
+      let rejectLater = null;
       const migration = {
         up: mock.fn(() => new Promise((_resolve, reject) => (rejectLater = reject))),
         down: mock.fn(),
@@ -371,7 +371,7 @@ describe('runMigration — changelog-write phase (non-transactional)', () => {
 describe('runMigration — timeout aborts ctx.signal', () => {
   it('should abort the context signal when the timeout fires', async () => {
     const { context } = makeContext();
-    let observedSignal;
+    let observedSignal = null;
     const migration = {
       // A cooperative body: parks forever unless the signal tells it to stop.
       up: (ctx) => {
@@ -407,7 +407,7 @@ describe('runMigration — timeout aborts ctx.signal', () => {
   it('should compose the run signal with the timeout signal', async () => {
     const { context } = makeContext();
     const runController = new AbortController();
-    let observedSignal;
+    let observedSignal = null;
     const migration = {
       up: (ctx) => {
         observedSignal = ctx.signal;
@@ -455,7 +455,7 @@ describe('runMigration — failure timing', () => {
 
 describe('runMigration — onError always gets a whole context', () => {
   it('should hand it a first attempt’s context when the session would not start', async () => {
-    let failedWith;
+    let failedWith = null;
     await assert.rejects(
       runMigration({
         name: 'a.ts',
@@ -555,7 +555,7 @@ describe('runMigration — a context per attempt', () => {
 
   it('should hand onError the context of the attempt that failed last', async () => {
     const { context } = retryingContext();
-    let failedWith;
+    let failedWith = null;
     await assert.rejects(
       runMigration({
         name: 'a.ts',

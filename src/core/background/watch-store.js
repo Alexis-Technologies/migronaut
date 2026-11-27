@@ -1,4 +1,5 @@
 const os = require('node:os');
+
 const { backgroundCollectionNames } = require('../config.js');
 const { READ_OPTIONS } = require('../server-info.js');
 

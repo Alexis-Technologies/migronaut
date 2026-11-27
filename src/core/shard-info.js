@@ -1,3 +1,4 @@
+const { isUnauthorized } = require('../utils/error.js');
 const { READ_OPTIONS } = require('./server-info.js');
 
 /**
@@ -11,11 +12,6 @@ const { READ_OPTIONS } = require('./server-info.js');
  *   under `{ _id: 1 }`, which is no key to partition or target by);
  * - `readChunks` — the chunks of a sharded collection, in key order.
  */
-
-/** The server's "not authorized" — the one refusal that means "unknown", not "broken" */
-const UNAUTHORIZED = 13;
-
-const isUnauthorized = (error) => error?.code === UNAUTHORIZED;
 
 /**
  * `{ key, uuid, timestamp, unsplittable }` of a sharded collection, `null` when
@@ -73,4 +69,4 @@ const readChunks = async (client, dbName, collection, sharding) => {
   }
 };
 
-module.exports = { isUnauthorized, readChunks, readShardKey };
+module.exports = { readShardKey, readChunks };

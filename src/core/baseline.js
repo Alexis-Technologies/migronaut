@@ -42,9 +42,9 @@ const runBaseline = async (deps, options, signal) => {
   // Checksums come from the files as they are NOW — that is the contract: the
   // baseline asserts "the database already matches these exact files", and
   // later drift checks police edits against this snapshot.
-  const checksums = await mapLimit(targets, FS_CONCURRENCY, (name) =>
-    computeChecksum(deps.filepath(name)),
-  );
+  const checksums = await mapLimit(targets, FS_CONCURRENCY, (name) => {
+    return computeChecksum(deps.filepath(name));
+  });
 
   const batch = await deps.nextBatch();
   const records = [];

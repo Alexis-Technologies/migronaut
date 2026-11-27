@@ -1,7 +1,7 @@
 const { addAbortListener } = require('node:events');
 
 const { errorText } = require('../../utils/error.js');
-const { isUnauthorized } = require('../shard-info.js');
+const { isUnauthorized } = require('../../utils/error.js');
 
 /**
  * Pacing a background migration: it rewrites a production collection while
@@ -49,6 +49,12 @@ const NO_REPLICATION = new Set([
   76, // NoReplicationEnabled (standalone)
   115, // CommandNotSupported
 ]);
+
+/** How often a throttle change is reported, at most, per controller */
+const THROTTLE_REPORT_INTERVAL_MS = 10_000;
+
+/** The first extra pause once the batch is as small as it gets */
+const FIRST_BACKOFF_MS = 100;
 
 /** Sleep `ms`, cut short (rejecting with the reason) when `signal` aborts */
 const sleep = (ms, signal) => {
@@ -111,16 +117,12 @@ const excludedMembers = (config) => {
  * (`Map<name, { since, warnedAt, reportedAt }>`): a wait goes on across the
  * slices and the lanes of a process, and is said once for all of them.
  */
-const createThrottle = ({
-  spec,
-  db,
-  logger,
-  name,
-  now = Date.now,
-  wait = sleep,
-  warned,
-  lagWaits = new Map(),
-}) => {
+const createThrottle = (options) => {
+  const { spec, db, logger, name, warned } = options;
+  const now = options.now ?? Date.now;
+  const wait = options.wait ?? sleep;
+  const lagWaits = options.lagWaits ?? new Map();
+
   const maxLag = spec.maxReplicationLagMs;
   let lagEnabled = maxLag !== false && typeof db?.admin === 'function';
   let lastLagCheck = -Infinity;
@@ -259,12 +261,6 @@ const createThrottle = ({
 
 // ─── Adaptive batch sizing (AIMD) ─────────────────────────────────────────────
 
-/** How often a throttle change is reported, at most, per controller */
-const THROTTLE_REPORT_INTERVAL_MS = 10_000;
-
-/** The first extra pause once the batch is as small as it gets */
-const FIRST_BACKOFF_MS = 100;
-
 /**
  * A latency-driven batch size, additive-increase / multiplicative-decrease —
  * TCP's answer to "how fast may I go without knowing the capacity": every
@@ -336,9 +332,9 @@ module.exports = {
   LAG_WARN_EVERY_MS,
   MAX_HOOK_PAUSE_MS,
   THROTTLE_REPORT_INTERVAL_MS,
-  createAdaptive,
-  createThrottle,
-  excludedMembers,
-  replicationLagMs,
   sleep,
+  replicationLagMs,
+  excludedMembers,
+  createThrottle,
+  createAdaptive,
 };

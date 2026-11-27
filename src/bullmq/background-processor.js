@@ -60,17 +60,6 @@ const MAX_INLINE_STEPS = 5;
 /** The longest slice a caller may ask for — the kit's limit, mirrored (a unit test pins it) */
 const MAX_SLICE_MS = 3_600_000;
 
-/**
- * The error that tells BullMQ a job was moved (delayed, waiting for its
- * children) — a typed one, renamed: BullMQ matches the name, and the adapter
- * cannot import its classes.
- */
-const moved = (name) => {
-  const error = new RunAbortedError(`Moved: ${name}`, { context: { reason: name, moved: true } });
-  error.name = name;
-  return error;
-};
-
 /** Every option createBackgroundProcessor takes — a typo is refused, not ignored */
 const PROCESSOR_KEYS = new Set([
   'kit',
@@ -85,6 +74,17 @@ const PROCESSOR_KEYS = new Set([
   'maxLaneRetries',
   'userlandLogRows',
 ]);
+
+/**
+ * The error that tells BullMQ a job was moved (delayed, waiting for its
+ * children) — a typed one, renamed: BullMQ matches the name, and the adapter
+ * cannot import its classes.
+ */
+const moved = (name) => {
+  const error = new RunAbortedError(`Moved: ${name}`, { context: { reason: name, moved: true } });
+  error.name = name;
+  return error;
+};
 
 /**
  * Validate the background processor's options. Pure, like the migration
@@ -256,12 +256,12 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
    */
   const asLane = async (job, fn) => {
     const ref = jobRefOf(job);
-    if (ref === undefined) {
+    if (ref === null) {
       kit.logger.debug(
         `Lane job ${job?.id} has no id a slice can carry — its lines name no job`,
         {},
       );
-      return fn(undefined);
+      return fn(null);
     }
     const lane = { job, writes: new Set(), rows: 0, dropped: 0 };
     lanes.set(ref.id, lane);
@@ -294,12 +294,9 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
 
   /** Whether this coordinator can spawn its lanes as children and wait for them */
   const childrenFor = (ctx) => {
-    return (
-      settings.children !== false &&
-      typeof parentQueueOf(ctx.job) === 'string' &&
-      typeof ctx.job.moveToWaitingChildren === 'function' &&
-      typeof ctx.token === 'string'
-    );
+    if (settings.children === false || typeof ctx.token !== 'string') return false;
+    const canWait = typeof ctx.job.moveToWaitingChildren === 'function';
+    return canWait && typeof parentQueueOf(ctx.job) === 'string';
   };
 
   /**
@@ -414,13 +411,13 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
     if (shutdownController.signal.aborted) return later(ctx, 0, { ...base, outcome: 'stopped' });
     let slice = null;
     try {
-      slice = await asLane(job, (ref) =>
-        kit.runBackgroundSlice(name, {
+      slice = await asLane(job, (ref) => {
+        return kit.runBackgroundSlice(name, {
           signal: ctx.abort,
           ...(settings.sliceMs !== undefined ? { sliceMs: settings.sliceMs } : {}),
           ...(ref ? { job: ref } : {}),
-        }),
-      );
+        });
+      });
     } catch (error) {
       if (shutdownController.signal.aborted) {
         return later(ctx, 0, { ...base, outcome: 'stopped' });
@@ -578,6 +575,6 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
 module.exports = {
   BACKGROUND_PROCESSOR_DEFAULTS: DEFAULTS,
   MAX_SLICE_MS,
-  createBackgroundProcessor,
   resolveBackgroundProcessorOptions,
+  createBackgroundProcessor,
 };

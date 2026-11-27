@@ -41,4 +41,4 @@ const jobFields = (job) => {
   return { jobId: job.id, ...(job.groupId !== undefined ? { groupId: job.groupId } : {}) };
 };
 
-module.exports = { JOB_REF_LIMITS, jobFields, jobRefIssue };
+module.exports = { JOB_REF_LIMITS, jobRefIssue, jobFields };

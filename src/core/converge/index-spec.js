@@ -1,4 +1,18 @@
 const { deepEqual, isPlainObject, regExpIssue, toWire } = require('../../utils/canonical.js');
+const { isVersionAtLeast } = require('../server-info.js');
+
+/** Index options that are finite numbers (the 2d bounds) */
+const FINITE_OPTIONS = Object.freeze(['min', 'max']);
+
+/** A text index's string options */
+const TEXT_STRING_OPTIONS = Object.freeze(['default_language', 'language_override']);
+
+/** Index options that are positive integers */
+const POSITIVE_INTEGER_OPTIONS = Object.freeze([
+  'textIndexVersion',
+  '2dsphereIndexVersion',
+  'bits',
+]);
 
 /**
  * One declared index against one live index: validation, normalization, and
@@ -54,7 +68,7 @@ const INDEX_KEYS = new Set([
 ]);
 
 /** Every option an index is normalized with — built once, read per index */
-const NORMALIZED_OPTIONS = Object.freeze([...SEMANTIC_OPTIONS, ...DECLARED_ONLY_OPTIONS]);
+const NORMALIZED_OPTIONS = Object.freeze(SEMANTIC_OPTIONS.concat(DECLARED_ONLY_OPTIONS));
 
 const BOOLEAN_OPTIONS = new Set(['unique', 'sparse', 'hidden', 'background']);
 const OBJECT_OPTIONS = new Set([
@@ -73,6 +87,19 @@ const TEXT_DEFAULTS = { default_language: 'english', language_override: 'languag
 
 /** Field names a plain object moves to the front, whatever order they were written in */
 const INTEGER_LIKE = /^(?:0|[1-9]\d*)$/;
+
+/**
+ * Collation fields whose default is the same for every locale. A declaration
+ * that leaves one out means this value — so a live index built with another
+ * (`strength: 2`) is a difference, not a match. Every other field (`caseFirst`,
+ * `alternate`, `backwards`, `normalization`, …) has locale-specific defaults
+ * and is compared only when declared.
+ */
+const UNIVERSAL_COLLATION_DEFAULTS = Object.freeze({
+  strength: 3,
+  caseLevel: false,
+  numericOrdering: false,
+});
 
 /** Whether `entries` name their fields in exactly the order of `fields` */
 const sameFieldOrder = (entries, fields) => {
@@ -210,19 +237,19 @@ const indexIssues = (index, path) => {
   if (collationInvalid) {
     report('collation')('must be an object with a locale');
   }
-  for (const option of ['default_language', 'language_override']) {
+  for (const option of TEXT_STRING_OPTIONS) {
     const value = index[option];
     if (value !== undefined && (typeof value !== 'string' || value.length === 0)) {
       report(option)('must be a non-empty string');
     }
   }
-  for (const option of ['textIndexVersion', '2dsphereIndexVersion', 'bits']) {
+  for (const option of POSITIVE_INTEGER_OPTIONS) {
     const value = index[option];
     if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
       report(option)('must be a positive integer');
     }
   }
-  for (const option of ['min', 'max']) {
+  for (const option of FINITE_OPTIONS) {
     if (index[option] !== undefined && !Number.isFinite(index[option])) {
       report(option)('must be a finite number');
     }
@@ -345,19 +372,6 @@ const sameKey = (declared, live) => {
   return true;
 };
 
-/**
- * Collation fields whose default is the same for every locale. A declaration
- * that leaves one out means this value — so a live index built with another
- * (`strength: 2`) is a difference, not a match. Every other field (`caseFirst`,
- * `alternate`, `backwards`, `normalization`, …) has locale-specific defaults
- * and is compared only when declared.
- */
-const UNIVERSAL_COLLATION_DEFAULTS = Object.freeze({
-  strength: 3,
-  caseLevel: false,
-  numericOrdering: false,
-});
-
 /** A declared collation with the universal defaults filled in */
 const withCollationDefaults = (collation) => {
   if (collation === undefined || collation.locale === 'simple') return collation;
@@ -408,10 +422,14 @@ const collationMatches = (declared, liveCollation, defaultCollation) => {
  * their names.
  */
 const sameSignature = (declared, live, defaultCollation) => {
+  if (!sameKey(declared, live)) return false;
+  const { options } = declared;
+  const samePartial = deepEqual(
+    options.partialFilterExpression,
+    live.options.partialFilterExpression,
+  );
   return (
-    sameKey(declared, live) &&
-    deepEqual(declared.options.partialFilterExpression, live.options.partialFilterExpression) &&
-    collationMatches(declared.options.collation, live.options.collation, defaultCollation)
+    samePartial && collationMatches(options.collation, live.options.collation, defaultCollation)
   );
 };
 
@@ -424,14 +442,12 @@ const sameSignature = (declared, live, defaultCollation) => {
  * collation, which a definition cannot know.
  */
 const sameDeclaredSignature = (a, b) => {
-  return (
-    sameKey(a, b) &&
-    deepEqual(a.options.partialFilterExpression, b.options.partialFilterExpression) &&
-    deepEqual(
-      withCollationDefaults(a.options.collation),
-      withCollationDefaults(b.options.collation),
-    )
-  );
+  if (!sameKey(a, b)) return false;
+  if (!deepEqual(a.options.partialFilterExpression, b.options.partialFilterExpression)) {
+    return false;
+  }
+  const collationA = withCollationDefaults(a.options.collation);
+  return deepEqual(collationA, withCollationDefaults(b.options.collation));
 };
 
 /**
@@ -440,17 +456,14 @@ const sameDeclaredSignature = (a, b) => {
  * available `hidden` and TTL change).
  */
 const inPlaceCapabilities = (version) => {
-  const atLeast = (major, minor) =>
-    version !== undefined &&
-    (version.major > major || (version.major === major && version.minor >= minor));
   return {
     // collMod prepareUnique → unique: a non-unique index becomes unique
     // without being dropped — no window without it, no second scan. The
     // commands exist since 6.0, but a 6.0 server reported the conversion and
     // went on accepting duplicates in our tests; 7.0 is where it is enforced.
-    unique: atLeast(7, 0),
+    unique: isVersionAtLeast(version, 7, 0),
     // collMod expireAfterSeconds on a single-field index that has no TTL yet.
-    addTtl: atLeast(5, 1),
+    addTtl: isVersionAtLeast(version, 5, 1),
   };
 };
 
@@ -510,7 +523,7 @@ const compareIndex = (declared, live, defaultCollation, capabilities = {}) => {
   if (declared.isText || live.isText) {
     const weights = declared.isText ? textWeights(declared.entries, d.weights) : undefined;
     if (!deepEqual(weights, l.weights)) diffs.push('weights');
-    for (const option of ['default_language', 'language_override']) {
+    for (const option of TEXT_STRING_OPTIONS) {
       const want = declared.isText ? (d[option] ?? TEXT_DEFAULTS[option]) : undefined;
       if (want !== l[option]) diffs.push(option);
     }
@@ -540,16 +553,16 @@ const restoreSpec = (raw) => {
 
 module.exports = {
   DIRECTIONS,
-  inPlaceCapabilities,
-  INDEX_KEYS,
   SEMANTIC_OPTIONS,
-  compareIndex,
+  INDEX_KEYS,
+  keyEntries,
   defaultIndexName,
   indexIssues,
-  keyEntries,
   normalizeDeclaredIndex,
   normalizeLiveIndex,
-  restoreSpec,
-  sameDeclaredSignature,
   sameSignature,
+  sameDeclaredSignature,
+  inPlaceCapabilities,
+  compareIndex,
+  restoreSpec,
 };

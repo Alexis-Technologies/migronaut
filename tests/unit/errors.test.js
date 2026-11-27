@@ -5,30 +5,30 @@ const { HookFailedError, MigronautError, NotAppliedError } = errors;
 
 describe('MigronautError', () => {
   it('should set message, code and context from the options', () => {
-    const err = new MigronautError('Bad config', {
+    const error = new MigronautError('Bad config', {
       code: 'ALX_ERR_CONFIG_INVALID',
       context: { field: 'uri' },
     });
-    assert.strictEqual(err.code, 'ALX_ERR_CONFIG_INVALID');
-    assert.strictEqual(err.message, 'Bad config');
-    assert.deepStrictEqual(err.context, { field: 'uri' });
-    assert.strictEqual(err.name, 'MigronautError');
+    assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
+    assert.strictEqual(error.message, 'Bad config');
+    assert.deepStrictEqual(error.context, { field: 'uri' });
+    assert.strictEqual(error.name, 'MigronautError');
   });
 
   it('should be an instance of Error', () => {
-    const err = new MigronautError('Bad config', { code: 'ALX_ERR_CONFIG_INVALID' });
-    assert.ok(err instanceof Error);
+    const error = new MigronautError('Bad config', { code: 'ALX_ERR_CONFIG_INVALID' });
+    assert.ok(error instanceof Error);
   });
 
   it('should give every instance a context, empty when none is given', () => {
-    const err = new MigronautError('Bad config', { code: 'ALX_ERR_CONFIG_INVALID' });
-    assert.ok(Object.hasOwn(err, 'context'));
-    assert.deepStrictEqual(err.context, {});
+    const error = new MigronautError('Bad config', { code: 'ALX_ERR_CONFIG_INVALID' });
+    assert.ok(Object.hasOwn(error, 'context'));
+    assert.deepStrictEqual(error.context, {});
   });
 
   it('should capture a stack trace', () => {
-    const err = new MigronautError('Bad config', { code: 'ALX_ERR_CONFIG_INVALID' });
-    assert.notStrictEqual(err.stack, undefined);
+    const error = new MigronautError('Bad config', { code: 'ALX_ERR_CONFIG_INVALID' });
+    assert.notStrictEqual(error.stack, undefined);
   });
 });
 
@@ -53,14 +53,14 @@ describe('domain error classes', () => {
   for (const [name, Ctor] of subclasses) {
     describe(name, () => {
       it('should carry a typed code and extend MigronautError', () => {
-        const err = new Ctor('Something happened', { context: { detail: 1 } });
-        assert.ok(err instanceof MigronautError);
-        assert.ok(err instanceof Error);
-        assert.strictEqual(typeof err.code, 'string');
-        assert.match(err.code, /^ALX_ERR_[A-Z_]+$/);
-        assert.strictEqual(err.name, name);
-        assert.strictEqual(err.message, 'Something happened');
-        assert.deepStrictEqual(err.context, { detail: 1 });
+        const error = new Ctor('Something happened', { context: { detail: 1 } });
+        assert.ok(error instanceof MigronautError);
+        assert.ok(error instanceof Error);
+        assert.strictEqual(typeof error.code, 'string');
+        assert.match(error.code, /^ALX_ERR_[A-Z_]+$/);
+        assert.strictEqual(error.name, name);
+        assert.strictEqual(error.message, 'Something happened');
+        assert.deepStrictEqual(error.context, { detail: 1 });
       });
 
       it('should keep its own code over one given in the options', () => {
@@ -98,19 +98,19 @@ describe('error cause chaining', () => {
   });
 
   it('should not set cause when none is given', () => {
-    const err = new NotAppliedError('nope', { context: { filename: 'a.js' } });
-    assert.ok(!Object.hasOwn(err, 'cause'));
-    assert.strictEqual(err.cause, undefined);
+    const error = new NotAppliedError('nope', { context: { filename: 'a.js' } });
+    assert.ok(!Object.hasOwn(error, 'cause'));
+    assert.strictEqual(error.cause, undefined);
   });
 
   it('should chain the cause through a subclass', () => {
     const root = new TypeError('bad input');
-    const err = new HookFailedError('The beforeAll hook failed', {
+    const error = new HookFailedError('The beforeAll hook failed', {
       cause: root,
       context: { hook: 'beforeAll' },
     });
-    assert.strictEqual(err.cause, root);
-    assert.strictEqual(err.context.hook, 'beforeAll');
-    assert.strictEqual(err.code, 'ALX_ERR_HOOK_FAILED');
+    assert.strictEqual(error.cause, root);
+    assert.strictEqual(error.context.hook, 'beforeAll');
+    assert.strictEqual(error.code, 'ALX_ERR_HOOK_FAILED');
   });
 });

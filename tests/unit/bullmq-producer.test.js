@@ -562,7 +562,7 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
       );
       // `wait()` promised a promise: a throw would pass `.catch()` by.
       for (const call of [() => group.wait(), () => group.wait(null), () => group.wait('soon')]) {
-        let pending;
+        let pending = null;
         assert.doesNotThrow(() => {
           pending = call();
         });

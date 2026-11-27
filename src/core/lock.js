@@ -1,10 +1,11 @@
 const os = require('node:os');
+
 const {
   LockAlreadyHeldError,
   LockLostError,
   LockReleaseFailedError,
 } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
+const { errorText, isDuplicateKey } = require('../utils/error.js');
 const { randomId } = require('../utils/id.js');
 const { safeUsername } = require('../utils/user.js');
 const { BOOKKEEPING_OPTIONS } = require('./server-info.js');
@@ -17,11 +18,6 @@ const LOCK_LABEL = 'migration lock';
 
 /** `migration lock` → `Migration lock`, for the start of a sentence */
 const sentence = (label) => label.charAt(0).toUpperCase() + label.slice(1);
-
-/** Returns true when an error is a MongoDB duplicate-key error (code 11000) */
-const isDuplicateKeyError = (error) => {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 11000;
-};
 
 /**
  * Map a raw lock document to the public LockInfo shape. The `nonce` — what
@@ -170,7 +166,7 @@ class MigrationLock {
         { upsert: true, ...this.#timeLimit },
       );
     } catch (error) {
-      if (isDuplicateKeyError(error)) {
+      if (isDuplicateKey(error)) {
         // Two processes raced the very first insert; the loser lands here.
         // The holder is only said in the error: a read that fails must not
         // turn "the lock is held" into a driver error.
@@ -470,8 +466,8 @@ const runWithLock = async (lock, options, fn) => {
   let released = false;
   let releasing = null;
   const control = {
-    release: () =>
-      (releasing ??= (async () => {
+    release: () => {
+      return (releasing ??= (async () => {
         await stopHeartbeat();
         try {
           await lock.release();
@@ -486,7 +482,8 @@ const runWithLock = async (lock, options, fn) => {
           );
         }
         return released;
-      })()),
+      })());
+    },
   };
 
   let result = undefined;
@@ -533,4 +530,4 @@ const runWithLock = async (lock, options, fn) => {
   return result;
 };
 
-module.exports = { LOCK_ID, LOCK_LABEL, MigrationLock, runWithLock, toLockInfo };
+module.exports = { LOCK_ID, LOCK_LABEL, toLockInfo, MigrationLock, runWithLock };

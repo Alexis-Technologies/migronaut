@@ -15,6 +15,17 @@
  * would leave the database out of step with the declaration forever.
  */
 
+/**
+ * A JavaScript RegExp's flags as the server stores them. The driver writes
+ * `i` and `m` as they are, `g` as the server's `s` (dotAll) — and drops every
+ * other flag. Comparing in this form is what lets a declared `/x/i` and the
+ * `/x/i` read back compare equal, and a `BSONRegExp('x', 's')` match too.
+ */
+const DRIVER_REGEXP_FLAGS = { __proto__: null, i: 'i', m: 'm', g: 's' };
+
+/** JavaScript RegExp flags that do not survive the trip to the server as written */
+const UNSTORABLE_FLAGS = /[^im]/g;
+
 const isPlainObject = (value) => {
   if (value === null || typeof value !== 'object') return false;
   const proto = Object.getPrototypeOf(value);
@@ -22,10 +33,11 @@ const isPlainObject = (value) => {
 };
 
 /** A BSON value class from the driver (`Int32`, `Long`, `ObjectId`, …) */
-const bsonType = (value) =>
-  value !== null && typeof value === 'object' && typeof value._bsontype === 'string'
+const bsonType = (value) => {
+  return value !== null && typeof value === 'object' && typeof value._bsontype === 'string'
     ? value._bsontype
     : undefined;
+};
 
 const canonicalNumber = (number) => {
   if (Number.isNaN(number)) return { $number: 'NaN' };
@@ -55,21 +67,11 @@ const sortFlags = (flags) => {
   return chars.join('');
 };
 
-/**
- * A JavaScript RegExp's flags as the server stores them. The driver writes
- * `i` and `m` as they are, `g` as the server's `s` (dotAll) — and drops every
- * other flag. Comparing in this form is what lets a declared `/x/i` and the
- * `/x/i` read back compare equal, and a `BSONRegExp('x', 's')` match too.
- */
-const DRIVER_REGEXP_FLAGS = { __proto__: null, i: 'i', m: 'm', g: 's' };
 const storedFlags = (flags) => {
   let out = '';
   for (const flag of `${flags}`) out += DRIVER_REGEXP_FLAGS[flag] ?? '';
   return out;
 };
-
-/** JavaScript RegExp flags that do not survive the trip to the server as written */
-const UNSTORABLE_FLAGS = /[^im]/g;
 
 /**
  * Why `value` cannot be stored as declared — a RegExp whose flags the driver
@@ -221,9 +223,7 @@ const canonical = (value) => {
 };
 
 /** Deep equality under {@link canonical} */
-const deepEqual = (a, b) => {
-  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
-};
+const deepEqual = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 
 /**
  * A copy of a declared value fit to send: plain objects lose their
@@ -254,11 +254,12 @@ const toWire = (value) => {
 };
 
 module.exports = {
+  isPlainObject,
+  bsonType,
+  regExpIssue,
+  unsendable,
   assign,
   canonical,
   deepEqual,
-  isPlainObject,
-  regExpIssue,
   toWire,
-  unsendable,
 };

@@ -134,7 +134,7 @@ const auditFindings = async (deps, { now = Date.now() } = {}) => {
     parts.push(`${counts[status]} ${status}`);
   }
   const summary = parts.join(', ');
-  if (failures.length > 0) return { status: 'fail', detail: [...failures, ...warnings].join('; ') };
+  if (failures.length > 0) return { status: 'fail', detail: failures.concat(warnings).join('; ') };
   if (warnings.length > 0) return { status: 'warn', detail: warnings.join('; ') };
   return { status: 'pass', detail: `${states.length} background migration(s): ${summary}` };
 };

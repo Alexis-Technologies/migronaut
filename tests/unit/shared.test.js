@@ -59,13 +59,13 @@ describe('exitCodeFor', () => {
 describe('reportUsageError', () => {
   /** Run `fn` with both streams captured and the exit code put back afterwards */
   const captured = (fn) => {
-    const out = [];
-    const err = [];
-    const stdout = mock.method(process.stdout, 'write', (chunk) => out.push(chunk) > 0);
-    const stderr = mock.method(process.stderr, 'write', (chunk) => err.push(chunk) > 0);
+    const written = [];
+    const errored = [];
+    const stdout = mock.method(process.stdout, 'write', (chunk) => written.push(chunk) > 0);
+    const stderr = mock.method(process.stderr, 'write', (chunk) => errored.push(chunk) > 0);
     try {
       fn();
-      return { out: out.join(''), err: err.join(''), code: process.exitCode };
+      return { out: written.join(''), err: errored.join(''), code: process.exitCode };
     } finally {
       stdout.mock.restore();
       stderr.mock.restore();

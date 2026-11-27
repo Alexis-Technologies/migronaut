@@ -19,7 +19,7 @@ const makeDb = () => {
   // acquire() upserts with an `owner` token and a nonce, then reads them back
   // to confirm ownership. The mock captures both from the update and echoes
   // them from findOne so a successful acquire resolves.
-  let held;
+  let held = null;
   const collection = {
     updateOne: mock.fn((_filter, update) => {
       const taken = heldFromUpdate(update);
@@ -516,7 +516,7 @@ describe('runWithLock', () => {
     // fails; the deadline is the sole escalation and must fire strictly
     // before the lock becomes stale-reclaimable at 1×TTL.
     const lock = new MigrationLock(db, '_migronaut_locks', 0.2);
-    let held;
+    let held = null;
     collection.updateOne.mock.mockImplementation((_filter, update) => {
       // acquire() carries the owner token; renew() only re-stamps lockedAt.
       const taken = heldFromUpdate(update);
@@ -580,7 +580,7 @@ describe('runWithLock', () => {
     );
     const logger = warningLogger();
     const reasons = [];
-    let renewalsAtLoss;
+    let renewalsAtLoss = null;
     const release = keepEventLoopAlive();
     try {
       // onLockLost: 'warn' — the run goes on for six more renewal intervals.
@@ -616,7 +616,7 @@ describe('runWithLock', () => {
     });
     const logger = warningLogger();
     const reasons = [];
-    let renewalsAtLoss;
+    let renewalsAtLoss = null;
     const release = keepEventLoopAlive();
     try {
       await runWithLock(
@@ -640,7 +640,7 @@ describe('runWithLock', () => {
   it('should report ttlMs and acquisition latency on lock:acquired', async () => {
     const { db } = makeDb();
     const lock = new MigrationLock(db, '_migronaut_locks', 60);
-    let extra;
+    let extra = null;
     await runWithLock(
       lock,
       { logger: silentLogger, onLockAcquired: (e) => (extra = e) },
@@ -657,7 +657,7 @@ describe('runWithLock', () => {
     // let it; without the re-entrancy guard, every later tick would overwrite
     // `inFlight` and fire its own overlapping renewal.
     const lock = new MigrationLock(db, '_migronaut_locks', 0.2);
-    let held;
+    let held = null;
     let renewCalls = 0;
     let stuck = true;
     const pending = [];
@@ -674,7 +674,7 @@ describe('runWithLock', () => {
       return new Promise((resolve) => pending.push(() => resolve({ matchedCount: 1 })));
     });
     collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, ...held }));
-    let callsWhileStuck;
+    let callsWhileStuck = null;
     await runWithLock(
       lock,
       { logger: silentLogger },
@@ -755,7 +755,7 @@ describe('runWithLock — any lock-shaped object', () => {
     // Once the 50ms timer fires, the unref'ed heartbeat is the only pending
     // handle — see tests/helpers/event-loop.js.
     const release = keepEventLoopAlive();
-    let result;
+    let result = null;
     try {
       result = await runWithLock(lease, { logger }, async (signal) => {
         await new Promise((resolve) => setTimeout(resolve, 50));

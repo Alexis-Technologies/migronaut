@@ -4,8 +4,8 @@ const mongoose = require('mongoose');
 const { defineShapes, versioningPlugin } = require('../../versioning.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
-let connection;
+let mongo = null;
+let connection = null;
 const DB = 'migronaut_versioning_mongoose_test';
 
 before(async () => {

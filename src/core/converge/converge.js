@@ -1,4 +1,5 @@
 const { createHash } = require('node:crypto');
+
 const { ConvergeFailedError } = require('../../errors/index.js');
 const { errorText } = require('../../utils/error.js');
 const {
@@ -89,13 +90,14 @@ const readAndPlan = async (deps, options) => {
     waitRequested: options.search?.wait === true && !options.dryRun,
   };
   // Reads `search` at call time: a skip at apply time turns Search off for the rest of the run.
-  const planFor = (definition, live) =>
-    planCollection(definition, live, {
+  const planFor = (definition, live) => {
+    return planCollection(definition, live, {
       prune: pruneFor(definition),
       rebuildUnique: options.rebuildUnique === true,
       capabilities,
       search: { available: search.available, onUnavailable: search.onUnavailable },
     });
+  };
 
   const live = await readLiveStates(db, names);
   if (server.mongos) {

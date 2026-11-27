@@ -5,7 +5,7 @@ const { MigrationTimeoutError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_migration_logs_test';
 
 before(async () => {
@@ -16,7 +16,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 const kits = [];
 
 beforeEach(async () => {
@@ -147,8 +147,8 @@ export async function down() {}
   await users.insertOne({ email: 'a@b.c' });
   try {
     await users.insertOne({ email: 'a@b.c' });
-  } catch (err) {
-    logger.error('duplicate skipped', { userland: true, err });
+  } catch (error) {
+    logger.error('duplicate skipped', { userland: true, err: error });
   }
 }
 export async function down() {}
@@ -158,15 +158,15 @@ export async function down() {}
     const { events } = listen(kit);
     await kit.up();
     assert.strictEqual(events.length, 1);
-    const { err } = events[0].data;
-    assert.strictEqual(err.name, 'MongoServerError');
-    assert.strictEqual(err.code, 11000);
-    assert.match(err.message, /dup key: \{ <redacted> \}/);
+    const logged = events[0].data.err;
+    assert.strictEqual(logged.name, 'MongoServerError');
+    assert.strictEqual(logged.code, 11000);
+    assert.match(logged.message, /dup key: \{ <redacted> \}/);
     assert.ok(!JSON.stringify(events[0]).includes('a@b.c'));
     // What a subscriber stores is the same document.
     await mongo.db.collection('migration_logs').insertOne({ ...events[0] });
     const stored = await mongo.db.collection('migration_logs').findOne();
-    assert.deepStrictEqual(stored.data.err, err);
+    assert.deepStrictEqual(stored.data.err, logged);
   });
 
   it('should keep correlating a call a timed-out body makes after the run ended', async () => {

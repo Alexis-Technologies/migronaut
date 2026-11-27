@@ -207,8 +207,7 @@ const startBackgroundRunner = (options = {}) => {
       case 'stopped':
         return;
       case 'busy':
-        backOff(name, slice.retryAfterMs ?? pollIntervalMs);
-        return;
+        return void backOff(name, slice.retryAfterMs ?? pollIntervalMs);
       case 'paused':
       case 'cancelled':
       case 'failed':

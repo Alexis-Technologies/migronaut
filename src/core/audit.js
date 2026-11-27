@@ -14,6 +14,9 @@ const EXPECTED_INDEXES = [
   'status_appliedAt_name',
 ];
 
+/** Search index lists the audit reads at once */
+const AUDIT_READ_CONCURRENCY = 8;
+
 /**
  * Read-only health check of the setup: configuration, connectivity,
  * transaction support, indexes, lock state, checksum drift — and Atlas Search,
@@ -186,9 +189,6 @@ const runAudit = async (deps) => {
   return auditReport(checks);
 };
 
-/** Search index lists the audit reads at once */
-const AUDIT_READ_CONCURRENCY = 8;
-
 /**
  * Whether the server has the Atlas Search that declared search indexes need,
  * and whether any of them failed to build. Records nothing when none is
@@ -235,9 +235,9 @@ const auditSearch = async (deps, db, config, record) => {
     const failed = [];
     const stale = [];
     // One list per collection, a few at a time; reported in declaration order.
-    const lists = await mapLimit(declaring, AUDIT_READ_CONCURRENCY, ({ definition }) =>
-      listSearchIndexes(db, definition.name, READ_OPTIONS),
-    );
+    const lists = await mapLimit(declaring, AUDIT_READ_CONCURRENCY, ({ definition }) => {
+      return listSearchIndexes(db, definition.name, READ_OPTIONS);
+    });
     for (let position = 0; position < declaring.length; position++) {
       const { definition, names } = declaring[position];
       for (const raw of lists[position]) {

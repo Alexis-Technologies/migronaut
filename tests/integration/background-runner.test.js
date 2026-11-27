@@ -5,7 +5,7 @@ const { ConfigInvalidError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_runner_test';
 const NAME = '0001-orders.js';
 
@@ -24,7 +24,7 @@ beforeEach(async () => {
 
 const kits = [];
 const runners = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const runner of runners.splice(0)) await runner.stop();

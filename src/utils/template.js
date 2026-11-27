@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+
 const {
   ConfigFileExistsError,
   ConfigInvalidError,
@@ -11,6 +12,39 @@ const { contextPath, errorText } = require('./error.js');
 const { readSmallFile } = require('./file.js');
 const { randomId } = require('./id.js');
 const { redactUris } = require('./redact.js');
+
+/** Extensions a custom `--template` file may have — anything else is refused */
+const TEMPLATE_EXTENSIONS = ['.ts', '.js', '.cjs', '.mjs'];
+
+const TEMPLATE_EXTENSION_SET = new Set(TEMPLATE_EXTENSIONS);
+
+/**
+ * Shared documentation block for the secret-provider templates. Explains the
+ * factory-function form and — crucially — that the example uses AWS but ANY
+ * provider works by editing `loadMongoSecret()`.
+ */
+const SECRET_PROVIDER_GUIDE = `/**
+ * migronaut configuration — loads the connection from a secret manager.
+ *
+ * This config exports an async FUNCTION (not a plain object), so the MongoDB
+ * connection is fetched at runtime on every \`migronaut\` command. The value stays in
+ * memory and is never written to disk, so this file is safe to commit.
+ *
+ * Precedence (highest first): CLI flags > MIGRONAUT_* env vars > this file > defaults.
+ *
+ * ── Provider-agnostic ────────────────────────────────────────────────────────
+ * The example below uses AWS Secrets Manager, but ANY source works — change
+ * only the body of loadMongoSecret() to use Google Secret Manager, HashiCorp
+ * Vault, Azure Key Vault, your own HTTP API, etc. It just has to return an
+ * object containing at least { uri, dbName }. For example, Google:
+ *
+ *   import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
+ *   const client = new SecretManagerServiceClient();
+ *   const [version] = await client.accessSecretVersion({
+ *     name: 'projects/PROJECT/secrets/mongo/versions/latest',
+ *   });
+ *   return JSON.parse(version.payload.data.toString());
+ */`;
 
 /**
  * Convert an arbitrary migration name into a kebab-case slug. Unicode-aware —
@@ -192,10 +226,6 @@ module.exports = { description, background };
 `;
 };
 
-/** Extensions a custom `--template` file may have — anything else is refused */
-const TEMPLATE_EXTENSIONS = ['.ts', '.js', '.cjs', '.mjs'];
-const TEMPLATE_EXTENSION_SET = new Set(TEMPLATE_EXTENSIONS);
-
 /** Resolve template file contents — a custom template if provided, else the built-in */
 const resolveTemplateContent = async (templatePath, js, esm = false, background = false) => {
   if (background) return defaultBackgroundTemplate(js, esm);
@@ -293,8 +323,9 @@ const isEsmProject = async (dir) => {
 };
 
 /** The export statement matching the project's module system */
-const exportStatement = (esm, expression) =>
-  esm ? `export default ${expression};` : `module.exports = ${expression};`;
+const exportStatement = (esm, expression) => {
+  return esm ? `export default ${expression};` : `module.exports = ${expression};`;
+};
 
 // ─── Config File Creation ───────────────────────────────────────────────────────
 
@@ -514,34 +545,6 @@ const defaultConfigJson = (values = {}) => {
 };
 
 /**
- * Shared documentation block for the secret-provider templates. Explains the
- * factory-function form and — crucially — that the example uses AWS but ANY
- * provider works by editing `loadMongoSecret()`.
- */
-const SECRET_PROVIDER_GUIDE = `/**
- * migronaut configuration — loads the connection from a secret manager.
- *
- * This config exports an async FUNCTION (not a plain object), so the MongoDB
- * connection is fetched at runtime on every \`migronaut\` command. The value stays in
- * memory and is never written to disk, so this file is safe to commit.
- *
- * Precedence (highest first): CLI flags > MIGRONAUT_* env vars > this file > defaults.
- *
- * ── Provider-agnostic ────────────────────────────────────────────────────────
- * The example below uses AWS Secrets Manager, but ANY source works — change
- * only the body of loadMongoSecret() to use Google Secret Manager, HashiCorp
- * Vault, Azure Key Vault, your own HTTP API, etc. It just has to return an
- * object containing at least { uri, dbName }. For example, Google:
- *
- *   import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
- *   const client = new SecretManagerServiceClient();
- *   const [version] = await client.accessSecretVersion({
- *     name: 'projects/PROJECT/secrets/mongo/versions/latest',
- *   });
- *   return JSON.parse(version.payload.data.toString());
- */`;
-
-/**
  * The migration-tool options shared by both secret-provider templates, indented
  * to sit inside the returned object of the async factory (4 spaces).
  */
@@ -737,7 +740,6 @@ const createConfigFile = async (options) => {
 };
 
 module.exports = {
-  isEsmProject,
   slugify,
   buildPrefix,
   nextSequenceIndex,
@@ -745,6 +747,7 @@ module.exports = {
   defaultTemplateJs,
   resolveTemplateContent,
   createMigrationFile,
+  isEsmProject,
   maskUriCredentials,
   defaultConfigTs,
   defaultConfigJs,

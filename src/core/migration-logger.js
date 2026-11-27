@@ -24,6 +24,9 @@ const USERLAND = 'userland';
 /** The longest message an event carries; the log line keeps the whole one */
 const MAX_MESSAGE_LENGTH = 2048;
 
+/** Keys of `info` a log line leaves out: who asked and why go to the event only */
+const EVENT_ONLY = new Set(['requestedBy', 'reason']);
+
 /** A counter, one per run (or lane slice): orders a run's events within one millisecond */
 const sequence = () => {
   let next = 0;
@@ -39,9 +42,7 @@ const sequence = () => {
  * `base` holds the run id and, when the caller gave them, the job and the
  * actor: `{ id, jobId?, groupId?, requestedBy?, reason? }`.
  */
-const runInfo = (base, direction) => {
-  return Object.freeze({ id: base.id, direction, ...withoutId(base) });
-};
+const runInfo = (base, direction) => Object.freeze({ id: base.id, direction, ...withoutId(base) });
 
 /** `ctx.run` of one attempt of one migration — a new frozen object per attempt */
 const migrationRunInfo = (run, { migration, batch, attempt }) => {
@@ -60,9 +61,6 @@ const withoutId = (base) => {
   }
   return rest;
 };
-
-/** Keys of `info` a log line leaves out: who asked and why go to the event only */
-const EVENT_ONLY = new Set(['requestedBy', 'reason']);
 
 /**
  * The one mapping from a context's correlation (`ctx.run`, or a background
@@ -106,9 +104,7 @@ const messageText = (msg) => {
  * each for a call dropped and a call cut to the event's bounds, per run (or
  * lane slice), not per call: `{ dropped, truncated }`.
  */
-const notices = () => {
-  return { dropped: false, truncated: false };
-};
+const notices = () => ({ dropped: false, truncated: false });
 
 /**
  * A logger bound to one context's correlation.
@@ -124,16 +120,11 @@ const notices = () => {
  *
  * Pino's own argument order — `(fields, msg)` — is accepted too.
  */
-const createMigrationLogger = ({
-  sink,
-  kind,
-  info,
-  direction,
-  emitter,
-  nextSeq,
-  noticed = notices(),
-  dryRun = false,
-}) => {
+const createMigrationLogger = (options) => {
+  const { sink, kind, info, direction, emitter, nextSeq } = options;
+  const noticed = options.noticed ?? notices();
+  const dryRun = options.dryRun ?? false;
+
   const { event, line } = correlationOf(kind, info, direction);
   if (dryRun) line.dryRun = true;
   /** The one debug line for `what` (a key of `noticed`) — the call that caused it goes on */
@@ -142,54 +133,56 @@ const createMigrationLogger = ({
     noticed[what] = true;
     sink.debug(text, { ...line });
   };
-  const write = (level) => (first, second) => {
-    // Logging must never break a migration: a getter that throws, a message
-    // that cannot be stringified — the call is dropped, the run goes on.
-    try {
-      let msg = first;
-      let fields = second;
-      if (isPlainObject(first) && (second === undefined || typeof second === 'string')) {
-        msg = second;
-        fields = first;
-      }
-      const text = messageText(msg);
-      const plain = isPlainObject(fields);
-      if (plain) sink[level](text, { ...fields, ...line });
-      else if (fields === undefined) sink[level](text, { ...line });
-      else sink[level](text, { ...line, value: fields });
-      if (!plain || fields[USERLAND] !== true || !emitter || dryRun || !emitter.wanted()) return;
-      const data = redactBounded(fields, { omit: USERLAND });
-      // The event leaves the process: the values a server error quotes (an
-      // E11000's duplicate key) are masked too, as everywhere text leaves it.
-      // The log line keeps them — it is what a developer debugs with.
-      const { text: message, cut } = redactWithin(text, MAX_MESSAGE_LENGTH);
-      const clipped = cut || message.length > MAX_MESSAGE_LENGTH;
-      const truncated = data.truncated || clipped;
-      emitter.emit({
-        ...event,
-        level,
-        msg: clipped ? `${message.slice(0, MAX_MESSAGE_LENGTH)}…` : message,
-        data: data.value,
-        at: new Date(),
-        seq: nextSeq(),
-        ...(truncated ? { truncated: true } : {}),
-      });
-      if (truncated) {
-        notice(
-          'truncated',
-          'A ctx.logger call was cut to the bounds of its migration:log event ' +
-            `(message ${MAX_MESSAGE_LENGTH} characters; data ${BOUNDS.depth} levels, ` +
-            `${BOUNDS.entries} entries, ${BOUNDS.string}-character strings)`,
-        );
-      }
-    } catch (error) {
-      // See above: dropped — but said once, at debug level.
+  const write = (level) => {
+    return (first, second) => {
+      // Logging must never break a migration: a getter that throws, a message
+      // that cannot be stringified — the call is dropped, the run goes on.
       try {
-        notice('dropped', `A ctx.logger call was dropped: ${errorText(error)}`);
-      } catch {
-        // Not even that: the thrown value cannot be described.
+        let msg = first;
+        let fields = second;
+        if (isPlainObject(first) && (second === undefined || typeof second === 'string')) {
+          msg = second;
+          fields = first;
+        }
+        const text = messageText(msg);
+        const plain = isPlainObject(fields);
+        if (plain) sink[level](text, { ...fields, ...line });
+        else if (fields === undefined) sink[level](text, { ...line });
+        else sink[level](text, { ...line, value: fields });
+        if (!plain || fields[USERLAND] !== true || !emitter || dryRun || !emitter.wanted()) return;
+        const data = redactBounded(fields, { omit: USERLAND });
+        // The event leaves the process: the values a server error quotes (an
+        // E11000's duplicate key) are masked too, as everywhere text leaves it.
+        // The log line keeps them — it is what a developer debugs with.
+        const { text: message, cut } = redactWithin(text, MAX_MESSAGE_LENGTH);
+        const clipped = cut || message.length > MAX_MESSAGE_LENGTH;
+        const truncated = data.truncated || clipped;
+        emitter.emit({
+          ...event,
+          level,
+          msg: clipped ? `${message.slice(0, MAX_MESSAGE_LENGTH)}…` : message,
+          data: data.value,
+          at: new Date(),
+          seq: nextSeq(),
+          ...(truncated ? { truncated: true } : {}),
+        });
+        if (truncated) {
+          notice(
+            'truncated',
+            'A ctx.logger call was cut to the bounds of its migration:log event ' +
+              `(message ${MAX_MESSAGE_LENGTH} characters; data ${BOUNDS.depth} levels, ` +
+              `${BOUNDS.entries} entries, ${BOUNDS.string}-character strings)`,
+          );
+        }
+      } catch (error) {
+        // See above: dropped — but said once, at debug level.
+        try {
+          notice('dropped', `A ctx.logger call was dropped: ${errorText(error)}`);
+        } catch {
+          // Not even that: the thrown value cannot be described.
+        }
       }
-    }
+    };
   };
   return { debug: write('debug'), info: write('info'), warn: write('warn'), error: write('error') };
 };
@@ -229,8 +222,16 @@ const createRunLog = ({ id, job, actor = {}, sink, emitter }) => {
     }
     return run;
   };
-  const logger = (bound) =>
-    createMigrationLogger({ sink, kind: 'migration', info: bound, emitter, nextSeq, noticed });
+  const logger = (bound) => {
+    return createMigrationLogger({
+      sink,
+      kind: 'migration',
+      info: bound,
+      emitter,
+      nextSeq,
+      noticed,
+    });
+  };
   return {
     job: ref,
     fields,
@@ -251,8 +252,8 @@ const createRunLog = ({ id, job, actor = {}, sink, emitter }) => {
 const backgroundLogs = ({ sink, emitter, dryRun = false }) => {
   const nextSeq = sequence();
   const noticed = notices();
-  return (info, direction) =>
-    createMigrationLogger({
+  return (info, direction) => {
+    return createMigrationLogger({
       sink,
       kind: 'background',
       info,
@@ -262,18 +263,19 @@ const backgroundLogs = ({ sink, emitter, dryRun = false }) => {
       noticed,
       dryRun,
     });
+  };
 };
 
 module.exports = {
-  MAX_MESSAGE_LENGTH,
   MIGRATION_LOG_EVENT,
   USERLAND,
-  backgroundLogs,
+  MAX_MESSAGE_LENGTH,
+  sequence,
+  runInfo,
+  migrationRunInfo,
   correlationOf,
+  notices,
   createMigrationLogger,
   createRunLog,
-  migrationRunInfo,
-  notices,
-  runInfo,
-  sequence,
+  backgroundLogs,
 };

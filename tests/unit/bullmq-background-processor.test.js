@@ -417,7 +417,7 @@ describe('background lane jobs', () => {
   });
 
   it('should go back to the queue on shutdown — before it starts, or once its slice stops', async () => {
-    let stopNow;
+    let stopNow = null;
     const kit = backgroundKit({
       runBackgroundSlice: mock.fn(
         () =>
@@ -516,7 +516,7 @@ describe('userland lines of background lanes', () => {
   });
 
   it('should drain the rows before the lane moves on, and take none after', async () => {
-    let late;
+    let late = null;
     const kit = backgroundKit({
       runBackgroundSlice: mock.fn(async (_name, { job }) => {
         kit.emit('migration:log', userland(job.id));
@@ -526,7 +526,7 @@ describe('userland lines of background lanes', () => {
     });
     const processor = createBackgroundProcessor({ kit, queue: fakeQueue() });
     const job = laneJob();
-    let logsAtMove;
+    let logsAtMove = null;
     job.moveToDelayed = mock.fn(async () => {
       logsAtMove = [...job.logs];
     });

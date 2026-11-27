@@ -44,12 +44,14 @@ class ConvergeHost {
       emit: (event, payload) => kit.emit(event, payload),
       assertNotAborted: (abortSignal) => kit.assertNotAborted(abortSignal),
       // The history entry's who-and-where, like a changelog record's.
-      audit: () => ({
-        ...(kit.runId ? { runId: kit.runId } : {}),
-        executedBy: safeUsername(),
-        host: os.hostname(),
-        environment: kit.environment(),
-      }),
+      audit: () => {
+        return {
+          ...(kit.runId ? { runId: kit.runId } : {}),
+          executedBy: safeUsername(),
+          host: os.hostname(),
+          environment: kit.environment(),
+        };
+      },
       record: (entry) => this.#log().append(db, entry, { ensureIndex: kit.config.ensureIndexes }),
       // Behind a mongos only: the shard key — so prune never drops its index,
       // and the version index takes it as a prefix. An 8.0 `unsplittable`

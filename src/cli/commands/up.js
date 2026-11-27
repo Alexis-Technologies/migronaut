@@ -48,15 +48,16 @@ const registerUp = (program) => {
       }
       return undefined;
     },
-    run: (migrator, opts, positionals) =>
-      migrator.up(positionals[0], {
+    run: (migrator, opts, positionals) => {
+      return migrator.up(positionals[0], {
         noLock: opts.noLock,
         ...(opts.force ? { force: true } : {}),
         ...(opts.step ? { step: true } : {}),
         ...(opts.to ? { to: opts.to } : {}),
         ...(typeof opts.converge === 'boolean' ? { converge: opts.converge } : {}),
         ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
-      }),
+      });
+    },
     // No render: core logs every ✔ Applied line itself — and, after a bulk run
     // that converges, every converge line too. `--json` stays the migration
     // rows: an array cannot carry the converge result without breaking its

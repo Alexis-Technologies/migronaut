@@ -78,7 +78,7 @@ const readJson = async (req) => {
     chunks.push(chunk);
   }
   if (size === 0) return {};
-  let body;
+  let body = null;
   try {
     body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {

@@ -4,7 +4,7 @@ const { Changelog } = require('../../src/core/changelog.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeRecord } = require('../helpers/records.js');
 
-let mongo;
+let mongo = null;
 const COLLECTION = '_migronaut_migrations';
 const changelog = new Changelog(COLLECTION);
 

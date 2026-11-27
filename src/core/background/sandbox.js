@@ -93,6 +93,26 @@ const MAX_IMAGE_BYTES = 64 * 1024;
 
 const ATTEMPTS = 3;
 
+const DEADLINE = Symbol('deadline');
+
+/** Properties every proxy answers without refusing — `then` especially (never thenable) */
+const INERT = new Set(['then', 'constructor', 'toJSON', 'inspect']);
+
+/** Where a write method takes its options */
+const OPTIONS_AT = {
+  insertOne: 1,
+  insertMany: 1,
+  updateOne: 2,
+  updateMany: 2,
+  replaceOne: 2,
+  deleteOne: 1,
+  deleteMany: 1,
+  findOneAndUpdate: 2,
+  findOneAndReplace: 2,
+  findOneAndDelete: 1,
+  bulkWrite: 1,
+};
+
 /** A value as relaxed EJSON, cut to `bytes` of JSON */
 const snapshot = (value, bytes) => {
   let json = null;
@@ -213,8 +233,6 @@ const runOnce = async (options, fn, attempt) => {
   return { report, retry };
 };
 
-const DEADLINE = Symbol('deadline');
-
 /** Refuse `method`: recorded, then thrown */
 const refuse = (state, method, reason, collection) => {
   const entry = { method, reason, ...(collection !== undefined ? { collection } : {}) };
@@ -300,9 +318,7 @@ const checkPipeline = (state, method, collection, pipeline) => {
   }
 };
 
-const isForbidden = (state, name) => {
-  return name.startsWith('system.') || state.forbidden.has(name);
-};
+const isForbidden = (state, name) => name.startsWith('system.') || state.forbidden.has(name);
 
 /** Record an operation, while there is room */
 const record = (state, entry) => {
@@ -398,15 +414,21 @@ const noteCreated = (state, raw, method, result) => {
       return;
     }
     const key = imageKey(raw.collectionName, id);
-    if (!state.images.has(key)) state.images.set(key, { collection: raw.collectionName, id, raw });
+    if (!state.images.has(key)) {
+      // Created by the step: no image before it.
+      state.images.set(key, { collection: raw.collectionName, id, before: null, raw });
+    }
   }
 };
 
-/** What happened to a document, by its images: `after` is `undefined` when it could not be read */
-const imageOp = (before, after) => {
-  if (before === undefined) return 'insert';
+/**
+ * What happened to a document, by its images: no `before` — created; no
+ * `after` — deleted, unless it could not be read at all (`isAfterRead`).
+ */
+const imageOp = (before, after, isAfterRead) => {
+  if (before === null) return 'insert';
+  if (!isAfterRead) return 'unknown';
   if (after === null) return 'delete';
-  if (after === undefined) return 'unknown';
   return 'update';
 };
 
@@ -414,33 +436,31 @@ const imageOp = (before, after) => {
 const finishImages = async (state) => {
   for (const image of state.images.values()) {
     let after = null;
+    let isAfterRead = true;
     try {
       after = await image.raw.findOne({ _id: image.id }, { session: state.session });
     } catch {
       // The transaction may be gone (a write error aborted it): no after-image.
-      after = undefined;
+      isAfterRead = false;
     }
     const before = image.before;
-    if (before !== undefined && after !== undefined && after !== null) {
+    if (before !== null && after !== null) {
       const unchanged =
         JSON.stringify(snapshot(before, Infinity)) === JSON.stringify(snapshot(after, Infinity));
       if (unchanged) continue;
     }
-    const op = imageOp(before, after);
+    const op = imageOp(before, after, isAfterRead);
     state.report.documents.push({
       collection: image.collection,
       _id: snapshot(image.id, MAX_FILTER_BYTES),
       op,
-      ...(before !== undefined ? { before: snapshot(before, MAX_IMAGE_BYTES) } : {}),
-      ...(after ? { after: snapshot(after, MAX_IMAGE_BYTES) } : {}),
+      ...(before !== null ? { before: snapshot(before, MAX_IMAGE_BYTES) } : {}),
+      ...(after !== null ? { after: snapshot(after, MAX_IMAGE_BYTES) } : {}),
     });
   }
 };
 
 // ─── Proxies ──────────────────────────────────────────────────────────────────
-
-/** Properties every proxy answers without refusing — `then` especially (never thenable) */
-const INERT = new Set(['then', 'constructor', 'toJSON', 'inspect']);
 
 const proxyCollection = (state, raw) => {
   const name = raw.collectionName;
@@ -455,8 +475,8 @@ const proxyCollection = (state, raw) => {
       // `distinct` asks first whether the collection is sharded — where the
       // server refuses it inside a transaction (263); a clearer refusal here.
       if (property === 'distinct') {
-        return (...args) =>
-          settle(async () => {
+        return (...args) => {
+          return settle(async () => {
             if (await state.options.isSharded?.(name)) {
               throw refuse(
                 state,
@@ -467,6 +487,7 @@ const proxyCollection = (state, raw) => {
             }
             return readOp(state, raw, property, args);
           });
+        };
       }
       if (COLLECTION_READS.has(property)) {
         return (...args) => settle(() => readOp(state, raw, property, args));
@@ -528,21 +549,6 @@ const readOp = (state, raw, method, args) => {
   });
 };
 
-/** Where a write method takes its options */
-const OPTIONS_AT = {
-  insertOne: 1,
-  insertMany: 1,
-  updateOne: 2,
-  updateMany: 2,
-  replaceOne: 2,
-  deleteOne: 1,
-  deleteMany: 1,
-  findOneAndUpdate: 2,
-  findOneAndReplace: 2,
-  findOneAndDelete: 1,
-  bulkWrite: 1,
-};
-
 const writeOp = (state, raw, method, args) => {
   const name = raw.collectionName;
   if (isForbidden(state, name)) throw refuse(state, method, `${name} is migronaut's own`, name);
@@ -583,9 +589,8 @@ const proxyCursor = (state, cursor) => {
     closed = true;
     state.cursors.delete(cursor);
   };
-  const terminal =
-    (method) =>
-    (...args) => {
+  const terminal = (method) => {
+    return (...args) => {
       if (closed) throw refuse(state, `cursor.${method}`, 'the cursor is closed');
       return serialized(state, async () => {
         const result = await cursor[method](...args);
@@ -594,6 +599,7 @@ const proxyCursor = (state, cursor) => {
         return result;
       });
     };
+  };
   const proxy = new Proxy(Object.create(null), {
     get(_target, property) {
       if (property === Symbol.asyncIterator) {

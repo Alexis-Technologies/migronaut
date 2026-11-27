@@ -38,9 +38,9 @@ const spec = ({ delayMs = 5, extra = '', collection = 'orders' } = {}) => {
  * `harness`: the object `defineBullMQScenarios` takes.
  */
 const defineBullMQBackgroundScenarios = (harness) => {
-  let project;
-  let connection;
-  let prefix;
+  let project = null;
+  let connection = null;
+  let prefix = null;
   const opened = [];
 
   beforeEach(async () => {
@@ -115,7 +115,7 @@ const defineBullMQBackgroundScenarios = (harness) => {
 
   /** Nothing left on the background queue but finished jobs */
   const drained = async (mq, timeoutMs = 30_000) => {
-    let last;
+    let last = null;
     await until(
       'the background queue to drain',
       async () => {

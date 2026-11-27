@@ -12,7 +12,7 @@ const { retryOnConflict, updateWithRevision } = require('../../versioning.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_kit_test';
 const NAME = '0001-orders.js';
 const childPath = path.join(__dirname, '..', 'helpers', 'background-child.js');
@@ -31,7 +31,7 @@ beforeEach(async () => {
 });
 
 const kits = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const kit of kits.splice(0)) await kit.disconnect();
@@ -383,7 +383,7 @@ export async function down() {}
     });
     project.write(NAME, spec(`migrate: (doc) => ({ ...doc, email: 'taken@example.com' }),`));
     await kit.up();
-    let thrown;
+    let thrown = null;
     await kit.runBackground(NAME).catch((error) => {
       thrown = error;
     });

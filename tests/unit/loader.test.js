@@ -230,10 +230,10 @@ describe('tsLoadErrorOrNull', () => {
   });
 
   it('should detect the failure via the error message on an Error instance', () => {
-    const err = new Error('Unknown file extension ".ts" for /x.ts');
-    const result = tsLoadErrorOrNull('/migrations/0001-x.ts', err);
+    const error = new Error('Unknown file extension ".ts" for /x.ts');
+    const result = tsLoadErrorOrNull('/migrations/0001-x.ts', error);
     assert.ok(result instanceof MigrationInvalidExportError);
-    assert.strictEqual(result.context?.cause, err.message);
+    assert.strictEqual(result.context?.cause, error.message);
   });
 });
 

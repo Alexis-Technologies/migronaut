@@ -5,7 +5,7 @@ const { LockAlreadyHeldError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
+let mongo = null;
 const COLLECTION = '_migronaut_locks';
 
 before(async () => {
@@ -95,7 +95,7 @@ describe('MigrationLock (integration)', () => {
     // the TTL; without renewal the lock would have gone stale and been
     // reclaimable, which is the exact bug this fixes.
     const lock = new MigrationLock(mongo.db, COLLECTION, 1);
-    let release;
+    let release = null;
     const gate = new Promise((resolve) => {
       release = resolve;
     });

@@ -6,7 +6,7 @@ const { LOCK_ID } = require('../../src/core/lock.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_concurrency_test';
 const LOCK_COLLECTION = '_migronaut_locks';
 const runnerPath = path.join(__dirname, '..', 'helpers', 'child-runner.js');
@@ -22,8 +22,8 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
-let children;
+let project = null;
+let children = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();

@@ -1,10 +1,14 @@
 const os = require('node:os');
+
 const { ConfigInvalidError, LockLostError } = require('../../errors/index.js');
-const { errorText } = require('../../utils/error.js');
+const { DUPLICATE_KEY, errorText } = require('../../utils/error.js');
 const { randomId } = require('../../utils/id.js');
 const { MAX_BAD_IDS } = require('./spec.js');
 const { backgroundCollectionNames } = require('../config.js');
 const { READ_OPTIONS } = require('../server-info.js');
+
+/** The collections of the store that carry indexes */
+const INDEXED_COLLECTIONS = Object.freeze(['state', 'partitions']);
 
 /**
  * Where background migrations keep their state, in MongoDB — the truth every
@@ -36,19 +40,6 @@ const MAX_HISTORY = 50;
 /** Statuses of a partition still to be worked */
 const OPEN_PARTITION = ['pending', 'running'];
 
-const DUPLICATE_KEY = 11000;
-
-/** A value as itself inside an update pipeline — a string with a leading `$` is not a field path */
-const literal = (value) => ({ $literal: value });
-
-/** `field + n` inside a pipeline, a missing field counting as 0 */
-const plus = (field, n) => ({ $add: [{ $ifNull: [`$${field}`, 0] }, n] });
-
-/** An array field with `items` appended, keeping the last `max` */
-const appendSliced = (field, items, max) => ({
-  $slice: [{ $concatArrays: [{ $ifNull: [`$${field}`, []] }, literal(items)] }, -max],
-});
-
 /** What the indexes are: the state's listing order, the claims, and the lease slots */
 const INDEXES = [
   { on: 'state', key: { status: 1, registeredAt: 1 }, options: { name: 'status_registeredAt' } },
@@ -79,6 +70,19 @@ const INDEXES = [
 
 const NAMESPACE_NOT_FOUND = 26;
 
+/** A value as itself inside an update pipeline — a string with a leading `$` is not a field path */
+const literal = (value) => ({ $literal: value });
+
+/** `field + n` inside a pipeline, a missing field counting as 0 */
+const plus = (field, n) => ({ $add: [{ $ifNull: [`$${field}`, 0] }, n] });
+
+/** An array field with `items` appended, keeping the last `max` */
+const appendSliced = (field, items, max) => {
+  return {
+    $slice: [{ $concatArrays: [{ $ifNull: [`$${field}`, []] }, literal(items)] }, -max],
+  };
+};
+
 /**
  * Whether an E11000 was the migration's lease slot (`lease_slot`) rather than
  * a group slot: told by the key the server names (`keyPattern`), and by the
@@ -95,8 +99,10 @@ const isLeaseSlotClash = (error) => {
 class BackgroundStore {
   #db;
   #names;
-  #indexed;
-  #asserted;
+  /** The index builds of this store, under way or done — made once */
+  #indexing = null;
+  /** The check of the state documents' schema, under way or done — made once */
+  #asserting = null;
 
   /**
    * `collection` is the `backgroundCollection` setting: the state lives
@@ -126,18 +132,18 @@ class BackgroundStore {
    * it first).
    */
   async ensureIndexes() {
-    if (this.#indexed === undefined) {
+    if (this.#indexing === null) {
       const created = [];
       for (let i = 0; i < INDEXES.length; i++) {
         const { on, key, options } = INDEXES[i];
         created.push(this.#collection(on).createIndex(key, options));
       }
-      this.#indexed = Promise.all(created).catch((error) => {
-        this.#indexed = undefined;
+      this.#indexing = Promise.all(created).catch((error) => {
+        this.#indexing = null;
         throw error;
       });
     }
-    await this.#indexed;
+    await this.#indexing;
   }
 
   /**
@@ -148,10 +154,10 @@ class BackgroundStore {
    * @throws {ConfigInvalidError} naming each missing index and its key
    */
   async assertIndexes() {
-    this.#asserted ??= (async () => {
+    this.#asserting ??= (async () => {
       const missing = [];
       const present = new Map();
-      for (const on of ['state', 'partitions']) {
+      for (const on of INDEXED_COLLECTIONS) {
         const names = new Set();
         try {
           const indexes = await this.#collection(on).listIndexes().toArray();
@@ -174,10 +180,10 @@ class BackgroundStore {
         );
       }
     })().catch((error) => {
-      this.#asserted = undefined;
+      this.#asserting = null;
       throw error;
     });
-    await this.#asserted;
+    await this.#asserting;
   }
 
   #collection(on) {
@@ -386,10 +392,11 @@ class BackgroundStore {
    * plan is not the state's — and removes them. Returns the state after, or
    * `null` when the race was lost.
    */
-  async commitPlan(
-    name,
-    { generation, previousToken, plan, partitions, fields = {}, filter = {} },
-  ) {
+  async commitPlan(name, options) {
+    const { generation, previousToken, plan, partitions } = options;
+    const fields = options.fields ?? {};
+    const filter = options.filter ?? {};
+
     const token = randomId();
     const nextGeneration = generation + 1;
     if (partitions.length > 0) {
@@ -974,10 +981,4 @@ class BackgroundStore {
   }
 }
 
-module.exports = {
-  BackgroundStore,
-  MAX_BAD_IDS,
-  MAX_DOC_ERRORS,
-  OPEN_PARTITION,
-  STATE_SCHEMA,
-};
+module.exports = { MAX_BAD_IDS, STATE_SCHEMA, MAX_DOC_ERRORS, OPEN_PARTITION, BackgroundStore };

@@ -58,4 +58,4 @@ const requiresIssues = (requires, name) => {
   return issues;
 };
 
-module.exports = { assertMigrationName, isBareFilename, requiresIssues };
+module.exports = { isBareFilename, assertMigrationName, requiresIssues };

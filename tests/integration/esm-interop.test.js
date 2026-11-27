@@ -30,7 +30,7 @@ const typescriptEntry = () => {
 };
 
 describe('ESM consumer interop (integration)', () => {
-  let dir;
+  let dir = null;
 
   before(() => {
     dir = mkdtempSync(path.join(tmpdir(), 'migronaut-esm-'));
@@ -104,7 +104,7 @@ if (typeof adapter.createMigrationQueue !== 'function') throw new Error('subpath
 
 // The exports map is closed: only what it lists is reachable, so an internal
 // module can be moved without breaking anyone who reached past the entry point.
-let code;
+let code = null;
 try {
   require('@alexify/migronaut/src/bullmq/index.js');
 } catch (error) {

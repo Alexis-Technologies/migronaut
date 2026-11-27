@@ -5,7 +5,7 @@ const { defineBullMQScenarios } = require('../helpers/bullmq-scenarios.js');
 const { createFakeConnection, fakeBullmq } = require('../helpers/fake-bullmq.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_bullmq_test';
 
 before(async () => {

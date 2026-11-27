@@ -224,6 +224,16 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
   are `if`s, helpers or tables, 29 call-then-returns are `return void`, 18 `new Array(n)` are built
   with `push`, and 29 data arrays spread into arguments are loops. The exceptions, each with its
   reason, are in CLAUDE.md.
+- **The rest of `js-conventions` in `src/` and `bin/`.** A field, a reset or a lookup that holds
+  no reference is `null` (a scalar stays `undefined`; a MongoDB document, a JSON row and an event
+  payload still leave the key out); a module is its requires (built-ins apart), its constants,
+  its functions, its classes and a `module.exports` in the order it defines them; a signature fits
+  one line, an arrow body that does not is a block, a wrapped condition is a named boolean, a
+  choice among values is a table (`ACTION_COLORS`, `BUILD_DETAILS`, `STOPPED_OUTCOMES`), a fact
+  named twice is one constant (`ACTOR_FIELDS`, the server's error codes in `utils/error.js`), a
+  helper written twice is one (`assertCount`, `pushAll`, `isVersionAtLeast`), and private
+  helpers that never read `this` are module functions. The tests, the bench, the scripts and the
+  example start every `let` with a value and call a caught error `error`.
 - **Tests are `describe` and `it('should …')`.** The 60 titles that did not start with `should`
   keep their meaning in a `describe` of the method or the tag they named; the helpers of the tests,
   the bench and the scripts are `const` arrows too.

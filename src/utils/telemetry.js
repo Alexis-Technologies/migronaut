@@ -79,6 +79,31 @@ const DURATION_BUCKETS_SECONDS = [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 9
 /** The longest span status message sent — a blocked run can list hundreds of files */
 const MAX_STATUS_MESSAGE_LENGTH = 1024;
 
+/** The parts of `telemetry` — anything else in it is a typo, mentioned at debug level */
+const TELEMETRY_KEYS = Object.freeze(['tracer', 'meter', 'attributes']);
+
+/** The types a static attribute's value may have */
+const ATTRIBUTE_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
+
+/** Static attributes are dimensions: a handful at most */
+const MAX_STATIC_ATTRIBUTES = 20;
+
+/** What a tracer must have to start a span — and a meter, to make its instruments */
+const TRACER_METHODS = ['startActiveSpan'];
+
+const METER_METHODS = ['createHistogram', 'createCounter'];
+
+/** A slice's document counters, and the `background.result` each is reported as */
+const DOCUMENT_RESULTS = [
+  { field: 'migrated', result: 'migrated' },
+  { field: 'skipped', result: 'skipped' },
+  { field: 'conflicts', result: 'conflict' },
+  { field: 'failed', result: 'failed' },
+];
+
+/** What the kit holds when there is no tracer: the same surface, doing nothing */
+const NOOP_SPAN = { set() {}, finish() {} };
+
 /**
  * Mark a promise an SDK handed back as handled. A tracer that wraps the work
  * (`return fn(span).finally(…)`) or an instrument that is async returns a
@@ -149,18 +174,6 @@ const failureText = (error) => {
     : text;
 };
 
-/** The parts of `telemetry` — anything else in it is a typo, mentioned at debug level */
-const TELEMETRY_KEYS = Object.freeze(['tracer', 'meter', 'attributes']);
-
-/** The types a static attribute's value may have */
-const ATTRIBUTE_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
-/** Static attributes are dimensions: a handful at most */
-const MAX_STATIC_ATTRIBUTES = 20;
-
-/** What a tracer must have to start a span — and a meter, to make its instruments */
-const TRACER_METHODS = ['startActiveSpan'];
-const METER_METHODS = ['createHistogram', 'createCounter'];
-
 /** Neither undefined nor null: an option that was given */
 const isGiven = (value) => value !== undefined && value !== null;
 
@@ -223,17 +236,6 @@ const telemetryIssues = (telemetry) => {
   }
   return issues;
 };
-
-/** A slice's document counters, and the `background.result` each is reported as */
-const DOCUMENT_RESULTS = [
-  { field: 'migrated', result: 'migrated' },
-  { field: 'skipped', result: 'skipped' },
-  { field: 'conflicts', result: 'conflict' },
-  { field: 'failed', result: 'failed' },
-];
-
-/** What the kit holds when there is no tracer: the same surface, doing nothing */
-const NOOP_SPAN = { set() {}, finish() {} };
 
 /** Wrap an SDK span so no call on it can throw into the run, and it ends once */
 const guardSpan = (span) => {
@@ -309,11 +311,11 @@ const createTelemetry = (telemetry, { dbName } = {}) => {
       return result;
     };
     // Three arguments, always: an SDK picks the overload by argument count.
-    safe(() =>
-      tracer.startActiveSpan(name, { attributes: withBase(attributes) }, (span) =>
-        run(guardSpan(span)),
-      ),
-    );
+    safe(() => {
+      return tracer.startActiveSpan(name, { attributes: withBase(attributes) }, (span) => {
+        return run(guardSpan(span));
+      });
+    });
     // Through `run`, not `fn`: it marks the work as done, so a tracer that
     // calls back late finds nothing left to run.
     if (!called) return run(NOOP_SPAN);
@@ -336,18 +338,20 @@ const createTelemetry = (telemetry, { dbName } = {}) => {
     });
   };
 
-  const histogram = (name, description) =>
-    meter
-      ? safe(() =>
-          meter.createHistogram(name, {
+  const histogram = (name, description) => {
+    return meter
+      ? safe(() => {
+          return meter.createHistogram(name, {
             description,
             unit: 's',
             advice: { explicitBucketBoundaries: DURATION_BUCKETS_SECONDS },
-          }),
-        )
+          });
+        })
       : undefined;
-  const counter = (name, description, unit) =>
-    meter ? safe(() => meter.createCounter(name, { description, unit })) : undefined;
+  };
+  const counter = (name, description, unit) => {
+    return meter ? safe(() => meter.createCounter(name, { description, unit })) : undefined;
+  };
 
   const runDuration = histogram(METRICS.RUN_DURATION, 'Duration of a migration run');
   const migrationDuration = histogram(METRICS.MIGRATION_DURATION, 'Duration of one migration');
@@ -419,8 +423,9 @@ const createTelemetry = (telemetry, { dbName } = {}) => {
   const increment = (instrument) => {
     if (instrument) safe(() => instrument.add(1, withBase()));
   };
-  const failure = (error) =>
-    error !== undefined ? { [ATTRIBUTES.ERROR_TYPE]: errorType(error) } : {};
+  const failure = (error) => {
+    return error !== undefined ? { [ATTRIBUTES.ERROR_TYPE]: errorType(error) } : {};
+  };
 
   return {
     open,
@@ -514,16 +519,16 @@ const createTelemetry = (telemetry, { dbName } = {}) => {
 };
 
 module.exports = {
+  SPAN_STATUS_ERROR,
+  SPANS,
   ATTRIBUTES,
-  TELEMETRY_KEYS,
-  telemetryIssues,
+  METRICS,
   DURATION_BUCKETS_SECONDS,
   MAX_STATUS_MESSAGE_LENGTH,
-  METRICS,
+  TELEMETRY_KEYS,
   NOOP_SPAN,
-  SPANS,
-  SPAN_STATUS_ERROR,
-  createTelemetry,
   errorType,
   failureText,
+  telemetryIssues,
+  createTelemetry,
 };
