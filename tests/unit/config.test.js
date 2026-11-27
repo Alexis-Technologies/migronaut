@@ -243,11 +243,25 @@ describe('loadConfig', () => {
       loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } }),
       (error) => {
         assert.ok(error instanceof ConfigInvalidError);
-        assert.strictEqual(error.context.name, 'MIGRONAUT_STRICT');
-        assert.strictEqual(error.context.value, 'on');
+        assert.deepStrictEqual(error.context.issues, [
+          { path: 'MIGRONAUT_STRICT', message: "must be 'true'/'1'/'yes' or 'false'/'0'/'no'" },
+        ]);
+        // What a person reads names the variable and the rule.
+        assert.match(error.message, /^Invalid configuration — MIGRONAUT_STRICT must be/);
         return true;
       },
     );
+  });
+
+  it('should report every env var that does not parse at once, with the other issues', async () => {
+    process.env.MIGRONAUT_STRICT = 'on';
+    process.env.MIGRONAUT_LOCK_TTL = 'abc';
+    await assert.rejects(loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017' } }), (error) => {
+      const paths = [];
+      for (const issue of error.context.issues) paths.push(issue.path);
+      assert.deepStrictEqual(paths.sort(), ['MIGRONAUT_LOCK_TTL', 'MIGRONAUT_STRICT', 'dbName']);
+      return true;
+    });
   });
 
   it('should reject unrecognized values for every boolean env var', async () => {
@@ -278,7 +292,7 @@ describe('loadConfig', () => {
           loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } }),
           (error) => {
             assert.ok(error instanceof ConfigInvalidError);
-            assert.strictEqual(error.context.name, key, `${key}=${value}`);
+            assert.strictEqual(error.context.issues[0].path, key, `${key}=${value}`);
             return true;
           },
         );
@@ -300,8 +314,8 @@ describe('loadConfig', () => {
         loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } }),
         (error) => {
           assert.ok(error instanceof ConfigInvalidError);
-          assert.strictEqual(error.context.name, key);
-          assert.strictEqual(error.context.value, value);
+          assert.strictEqual(error.context.issues[0].path, key);
+          assert.match(error.context.issues[0].message, /^must be /);
           return true;
         },
       );
@@ -507,9 +521,10 @@ describe('loadConfig', () => {
       }),
     );
     const lines = [];
-    const logger = { debug: (msg) => lines.push(msg), info() {}, warn() {}, error() {} };
+    const record = (msg) => lines.push(msg);
+    const logger = { debug: record, info() {}, warn: record, error() {} };
     await loadConfig({ cwd: tmp, flags: { logger } });
-    assert.ok(!lines.some((line) => line.startsWith('Unrecognized config key')));
+    assert.ok(!lines.some((line) => line.includes('Unrecognized config key')));
   });
 
   it('should resolve a synchronous function (factory) config file', async () => {
@@ -743,7 +758,7 @@ describe('validateConfig', () => {
       flags: { uri: 'mongodb://x:27017', dbName: 'x', logger, generateId },
     });
     assert.strictEqual(config.generateId, generateId);
-    assert.ok(!lines.some((line) => line.msg.startsWith('Unrecognized config key')));
+    assert.ok(!lines.some((line) => line.msg.includes('Unrecognized config key')));
     const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
     assert.strictEqual(dump.fields.generateId, '[injected]');
   });
@@ -785,9 +800,9 @@ describe('validateConfig', () => {
       return {
         lines,
         logger: {
-          debug: (msg, fields) => lines.push({ msg, fields }),
+          debug: (msg, fields) => lines.push({ level: 'debug', msg, fields }),
           info() {},
-          warn() {},
+          warn: (msg, fields) => lines.push({ level: 'warn', msg, fields }),
           error() {},
         },
       };
@@ -894,7 +909,7 @@ describe('validateConfig', () => {
         flags: { uri: 'mongodb://x:27017', dbName: 'x', logger, telemetry },
       });
       assert.strictEqual(config.telemetry, telemetry);
-      assert.ok(!lines.some((line) => line.msg.startsWith('Unrecognized config key')));
+      assert.ok(!lines.some((line) => line.msg.includes('Unrecognized config key')));
       const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
       assert.strictEqual(dump.fields.telemetry, '[injected]');
     });
@@ -904,6 +919,20 @@ describe('validateConfig', () => {
       await loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x', logger } });
       const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
       assert.ok(!('telemetry' in dump.fields));
+    });
+
+    it('should leave an unknown key out of the resolved-config line', async () => {
+      // An unknown key is ignored — and may hold a secret no URI shape gives away.
+      const { lines, logger } = recorder();
+      await loadConfig({
+        cwd: tmp,
+        flags: { uri: 'mongodb://x:27017', dbName: 'x', logger, apiKey: 'sk-live-123' },
+      });
+      const dump = lines.find((line) => line.msg.startsWith('Resolved config'));
+      assert.ok(!('apiKey' in dump.fields));
+      assert.strictEqual(dump.fields.dbName, 'x');
+      const warning = lines.find((line) => line.level === 'warn');
+      assert.match(warning.msg, /Unrecognized config key\(s\), ignored: apiKey/);
     });
 
     it('should mention a stray key inside telemetry — the whole API module is the usual one', async () => {
@@ -919,11 +948,13 @@ describe('validateConfig', () => {
           telemetry: { trace: {}, metrics: {}, tracer },
         },
       });
-      const mention = lines.find((line) => line.msg.startsWith('Unrecognized config key'));
+      const mention = lines.find((line) => line.msg.includes('Unrecognized config key'));
       assert.strictEqual(
         mention.msg,
-        'Unrecognized config key(s), ignored: telemetry.trace, telemetry.metrics',
+        '⚠ Unrecognized config key(s), ignored: telemetry.trace, telemetry.metrics',
       );
+      // A warning, not a debug line: a typo'd key leaves a safety option at its default.
+      assert.strictEqual(mention.level, 'warn');
     });
 
     it('should reject an unusable telemetry through loadConfig', async () => {
@@ -1050,7 +1081,7 @@ describe('background config', () => {
     ]);
     assert.match(
       issues.find((issue) => issue.path === 'backgroundDrift').message,
-      /'poll', 'stream', 'both'/,
+      /'poll', 'stream' or 'both'/,
     );
   });
 

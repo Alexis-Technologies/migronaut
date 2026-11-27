@@ -1262,12 +1262,17 @@ export class MigrationQueue<
   /**
    * Enqueue pending migrations — all, up to `options.to`, or the one
    * `filename` — as one job each, under a single shared batch.
+   * @throws {QueueClosedError} ALX_ERR_QUEUE_CLOSED — the queue is closed or closing
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — bad options, or a permission `allow` withholds
+   * @throws {MigrationBlockedError} ALX_ERR_MIGRATION_BLOCKED — an `ordered` single file out of sequence
    */
   enqueueUp(filename?: string, options?: EnqueueUpOptions): Promise<MigrationGroup>;
   /**
    * Enqueue a rollback — the last batch, `options.batch`, the last
    * `options.steps`, everything after `options.to`, or the one `filename` —
    * newest applied first.
+   * @throws {QueueClosedError} ALX_ERR_QUEUE_CLOSED — the queue is closed or closing
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — bad options, or a permission `allow` withholds
    */
   enqueueDown(filename?: string, options?: EnqueueDownOptions): Promise<MigrationGroup>;
   /**
@@ -1317,6 +1322,8 @@ export class MigrationQueue<
    * MongoDB first, so an unreachable database fails here rather than on the
    * first job. Calling it again resolves the same worker — or, after a start
    * that failed, tries again.
+   * @throws {QueueClosedError} ALX_ERR_QUEUE_CLOSED — the queue is closed or closing
+   * @throws {ConnectionFailedError} ALX_ERR_CONNECTION_FAILED — MongoDB could not be reached
    */
   startWorker(options?: StartWorkerOptions): Promise<W>;
   /**
@@ -1353,7 +1360,8 @@ export class MigrationQueue<
    * `force` skips waiting for the job in flight — whose migration body, if
    * running, keeps its connection: a kit this object created is disconnected
    * once it settles. Injected instances, the Redis connection and an injected
-   * kit are left open. Idempotent.
+   * kit are left open. Idempotent. Every step is attempted; the first
+   * failure is what it rejects with, and the others are warned about.
    */
   close(options?: { force?: boolean }): Promise<void>;
 }

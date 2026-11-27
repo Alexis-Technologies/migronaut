@@ -1,10 +1,6 @@
-const fs = require('node:fs/promises');
 const util = require('node:util');
-const { ConfigInvalidError } = require('../errors/index.js');
-const { contextPath } = require('./error.js');
 
-/** Larger than any sane .env — the same ceiling custom templates get */
-const MAX_ENV_FILE_BYTES = 1024 * 1024;
+const { readSmallFile } = require('./file.js');
 
 /**
  * Keys never copied into the target: with a plain-object `env`, assigning
@@ -21,28 +17,15 @@ const UNSAFE_ENV_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
  * Node range (added in 20.12; engines require ≥22.18).
  */
 const applyEnvFile = async (filePath, env = process.env) => {
-  // stat before read: `--env-file /dev/zero` (or a runaway file) must fail
-  // with a typed error, not hang the process reading forever.
-  let stats = null;
+  // `--env-file /dev/zero`, a FIFO or a runaway file must fail with a typed
+  // error, not hang the process reading forever (readSmallFile).
+  let content = '';
   try {
-    stats = await fs.stat(filePath);
+    content = await readSmallFile(filePath, 'env file');
   } catch (error) {
-    if (error.code === 'ENOENT') return;
+    if (error?.code === 'ENOENT') return;
     throw error;
   }
-  // A device file (/dev/zero reports size 0), FIFO or directory would hang or
-  // garble the read — only regular files are .env candidates.
-  if (!stats.isFile()) {
-    throw new ConfigInvalidError('env file is not a regular file', {
-      context: { path: contextPath(filePath) },
-    });
-  }
-  if (stats.size > MAX_ENV_FILE_BYTES) {
-    throw new ConfigInvalidError('env file is too large (max 1 MB)', {
-      context: { path: contextPath(filePath), size: stats.size },
-    });
-  }
-  const content = await fs.readFile(filePath, 'utf8');
   const parsed = util.parseEnv(content);
   for (const key of Object.keys(parsed)) {
     if (UNSAFE_ENV_KEYS.has(key)) continue;

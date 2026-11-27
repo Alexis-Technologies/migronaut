@@ -10,6 +10,7 @@ const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
 const TELEMETRY_KEY_SET = new Set(TELEMETRY_KEYS);
 const { applyEnvFile } = require('../utils/env.js');
 const { contextPath, errorText } = require('../utils/error.js');
+const { readSmallFile } = require('../utils/file.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { redactDeep } = require('../utils/redact.js');
 const { collectionsIssues } = require('./collections.js');
@@ -61,8 +62,21 @@ const MAX_LOCK_TTL_SECONDS = Math.floor(MAX_TIMER_MS / 1000);
 
 /** A lock TTL the heartbeat and the deadline can arm */
 const isLockTtl = (value) => isPositiveInteger(value) && value <= MAX_LOCK_TTL_SECONDS;
-const isExtension = (value) => value === 'ts' || value === 'js';
-const oneOf = (values) => (value) => values.includes(value);
+/** A check that `value` is one of `values` — a Set, read once per call */
+const oneOf = (values) => {
+  const allowed = new Set(values);
+  return (value) => allowed.has(value);
+};
+/** "'warn', 'error' or 'allow'": `values` in single quotes, the last after "or" */
+const choices = (values) => {
+  let text = '';
+  for (let i = 0; i < values.length; i++) {
+    if (i > 0) text += i === values.length - 1 ? ' or ' : ', ';
+    text += `'${values[i]}'`;
+  }
+  return text;
+};
+
 /** `values` each in single quotes, joined by `separator` */
 const quoted = (values, separator = ', ') => {
   let text = '';
@@ -73,9 +87,27 @@ const quoted = (values, separator = ', ') => {
   return text;
 };
 
+/**
+ * The values of every enum key, once: what the config table checks, what the
+ * env table parses, and what migronaut.schema.json lists (a test holds the
+ * schema's `enum` to these).
+ */
+const CREATE_EXTENSIONS = ['ts', 'js'];
+const ON_LOCK_LOST = ['abort', 'warn'];
+const ON_OUT_OF_ORDER = ['warn', 'error', 'allow'];
+const ON_SEARCH_UNAVAILABLE = ['fail', 'skip'];
 const ON_DRIFT = ['reopen', 'report'];
 const DRIFT_MODES = ['poll', 'stream', 'both'];
 const SHARD_AWARE = ['auto', 'off'];
+
+/** A CONFIG_KEYS row for an enum key: its values, the check and the message from them */
+const enumKey = (key, values) => ({
+  path: key,
+  check: oneOf(values),
+  message: `must be ${choices(values)}`,
+  optional: true,
+  values,
+});
 
 /**
  * The collections a background migration keeps its state in: the state
@@ -133,6 +165,7 @@ const CONFIG_KEYS = [
     path: 'lockTTLSeconds',
     check: isLockTtl,
     message: `must be a positive integer, at most ${MAX_LOCK_TTL_SECONDS}`,
+    max: MAX_LOCK_TTL_SECONDS,
   },
   { path: 'strict', check: isBoolean, message: 'must be a boolean' },
   { path: 'useTransaction', check: isBoolean, message: 'must be a boolean' },
@@ -141,7 +174,7 @@ const CONFIG_KEYS = [
     check: isStringList,
     message: 'must be a non-empty array of non-empty strings',
   },
-  { path: 'createExtension', check: isExtension, message: "must be 'ts' or 'js'" },
+  { ...enumKey('createExtension', CREATE_EXTENSIONS), optional: false },
   { path: 'sequential', check: isBoolean, message: 'must be a boolean' },
   {
     path: 'templatePath',
@@ -155,18 +188,8 @@ const CONFIG_KEYS = [
     message: 'must be a non-empty string',
     optional: true,
   },
-  {
-    path: 'onLockLost',
-    check: (value) => value === 'abort' || value === 'warn',
-    message: "must be 'abort' or 'warn'",
-    optional: true,
-  },
-  {
-    path: 'onOutOfOrder',
-    check: (value) => value === 'warn' || value === 'error' || value === 'allow',
-    message: "must be 'warn', 'error' or 'allow'",
-    optional: true,
-  },
+  enumKey('onLockLost', ON_LOCK_LOST),
+  enumKey('onOutOfOrder', ON_OUT_OF_ORDER),
   {
     path: 'envFile',
     check: (value) => value === false || isNonEmptyString(value),
@@ -185,6 +208,7 @@ const CONFIG_KEYS = [
     check: isTimerMs,
     message: `must be a positive integer, at most ${MAX_TIMER_MS}`,
     optional: true,
+    max: MAX_TIMER_MS,
   },
   { path: 'reloadMigrations', check: isBoolean, message: 'must be a boolean', optional: true },
   // Only the outer shape here — each definition is checked by
@@ -203,18 +227,14 @@ const CONFIG_KEYS = [
     optional: true,
   },
   { path: 'convergeAfterUp', check: isBoolean, message: 'must be a boolean', optional: true },
-  {
-    path: 'onSearchUnavailable',
-    check: (value) => value === 'fail' || value === 'skip',
-    message: "must be 'fail' or 'skip'",
-    optional: true,
-  },
+  enumKey('onSearchUnavailable', ON_SEARCH_UNAVAILABLE),
   { path: 'waitForSearchIndexes', check: isBoolean, message: 'must be a boolean', optional: true },
   {
     path: 'searchIndexWaitTimeoutMs',
     check: isTimerMs,
     message: `must be a positive integer, at most ${MAX_TIMER_MS}`,
     optional: true,
+    max: MAX_TIMER_MS,
   },
   {
     path: 'backgroundCollection',
@@ -223,24 +243,9 @@ const CONFIG_KEYS = [
     optional: true,
   },
   { path: 'backgroundInline', check: isBoolean, message: 'must be a boolean', optional: true },
-  {
-    path: 'backgroundOnDrift',
-    check: oneOf(ON_DRIFT),
-    message: `must be ${quoted(ON_DRIFT)}`,
-    optional: true,
-  },
-  {
-    path: 'backgroundDrift',
-    check: oneOf(DRIFT_MODES),
-    message: `must be ${quoted(DRIFT_MODES)}`,
-    optional: true,
-  },
-  {
-    path: 'backgroundShardAware',
-    check: oneOf(SHARD_AWARE),
-    message: `must be ${quoted(SHARD_AWARE)}`,
-    optional: true,
-  },
+  enumKey('backgroundOnDrift', ON_DRIFT),
+  enumKey('backgroundDrift', DRIFT_MODES),
+  enumKey('backgroundShardAware', SHARD_AWARE),
 ];
 
 /**
@@ -359,9 +364,8 @@ const parseBoolean = (value, name) => {
   const normalized = value.trim().toLowerCase();
   if (TRUE_BOOLEAN_STRINGS.has(normalized)) return true;
   if (FALSE_BOOLEAN_STRINGS.has(normalized)) return false;
-  throw new ConfigInvalidError(`${name} must be 'true'/'1'/'yes' or 'false'/'0'/'no'`, {
-    context: { name, value },
-  });
+  const issue = "must be 'true'/'1'/'yes' or 'false'/'0'/'no'";
+  throw new ConfigInvalidError(`${name} ${issue}`, { context: { name, value, issue } });
 };
 
 /**
@@ -391,9 +395,8 @@ const mergeDefined = (target, source) => {
 const parsePositiveInteger = (value, name) => {
   const parsed = Number(value.trim());
   if (!isPositiveInteger(parsed)) {
-    throw new ConfigInvalidError(`${name} must be a positive integer`, {
-      context: { name, value },
-    });
+    const issue = 'must be a positive integer';
+    throw new ConfigInvalidError(`${name} ${issue}`, { context: { name, value, issue } });
   }
   return parsed;
 };
@@ -405,7 +408,8 @@ const parseEnum = (allowed) => {
   return (value, name) => {
     const normalized = value.trim();
     if (!values.has(normalized)) {
-      throw new ConfigInvalidError(`${name} must be ${list}`, { context: { name, value } });
+      const issue = `must be ${list}`;
+      throw new ConfigInvalidError(`${name} ${issue}`, { context: { name, value, issue } });
     }
     return normalized;
   };
@@ -444,16 +448,16 @@ const ENV_KEYS = [
   { env: 'MIGRONAUT_STRICT', path: 'strict', parse: parseBoolean },
   { env: 'MIGRONAUT_USE_TRANSACTION', path: 'useTransaction', parse: parseBoolean },
   { env: 'MIGRONAUT_SEQUENTIAL', path: 'sequential', parse: parseBoolean },
-  { env: 'MIGRONAUT_CREATE_EXTENSION', path: 'createExtension', parse: parseEnum(['ts', 'js']) },
+  {
+    env: 'MIGRONAUT_CREATE_EXTENSION',
+    path: 'createExtension',
+    parse: parseEnum(CREATE_EXTENSIONS),
+  },
   { env: 'MIGRONAUT_ENVIRONMENT', path: 'environment', parse: parseString },
   { env: 'MIGRONAUT_TEMPLATE_PATH', path: 'templatePath', parse: parseString },
   { env: 'MIGRONAUT_TIMEOUT_MS', path: 'timeoutMs', parse: parsePositiveInteger },
-  { env: 'MIGRONAUT_ON_LOCK_LOST', path: 'onLockLost', parse: parseEnum(['abort', 'warn']) },
-  {
-    env: 'MIGRONAUT_ON_OUT_OF_ORDER',
-    path: 'onOutOfOrder',
-    parse: parseEnum(['warn', 'error', 'allow']),
-  },
+  { env: 'MIGRONAUT_ON_LOCK_LOST', path: 'onLockLost', parse: parseEnum(ON_LOCK_LOST) },
+  { env: 'MIGRONAUT_ON_OUT_OF_ORDER', path: 'onOutOfOrder', parse: parseEnum(ON_OUT_OF_ORDER) },
   { env: 'MIGRONAUT_ENSURE_INDEXES', path: 'ensureIndexes', parse: parseBoolean },
   { env: 'MIGRONAUT_RELOAD_MIGRATIONS', path: 'reloadMigrations', parse: parseBoolean },
   { env: 'MIGRONAUT_COLLECTIONS_DIR', path: 'collectionsDir', parse: parseString },
@@ -461,7 +465,7 @@ const ENV_KEYS = [
   {
     env: 'MIGRONAUT_ON_SEARCH_UNAVAILABLE',
     path: 'onSearchUnavailable',
-    parse: parseEnum(['fail', 'skip']),
+    parse: parseEnum(ON_SEARCH_UNAVAILABLE),
   },
   { env: 'MIGRONAUT_WAIT_FOR_SEARCH_INDEXES', path: 'waitForSearchIndexes', parse: parseBoolean },
   {
@@ -485,14 +489,33 @@ const ENV_KEYS = [
 ];
 
 /** Build a partial config from the MIGRONAUT_* environment variables */
-const readEnvConfig = (env = process.env) => {
+const readEnvConfig = (env, issues) => {
   const result = {};
   for (const spec of ENV_KEYS) {
     const value = env[spec.env];
     if (value === undefined) continue;
-    result[spec.path] = spec.parse(value, spec.env);
+    try {
+      result[spec.path] = spec.parse(value, spec.env);
+    } catch (error) {
+      if (!(error instanceof ConfigInvalidError)) throw error;
+      // Every variable that does not parse, named as the user set it — one
+      // fix and run per typo was the price of throwing at the first.
+      issues.push({ path: spec.env, message: error.context.issue });
+    }
   }
   return result;
+};
+
+/** "Invalid configuration — dbName is required; MIGRONAUT_STRICT must be …": what a person reads */
+const issuesMessage = (issues) => {
+  let text = '';
+  for (let i = 0; i < issues.length; i++) {
+    const { path: where, message } = issues[i];
+    // `uri is required` names its key already; the rest say only the rule.
+    const line = message.startsWith(`${where} `) ? message : `${where} ${message}`;
+    text += `${i === 0 ? '' : '; '}${line}`;
+  }
+  return `Invalid configuration — ${text}`;
 };
 
 /** Returns true when `filepath` exists on disk */
@@ -542,7 +565,7 @@ const shapeOf = (value) => {
  */
 const loadConfigFile = async (filepath, lenient = false) => {
   if (filepath.endsWith('.json')) {
-    const raw = await fs.readFile(filepath, 'utf8');
+    const raw = await readSmallFile(filepath, 'Config file');
     try {
       return JSON.parse(raw);
     } catch (error) {
@@ -593,6 +616,16 @@ const definitionNames = (definitions) => {
   const names = [];
   for (let i = 0; i < definitions.length; i++) names.push(definitions[i].name);
   return names;
+};
+
+/** The keys of `values` migronaut knows — what the resolved-config line may show */
+const knownOnly = (values) => {
+  const known = {};
+  const keys = Object.keys(values);
+  for (let i = 0; i < keys.length; i++) {
+    if (KNOWN_CONFIG_KEYS.has(keys[i])) known[keys[i]] = values[keys[i]];
+  }
+  return known;
 };
 
 /**
@@ -671,7 +704,8 @@ const loadConfig = async (options = {}) => {
     }
   }
 
-  mergeDefined(merged, readEnvConfig());
+  const envIssues = [];
+  mergeDefined(merged, readEnvConfig(process.env, envIssues));
 
   if (options.flags) {
     mergeDefined(merged, options.flags);
@@ -683,30 +717,35 @@ const loadConfig = async (options = {}) => {
     if (merged.dbName === undefined) merged.dbName = '';
   }
 
-  const issues = validateConfig(merged, { requireDb });
+  const issues = envIssues.concat(validateConfig(merged, { requireDb }));
   if (issues.length > 0) {
-    throw new ConfigInvalidError('Invalid configuration', { context: { issues } });
+    throw new ConfigInvalidError(issuesMessage(issues), { context: { issues } });
   }
 
   const config = merged;
 
   // A typo'd key (`migrationsDirectory`, `useTransactions`) validates fine and
-  // then silently does nothing; a debug mention is the cheapest way to notice.
-  // The array is only allocated when a stray key actually exists.
+  // then silently does nothing — a safety option left at its default. Warned,
+  // not refused: a key of a newer release must not break an older one. The
+  // array is only allocated when a stray key actually exists.
   let unknown = null;
   for (const key in config) {
     if (!KNOWN_CONFIG_KEYS.has(key)) (unknown ??= []).push(key);
   }
   // Same for `telemetry`: handing over the whole `@opentelemetry/api` module
   // (`trace`, `metrics`) instead of a tracer and a meter turns it off silently.
+  // It is the user's object, so only its own keys are read.
   if (config.telemetry) {
-    for (const key in config.telemetry) {
+    const telemetryKeys = Object.keys(config.telemetry);
+    for (let i = 0; i < telemetryKeys.length; i++) {
+      const key = telemetryKeys[i];
       if (!TELEMETRY_KEY_SET.has(key)) (unknown ??= []).push(`telemetry.${key}`);
     }
   }
   if (unknown) {
-    effectiveLogger(config.logger).debug(
-      `Unrecognized config key(s), ignored: ${unknown.join(', ')}`,
+    effectiveLogger(config.logger).warn(
+      `⚠ Unrecognized config key(s), ignored: ${unknown.join(', ')}`,
+      { keys: unknown },
     );
   }
 
@@ -716,7 +755,9 @@ const loadConfig = async (options = {}) => {
   }
 
   // "Which config did it actually pick up?" — the merged result, once, at
-  // debug level. Live instances (client, mongoose, hooks, logger, telemetry)
+  // debug level: the keys migronaut knows only — an unknown key may be a
+  // secret the redaction cannot see by its shape (`apiKey`), and it is
+  // ignored anyway (warned above). Live instances (client, mongoose, hooks, logger, telemetry)
   // and the generateId function are elided: they are not serializable and
   // redactDeep rightly refuses to clone them. Declared collections show as
   // names only — validators can run to hundreds of lines. clientOptions shows
@@ -738,7 +779,7 @@ const loadConfig = async (options = {}) => {
     effectiveLogger(config.logger).debug(
       `Resolved config (source: ${configFilePath ? path.basename(configFilePath) : 'env/flags/defaults'})`,
       redactDeep({
-        ...rest,
+        ...knownOnly(rest),
         ...(clientOptions ? { clientOptions: Object.keys(clientOptions) } : {}),
         ...(collections ? { collections: definitionNames(collections) } : {}),
         ...(client ? { client: '[injected]' } : {}),

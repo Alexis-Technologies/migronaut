@@ -346,12 +346,14 @@ expected (a plain `mongo` container in development while production runs on Atla
 `onSearchUnavailable: 'skip'`: everything else converges, and the search indexes are reported as
 `skip`. A converge with no `searchIndexes` declared anywhere never asks the server about Search.
 
-```js
-export default {
-  // …
-  onSearchUnavailable: process.env.NODE_ENV === 'development' ? 'skip' : 'fail',
-};
+Set it where that server runs, not by branching on the environment's name — in the development
+`.env` (or the container's environment):
+
+```sh
+MIGRONAUT_ON_SEARCH_UNAVAILABLE=skip
 ```
+
+Production leaves it unset, and keeps the default, `'fail'`.
 
 `migronaut audit` checks the same thing ahead of time: its `search` check fails where converge
 would refuse, and warns about a FAILED build.

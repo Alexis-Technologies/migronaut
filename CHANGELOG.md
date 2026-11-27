@@ -79,6 +79,12 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 - **A run stopped on request is no error in telemetry**: its span ends without the ERROR status and
   its `migronaut.run.duration` point without `error.type`, both with `migronaut.run.stopped = true`
   — every rolling deploy was an error-rate spike.
+- **A configuration that does not validate says every issue, in its message and at once.** An
+  environment variable that does not parse joins the other issues in `context.issues`
+  (`{ path: 'MIGRONAUT_STRICT', message: … }`) instead of throwing alone with `context.name` and
+  `context.value`, and the message lists them all: `Invalid configuration — MIGRONAUT_LOCK_TTL
+  must be a positive integer; dbName is required`, where a person read only "Invalid
+  configuration".
 - **`EXIT_CODES` is frozen, with no prototype.** The CLI reads the same object, so a consumer's
   write changed its exit codes for the whole process.
 
@@ -97,6 +103,8 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 
 ### Changed
 
+- **An unknown config key is a warning**, where it was a debug line: a mistyped safety option
+  (`useTransactions`) runs with its default.
 - **`LICENSE` and `SECURITY.md` ship in the package.** `files` lists them next to `README.md` and
   `CHANGELOG.md` (npm added `LICENSE` on its own before; the security policy is new in the
   tarball).
@@ -138,6 +146,12 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
   is held, nothing else bounded a stalled one.
 - **A verify tick or a control action no longer carries the id of the run in flight** on its
   events, as it did on a queue whose kit served both workers.
+- **`init` writes the config file exclusively, and `--force` atomically**: no window between the
+  check and the write in which another `init` lands, and a crash during `--force` no longer leaves
+  a half-written config where the old one was.
+- **A `.env`, a JSON config and a custom template are read through one descriptor**, regular files
+  of at most 1 MB: a FIFO named like one no longer hangs the run, and a JSON config has the cap
+  the other two had.
 - **The drift watcher loads a file that would not load once per refresh**, not once per write
   of a busy collection (each with a warning and a reopening write).
 - **An error that escapes the CLI stops the run in flight.** After an unhandled rejection (a
@@ -151,6 +165,10 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 
 ### Security
 
+- **The resolved-config debug line shows the keys migronaut knows only**: an unknown key — ignored
+  anyway — could hold a secret its redaction cannot tell by its shape (`apiKey`).
+- **The secret-manager config scaffold no longer falls back to a production secret name**: with
+  `MONGO_SECRET_ID` unset it fetched `prod/myapp/mongo`; it now refuses to start.
 - **A failed migration's `context.cause` masks URI credentials**, through `errorText` as at every
   other wrap site: `ALX_ERR_MIGRATION_EXECUTION_FAILED` (the changelog-write case included) and
   `ALX_ERR_TRANSACTIONS_UNSUPPORTED` kept the thrown message raw for a caller of the API; the CLI,
@@ -158,6 +176,11 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 
 ### Documentation
 
+- **The public methods say what they throw**: `@throws` with the code on the kit's run methods,
+  `connect`, `import`, `baseline` and `converge`, and on the queue's `enqueueUp`, `enqueueDown`
+  and `startWorker`.
+- **The collections guide sets `onSearchUnavailable` per environment** through
+  `MIGRONAUT_ON_SEARCH_UNAVAILABLE`, not by branching on `NODE_ENV`.
 - **The CHANGELOG follows Keep a Changelog.** `## [X.Y.Z] - YYYY-MM-DD` headings under an
   `[Unreleased]` section, a link block for every release, and the headings of the format:
   `Breaking changes` is `Changed (breaking)`, 2.0.0's `Fixed / hardened` is `Fixed`, 2.3.0's
@@ -169,6 +192,8 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 
 ### Tooling
 
+- **`CONFIG_KEYS` is the one source of the enum values and bounds** the schema lists: a test holds
+  `migronaut.schema.json` (and its served copy) to them, and the env table parses the same lists.
 - **The skills come from `@alexify/metaskills` 1.2.0**, a devDependency, linked into
   `.claude/skills` by `prepare` (`alexiskills claude`) in place of the six skills of
   metarhia/metaskills 1.0.5 the repository kept. 1.1.1 changed the App profile only; 1.1.2 allows

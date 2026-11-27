@@ -8,6 +8,8 @@ const {
 } = require('../errors/index.js');
 const { formatStamp } = require('./date.js');
 const { contextPath, errorText } = require('./error.js');
+const { readSmallFile } = require('./file.js');
+const { randomId } = require('./id.js');
 const { redactUris } = require('./redact.js');
 
 /**
@@ -193,9 +195,6 @@ module.exports = { description, background };
 /** Extensions a custom `--template` file may have — anything else is refused */
 const TEMPLATE_EXTENSIONS = ['.ts', '.js', '.cjs', '.mjs'];
 
-/** Size cap for a custom template — a migration scaffold is never this big */
-const MAX_TEMPLATE_BYTES = 1024 * 1024;
-
 /** Resolve template file contents — a custom template if provided, else the built-in */
 const resolveTemplateContent = async (templatePath, js, esm = false, background = false) => {
   if (background) return defaultBackgroundTemplate(js, esm);
@@ -207,23 +206,14 @@ const resolveTemplateContent = async (templatePath, js, esm = false, background 
         { context: { templatePath } },
       );
     }
-    let stats = null;
     try {
-      stats = await fs.stat(templatePath);
+      return await readSmallFile(templatePath, 'Template file');
     } catch (error) {
-      if (error.code === 'ENOENT') {
-        throw new MigrationFileNotFoundError('Template file not found', {
-          context: { templatePath },
-        });
-      }
-      throw error;
-    }
-    if (stats.size > MAX_TEMPLATE_BYTES) {
-      throw new ConfigInvalidError('Template file is too large (max 1 MB)', {
-        context: { templatePath, size: stats.size },
+      if (error?.code !== 'ENOENT') throw error;
+      throw new MigrationFileNotFoundError('Template file not found', {
+        context: { templatePath: contextPath(templatePath) },
       });
     }
-    return fs.readFile(templatePath, 'utf8');
   }
   return js ? defaultTemplateJs(esm) : defaultTemplateTs(esm);
 };
@@ -589,8 +579,10 @@ import {
  * GCP / Vault / Azure / anything — it just has to return { uri, dbName }.
  */
 async function loadMongoSecret() {
-  // Secret name/ARN. Read from an env var so it can differ per environment.
-  const secretId = process.env.MONGO_SECRET_ID ?? 'prod/myapp/mongo';
+  // Secret name/ARN, per environment. No fallback: a default would be some
+  // environment's real secret, read wherever the variable was left unset.
+  const secretId = process.env.MONGO_SECRET_ID;
+  if (!secretId) throw new Error('Set MONGO_SECRET_ID to the secret that holds the connection');
 
   // Region & credentials come from the environment (AWS_REGION,
   // AWS_ACCESS_KEY_ID/SECRET, or an attached IAM role).
@@ -639,8 +631,10 @@ import {
  * GCP / Vault / Azure / anything — it just has to return { uri, dbName }.
  */
 async function loadMongoSecret(): Promise<{ uri: string; dbName: string }> {
-  // Secret name/ARN. Read from an env var so it can differ per environment.
-  const secretId = process.env.MONGO_SECRET_ID ?? 'prod/myapp/mongo';
+  // Secret name/ARN, per environment. No fallback: a default would be some
+  // environment's real secret, read wherever the variable was left unset.
+  const secretId = process.env.MONGO_SECRET_ID;
+  if (!secretId) throw new Error('Set MONGO_SECRET_ID to the secret that holds the connection');
 
   // Region & credentials come from the environment (AWS_REGION,
   // AWS_ACCESS_KEY_ID/SECRET, or an attached IAM role).
@@ -698,19 +692,25 @@ const configTemplateContent = (format, values = {}, secretProvider = false, esm 
  * Create an `migronaut.config.<format>` file on disk and return its absolute path.
  * Throws ConfigFileExistsError if the file exists and `force` is false.
  */
+/**
+ * Replace `filepath` with `content` in one step: written whole to a file of
+ * its own beside it, then renamed over it — a crash never leaves a config
+ * half-written where the old one was.
+ */
+const replaceFile = async (filepath, content) => {
+  const temporary = `${filepath}.${randomId()}.tmp`;
+  try {
+    await fs.writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' });
+    await fs.rename(temporary, filepath);
+  } catch (error) {
+    // The write's own failure is what is reported; a leftover temp file is no config.
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+};
+
 const createConfigFile = async (options) => {
   const filepath = path.join(options.dir, `migronaut.config.${options.format}`);
-  if (!options.force) {
-    const exists = await fs
-      .access(filepath)
-      .then(() => true)
-      .catch(() => false);
-    if (exists) {
-      throw new ConfigFileExistsError('Config file already exists', {
-        context: { path: contextPath(filepath) },
-      });
-    }
-  }
   const content = configTemplateContent(
     options.format,
     options.values ?? {},
@@ -719,7 +719,19 @@ const createConfigFile = async (options) => {
     // Node's reparse warning.
     await isEsmProject(options.dir),
   );
-  await fs.writeFile(filepath, content, 'utf8');
+  if (options.force) {
+    await replaceFile(filepath, content);
+    return filepath;
+  }
+  // Exclusive: no check-then-write window in which another `init` lands first.
+  try {
+    await fs.writeFile(filepath, content, { encoding: 'utf8', flag: 'wx' });
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    throw new ConfigFileExistsError('Config file already exists', {
+      context: { path: contextPath(filepath) },
+    });
+  }
   return filepath;
 };
 

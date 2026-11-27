@@ -44,6 +44,29 @@ describe('config schema sync', () => {
     }
   });
 
+  it('should list the enum values and the bounds CONFIG_KEYS holds, and no others', () => {
+    // CONFIG_KEYS is the one source for what can drift unseen: an enum value
+    // added to the validator but not to the schema red-squiggles a valid
+    // config; a bound only in the schema accepts what the run refuses.
+    const { CONFIG_KEYS } = require(path.join(repoRoot, 'src', 'core', 'config.js'));
+    let enums = 0;
+    for (const spec of CONFIG_KEYS) {
+      const property = schema.properties[spec.path];
+      if (spec.values !== undefined) {
+        enums += 1;
+        assert.deepStrictEqual(property.enum, spec.values, `enum of '${spec.path}'`);
+      } else {
+        assert.strictEqual(
+          property.enum,
+          undefined,
+          `'${spec.path}' lists values CONFIG_KEYS does not`,
+        );
+      }
+      assert.strictEqual(property.maximum, spec.max, `maximum of '${spec.path}'`);
+    }
+    assert.ok(enums >= 7, 'expected the enum keys');
+  });
+
   it('should allow unknown keys, matching the runtime validator', () => {
     // validateConfig documents non-strict behavior; a schema that rejects
     // unknown keys red-squiggles configs that run fine.

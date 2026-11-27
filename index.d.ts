@@ -2147,7 +2147,11 @@ export interface MigratorKitOptions {
 export class MigratorKit extends EventEmitter {
   constructor(config?: Partial<MigronautConfig>, options?: MigratorKitOptions);
 
-  /** Connect to MongoDB and ensure changelog indexes exist */
+  /**
+   * Connect to MongoDB and ensure changelog indexes exist.
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — the configuration does not validate
+   * @throws {ConnectionFailedError} ALX_ERR_CONNECTION_FAILED — MongoDB could not be reached, or its indexes not created
+   */
   connect(): Promise<void>;
   /**
    * The resolved logger — silent when config sets `logger: null`. Meaningful
@@ -2183,14 +2187,53 @@ export class MigratorKit extends EventEmitter {
    * its own ids to match. Resolves the config; does not connect.
    */
   generateId(): Promise<string>;
-  /** Run all pending migrations, or a specific named file */
+  /**
+   * Run all pending migrations, or a specific named file. A failure carries
+   * the rows applied before it in `context.results`.
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — bad options or configuration
+   * @throws {ConnectionFailedError} ALX_ERR_CONNECTION_FAILED — MongoDB could not be reached
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
+   * @throws {LockLostError} ALX_ERR_LOCK_LOST — the lock was lost mid-run
+   * @throws {RunAbortedError} ALX_ERR_RUN_ABORTED — `stop()` or the `signal` stopped it
+   * @throws {RunInFlightError} ALX_ERR_RUN_IN_FLIGHT — this kit already has a run in flight
+   * @throws {DatabaseOperationFailedError} ALX_ERR_DATABASE_OPERATION_FAILED — a changelog or lock operation failed
+   * @throws {MigrationExecutionFailedError} ALX_ERR_MIGRATION_EXECUTION_FAILED — a migration threw
+   * @throws {MigrationLoadFailedError} ALX_ERR_MIGRATION_LOAD_FAILED — a migration file did not load
+   * @throws {MigrationInvalidExportError} ALX_ERR_MIGRATION_INVALID_EXPORT — a file exports no valid migration
+   * @throws {MigrationTimeoutError} ALX_ERR_MIGRATION_TIMEOUT — a migration outlived its `timeoutMs`
+   * @throws {ChecksumMismatchError} ALX_ERR_CHECKSUM_MISMATCH — an applied file changed, under `strict`
+   * @throws {OutOfOrderMigrationError} ALX_ERR_MIGRATION_OUT_OF_ORDER — under `onOutOfOrder: 'error'`
+   * @throws {MigrationBlockedError} ALX_ERR_MIGRATION_BLOCKED — an `ordered` single file out of sequence
+   * @throws {BackgroundPendingError} ALX_ERR_BACKGROUND_PENDING — a required background migration is not done
+   * @throws {HookFailedError} ALX_ERR_HOOK_FAILED — a lifecycle hook threw
+   */
   up(filename?: string, options?: UpOptions): Promise<RunResult[]>;
-  /** Rollback the last batch, a specific batch, a specific file, or the last N steps */
+  /**
+   * Rollback the last batch, a specific batch, a specific file, or the last N steps.
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — bad options or configuration
+   * @throws {ConnectionFailedError} ALX_ERR_CONNECTION_FAILED — MongoDB could not be reached
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
+   * @throws {LockLostError} ALX_ERR_LOCK_LOST — the lock was lost mid-run
+   * @throws {RunAbortedError} ALX_ERR_RUN_ABORTED — `stop()` or the `signal` stopped it
+   * @throws {RunInFlightError} ALX_ERR_RUN_IN_FLIGHT — this kit already has a run in flight
+   * @throws {DatabaseOperationFailedError} ALX_ERR_DATABASE_OPERATION_FAILED — a changelog or lock operation failed
+   * @throws {MigrationExecutionFailedError} ALX_ERR_MIGRATION_EXECUTION_FAILED — a `down()` threw
+   * @throws {NotAppliedError} ALX_ERR_NOT_APPLIED — the named migration is not applied
+   * @throws {IrreversibleMigrationError} ALX_ERR_MIGRATION_IRREVERSIBLE — an imported or baselined record
+   * @throws {MigrationBlockedError} ALX_ERR_MIGRATION_BLOCKED — an `ordered` single file out of sequence
+   */
   down(filename?: string, options?: DownOptions): Promise<RunResult[]>;
   /**
    * Rollback then re-apply: the last applied migration, or a specific file.
    * Both directions run under a single lock, so no other process can slip in
-   * while the migration is reverted.
+   * while the migration is reverted. Throws what `down` and `up` throw.
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — bad options or configuration
+   * @throws {ConnectionFailedError} ALX_ERR_CONNECTION_FAILED — MongoDB could not be reached
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
+   * @throws {LockLostError} ALX_ERR_LOCK_LOST — the lock was lost mid-run
+   * @throws {RunAbortedError} ALX_ERR_RUN_ABORTED — `stop()` or the `signal` stopped it
+   * @throws {RunInFlightError} ALX_ERR_RUN_IN_FLIGHT — this kit already has a run in flight
+   * @throws {DatabaseOperationFailedError} ALX_ERR_DATABASE_OPERATION_FAILED — a changelog or lock operation failed
    */
   redo(filename?: string, options?: RedoOptions): Promise<RunResult[]>;
   on<E extends keyof MigronautEvents>(event: E, listener: MigronautEvents[E]): this;
@@ -2236,6 +2279,9 @@ export class MigratorKit extends EventEmitter {
   /**
    * Adopt an existing migrate-mongo `changelog` collection by mapping its
    * records into our schema and writing them to `migrationsCollection`.
+   *
+   * @throws {ImportTargetNotEmptyError} ALX_ERR_IMPORT_TARGET_NOT_EMPTY — the target holds records, without `force`
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
    */
   import(options?: ImportOptions): Promise<ImportResult>;
   /**
@@ -2244,6 +2290,9 @@ export class MigratorKit extends EventEmitter {
    * `origin: 'baseline'` — without executing anything. Forward-only:
    * `down`/`redo` refuse baselined records. Idempotent: already-applied names
    * are skipped, so a partial baseline can simply be re-run.
+   *
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
+   * @throws {MigrationFileNotFoundError} ALX_ERR_MIGRATION_FILE_NOT_FOUND — `to` names no file
    */
   baseline(options?: BaselineOptions): Promise<BaselineSummary>;
   /**
@@ -2253,6 +2302,10 @@ export class MigratorKit extends EventEmitter {
    * history ({@link MigratorKit.convergeHistory}), which no run reads back. A
    * real run holds the migration lock; a plan with a conflict is refused before
    * any write, and a failed step throws {@link ConvergeFailedError}. Experimental.
+   *
+   * @throws {ConvergeFailedError} ALX_ERR_CONVERGE_FAILED — a conflict, a failed step, a search wait that gave up
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
+   * @throws {RunAbortedError} ALX_ERR_RUN_ABORTED — `stop()` or the `signal` stopped it
    */
   converge(options?: ConvergeOptions): Promise<ConvergeResult>;
   /**
