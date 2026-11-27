@@ -2,7 +2,7 @@ const { setTimeout: sleepFor } = require('node:timers/promises');
 
 const { ConvergeFailedError, MigronautError } = require('../../errors/index.js');
 const { mapLimit } = require('../../utils/concurrency.js');
-const { errorText } = require('../../utils/error.js');
+const { formatError } = require('../../utils/error.js');
 const { SERVED_ACTIONS } = require('./plan.js');
 const { awaitSearchIndexes, listSearchIndexes, probeSearch, searchHint } = require('./search.js');
 const { searchBuild, searchBuildState } = require('./search-index-spec.js');
@@ -36,9 +36,9 @@ const STATE_NOTES = Object.freeze({
 });
 
 /** Sleep `ms` — less, when `signal` aborts: the caller's next abort check says why */
-const pause = async (ms, signal) => {
+const pause = async (delayMs, signal) => {
   try {
-    await sleepFor(ms, undefined, signal ? { signal } : undefined);
+    await sleepFor(delayMs, undefined, signal ? { signal } : undefined);
   } catch (error) {
     if (error?.name !== 'AbortError') throw error;
   }
@@ -50,7 +50,7 @@ const pause = async (ms, signal) => {
  * stale or failed) — or undefined. Asked of every row by the report's one
  * pass over them.
  */
-const notReadyEntry = (collection, action) => {
+const toNotReadyEntry = (collection, action) => {
   if (action.target !== 'searchIndex' || action.build === undefined) return null;
   if (!SERVED_ACTIONS.has(action.action)) return null;
   if (searchBuildState(action.build) === 'serving') return null;
@@ -97,7 +97,7 @@ const searchReadFailure = (error, collection, phase) => {
   if (error instanceof MigronautError) return error;
   const mongoCode = typeof error?.code === 'number' ? error.code : undefined;
   const hint = searchHint(error);
-  const cause = errorText(error);
+  const cause = formatError(error);
   return new ConvergeFailedError(
     `Could not read the search indexes of ${collection}: ${cause}${hint ? ` — ${hint}` : ''}`,
     {
@@ -261,15 +261,15 @@ const describeNotReady = (notReady) => {
 };
 
 /** Why a wait ran out, and what to do — a STALE index will not get there by waiting longer */
-const timeoutAdvice = (notReady) => {
-  let allStale = true;
+const adviseOnTimeout = (notReady) => {
+  let isAllStale = true;
   for (let i = 0; i < notReady.length; i++) {
     if (searchBuildState(notReady[i]) !== 'stale') {
-      allStale = false;
+      isAllStale = false;
       break;
     }
   }
-  if (allStale) {
+  if (isAllStale) {
     return 'a STALE index is queryable but no longer replicating from the collection — see troubleshooting';
   }
   return 'the server goes on building; converge again to wait more, or raise searchIndexWaitTimeoutMs';
@@ -314,15 +314,15 @@ const waitPhase = async (run, signal) => {
       targets,
       read: (collection) => readSearchIndexes(deps, collection, 'wait'),
       timeoutMs: wait.timeoutMs,
-      sleep: (ms) => sleep(ms, signal),
+      sleep: (delayMs) => sleep(delayMs, signal),
       now,
       // An abort ends the wait here; runConverge attaches the result to it.
       beforePoll: () => deps.assertNotAborted(signal),
       onReadError: (error, inARow) => {
         deps.logger.warn(
           `⚠ Could not read the search indexes (${inARow} in a row) — trying again: ` +
-            errorText(error),
-          deps.fields({ error: errorText(error), consecutiveFailures: inARow }),
+            formatError(error),
+          deps.fields({ error: formatError(error), consecutiveFailures: inARow }),
         );
       },
       onPoll: (live) => {
@@ -379,16 +379,16 @@ const settleWait = (deps, targets, outcome, wait, result) => {
       deps.fields({ searchIndexes: ready, waitedMs: outcome.waitedMs }),
     );
   }
-  const failed = outcome.outcome === 'failed';
+  const hasFailed = outcome.outcome === 'failed';
   throw new ConvergeFailedError(
-    failed
+    hasFailed
       ? `Search index build failed: ${describeNotReady(outcome.failed)} — fix the definition or the data, then converge again`
       : `Search index(es) not queryable after ${Math.round(outcome.waitedMs / 1000)}s: ` +
-          `${describeNotReady(outcome.notReady)} — ${timeoutAdvice(outcome.notReady)}`,
+          `${describeNotReady(outcome.notReady)} — ${adviseOnTimeout(outcome.notReady)}`,
     {
       context: {
         phase: 'wait',
-        reason: failed ? 'failed' : 'timeout',
+        reason: hasFailed ? 'failed' : 'timeout',
         notReady: outcome.notReady,
         waitedMs: outcome.waitedMs,
         ...(wait.timeoutMs !== undefined ? { timeoutMs: wait.timeoutMs } : {}),
@@ -444,7 +444,7 @@ const reportNotReady = (deps, result) => {
 module.exports = {
   SEARCH_SETTLE_DELAYS_MS,
   pause,
-  notReadyEntry,
+  toNotReadyEntry,
   searchSummary,
   warnIgnored,
   readSearch,

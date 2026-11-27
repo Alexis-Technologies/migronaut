@@ -3,8 +3,8 @@ const { describe, it, mock } = require('node:test');
 const {
   EXIT_CODES,
   attachSignalHandlers,
-  exitCodeFor,
-  partialFromOpts,
+  resolveExitCode,
+  toPartialConfig,
   reportUsageError,
   resolveLevel,
   stopActiveMigrators,
@@ -12,9 +12,9 @@ const {
 const { ConfigInvalidError, LockAlreadyHeldError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 
-describe('partialFromOpts', () => {
+describe('toPartialConfig', () => {
   it('should map the CLI flags onto config keys', () => {
-    const partial = partialFromOpts({
+    const partial = toPartialConfig({
       uri: 'mongodb://x:27017',
       db: 'shop',
       dir: './migrations',
@@ -31,28 +31,28 @@ describe('partialFromOpts', () => {
   it('should omit keys for absent flags instead of writing undefined', () => {
     // An `undefined` value would still be an own key and shadow the config
     // file's value in the merge.
-    assert.deepStrictEqual(partialFromOpts({}), {});
+    assert.deepStrictEqual(toPartialConfig({}), {});
   });
 
   it('should let --no-env win over --env-file', () => {
-    const partial = partialFromOpts({ env: false, envFile: '.env.ci' });
+    const partial = toPartialConfig({ env: false, envFile: '.env.ci' });
     assert.strictEqual(partial.envFile, false);
   });
 
   it('should pass --env-file through when --no-env is absent', () => {
-    assert.strictEqual(partialFromOpts({ envFile: '.env.ci' }).envFile, '.env.ci');
+    assert.strictEqual(toPartialConfig({ envFile: '.env.ci' }).envFile, '.env.ci');
   });
 });
 
-describe('exitCodeFor', () => {
+describe('resolveExitCode', () => {
   it('should map a typed error to its dedicated code', () => {
-    assert.strictEqual(exitCodeFor(new LockAlreadyHeldError('held')), 3);
-    assert.strictEqual(exitCodeFor(new ConfigInvalidError('bad')), 6);
+    assert.strictEqual(resolveExitCode(new LockAlreadyHeldError('held')), 3);
+    assert.strictEqual(resolveExitCode(new ConfigInvalidError('bad')), 6);
   });
 
   it('should collapse a non-Migronaut error to 1', () => {
-    assert.strictEqual(exitCodeFor(new Error('boom')), 1);
-    assert.strictEqual(exitCodeFor('string failure'), 1);
+    assert.strictEqual(resolveExitCode(new Error('boom')), 1);
+    assert.strictEqual(resolveExitCode('string failure'), 1);
   });
 });
 
@@ -134,7 +134,7 @@ describe('EXIT_CODES', () => {
       EXIT_CODES.ALX_ERR_LOCK_LOST = 1;
     }, TypeError);
     assert.strictEqual(EXIT_CODES.toString, undefined);
-    assert.strictEqual(exitCodeFor({ code: 'toString' }), 1);
+    assert.strictEqual(resolveExitCode({ code: 'toString' }), 1);
   });
 });
 

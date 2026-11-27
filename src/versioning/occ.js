@@ -4,9 +4,9 @@ const { ConfigInvalidError, RevisionConflictError } = require('../errors/index.j
 const {
   resolveFieldNames,
   resolveRevisionField,
-  revisionFilter,
-  revisionOf,
-  stampedUpdate,
+  buildRevisionFilter,
+  readRevision,
+  stampUpdate,
   assertCount,
 } = require('./document.js');
 const { filterTouches, isPlainObject, toCount } = require('./internal.js');
@@ -75,7 +75,7 @@ const splitOptions = (options = {}) => {
  * The revision the caller read, as a number: an Int32, a Long or a bigint
  * (a document read with `promoteValues: false`, or `useBigInt64`) counts too.
  */
-const expectedOf = (expected) => {
+const toExpectedRevision = (expected) => {
   const count = toCount(expected);
   if (count === null) {
     throw new ConfigInvalidError('expectedRevision must be an integer ≥ 0', {
@@ -86,10 +86,10 @@ const expectedOf = (expected) => {
 };
 
 /** An `_id` given as an operator — anything but a single `$eq` of a value */
-const operatorId = (id) => {
+const isOperatorId = (id) => {
   if (!isPlainObject(id)) return false;
   const keys = Object.keys(id);
-  if (keys.length === 1 && keys[0] === '$eq') return operatorId(id.$eq);
+  if (keys.length === 1 && keys[0] === '$eq') return isOperatorId(id.$eq);
   for (const key of keys) if (key.startsWith('$')) return true;
   return false;
 };
@@ -100,9 +100,9 @@ const operatorId = (id) => {
  * (`{ $ne: null }` from a request body, say) would let it land on whichever
  * document is at that revision — every legacy one is at 0 — so it is refused.
  */
-const guardedFilter = (filter, names, expected) => {
+const guardFilter = (filter, names, expected) => {
   if (!isPlainObject(filter)) throw new ConfigInvalidError('filter must be an object');
-  if (operatorId(filter._id)) {
+  if (isOperatorId(filter._id)) {
     throw new ConfigInvalidError(
       'filter._id must be a value, not an operator — a revision guards one document',
     );
@@ -113,11 +113,11 @@ const guardedFilter = (filter, names, expected) => {
         'expectedRevision',
     );
   }
-  return { ...filter, ...revisionFilter(names, expected) };
+  return { ...filter, ...buildRevisionFilter(names, expected) };
 };
 
 /** What became of the document, as a conflict's message says it */
-const conflictDetail = (context, expected) => {
+const describeConflict = (context, expected) => {
   if (context.reason === 'conflict') return `is at revision ${context.actual}, not ${expected}`;
   if (context.reason === 'not-found') return 'does not exist';
   return `was not at revision ${expected}, or no longer exists`;
@@ -129,7 +129,13 @@ const conflictDetail = (context, expected) => {
  * cannot be told (`unknown` — the read was turned off, or it failed). The
  * filter itself never goes into the error: it may carry PII.
  */
-const conflictError = async (collection, filter, names, expected, { verify, driverOptions }) => {
+const createConflictError = async (
+  collection,
+  filter,
+  names,
+  expected,
+  { verify, driverOptions },
+) => {
   const context = { expected, reason: 'unknown' };
   if (collection?.collectionName !== undefined) context.collection = collection.collectionName;
   if (verify) {
@@ -144,7 +150,7 @@ const conflictError = async (collection, filter, names, expected, { verify, driv
       if (current === null || current === undefined) {
         context.reason = 'not-found';
       } else {
-        const actual = revisionOf(current, names.revisionField);
+        const actual = readRevision(current, names.revisionField);
         // The same revision again means the guard missed on something else.
         if (actual !== expected) {
           context.reason = 'conflict';
@@ -155,7 +161,7 @@ const conflictError = async (collection, filter, names, expected, { verify, driv
       // `unknown` it stays.
     }
   }
-  const what = conflictDetail(context, expected);
+  const what = describeConflict(context, expected);
   return new RevisionConflictError(`Revision conflict: the document ${what}`, { context });
 };
 
@@ -171,13 +177,13 @@ const conflictError = async (collection, filter, names, expected, { verify, driv
  */
 const updateWithRevision = async (collection, filter, expectedRevision, update, options) => {
   const { names, version, verify, driverOptions } = splitOptions(options);
-  const expected = expectedOf(expectedRevision);
-  const guarded = guardedFilter(filter, names, expected);
-  const stamped = stampedUpdate(names, { to: version, update });
+  const expected = toExpectedRevision(expectedRevision);
+  const guarded = guardFilter(filter, names, expected);
+  const stamped = stampUpdate(names, { to: version, update });
   const result = await collection.updateOne(guarded, stamped, driverOptions);
   assertAcknowledged(result);
   if (result.matchedCount === 0) {
-    throw await conflictError(collection, filter, names, expected, { verify, driverOptions });
+    throw await createConflictError(collection, filter, names, expected, { verify, driverOptions });
   }
   return { ...result, revision: expected + 1 };
 };
@@ -212,19 +218,19 @@ const isReplacement = (value) => {
  */
 const replaceWithRevision = async (collection, filter, expectedRevision, replacement, options) => {
   const { names, version, verify, driverOptions } = splitOptions(options);
-  const expected = expectedOf(expectedRevision);
+  const expected = toExpectedRevision(expectedRevision);
   if (!isReplacement(replacement)) {
     throw new ConfigInvalidError(
       'The replacement must be a plain document without update operators',
     );
   }
-  const guarded = guardedFilter(filter, names, expected);
+  const guarded = guardFilter(filter, names, expected);
   const document = { ...replacement, [names.revisionField]: expected + 1 };
   if (version !== undefined) document[names.field] = version;
   const result = await collection.replaceOne(guarded, document, driverOptions);
   assertAcknowledged(result);
   if (result.matchedCount === 0) {
-    throw await conflictError(collection, filter, names, expected, { verify, driverOptions });
+    throw await createConflictError(collection, filter, names, expected, { verify, driverOptions });
   }
   return { ...result, revision: expected + 1 };
 };
@@ -239,9 +245,9 @@ const replaceWithRevision = async (collection, filter, expectedRevision, replace
  */
 const findOneAndUpdateWithRevision = async (collection, filter, revision, update, options) => {
   const { names, version, verify, driverOptions } = splitOptions(options);
-  const expected = expectedOf(revision);
-  const guarded = guardedFilter(filter, names, expected);
-  const stamped = stampedUpdate(names, { to: version, update });
+  const expected = toExpectedRevision(revision);
+  const guarded = guardFilter(filter, names, expected);
+  const stamped = stampUpdate(names, { to: version, update });
   const result = await collection.findOneAndUpdate(guarded, stamped, {
     returnDocument: 'after',
     ...driverOptions,
@@ -249,7 +255,7 @@ const findOneAndUpdateWithRevision = async (collection, filter, revision, update
   });
   const value = result?.value ?? null;
   if (value === null) {
-    throw await conflictError(collection, filter, names, expected, { verify, driverOptions });
+    throw await createConflictError(collection, filter, names, expected, { verify, driverOptions });
   }
   return value;
 };
@@ -259,14 +265,14 @@ const jitter = ({ baseMs = 10, maxMs = 1000 } = {}) => {
   return (attempt) => Math.random() * Math.min(maxMs, baseMs * 2 ** attempt);
 };
 
-const sleep = (ms, signal) => {
+const sleep = (delayMs, signal) => {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return void reject(signal.reason);
     let listening = null;
     const timer = setTimeout(() => {
       listening?.[Symbol.dispose]();
       resolve();
-    }, ms);
+    }, delayMs);
     if (signal === undefined || signal === null) return;
     listening = addAbortListener(signal, () => {
       clearTimeout(timer);
@@ -276,7 +282,7 @@ const sleep = (ms, signal) => {
 };
 
 /** What a backoff's answer means in ms — nothing for a negative or `NaN` */
-const backoffMs = (ms) => (ms > 0 ? Math.min(ms, MAX_BACKOFF_MS) : 0);
+const clampBackoffMs = (delayMs) => (delayMs > 0 ? Math.min(delayMs, MAX_BACKOFF_MS) : 0);
 
 /**
  * Run `fn(attempt)` — which reads, decides and writes with a revision guard —
@@ -289,20 +295,20 @@ const backoffMs = (ms) => (ms > 0 ? Math.min(ms, MAX_BACKOFF_MS) : 0);
  * the attempt number returning milliseconds (an hour at most); `signal` cuts
  * a wait short.
  */
-const retryOnConflict = async (fn, { attempts = 3, backoff, signal } = {}) => {
-  if (typeof fn !== 'function') throw new ConfigInvalidError('retryOnConflict needs a function');
+const retryOnConflict = async (work, { attempts = 3, backoff, signal } = {}) => {
+  if (typeof work !== 'function') throw new ConfigInvalidError('retryOnConflict needs a function');
   if (!Number.isSafeInteger(attempts) || attempts < 1) {
     throw new ConfigInvalidError('attempts must be an integer ≥ 1', { context: { attempts } });
   }
-  const delay = typeof backoff === 'function' ? backoff : jitter(backoff);
+  const computeDelay = typeof backoff === 'function' ? backoff : jitter(backoff);
   for (let attempt = 0; ; attempt++) {
     try {
-      return await fn(attempt);
+      return await work(attempt);
     } catch (error) {
-      const retryable =
+      const isRetryable =
         error instanceof RevisionConflictError && error.context?.reason !== 'not-found';
-      if (!retryable || attempt + 1 >= attempts) throw error;
-      await sleep(backoffMs(delay(attempt)), signal);
+      if (!isRetryable || attempt + 1 >= attempts) throw error;
+      await sleep(clampBackoffMs(computeDelay(attempt)), signal);
     }
   }
 };
@@ -314,7 +320,7 @@ const retryOnConflict = async (fn, { attempts = 3, backoff, signal } = {}) => {
  * filter — the application's, or a background migration's — cannot see.
  */
 const bumpRevision = (update, { revisionField } = {}) => {
-  return stampedUpdate(
+  return stampUpdate(
     { field: null, revisionField: resolveRevisionField(revisionField) },
     { update },
   );

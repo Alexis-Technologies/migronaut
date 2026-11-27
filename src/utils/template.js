@@ -8,9 +8,9 @@ const {
   MigrationFileNotFoundError,
 } = require('../errors/index.js');
 const { formatStamp } = require('./date.js');
-const { contextPath, errorText } = require('./error.js');
+const { toContextPath, formatError } = require('./error.js');
 const { readSmallFile } = require('./file.js');
-const { randomId } = require('./id.js');
+const { createRandomId } = require('./id.js');
 const { redactUris } = require('./redact.js');
 
 /** Extensions a custom `--template` file may have — anything else is refused */
@@ -84,24 +84,24 @@ const buildPrefix = (options) => {
  * deleted, producing two migrations with the same prefix, and the new one then
  * sorts before an already-applied migration.
  */
-const nextSequenceIndex = async (dir, extensions) => {
+const findNextSequenceIndex = async (directory, extensions) => {
   let files = null;
   try {
-    files = await fs.readdir(dir);
+    files = await fs.readdir(directory);
   } catch (error) {
     if (error.code === 'ENOENT') return 1;
     throw error;
   }
   let max = 0;
   for (const file of files) {
-    let matchesExtension = false;
-    for (const ext of extensions) {
-      if (file.endsWith(ext)) {
-        matchesExtension = true;
+    let hasMatchingExtension = false;
+    for (const extension of extensions) {
+      if (file.endsWith(extension)) {
+        hasMatchingExtension = true;
         break;
       }
     }
-    if (!matchesExtension) continue;
+    if (!hasMatchingExtension) continue;
     const prefix = /^(\d+)-/.exec(file);
     if (prefix) {
       const index = Number(prefix[1]);
@@ -118,7 +118,7 @@ const nextSequenceIndex = async (dir, extensions) => {
  * system: an ESM migration in a CommonJS project makes Node reparse the file
  * and warn on every run. migronaut's loader accepts either form.
  */
-const defaultTemplateTs = (esm = false) => {
+const renderMigrationTs = (esm = false) => {
   if (esm) {
     return `import type { MigrationContext } from '@alexify/migronaut';
 
@@ -150,7 +150,7 @@ module.exports = { description, up, down };
 };
 
 /** The built-in JavaScript migration template */
-const defaultTemplateJs = (esm = false) => {
+const renderMigrationJs = (esm = false) => {
   if (esm) {
     return `export const description = '';
 
@@ -185,7 +185,7 @@ module.exports = { description, up, down };
  * The built-in background migration template (`create --background`): the
  * declarative form, with the knobs most worth knowing about spelled out.
  */
-const defaultBackgroundTemplate = (js, esm = false) => {
+const renderBackgroundMigration = (js, esm = false) => {
   const typed = js
     ? "/** @type {import('@alexify/migronaut').DeclarativeBackgroundMigration} */\n"
     : '';
@@ -228,10 +228,10 @@ module.exports = { description, background };
 
 /** Resolve template file contents — a custom template if provided, else the built-in */
 const resolveTemplateContent = async (templatePath, js, esm = false, background = false) => {
-  if (background) return defaultBackgroundTemplate(js, esm);
+  if (background) return renderBackgroundMigration(js, esm);
   if (templatePath) {
-    const ext = path.extname(templatePath);
-    if (!TEMPLATE_EXTENSION_SET.has(ext)) {
+    const extension = path.extname(templatePath);
+    if (!TEMPLATE_EXTENSION_SET.has(extension)) {
       throw new ConfigInvalidError(
         `Template file must have one of the extensions: ${TEMPLATE_EXTENSIONS.join(', ')}`,
         { context: { templatePath } },
@@ -242,11 +242,11 @@ const resolveTemplateContent = async (templatePath, js, esm = false, background 
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
       throw new MigrationFileNotFoundError('Template file not found', {
-        context: { templatePath: contextPath(templatePath) },
+        context: { templatePath: toContextPath(templatePath) },
       });
     }
   }
-  return js ? defaultTemplateJs(esm) : defaultTemplateTs(esm);
+  return js ? renderMigrationJs(esm) : renderMigrationTs(esm);
 };
 
 /**
@@ -254,11 +254,11 @@ const resolveTemplateContent = async (templatePath, js, esm = false, background 
  * The directory must already exist.
  */
 const createMigrationFile = async (options) => {
-  const ext = options.js ? '.js' : '.ts';
+  const extension = options.js ? '.js' : '.ts';
   const extensions = options.fileExtensions ?? ['.ts', '.js'];
-  const index = await nextSequenceIndex(options.dir, extensions);
+  const index = await findNextSequenceIndex(options.dir, extensions);
   const prefix = buildPrefix({ sequential: options.sequential, index });
-  const filename = `${prefix}-${slugify(options.name)}${ext}`;
+  const filename = `${prefix}-${slugify(options.name)}${extension}`;
   const filepath = path.join(options.dir, filename);
   const content = await resolveTemplateContent(
     options.templatePath,
@@ -275,7 +275,7 @@ const createMigrationFile = async (options) => {
   } catch (error) {
     if (error.code === 'EEXIST') {
       throw new MigrationFileExistsError('Migration file already exists', {
-        context: { path: contextPath(filepath) },
+        context: { path: toContextPath(filepath) },
       });
     }
     throw error;
@@ -292,8 +292,8 @@ const createMigrationFile = async (options) => {
  * command — so the generator matches the project instead of assuming.
  * Defaults to CommonJS, which is what an absent `"type"` means.
  */
-const isEsmProject = async (dir) => {
-  let current = path.resolve(dir);
+const isEsmProject = async (directory) => {
+  let current = path.resolve(directory);
   for (;;) {
     try {
       const raw = await fs.readFile(path.join(current, 'package.json'), 'utf8');
@@ -309,8 +309,8 @@ const isEsmProject = async (dir) => {
           {
             cause: error,
             context: {
-              path: contextPath(path.join(current, 'package.json')),
-              cause: errorText(error),
+              path: toContextPath(path.join(current, 'package.json')),
+              cause: formatError(error),
             },
           },
         );
@@ -341,7 +341,7 @@ const maskUriCredentials = (uri) => {
   const match = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^@/]+)@(.*)$/.exec(uri);
   let out = uri;
   let hasCredentials = false;
-  let masked = false;
+  let isMasked = false;
   if (match) {
     const scheme = match[1];
     const userinfo = match[2];
@@ -351,7 +351,7 @@ const maskUriCredentials = (uri) => {
     if (colon !== -1 && colon !== userinfo.length - 1) {
       const username = userinfo.slice(0, colon);
       out = `${scheme}${username}:****@${rest}`;
-      masked = true;
+      isMasked = true;
     }
   }
   // Secrets can also travel as query parameters (TLS key passphrases, proxy
@@ -362,11 +362,11 @@ const maskUriCredentials = (uri) => {
   if (queryMasked !== out) {
     return { uri: queryMasked, hasCredentials: true, masked: true };
   }
-  return { uri: out, hasCredentials, masked };
+  return { uri: out, hasCredentials, masked: isMasked };
 };
 
 /** Merge caller-supplied config values over the built-in defaults */
-const configFields = (values) => {
+const mergeConfigFields = (values) => {
   const { uri, masked } = maskUriCredentials(values.uri ?? 'mongodb://localhost:27017');
   return {
     uri,
@@ -382,8 +382,8 @@ const configFields = (values) => {
  * remembered as a CLI flag. `createExtension` is seeded to match the config
  * file's own language (a `.ts` config defaults to TS migrations, `.js` to JS).
  */
-const configBody = (values, createExtension) => {
-  const { uri, uriMasked, dbName, migrationsDir } = configFields(values);
+const renderConfigBody = (values, createExtension) => {
+  const { uri, uriMasked, dbName, migrationsDir } = mergeConfigFields(values);
   // User values go through JSON.stringify — never raw interpolation — so a
   // quote/backslash/newline in a URI or db name cannot break out of the string
   // literal and inject code into the generated (and later executed) config.
@@ -485,7 +485,7 @@ const configBody = (values, createExtension) => {
 };
 
 /** The built-in TypeScript config template */
-const defaultConfigTs = (values = {}, esm = false) => {
+const renderConfigTs = (values = {}, esm = false) => {
   return `import type { MigronautConfig } from '@alexify/migronaut';
 
 /**
@@ -494,7 +494,7 @@ const defaultConfigTs = (values = {}, esm = false) => {
  * Every field is optional; the values below are the built-in defaults.
  */
 const config: Partial<MigronautConfig> = {
-${configBody(values, 'ts')}
+${renderConfigBody(values, 'ts')}
 };
 
 ${exportStatement(esm, 'config')}
@@ -502,7 +502,7 @@ ${exportStatement(esm, 'config')}
 };
 
 /** The built-in JavaScript (ESM) config template */
-const defaultConfigJs = (values = {}, esm = false) => {
+const renderConfigJs = (values = {}, esm = false) => {
   return `/**
  * migronaut configuration.
  * Precedence (highest first): CLI flags > MIGRONAUT_* env vars > this file > defaults.
@@ -511,7 +511,7 @@ const defaultConfigJs = (values = {}, esm = false) => {
  * @type {Partial<import('@alexify/migronaut').MigronautConfig>}
  */
 const config = {
-${configBody(values, 'js')}
+${renderConfigBody(values, 'js')}
 };
 
 ${exportStatement(esm, 'config')}
@@ -523,8 +523,8 @@ ${exportStatement(esm, 'config')}
  * the `hooks`, `mongoose`, `logger`, `generateId` and `telemetry` options are
  * unavailable here — use a `.ts`/`.js` config if you need them.
  */
-const defaultConfigJson = (values = {}) => {
-  const { uri, dbName, migrationsDir } = configFields(values);
+const renderConfigJson = (values = {}) => {
+  const { uri, dbName, migrationsDir } = mergeConfigFields(values);
   const config = {
     // Editors use this to offer completion and validate the file as you type.
     $schema: 'https://migronaut.vercel.app/migronaut.schema.json',
@@ -548,7 +548,7 @@ const defaultConfigJson = (values = {}) => {
  * The migration-tool options shared by both secret-provider templates, indented
  * to sit inside the returned object of the async factory (4 spaces).
  */
-const secretConfigOptions = (createExtension, migrationsDir) => {
+const renderSecretOptions = (createExtension, migrationsDir) => {
   return `    // ── Migration files ─────────────────────────────────────
     migrationsDir: ${JSON.stringify(migrationsDir)},
     fileExtensions: ['.ts', '.js'],
@@ -567,8 +567,8 @@ const secretConfigOptions = (createExtension, migrationsDir) => {
 };
 
 /** Secret-provider JavaScript (ESM) config template */
-const secretConfigJs = (values = {}, esm = false) => {
-  const { migrationsDir } = configFields(values);
+const renderSecretConfigJs = (values = {}, esm = false) => {
+  const { migrationsDir } = mergeConfigFields(values);
   return `${SECRET_PROVIDER_GUIDE}
 
 // Install the SDK for your provider, e.g.:
@@ -611,7 +611,7 @@ ${exportStatement(
     uri: secret.uri,
     dbName: secret.dbName,
 
-${secretConfigOptions('js', migrationsDir)}
+${renderSecretOptions('js', migrationsDir)}
   };
 }`,
 )}
@@ -619,8 +619,8 @@ ${secretConfigOptions('js', migrationsDir)}
 };
 
 /** Secret-provider TypeScript config template */
-const secretConfigTs = (values = {}, esm = false) => {
-  const { migrationsDir } = configFields(values);
+const renderSecretConfigTs = (values = {}, esm = false) => {
+  const { migrationsDir } = mergeConfigFields(values);
   return `${SECRET_PROVIDER_GUIDE}
 import type { MigronautConfig } from '@alexify/migronaut';
 // Install the SDK for your provider, e.g.:
@@ -662,7 +662,7 @@ ${exportStatement(
     uri: secret.uri,
     dbName: secret.dbName,
 
-${secretConfigOptions('ts', migrationsDir)}
+${renderSecretOptions('ts', migrationsDir)}
   };
 }`,
 )}
@@ -674,22 +674,22 @@ ${secretConfigOptions('ts', migrationsDir)}
  * `secretProvider` is true a runtime secret-loading template is emitted instead
  * of the static object form — only valid for `js`/`ts` (JSON cannot hold code).
  */
-const configTemplateContent = (format, values = {}, secretProvider = false, esm = false) => {
+const renderConfigTemplate = (format, values = {}, secretProvider = false, esm = false) => {
   if (secretProvider) {
     if (format === 'json') {
       throw new ConfigInvalidError('Secret-provider configs are only available for js/ts', {
         context: { format },
       });
     }
-    return format === 'ts' ? secretConfigTs(values, esm) : secretConfigJs(values, esm);
+    return format === 'ts' ? renderSecretConfigTs(values, esm) : renderSecretConfigJs(values, esm);
   }
   if (format === 'js') {
-    return defaultConfigJs(values, esm);
+    return renderConfigJs(values, esm);
   }
   if (format === 'json') {
-    return defaultConfigJson(values);
+    return renderConfigJson(values);
   }
-  return defaultConfigTs(values, esm);
+  return renderConfigTs(values, esm);
 };
 
 /**
@@ -702,7 +702,7 @@ const configTemplateContent = (format, values = {}, secretProvider = false, esm 
  * half-written where the old one was.
  */
 const replaceFile = async (filepath, content) => {
-  const temporary = `${filepath}.${randomId()}.tmp`;
+  const temporary = `${filepath}.${createRandomId()}.tmp`;
   try {
     await fs.writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' });
     await fs.rename(temporary, filepath);
@@ -715,7 +715,7 @@ const replaceFile = async (filepath, content) => {
 
 const createConfigFile = async (options) => {
   const filepath = path.join(options.dir, `migronaut.config.${options.format}`);
-  const content = configTemplateContent(
+  const content = renderConfigTemplate(
     options.format,
     options.values ?? {},
     options.secretProvider ?? false,
@@ -733,7 +733,7 @@ const createConfigFile = async (options) => {
   } catch (error) {
     if (error?.code !== 'EEXIST') throw error;
     throw new ConfigFileExistsError('Config file already exists', {
-      context: { path: contextPath(filepath) },
+      context: { path: toContextPath(filepath) },
     });
   }
   return filepath;
@@ -742,18 +742,18 @@ const createConfigFile = async (options) => {
 module.exports = {
   slugify,
   buildPrefix,
-  nextSequenceIndex,
-  defaultTemplateTs,
-  defaultTemplateJs,
+  findNextSequenceIndex,
+  renderMigrationTs,
+  renderMigrationJs,
   resolveTemplateContent,
   createMigrationFile,
   isEsmProject,
   maskUriCredentials,
-  defaultConfigTs,
-  defaultConfigJs,
-  defaultConfigJson,
-  secretConfigJs,
-  secretConfigTs,
-  configTemplateContent,
+  renderConfigTs,
+  renderConfigJs,
+  renderConfigJson,
+  renderSecretConfigJs,
+  renderSecretConfigTs,
+  renderConfigTemplate,
   createConfigFile,
 };

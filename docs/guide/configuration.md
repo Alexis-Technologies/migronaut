@@ -198,10 +198,10 @@ config file is never required" literally true, not just a slogan. These
 | `MIGRONAUT_URI` | `uri` |
 | `MIGRONAUT_DB` | `dbName` |
 | `MIGRONAUT_MIGRATIONS_DIR` | `migrationsDir` |
-| `MIGRONAUT_COLLECTION` | `migrationsCollection` |
+| `MIGRONAUT_MIGRATIONS_COLLECTION` | `migrationsCollection` |
 | `MIGRONAUT_LOCK_COLLECTION` | `lockCollection` |
 | `MIGRONAUT_CONVERGE_LOG_COLLECTION` | `convergeLogCollection` |
-| `MIGRONAUT_LOCK_TTL` | `lockTTLSeconds` |
+| `MIGRONAUT_LOCK_TTL_SECONDS` | `lockTTLSeconds` |
 | `MIGRONAUT_STRICT` | `strict` |
 | `MIGRONAUT_USE_TRANSACTION` | `useTransaction` |
 | `MIGRONAUT_SEQUENTIAL` | `sequential` |
@@ -233,7 +233,7 @@ environment string cannot express.
 ::: warning Values are rejected, never coerced
 A value that doesn't parse fails the run with a `ALX_ERR_CONFIG_INVALID` error naming
 the variable. `MIGRONAUT_STRICT=on` does **not** quietly mean `false`, and
-`MIGRONAUT_LOCK_TTL=abc` does not quietly mean "no TTL" — a typo in a safety
+`MIGRONAUT_LOCK_TTL_SECONDS=abc` does not quietly mean "no TTL" — a typo in a safety
 setting must never be the reason a safety setting is off.
 
 Booleans accept `true`/`1`/`yes` and `false`/`0`/`no`, case-insensitive and

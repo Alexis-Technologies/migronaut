@@ -6,7 +6,7 @@ const {
   isSearchUnavailable,
   isTransientError,
   listSearchIndexes,
-  nextPollDelay,
+  computePollDelay,
   probeSearch,
   runSearchStep,
   searchHint,
@@ -417,7 +417,7 @@ describe('isTransientError', () => {
   });
 });
 
-describe('nextPollDelay', () => {
+describe('computePollDelay', () => {
   for (const [attempt, remaining, delay] of [
     [0, Infinity, 1000],
     [1, Infinity, 1500],
@@ -429,7 +429,7 @@ describe('nextPollDelay', () => {
     [0, 0, 0],
   ]) {
     it(`should pause ${delay}ms before poll ${attempt + 1} with ${remaining}ms left`, () => {
-      assert.strictEqual(nextPollDelay(attempt, remaining), delay);
+      assert.strictEqual(computePollDelay(attempt, remaining), delay);
     });
   }
 });

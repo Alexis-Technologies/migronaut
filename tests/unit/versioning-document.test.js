@@ -20,31 +20,31 @@ const { ConfigInvalidError, ShapeVersionError } = require('../../src/errors/inde
 const {
   VERSIONING_DEFAULTS,
   resolveVersioning,
-  versioningIssues,
-  versioningOf,
+  checkVersioning,
+  findVersioning,
 } = require('../../src/versioning/config.js');
 const {
-  belowVersionFilter,
+  buildBelowVersionFilter,
   cloneDocument,
-  fieldNameIssue,
+  checkFieldName,
   isVersion,
-  nextRevision,
-  occFilter,
+  incrementRevision,
+  buildOccFilter,
   resolveFieldNames,
-  revisionFilter,
-  revisionOf,
+  buildRevisionFilter,
+  readRevision,
   stampDocument,
-  stampedDiff,
-  stampedUpdate,
-  versionFilter,
-  versionIndexKey,
-  versionOf,
+  buildStampedDiff,
+  stampUpdate,
+  buildVersionFilter,
+  buildVersionIndexKey,
+  readVersion,
 } = require('../../src/versioning/document.js');
 const {
   filterTouches,
-  sameValue,
+  isSameValue,
   toCount,
-  touchedFields,
+  collectTouchedFields,
 } = require('../../src/versioning/internal.js');
 
 const names = { field: '__v', revisionField: '__rev' };
@@ -110,7 +110,7 @@ describe('versioning internals', () => {
         { a: 1, b: { c: 2 } },
       ],
     ];
-    for (const [a, b] of equal) assert.ok(sameValue(a, b), `${String(a)} should equal`);
+    for (const [a, b] of equal) assert.ok(isSameValue(a, b), `${String(a)} should equal`);
     const different = [
       [0, -0],
       [1, '1'],
@@ -145,7 +145,7 @@ describe('versioning internals', () => {
       [{ _bsontype: 'Unknown' }, { _bsontype: 'Unknown' }],
       [new Map(), new Map()],
     ];
-    for (const [a, b] of different) assert.ok(!sameValue(a, b), `${String(a)} should differ`);
+    for (const [a, b] of different) assert.ok(!isSameValue(a, b), `${String(a)} should differ`);
   });
 
   it('should clone plain structure and dates but share BSON values', () => {
@@ -157,28 +157,38 @@ describe('versioning internals', () => {
     assert.notStrictEqual(copy.at, source.at);
     assert.strictEqual(copy.at.getTime(), 1);
     assert.strictEqual(copy.id, id);
-    assert.ok(sameValue(copy, source));
+    assert.ok(isSameValue(copy, source));
   });
 
   it('should list the top-level fields an update writes', () => {
-    assert.deepStrictEqual(touchedFields({ a: 1, b: 2 }), {
+    assert.deepStrictEqual(collectTouchedFields({ a: 1, b: 2 }), {
       fields: new Set(['a', 'b']),
       whole: true,
     });
     assert.deepStrictEqual(
-      touchedFields({ $set: { 'a.b': 1 }, $inc: { c: 1 }, $rename: { d: 'e.f' }, $comment: 'x' }),
+      collectTouchedFields({
+        $set: { 'a.b': 1 },
+        $inc: { c: 1 },
+        $rename: { d: 'e.f' },
+        $comment: 'x',
+      }),
       { fields: new Set(['a', 'c', 'd', 'e']), whole: false },
     );
     assert.deepStrictEqual(
-      touchedFields([{ $set: { x: 1 } }, { $unset: ['y', 'z.w'] }, { $unset: 'q' }, 'bogus']),
+      collectTouchedFields([
+        { $set: { x: 1 } },
+        { $unset: ['y', 'z.w'] },
+        { $unset: 'q' },
+        'bogus',
+      ]),
       { fields: new Set(['x', 'y', 'z', 'q']), whole: false },
     );
-    assert.strictEqual(touchedFields([{ $replaceWith: '$doc' }]).whole, true);
-    assert.deepStrictEqual(touchedFields([{ $project: { a: 1 } }]), {
+    assert.strictEqual(collectTouchedFields([{ $replaceWith: '$doc' }]).whole, true);
+    assert.deepStrictEqual(collectTouchedFields([{ $project: { a: 1 } }]), {
       fields: new Set(['a']),
       whole: true,
     });
-    assert.deepStrictEqual(touchedFields('nope'), { fields: new Set(), whole: false });
+    assert.deepStrictEqual(collectTouchedFields('nope'), { fields: new Set(), whole: false });
   });
 
   it('should find a field in a filter through logical operators and $expr', () => {
@@ -219,7 +229,7 @@ describe('versioning settings', () => {
   });
 
   it('should report every problem with its path', () => {
-    const issues = versioningIssues(
+    const issues = checkVersioning(
       {
         current: 0,
         min: -1,
@@ -243,7 +253,7 @@ describe('versioning settings', () => {
 
   it('should refuse min above current, a missing current and clashing names', () => {
     const messages = (value) =>
-      versioningIssues(value).map((issue) => `${issue.path} ${issue.message}`);
+      checkVersioning(value).map((issue) => `${issue.path} ${issue.message}`);
     assert.match(messages({ current: 2, min: 3 })[0], /min must not exceed current \(2\)/);
     assert.match(messages({})[0], /current is required/);
     assert.match(messages({ current: 1, field: '__rev' })[0], /must differ/);
@@ -254,25 +264,25 @@ describe('versioning settings', () => {
   });
 
   it('should validate system field names', () => {
-    assert.strictEqual(fieldNameIssue('__v'), null);
+    assert.strictEqual(checkFieldName('__v'), null);
     for (const bad of ['', 1, '$v', 'a.b', '_id', 'a\0b', 'x'.repeat(65)]) {
-      assert.notStrictEqual(fieldNameIssue(bad), null, String(bad));
+      assert.notStrictEqual(checkFieldName(bad), null, String(bad));
     }
   });
 
   it('should find a collection versioning in a list or a map', () => {
     const orders = { name: 'orders', versioning: { current: 2 } };
-    assert.strictEqual(versioningOf([{ name: 'users' }, orders], 'orders').current, 2);
+    assert.strictEqual(findVersioning([{ name: 'users' }, orders], 'orders').current, 2);
     assert.strictEqual(
-      versioningOf({ orders: { versioning: { current: 3 } } }, 'orders').current,
+      findVersioning({ orders: { versioning: { current: 3 } } }, 'orders').current,
       3,
     );
-    assert.strictEqual(versioningOf([{ name: 'users' }], 'orders'), null);
-    assert.strictEqual(versioningOf([{ name: 'orders' }], 'orders'), null);
-    assert.strictEqual(versioningOf({}, 'orders'), null);
-    assert.strictEqual(versioningOf(null, 'orders'), null);
+    assert.strictEqual(findVersioning([{ name: 'users' }], 'orders'), null);
+    assert.strictEqual(findVersioning([{ name: 'orders' }], 'orders'), null);
+    assert.strictEqual(findVersioning({}, 'orders'), null);
+    assert.strictEqual(findVersioning(null, 'orders'), null);
     assert.throws(
-      () => versioningOf({ orders: { versioning: { current: 0 } } }, 'orders'),
+      () => findVersioning({ orders: { versioning: { current: 0 } } }, 'orders'),
       (error) => error instanceof ConfigInvalidError && /orders\.versioning/.test(error.message),
     );
   });
@@ -280,19 +290,19 @@ describe('versioning settings', () => {
 
 describe('document versions and revisions', () => {
   it('should read a missing or null field as 0', () => {
-    assert.strictEqual(versionOf({}), 0);
-    assert.strictEqual(versionOf({ __v: null }), 0);
-    assert.strictEqual(versionOf({ __v: new Int32(2) }), 2);
-    assert.strictEqual(versionOf({ __v: Long.fromNumber(3) }), 3);
-    assert.strictEqual(versionOf({ __v: 4n }), 4);
-    assert.strictEqual(versionOf({ v: 5 }, 'v'), 5);
-    assert.strictEqual(versionOf({ __v: 'x' }), null);
-    assert.strictEqual(versionOf({ __v: -1 }), null);
-    assert.strictEqual(versionOf(null), null);
-    assert.strictEqual(revisionOf({}), 0);
-    assert.strictEqual(revisionOf({ __rev: Long.fromNumber(2 ** 40) }), 2 ** 40);
-    assert.strictEqual(nextRevision(4), 5);
-    assert.strictEqual(nextRevision(undefined), 1);
+    assert.strictEqual(readVersion({}), 0);
+    assert.strictEqual(readVersion({ __v: null }), 0);
+    assert.strictEqual(readVersion({ __v: new Int32(2) }), 2);
+    assert.strictEqual(readVersion({ __v: Long.fromNumber(3) }), 3);
+    assert.strictEqual(readVersion({ __v: 4n }), 4);
+    assert.strictEqual(readVersion({ v: 5 }, 'v'), 5);
+    assert.strictEqual(readVersion({ __v: 'x' }), null);
+    assert.strictEqual(readVersion({ __v: -1 }), null);
+    assert.strictEqual(readVersion(null), null);
+    assert.strictEqual(readRevision({}), 0);
+    assert.strictEqual(readRevision({ __rev: Long.fromNumber(2 ** 40) }), 2 ** 40);
+    assert.strictEqual(incrementRevision(4), 5);
+    assert.strictEqual(incrementRevision(undefined), 1);
   });
 
   it('should resolve system field names with defaults', () => {
@@ -307,38 +317,38 @@ describe('document versions and revisions', () => {
   });
 
   it('should match version 0 as missing, null or 0', () => {
-    assert.deepStrictEqual(versionFilter(names, 0), { __v: { $in: [null, 0] } });
-    assert.deepStrictEqual(versionFilter(names, 2), { __v: 2 });
-    assert.deepStrictEqual(revisionFilter(names, 0), { __rev: { $in: [null, 0] } });
-    assert.deepStrictEqual(revisionFilter(names, 7), { __rev: 7 });
-    assert.deepStrictEqual(belowVersionFilter(names, 2), { __v: { $not: { $gte: 2 } } });
-    assert.strictEqual(belowVersionFilter(names, 0), null);
-    assert.deepStrictEqual(versionIndexKey({ field: 'v' }), { v: 1, _id: 1 });
-    assert.throws(() => versionFilter(names, -1), ConfigInvalidError);
-    assert.throws(() => revisionFilter(names, 1.5), ConfigInvalidError);
+    assert.deepStrictEqual(buildVersionFilter(names, 0), { __v: { $in: [null, 0] } });
+    assert.deepStrictEqual(buildVersionFilter(names, 2), { __v: 2 });
+    assert.deepStrictEqual(buildRevisionFilter(names, 0), { __rev: { $in: [null, 0] } });
+    assert.deepStrictEqual(buildRevisionFilter(names, 7), { __rev: 7 });
+    assert.deepStrictEqual(buildBelowVersionFilter(names, 2), { __v: { $not: { $gte: 2 } } });
+    assert.strictEqual(buildBelowVersionFilter(names, 0), null);
+    assert.deepStrictEqual(buildVersionIndexKey({ field: 'v' }), { v: 1, _id: 1 });
+    assert.throws(() => buildVersionFilter(names, -1), ConfigInvalidError);
+    assert.throws(() => buildRevisionFilter(names, 1.5), ConfigInvalidError);
   });
 
   it('should build the optimistic-concurrency filter from what was read', () => {
     const id = new ObjectId();
-    assert.deepStrictEqual(occFilter({ _id: id, __v: 1, __rev: 4 }, names), {
+    assert.deepStrictEqual(buildOccFilter({ _id: id, __v: 1, __rev: 4 }, names), {
       _id: id,
       __v: 1,
       __rev: 4,
     });
-    assert.deepStrictEqual(occFilter({ _id: id }, names, { from: 0 }), {
+    assert.deepStrictEqual(buildOccFilter({ _id: id }, names, { from: 0 }), {
       _id: id,
       __v: { $in: [null, 0] },
       __rev: { $in: [null, 0] },
     });
-    assert.deepStrictEqual(occFilter({ _id: id, __v: 1 }, noRevision), { _id: id, __v: 1 });
+    assert.deepStrictEqual(buildOccFilter({ _id: id, __v: 1 }, noRevision), { _id: id, __v: 1 });
     // A field that is not a count is matched exactly as it was read — as a
     // value, never as an operator, even when it looks like one.
-    assert.deepStrictEqual(occFilter({ _id: id, __v: 'x', __rev: 'y' }, names), {
+    assert.deepStrictEqual(buildOccFilter({ _id: id, __v: 'x', __rev: 'y' }, names), {
       _id: id,
       __v: { $eq: 'x' },
       __rev: { $eq: 'y' },
     });
-    assert.deepStrictEqual(occFilter({ _id: id, __v: { $ne: null } }, noRevision), {
+    assert.deepStrictEqual(buildOccFilter({ _id: id, __v: { $ne: null } }, noRevision), {
       _id: id,
       __v: { $eq: { $ne: null } },
     });
@@ -359,7 +369,7 @@ describe('document versions and revisions', () => {
   });
 });
 
-describe('stampedDiff', () => {
+describe('buildStampedDiff', () => {
   const id = new ObjectId();
 
   it('should leave unchanged fields out of $set, so their BSON types survive', () => {
@@ -379,7 +389,7 @@ describe('stampedDiff', () => {
     const next = cloneDocument(prev);
     next.shipping = { address: next.address };
     delete next.address;
-    assert.deepStrictEqual(stampedDiff(prev, next, names, { to: 2 }), {
+    assert.deepStrictEqual(buildStampedDiff(prev, next, names, { to: 2 }), {
       $set: { shipping: { address: 'Main St' }, __v: 2 },
       $unset: { address: '' },
       $inc: { __rev: 1 },
@@ -389,7 +399,7 @@ describe('stampedDiff', () => {
   it('should rewrite a whole top-level subdocument when something inside it changed', () => {
     const prev = { _id: id, nested: { a: 1, b: 2 }, __v: 1 };
     const next = { _id: id, nested: { a: 1, b: 3 } };
-    assert.deepStrictEqual(stampedDiff(prev, next, names, { to: 2 }).$set, {
+    assert.deepStrictEqual(buildStampedDiff(prev, next, names, { to: 2 }).$set, {
       nested: { a: 1, b: 3 },
       __v: 2,
     });
@@ -398,20 +408,20 @@ describe('stampedDiff', () => {
   it('should unset a field set to undefined, and the version for to: 0', () => {
     const prev = { _id: id, a: 1, b: 2, __v: 1, __rev: 1 };
     assert.deepStrictEqual(
-      stampedDiff(prev, { ...prev, a: undefined, c: undefined }, names, { to: 0 }),
+      buildStampedDiff(prev, { ...prev, a: undefined, c: undefined }, names, { to: 0 }),
       {
         $unset: { a: '', __v: '' },
         $inc: { __rev: 1 },
       },
     );
-    assert.deepStrictEqual(stampedDiff({ _id: id }, { _id: id }, noRevision, { to: 1 }), {
+    assert.deepStrictEqual(buildStampedDiff({ _id: id }, { _id: id }, noRevision, { to: 1 }), {
       $set: { __v: 1 },
     });
   });
 
   it('should ignore the system fields a transformation returns', () => {
     const prev = { _id: id, a: 1, __v: 1, __rev: 5 };
-    assert.deepStrictEqual(stampedDiff(prev, { a: 1, __v: 9, __rev: 0 }, names, { to: 2 }), {
+    assert.deepStrictEqual(buildStampedDiff(prev, { a: 1, __v: 9, __rev: 0 }, names, { to: 2 }), {
       $set: { __v: 2 },
       $inc: { __rev: 1 },
     });
@@ -421,7 +431,7 @@ describe('stampedDiff', () => {
     const prev = { _id: id, __v: 1 };
     const refuse = (next) =>
       assert.throws(
-        () => stampedDiff(prev, next, names, { to: 2 }),
+        () => buildStampedDiff(prev, next, names, { to: 2 }),
         (error) => error instanceof ShapeVersionError && error.context.reason === 'invalid',
       );
     refuse({ _id: new ObjectId() });
@@ -431,50 +441,50 @@ describe('stampedDiff', () => {
     refuse({ _id: id, 'a\0': 1 });
     refuse(null);
     refuse([]);
-    assert.throws(() => stampedDiff(prev, { _id: id }, names, { to: -1 }), ConfigInvalidError);
+    assert.throws(() => buildStampedDiff(prev, { _id: id }, names, { to: -1 }), ConfigInvalidError);
   });
 });
 
-describe('stampedUpdate', () => {
+describe('stampUpdate', () => {
   it('should merge the stamp into an operator update', () => {
     assert.deepStrictEqual(
-      stampedUpdate(names, { to: 2, update: { $set: { a: 1 }, $inc: { n: 1 } } }),
+      stampUpdate(names, { to: 2, update: { $set: { a: 1 }, $inc: { n: 1 } } }),
       { $set: { a: 1, __v: 2 }, $inc: { n: 1, __rev: 1 } },
     );
-    assert.deepStrictEqual(stampedUpdate(names, { update: { $set: { a: 1 } } }), {
+    assert.deepStrictEqual(stampUpdate(names, { update: { $set: { a: 1 } } }), {
       $set: { a: 1 },
       $inc: { __rev: 1 },
     });
-    assert.deepStrictEqual(stampedUpdate(names, { to: 0, update: { $unset: { a: '' } } }), {
+    assert.deepStrictEqual(stampUpdate(names, { to: 0, update: { $unset: { a: '' } } }), {
       $unset: { a: '', __v: '' },
       $inc: { __rev: 1 },
     });
-    assert.deepStrictEqual(stampedUpdate(noRevision, { to: 3, update: {} }), { $set: { __v: 3 } });
+    assert.deepStrictEqual(stampUpdate(noRevision, { to: 3, update: {} }), { $set: { __v: 3 } });
   });
 
   it('should append one stage to a pipeline', () => {
-    assert.deepStrictEqual(stampedUpdate(names, { to: 2, update: [{ $set: { a: 1 } }] }), [
+    assert.deepStrictEqual(stampUpdate(names, { to: 2, update: [{ $set: { a: 1 } }] }), [
       { $set: { a: 1 } },
       { $set: { __v: { $literal: 2 }, __rev: { $add: [{ $ifNull: ['$__rev', 0] }, 1] } } },
     ]);
-    assert.deepStrictEqual(stampedUpdate(noRevision, { to: 0, update: [] }), [{ $unset: '__v' }]);
-    assert.deepStrictEqual(stampedUpdate(noRevision, { update: [] }), []);
+    assert.deepStrictEqual(stampUpdate(noRevision, { to: 0, update: [] }), [{ $unset: '__v' }]);
+    assert.deepStrictEqual(stampUpdate(noRevision, { update: [] }), []);
   });
 
   it('should refuse replacements and updates that write a system field', () => {
-    assert.throws(() => stampedUpdate(names, { update: { a: 1 } }), /replaceWithRevision/);
+    assert.throws(() => stampUpdate(names, { update: { a: 1 } }), /replaceWithRevision/);
     assert.throws(
-      () => stampedUpdate(names, { update: [{ $replaceWith: '$x' }] }),
+      () => stampUpdate(names, { update: [{ $replaceWith: '$x' }] }),
       /cannot keep its revision/,
     );
-    assert.throws(() => stampedUpdate(names, { update: { $inc: { __rev: 1 } } }), /revision field/);
+    assert.throws(() => stampUpdate(names, { update: { $inc: { __rev: 1 } } }), /revision field/);
     assert.throws(
-      () => stampedUpdate(names, { to: 2, update: { $set: { __v: 1 } } }),
+      () => stampUpdate(names, { to: 2, update: { $set: { __v: 1 } } }),
       /version field/,
     );
-    assert.doesNotThrow(() => stampedUpdate(names, { update: { $set: { __v: 1 } } }));
-    assert.throws(() => stampedUpdate(names, { update: 'x' }), ConfigInvalidError);
-    assert.throws(() => stampedUpdate(names, { to: 1.5, update: {} }), ConfigInvalidError);
+    assert.doesNotThrow(() => stampUpdate(names, { update: { $set: { __v: 1 } } }));
+    assert.throws(() => stampUpdate(names, { update: 'x' }), ConfigInvalidError);
+    assert.throws(() => stampUpdate(names, { to: 1.5, update: {} }), ConfigInvalidError);
   });
 });
 
@@ -492,12 +502,12 @@ describe('versioning — __proto__ and plain documents', () => {
       writable: true,
       configurable: true,
     });
-    const update = stampedDiff(stored, next, names, { to: 2 });
+    const update = buildStampedDiff(stored, next, names, { to: 2 });
     assert.ok(Object.hasOwn(update.$set, '__proto__'), 'the change is written, not lost');
     assert.deepStrictEqual(Object.getOwnPropertyDescriptor(update.$set, '__proto__').value, {
       role: 'user',
     });
-    assert.match(fieldNameIssue('__proto__'), /__proto__/);
+    assert.match(checkFieldName('__proto__'), /__proto__/);
   });
 
   it('should refuse a document that is not a plain object, instead of a silent false', () => {

@@ -1,7 +1,7 @@
 const { createHash } = require('node:crypto');
 
 const { ConvergeFailedError } = require('../../errors/index.js');
-const { errorText } = require('../../utils/error.js');
+const { formatError } = require('../../utils/error.js');
 const {
   CHANGE_ACTIONS,
   SEARCH_UNAVAILABLE_REASON,
@@ -19,8 +19,8 @@ const {
   waitPhase,
   warnIgnored,
 } = require('./search-run.js');
-const { inPlaceCapabilities } = require('./index-spec.js');
-const { belowVersionFilter } = require('../../versioning/document.js');
+const { resolveInPlaceCapabilities } = require('./index-spec.js');
+const { buildBelowVersionFilter } = require('../../versioning/document.js');
 const { READ_OPTIONS, readServer } = require('../server-info.js');
 const {
   FLOOR_PROBE_TIMEOUT_MS,
@@ -35,7 +35,7 @@ const {
   describe,
   describeAll,
   LABELS,
-  whatOf,
+  describeTarget,
   wrapFailure,
 } = require('./failure.js');
 const { runStep } = require('./steps.js');
@@ -74,17 +74,17 @@ const readAndPlan = async (deps, options) => {
   const { definitions } = options;
   const pruneFor = (definition) => definition.prune ?? options.prune ?? false;
   const server = await readServer(db);
-  const capabilities = inPlaceCapabilities(server.version);
+  const capabilities = resolveInPlaceCapabilities(server.version);
   // The names to read, and whether any definition declares search indexes — one pass.
   const names = [];
-  let declared = false;
+  let isDeclared = false;
   for (let position = 0; position < definitions.length; position++) {
     const definition = definitions[position];
     names.push(definition.name);
-    if (definition.searchIndexes !== undefined) declared = true;
+    if (definition.searchIndexes !== undefined) isDeclared = true;
   }
   const search = {
-    declared,
+    declared: isDeclared,
     available: true,
     onUnavailable: options.search?.onUnavailable ?? 'fail',
     waitRequested: options.search?.wait === true && !options.dryRun,
@@ -217,13 +217,13 @@ const planFingerprint = (plans) => {
 /** The guard phase: a plan with any conflict refuses the whole run, before the first write */
 const refuseConflicts = (result) => {
   const conflicts = [];
-  let unavailable = false;
+  let isUnavailable = false;
   // The conflicts as the message lists them.
   let listed = '';
   for (const collection of result.collections) {
     for (const action of collection.actions) {
       if (action.action !== 'conflict') continue;
-      if (action.reason === SEARCH_UNAVAILABLE_REASON) unavailable = true;
+      if (action.reason === SEARCH_UNAVAILABLE_REASON) isUnavailable = true;
       const conflict = {
         collection: collection.name,
         target: action.target,
@@ -243,12 +243,12 @@ const refuseConflicts = (result) => {
   settleRest(result);
   throw new ConvergeFailedError(
     `Converge refused: ${conflicts.length} conflict(s) — ${listed}` +
-      (unavailable ? ` — ${SEARCH_UNAVAILABLE_HINT}` : ''),
+      (isUnavailable ? ` — ${SEARCH_UNAVAILABLE_HINT}` : ''),
     {
       context: {
         phase: 'plan',
         conflicts,
-        ...(unavailable ? { hint: SEARCH_UNAVAILABLE_HINT } : {}),
+        ...(isUnavailable ? { hint: SEARCH_UNAVAILABLE_HINT } : {}),
         converge: result,
       },
     },
@@ -306,7 +306,7 @@ const warnRenamed = (deps, plan) => {
 };
 
 /** Mark a row applied, and say so: the `converge:action` event and its log line */
-const settler = (deps, collection) => {
+const createSettler = (deps, collection) => {
   return (action, durationMs) => {
     action.status = 'applied';
     action.durationMs = durationMs;
@@ -325,7 +325,7 @@ const settler = (deps, collection) => {
         ? ' — building on the server'
         : '';
     deps.logger.info(
-      `${LABELS[action.action]} ${whatOf(action, collection)}   [${durationMs}ms]${building}`,
+      `${LABELS[action.action]} ${describeTarget(action, collection)}   [${durationMs}ms]${building}`,
       deps.fields({
         collection,
         target: action.target,
@@ -354,7 +354,7 @@ const stopIfAborted = (deps, signal, result) => {
  */
 const applyCollection = async (deps, plan, result, signal, search) => {
   const kept = new Set();
-  const settle = settler(deps, plan.name);
+  const settle = createSettler(deps, plan.name);
   for (const step of plan.steps) {
     // Between operations is the only safe place to stop — and never inside
     // a rebuild, which runs its drop and its create back to back.
@@ -392,7 +392,7 @@ const applyCollection = async (deps, plan, result, signal, search) => {
           name: action.name,
           action: action.action,
           status: 'failed',
-          error: errorText(error),
+          error: formatError(error),
         });
       }
       settleRest(result);
@@ -434,7 +434,7 @@ const warnFloorBreach = async (run, position) => {
   try {
     found = await deps.db
       .collection(definition.name)
-      .findOne(belowVersionFilter(definition.versioning, floor.min), {
+      .findOne(buildBelowVersionFilter(definition.versioning, floor.min), {
         projection: { _id: 1 },
         maxTimeMS: FLOOR_PROBE_TIMEOUT_MS,
         ...READ_OPTIONS,
@@ -442,8 +442,8 @@ const warnFloorBreach = async (run, position) => {
   } catch (error) {
     // A warning, at best: a probe that cannot answer leaves the run as it is.
     deps.logger.debug(
-      `${definition.name}: could not probe for documents below version ${floor.min} — ${errorText(error)}`,
-      deps.fields({ collection: definition.name, error: errorText(error) }),
+      `${definition.name}: could not probe for documents below version ${floor.min} — ${formatError(error)}`,
+      deps.fields({ collection: definition.name, error: formatError(error) }),
     );
     return;
   }
@@ -469,10 +469,10 @@ const verifyFixedPoint = async (run, position, kept, signal) => {
   // The search index list catches up with a create or an update a moment
   // later: read it again a few times before calling anything unstable.
   const rows = result.collections[position].actions;
-  const submitted = hasApplied(rows, 'searchIndex');
-  for (const delay of submitted ? SEARCH_SETTLE_DELAYS_MS : []) {
+  const hasSubmitted = hasApplied(rows, 'searchIndex');
+  for (const delayMs of hasSubmitted ? SEARCH_SETTLE_DELAYS_MS : []) {
     if (!changesSearchIndex(after.actions)) break;
-    await (deps.sleep ?? pause)(delay, signal);
+    await (deps.sleep ?? pause)(delayMs, signal);
     stopIfAborted(deps, signal, result);
     after = planFor(definition, await readFresh(run, position, 'apply'));
   }
@@ -504,7 +504,7 @@ const verifyFixedPoint = async (run, position, kept, signal) => {
 };
 
 /** "Kept 2 undeclared index(es) and 1 search index(es)" — the parts there are */
-const keptLine = (kept) => {
+const formatKept = (kept) => {
   const parts = [];
   if (kept.indexes > 0) parts.push(`${kept.indexes} undeclared index(es)`);
   if (kept.searchIndexes > 0) {
@@ -532,7 +532,7 @@ const reportSuccess = async (deps, options, result, startedAt, search) => {
       deps.fields({ collections: total, durationMs }),
     );
   }
-  const line = keptLine(kept);
+  const line = formatKept(kept);
   if (line) {
     logger.info(line, deps.fields({ kept: kept.indexes + kept.searchIndexes }));
   }
@@ -560,7 +560,7 @@ const reportFailure = async (deps, options, result, startedAt, error, search) =>
     changed: result.changed,
     inSync: false,
     counts: totals.counts,
-    error: errorText(error),
+    error: formatError(error),
     result,
   });
 };

@@ -1,6 +1,6 @@
 const { ConfigInvalidError, ShapeVersionError } = require('../errors/index.js');
 const { resolveVersioning } = require('./config.js');
-const { cloneDocument, versionOf } = require('./document.js');
+const { cloneDocument, readVersion } = require('./document.js');
 const { isPlainObject, unwrapDefinition } = require('./internal.js');
 
 /**
@@ -20,7 +20,7 @@ const { isPlainObject, unwrapDefinition } = require('./internal.js');
 
 const NEWER = new Set(['throw', 'keep']);
 
-const shapeError = (message, context) => new ShapeVersionError(message, { context });
+const createShapeError = (message, context) => new ShapeVersionError(message, { context });
 
 /** The steps, validated against the versioning: `Map<from, fn>` */
 const readSteps = (steps, versioning, label) => {
@@ -67,14 +67,17 @@ const readSteps = (steps, versioning, label) => {
 const runStep = (step, doc, from, versioning, context) => {
   const next = step(doc);
   if (next !== null && typeof next === 'object' && typeof next.then === 'function') {
-    throw shapeError(`The step from version ${from} returned a promise — steps are synchronous`, {
-      ...context,
-      reason: 'invalid',
-      version: from,
-    });
+    throw createShapeError(
+      `The step from version ${from} returned a promise — steps are synchronous`,
+      {
+        ...context,
+        reason: 'invalid',
+        version: from,
+      },
+    );
   }
   if (!isPlainObject(next)) {
-    throw shapeError(`The step from version ${from} did not return a document`, {
+    throw createShapeError(`The step from version ${from} did not return a document`, {
       ...context,
       reason: 'invalid',
       version: from,
@@ -100,9 +103,9 @@ const createUpcaster = (versioning, steps, { newer = 'throw', collection } = {})
   const base = collection ? { collection, current } : { current };
 
   const versionChecked = (doc) => {
-    const version = versionOf(doc, field);
+    const version = readVersion(doc, field);
     if (version === null) {
-      throw shapeError(`The document's ${field} is not a non-negative integer`, {
+      throw createShapeError(`The document's ${field} is not a non-negative integer`, {
         ...base,
         reason: 'invalid',
       });
@@ -116,7 +119,7 @@ const createUpcaster = (versioning, steps, { newer = 'throw', collection } = {})
     for (let version = from; version < to; version++) {
       const step = chain.get(version);
       if (step === undefined) {
-        throw shapeError(
+        throw createShapeError(
           `No step from version ${version} — the document is older than the oldest shape ` +
             `still supported (${min})`,
           { ...base, reason: 'below-min', version: from },
@@ -135,7 +138,7 @@ const createUpcaster = (versioning, steps, { newer = 'throw', collection } = {})
    */
   const upcast = (doc) => {
     if (!isPlainObject(doc)) {
-      throw shapeError(
+      throw createShapeError(
         'Only a plain document can be upcast — read it with .lean(), or call .toObject()',
         { ...base, reason: 'invalid' },
       );
@@ -144,7 +147,7 @@ const createUpcaster = (versioning, steps, { newer = 'throw', collection } = {})
     if (version === current) return doc;
     if (version > current) {
       if (newer === 'keep') return doc;
-      throw shapeError(
+      throw createShapeError(
         `The document is at version ${version}, newer than ${current} — written by a newer ` +
           'release',
         { ...base, reason: 'newer', version },
@@ -161,7 +164,7 @@ const createUpcaster = (versioning, steps, { newer = 'throw', collection } = {})
   const needsUpcast = (doc) => {
     if (doc === null || doc === undefined) return false;
     if (!isPlainObject(doc)) {
-      throw shapeError(
+      throw createShapeError(
         'Only a plain document can be upcast — read it with .lean(), or call .toObject()',
         { ...base, reason: 'invalid' },
       );

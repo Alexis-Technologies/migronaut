@@ -1,6 +1,6 @@
 const os = require('node:os');
 
-const { backgroundCollectionNames } = require('../config.js');
+const { listBackgroundCollections } = require('../config.js');
 const { READ_OPTIONS } = require('../server-info.js');
 
 /**
@@ -18,7 +18,7 @@ class BackgroundWatchStore {
   #collection;
 
   constructor(db, backgroundCollection) {
-    this.#collection = db.collection(backgroundCollectionNames(backgroundCollection).watch);
+    this.#collection = db.collection(listBackgroundCollections(backgroundCollection).watch);
   }
 
   /** The stored document of a collection's watcher, token included, or null */

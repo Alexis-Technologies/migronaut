@@ -3,8 +3,8 @@ const {
   LockAlreadyHeldError,
   TransactionsUnsupportedError,
 } = require('../../errors/index.js');
-const { documentErrorText, errorText } = require('../../utils/error.js');
-const { excludeBadIds, idKey, matchOf } = require('./engine.js');
+const { formatDocumentError, formatError } = require('../../utils/error.js');
+const { excludeBadIds, toIdKey, matchOf } = require('./engine.js');
 const { TERMINAL, matchHash } = require('./spec.js');
 const { MAX_BAD_IDS, STATE_SCHEMA } = require('./store.js');
 const { runWithLock } = require('../lock.js');
@@ -12,12 +12,12 @@ const { READ_OPTIONS } = require('../server-info.js');
 const {
   assertTransactions,
   DEGRADED,
-  jobFor,
+  loadJob,
   planMismatch,
   POLL_MS,
   REPLAN_REASONS,
   retrySoon,
-  shardingOf,
+  describeSharding,
   warnOnce,
 } = require('./job.js');
 
@@ -49,7 +49,7 @@ const coordinate = async (deps, name, { signal, driver = { kind: 'local' } } = {
       (lockSignal) => {
         // The span opens once the lock is held: a busy coordinator makes none.
         return withSpan(deps, 'coordinate', name, () => {
-          return coordinateStep(deps, name, { signal: anySignal(signal, lockSignal), driver });
+          return coordinateStep(deps, name, { signal: combineSignals(signal, lockSignal), driver });
         });
       },
     );
@@ -62,12 +62,12 @@ const coordinate = async (deps, name, { signal, driver = { kind: 'local' } } = {
 };
 
 /** `fn` inside the kit's span for `kind` (`slice`, `coordinate`), when it gives one */
-const withSpan = (deps, kind, name, fn) => {
-  return typeof deps.span === 'function' ? deps.span(kind, name, fn) : fn();
+const withSpan = (deps, kind, name, work) => {
+  return typeof deps.span === 'function' ? deps.span(kind, name, work) : work();
 };
 
 /** A signal aborted when either is */
-const anySignal = (a, b) => {
+const combineSignals = (a, b) => {
   if (!a) return b;
   if (!b) return a;
   return AbortSignal.any([a, b]);
@@ -127,13 +127,13 @@ const coordinatePass = async (deps, name, initial, { signal }) => {
   let state = initial;
   let job = null;
   try {
-    job = await jobFor(deps, name, state);
+    job = await loadJob(deps, name, state);
   } catch (error) {
     const isOtherVersion =
       error instanceof ChecksumMismatchError || error?.code === 'ALX_ERR_MIGRATION_FILE_NOT_FOUND';
     if (isOtherVersion) {
       // Mid-deploy: an older or newer pod holds the other version of the file.
-      deps.logger.warn(`⚠ ${errorText(error)}`, deps.fields({ background: name }));
+      deps.logger.warn(`⚠ ${formatError(error)}`, deps.fields({ background: name }));
       return retrySoon(deps, 'checksum');
     }
     throw error;
@@ -166,8 +166,8 @@ const coordinatePass = async (deps, name, initial, { signal }) => {
         )) ?? (await store.get(name));
     }
     // A replan re-splits the same pass; it is not a new one.
-    const replanning = state.phase === 'replan';
-    if (replanning && state.plan !== undefined) {
+    const isReplanning = state.phase === 'replan';
+    if (isReplanning && state.plan !== undefined) {
       await store.supersede(name, { generation: state.generation, plan: state.plan.token });
       const leases = await store.leases(name);
       if (leases.live > 0) return retrySoon(deps, 'replan-draining');
@@ -175,7 +175,7 @@ const coordinatePass = async (deps, name, initial, { signal }) => {
         (await store.cas(name, { phase: 'replan' }, { $set: { phase: 'partition' } })) ?? state;
     }
     if (state.phase !== 'process' || state.plan === undefined || state.plan.match !== hash) {
-      const planned = await planPass(deps, job, state, hash, { newPass: !replanning });
+      const planned = await planPass(deps, job, state, hash, { newPass: !isReplanning });
       if (planned.next) return planned;
       state = planned.state;
       if (planned.empty) {
@@ -236,7 +236,7 @@ const planPass = async (deps, job, state, hash, { newPass = true } = {}) => {
     });
   }
   const pass = (state.pass ?? 0) + (newPass ? 1 : 0);
-  const sharding = spec.mode === 'step' ? null : shardingOf(job, plan);
+  const sharding = spec.mode === 'step' ? null : describeSharding(job, plan);
   const committed = await store.commitPlan(state._id, {
     generation: state.generation,
     previousToken: state.plan?.token,
@@ -316,7 +316,7 @@ const finalize = async (deps, job, state) => {
     const seen = new Set();
     for (const list of [state.badIds ?? [], rolled?.badIds ?? []]) {
       for (const id of list) {
-        const key = idKey(id);
+        const key = toIdKey(id);
         if (!seen.has(key)) {
           seen.add(key);
           badIds.push(id);
@@ -420,7 +420,7 @@ const finalize = async (deps, job, state) => {
 /** Move a state to `failed` with `message`, and say so */
 const failState = async (deps, state, reason) => {
   // Kept, emitted and logged: the application's data stays out of it.
-  const message = documentErrorText(reason);
+  const message = formatDocumentError(reason);
   const failed = await deps.store.move(state._id, {
     from: ['running', 'pending', 'blocked'],
     to: 'failed',
@@ -445,7 +445,7 @@ const failState = async (deps, state, reason) => {
  * an import: `deps.adoptedOf(names)`). A completed revert is not done: what
  * required it needs the forward shape.
  */
-const requiresStatus = async (deps, requires) => {
+const readRequiresStatus = async (deps, requires) => {
   if (requires.length === 0) return [];
   const states = await deps.store.getMany(requires);
   const missing = [];
@@ -455,8 +455,8 @@ const requiresStatus = async (deps, requires) => {
   for (const migration of requires) {
     const state = states.get(migration);
     if (state === undefined) {
-      const done = adopted.has(migration);
-      rows.push({ migration, status: done ? 'adopted' : 'unregistered', done });
+      const isDone = adopted.has(migration);
+      rows.push({ migration, status: isDone ? 'adopted' : 'unregistered', done: isDone });
     } else if (state.direction === 'revert') {
       rows.push({ migration, status: 'reverted', done: false, state });
     } else {
@@ -467,9 +467,9 @@ const requiresStatus = async (deps, requires) => {
 };
 
 /** The names among `requires` not done yet, in order */
-const waitingFor = async (deps, requires) => {
+const listWaiting = async (deps, requires) => {
   const waitsFor = [];
-  for (const row of await requiresStatus(deps, requires)) {
+  for (const row of await readRequiresStatus(deps, requires)) {
     if (!row.done) waitsFor.push(row.migration);
   }
   return waitsFor;
@@ -480,7 +480,7 @@ const waitingFor = async (deps, requires) => {
  * the state after, or `null`.
  */
 const tryUnblock = async (deps, state) => {
-  const waitsFor = await waitingFor(deps, state.requires ?? []);
+  const waitsFor = await listWaiting(deps, state.requires ?? []);
   if (waitsFor.length > 0) {
     if (JSON.stringify(waitsFor) !== JSON.stringify(state.waitsFor ?? [])) {
       await deps.store.set(state._id, { waitsFor });
@@ -500,10 +500,10 @@ const tryUnblock = async (deps, state) => {
 module.exports = {
   coordinate,
   withSpan,
-  anySignal,
+  combineSignals,
   finalize,
   failState,
-  requiresStatus,
-  waitingFor,
+  readRequiresStatus,
+  listWaiting,
   tryUnblock,
 };

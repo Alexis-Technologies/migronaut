@@ -15,14 +15,14 @@ const registerImport = (program) => {
     ],
     lockable: true,
     mutating: true,
-    run: (migrator, opts) => {
+    run: (migrator, flags) => {
       return migrator.import({
-        noLock: opts.noLock,
-        ...(opts.from ? { from: opts.from } : {}),
-        ...(opts.to ? { to: opts.to } : {}),
-        ...(opts.dryRun ? { dryRun: true } : {}),
-        ...(opts.trustHash ? { trustHash: true } : {}),
-        ...(opts.force ? { force: true } : {}),
+        noLock: flags.noLock,
+        ...(flags.from ? { from: flags.from } : {}),
+        ...(flags.to ? { to: flags.to } : {}),
+        ...(flags.dryRun ? { dryRun: true } : {}),
+        ...(flags.trustHash ? { trustHash: true } : {}),
+        ...(flags.force ? { force: true } : {}),
       });
     },
     render: (result, { logger }) => {

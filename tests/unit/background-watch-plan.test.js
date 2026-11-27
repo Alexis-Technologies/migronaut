@@ -4,9 +4,9 @@ const { Timestamp } = require('mongodb');
 const {
   classifyStreamError,
   isEnding,
-  lagOf,
+  measureLagMs,
   watchView,
-  tokenDue,
+  isTokenDue,
   watchPipeline,
 } = require('../../src/core/background/watch-plan.js');
 const { WATCH_DEFAULTS, watchOptions } = require('../../src/core/background/watch.js');
@@ -115,14 +115,17 @@ describe('background-watch-plan — the stream', () => {
     assert.ok(isEnding({ operationType: 'drop' }));
     assert.ok(!isEnding({ operationType: 'insert' }));
     assert.ok(!isEnding(null));
-    assert.strictEqual(lagOf({ clusterTime: new Timestamp({ t: 100, i: 1 }) }, 101_500), 1_500);
-    assert.strictEqual(lagOf({ clusterTime: new Timestamp({ t: 200, i: 1 }) }, 100_000), 0);
-    assert.strictEqual(lagOf({}, 1), undefined);
-    assert.strictEqual(lagOf({ clusterTime: {} }, 1), undefined);
-    assert.ok(tokenDue(undefined, 0, 5_000));
-    assert.ok(!tokenDue(1_000, 2_000, 5_000));
-    assert.ok(tokenDue(1_000, 6_000, 5_000));
-    assert.ok(tokenDue(1_000, 1_001, 5_000, { force: true }));
+    assert.strictEqual(
+      measureLagMs({ clusterTime: new Timestamp({ t: 100, i: 1 }) }, 101_500),
+      1_500,
+    );
+    assert.strictEqual(measureLagMs({ clusterTime: new Timestamp({ t: 200, i: 1 }) }, 100_000), 0);
+    assert.strictEqual(measureLagMs({}, 1), undefined);
+    assert.strictEqual(measureLagMs({ clusterTime: {} }, 1), undefined);
+    assert.ok(isTokenDue(undefined, 0, 5_000));
+    assert.ok(!isTokenDue(1_000, 2_000, 5_000));
+    assert.ok(isTokenDue(1_000, 6_000, 5_000));
+    assert.ok(isTokenDue(1_000, 1_001, 5_000, { force: true }));
   });
 });
 

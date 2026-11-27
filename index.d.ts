@@ -474,9 +474,10 @@ export type IdGenerator = () => string;
 /**
  * Every **scalar** option below is also settable from the environment as
  * `MIGRONAUT_<SCREAMING_SNAKE>` (`migrationsDir` → `MIGRONAUT_MIGRATIONS_DIR`,
- * with `dbName` → `MIGRONAUT_DB`, `migrationsCollection` → `MIGRONAUT_COLLECTION`
- * and `lockTTLSeconds` → `MIGRONAUT_LOCK_TTL` as the shortened exceptions), which
- * is what makes a config file genuinely optional. Env vars outrank the config
+ * `lockTTLSeconds` → `MIGRONAUT_LOCK_TTL_SECONDS`, with `dbName` → `MIGRONAUT_DB`
+ * as the one shortened exception), which is what makes a config file genuinely
+ * optional. `MIGRONAUT_COLLECTION` and `MIGRONAUT_LOCK_TTL`, the 2.x names, are
+ * refused with the new one. Env vars outrank the config
  * file and are outranked by CLI flags. A value that does not parse is rejected
  * with a {@link ConfigInvalidError} naming the variable — never coerced.
  *

@@ -18,7 +18,7 @@ const JOB_REF_LIMITS = Object.freeze({ id: 1024, groupId: MAX_ID_LENGTH });
  * The problem with a job reference, or null when it is absent or valid.
  * `groupId: false` refuses that key (a lane has no group).
  */
-const jobRefIssue = (job, { groupId = true } = {}) => {
+const checkJobRef = (job, { groupId = true } = {}) => {
   if (job === undefined) return null;
   if (!isPlainObject(job)) return 'job must be an object: { id, groupId? }';
   for (const key of Object.keys(job)) {
@@ -36,9 +36,9 @@ const jobRefIssue = (job, { groupId = true } = {}) => {
 };
 
 /** What a valid job reference adds to a run's correlation: `{ jobId, groupId? }` */
-const jobFields = (job) => {
+const toJobFields = (job) => {
   if (job === undefined) return {};
   return { jobId: job.id, ...(job.groupId !== undefined ? { groupId: job.groupId } : {}) };
 };
 
-module.exports = { JOB_REF_LIMITS, jobRefIssue, jobFields };
+module.exports = { JOB_REF_LIMITS, checkJobRef, toJobFields };

@@ -1,5 +1,5 @@
 const { ConvergeFailedError, MigronautError } = require('../../errors/index.js');
-const { errorText } = require('../../utils/error.js');
+const { formatError } = require('../../utils/error.js');
 const { TARGET_LABELS } = require('./plan.js');
 const { searchHint } = require('./search.js');
 
@@ -53,7 +53,7 @@ const CONNECTION_ERROR_NAMES = new Set([
 const CONNECTION_ERROR_CODES = new Set([50, 89, 91, 189, 10107, 11600, 11602, 13435]);
 
 /** A failed conversion to unique: what became of the index (`prepareUnique` taken back off, or not) */
-const uniqueLeftover = (mongoCode, extra) => {
+const describeUniqueLeftover = (mongoCode, extra) => {
   if (extra.prepareUniqueLeft) {
     return (
       ' — and prepareUnique could not be taken back off: the index refuses new duplicates ' +
@@ -64,10 +64,10 @@ const uniqueLeftover = (mongoCode, extra) => {
 };
 
 /** A row's target as a log line names it, and what it is on */
-const whatOf = (action, collection) => {
+const describeTarget = (action, collection) => {
   const target = TARGET_LABELS[action.target] ?? action.target;
-  const named = action.target === 'index' || action.target === 'searchIndex';
-  return `${target} ${named ? `${action.name} on ${collection}` : collection}`;
+  const isNamed = action.target === 'index' || action.target === 'searchIndex';
+  return `${target} ${isNamed ? `${action.name} on ${collection}` : collection}`;
 };
 
 /** Copy-on-write, like the kit's #attachResults: the error may live on a shared abort signal */
@@ -110,7 +110,7 @@ const isConnectionTrouble = (error) => {
 };
 
 /** What a failed rebuild left behind, when it could not put the dropped index back */
-const lostIndexes = (extra) => {
+const describeLostIndexes = (extra) => {
   if (extra.restored !== false) return '';
   if (extra.uncertain) {
     return (
@@ -125,7 +125,7 @@ const lostIndexes = (extra) => {
 };
 
 /** What usually fixes a failed step: a search command's own hint, or one by server code */
-const failureHint = (target, error, mongoCode) => {
+const suggestFix = (target, error, mongoCode) => {
   if (target === 'searchIndex') return searchHint(error);
   return mongoCode !== undefined ? HINTS[mongoCode] : undefined;
 };
@@ -134,11 +134,11 @@ const wrapFailure = (error, collection, actions, result, extra = {}) => {
   const action = actions[0];
   if (error instanceof MigronautError) return attachConverge(error, result);
   const mongoCode = typeof error?.code === 'number' ? error.code : undefined;
-  const hint = failureHint(action.target, error, mongoCode);
-  const cause = errorText(error);
+  const hint = suggestFix(action.target, error, mongoCode);
+  const cause = formatError(error);
   return new ConvergeFailedError(
     `Could not ${VERBS[action.action] ?? action.action} ${describeAll(actions)} on ${collection}: ` +
-      `${cause}${hint ? ` — ${hint}` : ''}${uniqueLeftover(mongoCode, extra)}${lostIndexes(extra)}`,
+      `${cause}${hint ? ` — ${hint}` : ''}${describeUniqueLeftover(mongoCode, extra)}${describeLostIndexes(extra)}`,
     {
       cause: error,
       context: {
@@ -160,7 +160,7 @@ const wrapFailure = (error, collection, actions, result, extra = {}) => {
 module.exports = {
   NAMESPACE_EXISTS,
   LABELS,
-  whatOf,
+  describeTarget,
   attachConverge,
   describe,
   describeAll,

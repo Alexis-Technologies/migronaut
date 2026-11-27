@@ -1,6 +1,6 @@
 const { ConfigInvalidError, LockAlreadyHeldError } = require('../../errors/index.js');
 const { createColors } = require('../../utils/colors.js');
-const { errorText } = require('../../utils/error.js');
+const { formatError } = require('../../utils/error.js');
 const { confirm, defineCommand, EXIT_CODES } = require('../shared.js');
 const { renderTable } = require('../table.js');
 
@@ -73,7 +73,7 @@ const STATUS_COLORS = {
 };
 
 /** Every flag of a `FLAGS`-shaped table, in table order */
-const flagsOf = (table) => {
+const listFlags = (table) => {
   const flags = new Set();
   const actions = Object.keys(table);
   for (let i = 0; i < actions.length; i++) {
@@ -83,24 +83,24 @@ const flagsOf = (table) => {
   return flags;
 };
 
-const ALL_FLAGS = flagsOf(FLAGS);
+const ALL_FLAGS = listFlags(FLAGS);
 
-const flagName = (key) => `--${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
+const toFlagName = (key) => `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
 
 /** A positive integer flag, or undefined when not given */
-const integerFlag = (opts, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) => {
-  if (opts[key] === undefined) return undefined;
-  const value = Number(opts[key]);
+const readIntegerFlag = (flags, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) => {
+  if (flags[key] === undefined) return undefined;
+  const value = Number(flags[key]);
   if (!Number.isSafeInteger(value) || value < min || value > max) {
-    throw new ConfigInvalidError(`${flagName(key)} must be an integer from ${min} to ${max}`, {
-      context: { [key]: opts[key] },
+    throw new ConfigInvalidError(`${toFlagName(key)} must be an integer from ${min} to ${max}`, {
+      context: { [key]: flags[key] },
     });
   }
   return value;
 };
 
 /** Check the action, its name and its flags — before anything connects */
-const preflight = (opts, positionals) => {
+const preflight = (flags, positionals) => {
   const action = positionals[0];
   const name = positionals[1];
   if (!ACTIONS.has(action)) {
@@ -111,7 +111,7 @@ const preflight = (opts, positionals) => {
   if (NEEDS_NAME.has(action) && name === undefined) {
     throw new ConfigInvalidError(`background ${action} needs a migration name`);
   }
-  if (action === 'run' && (name === undefined) === !opts.all) {
+  if (action === 'run' && (name === undefined) === !flags.all) {
     throw new ConfigInvalidError('background run takes a migration name, or --all');
   }
   if (action === 'verify' && name !== undefined) {
@@ -119,23 +119,23 @@ const preflight = (opts, positionals) => {
   }
   const allowed = new Set(FLAGS[action]);
   for (const key of ALL_FLAGS) {
-    if (opts[key] !== undefined && opts[key] !== false && !allowed.has(key)) {
-      throw new ConfigInvalidError(`${flagName(key)} does not apply to background ${action}`);
+    if (flags[key] !== undefined && flags[key] !== false && !allowed.has(key)) {
+      throw new ConfigInvalidError(`${toFlagName(key)} does not apply to background ${action}`);
     }
   }
-  integerFlag(opts, 'concurrency', { max: 64 });
-  integerFlag(opts, 'sample', { max: 1000 });
-  integerFlag(opts, 'first', { max: 1000 });
-  integerFlag(opts, 'steps', { max: 50 });
-  integerFlag(opts, 'maxDocs', { max: 1000 });
-  integerFlag(opts, 'deadlineMs', { max: 50_000 });
+  readIntegerFlag(flags, 'concurrency', { max: 64 });
+  readIntegerFlag(flags, 'sample', { max: 1000 });
+  readIntegerFlag(flags, 'first', { max: 1000 });
+  readIntegerFlag(flags, 'steps', { max: 50 });
+  readIntegerFlag(flags, 'maxDocs', { max: 1000 });
+  readIntegerFlag(flags, 'deadlineMs', { max: 50_000 });
   return true;
 };
 
 /** The controls that cannot be taken back ask first; `--json` needs `--yes` */
-const confirmed = async (action, state, { opts, json, logger }) => {
-  const asks = ASKS_FIRST.has(action) || (action === 'retry' && opts.fromStart);
-  if (!asks || opts.yes) return true;
+const askToConfirm = async (action, state, { flags, json, logger }) => {
+  const asks = ASKS_FIRST.has(action) || (action === 'retry' && flags.fromStart);
+  if (!asks || flags.yes) return true;
   if (json) {
     throw new ConfigInvalidError(
       `background ${action} needs confirmation — pass --yes in --json mode`,
@@ -174,7 +174,7 @@ const onSignals = (handlerFor) => {
  * SIGTERM, which end it cleanly (exit 0): streams closed, positions saved,
  * locks released. What it does is printed as it happens.
  */
-const watchAction = async (migrator, opts, collection, { logger, json }) => {
+const watchAction = async (migrator, flags, collection, { logger, json }) => {
   const controller = new AbortController();
   const onWatch = (event) => logger.info(`… ${event.collection}: ${event.state}`);
   const onDrift = (event) => {
@@ -197,10 +197,10 @@ const watchAction = async (migrator, opts, collection, { logger, json }) => {
   try {
     const watcher = await migrator.watchBackground({
       ...(collection !== undefined ? { collections: [collection] } : {}),
-      ...(opts.report ? { upgrade: false } : {}),
+      ...(flags.report ? { upgrade: false } : {}),
       signal: controller.signal,
       onError: (error, where) => {
-        return logger.warn(`⚠ Drift watcher${where ? ` (${where})` : ''}: ${errorText(error)}`);
+        return logger.warn(`⚠ Drift watcher${where ? ` (${where})` : ''}: ${formatError(error)}`);
       },
     });
     if (!json) logger.info('Watching for old-shape writes — Ctrl-C to stop');
@@ -216,13 +216,13 @@ const watchAction = async (migrator, opts, collection, { logger, json }) => {
 };
 
 /** `run`: drive one background migration (or every runnable one, in order) from here */
-const runAction = async (migrator, opts, name, { logger }) => {
-  const concurrency = integerFlag(opts, 'concurrency', { max: 64 }) ?? 1;
+const runAction = async (migrator, flags, name, { logger }) => {
+  const concurrency = readIntegerFlag(flags, 'concurrency', { max: 64 }) ?? 1;
   const controller = new AbortController();
-  let stopping = false;
+  let isStopping = false;
   const onSignal = (signal) => {
-    if (stopping) process.exit(signal === 'SIGINT' ? 130 : 143);
-    stopping = true;
+    if (isStopping) process.exit(signal === 'SIGINT' ? 130 : 143);
+    isStopping = true;
     logger.warn(
       `⚠ ${signal} received — the lanes stop at their next batch; the background migration ` +
         'goes on from there next time. Press again to exit immediately.',
@@ -244,7 +244,7 @@ const runAction = async (migrator, opts, name, { logger }) => {
             `(${status.maxParallel}) — using ${status.maxParallel}`,
         );
       }
-      if (opts.once) {
+      if (flags.once) {
         const answer = await migrator.coordinateBackground(target, {
           signal: controller.signal,
           driver: { kind: 'cli' },
@@ -258,10 +258,10 @@ const runAction = async (migrator, opts, name, { logger }) => {
       return migrator.runBackground(target, {
         signal: controller.signal,
         concurrency,
-        untilDone: !opts.once,
+        untilDone: !flags.once,
       });
     };
-    if (!opts.all) return [await runOne(name)];
+    if (!flags.all) return [await runOne(name)];
     // Round after round: one that waited for another (run later in the same
     // round) is unblocked when that one completes, and runs in the next.
     // Done when a round changes nothing, or after one with --once.
@@ -276,7 +276,7 @@ const runAction = async (migrator, opts, name, { logger }) => {
       if (runnable.length === 0 || key === previous) break;
       previous = key;
       for (const target of runnable) results.set(target, await runOne(target));
-      if (opts.once) break;
+      if (flags.once) break;
     }
     return [...results.values()];
   } finally {
@@ -322,7 +322,7 @@ const renderStatuses = (states) => {
 };
 
 /** A partition's scope: `step`, or its bracket and group */
-const scopeText = (partition) => {
+const formatScope = (partition) => {
   if (partition.scope.kind === 'step') return 'step';
   const group = partition.group ? ` @${partition.group}` : '';
   return `${partition.scope.bracket ?? ''}${group}`;
@@ -335,7 +335,7 @@ const renderPartitions = (partitions) => {
     rows.push([
       `${partition.seq}`,
       partition.status,
-      scopeText(partition),
+      formatScope(partition),
       `${partition.counters.migrated ?? 0}`,
       partition.lease
         ? `slot ${partition.lease.slot} · ${partition.lease.host}:${partition.lease.pid}`
@@ -396,17 +396,17 @@ const registerBackground = (program) => {
       ['-y, --yes', 'cancel, retry --from-start, repin, unlock: do not ask (required with --json)'],
     ],
     spinner: false,
-    preflight: (opts, positionals) => preflight(opts, positionals),
-    run: async (migrator, opts, positionals, cli) => {
+    preflight: (flags, positionals) => preflight(flags, positionals),
+    run: async (migrator, flags, positionals, cli) => {
       const action = positionals[0];
       const name = positionals[1];
       const control = {
-        ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
-        ...(opts.wait ? { wait: true } : {}),
+        ...(flags.reason !== undefined ? { reason: flags.reason } : {}),
+        ...(flags.wait ? { wait: true } : {}),
       };
       switch (action) {
         case 'status': {
-          if (opts.partitions) {
+          if (flags.partitions) {
             if (name === undefined) {
               throw new ConfigInvalidError('background status --partitions needs a name');
             }
@@ -422,7 +422,7 @@ const registerBackground = (program) => {
           return { background: await migrator.backgroundStatus() };
         }
         case 'run':
-          return { background: await runAction(migrator, opts, name, cli) };
+          return { background: await runAction(migrator, flags, name, cli) };
         case 'pause':
           return migrator.pauseBackground(name, control);
         case 'resume':
@@ -432,7 +432,7 @@ const registerBackground = (program) => {
         case 'retry':
         case 'unlock': {
           const state = await migrator.backgroundStatus(name);
-          if (!(await confirmed(action, state, { ...cli, opts }))) {
+          if (!(await askToConfirm(action, state, { ...cli, flags }))) {
             cli.logger.info('Aborted');
             return undefined;
           }
@@ -441,28 +441,28 @@ const registerBackground = (program) => {
           if (action === 'unlock') return migrator.unlockBackground(name);
           return migrator.retryBackground(name, {
             ...control,
-            ...(opts.fromStart ? { fromStart: true } : {}),
-            ...(opts.repin ? { repin: true } : {}),
+            ...(flags.fromStart ? { fromStart: true } : {}),
+            ...(flags.repin ? { repin: true } : {}),
           });
         }
         case 'dry-run':
           return {
             dryRun: await migrator.dryRunBackground(name, {
-              ...(opts.sample !== undefined ? { sample: Number(opts.sample) } : {}),
-              ...(opts.first !== undefined ? { first: Number(opts.first) } : {}),
-              ...(opts.validate ? { validate: true } : {}),
-              ...(opts.steps !== undefined ? { steps: Number(opts.steps) } : {}),
-              ...(opts.revert ? { direction: 'revert' } : {}),
-              ...(opts.maxDocs !== undefined ? { maxDocuments: Number(opts.maxDocs) } : {}),
-              ...(opts.fromStart ? { fromStart: true } : {}),
-              ...(opts.deadlineMs !== undefined ? { deadlineMs: Number(opts.deadlineMs) } : {}),
+              ...(flags.sample !== undefined ? { sample: Number(flags.sample) } : {}),
+              ...(flags.first !== undefined ? { first: Number(flags.first) } : {}),
+              ...(flags.validate ? { validate: true } : {}),
+              ...(flags.steps !== undefined ? { steps: Number(flags.steps) } : {}),
+              ...(flags.revert ? { direction: 'revert' } : {}),
+              ...(flags.maxDocs !== undefined ? { maxDocuments: Number(flags.maxDocs) } : {}),
+              ...(flags.fromStart ? { fromStart: true } : {}),
+              ...(flags.deadlineMs !== undefined ? { deadlineMs: Number(flags.deadlineMs) } : {}),
             }),
           };
         case 'watch':
-          return watchAction(migrator, opts, name, cli);
+          return watchAction(migrator, flags, name, cli);
         default:
           return {
-            verify: await migrator.verifyBackground(opts.report ? { onDrift: 'report' } : {}),
+            verify: await migrator.verifyBackground(flags.report ? { onDrift: 'report' } : {}),
           };
       }
     },
@@ -496,10 +496,10 @@ const registerBackground = (program) => {
         );
       }
     },
-    after: (data, { opts, logger }) => {
+    after: (data, { flags, logger }) => {
       if (data === undefined) return;
       const states = data.background;
-      if (opts.check && Array.isArray(states)) {
+      if (flags.check && Array.isArray(states)) {
         const outcome = checkOutcome(states);
         if (outcome === 'failed') {
           logger.error('✖ A background migration failed');

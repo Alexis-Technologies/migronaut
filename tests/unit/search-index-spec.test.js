@@ -5,7 +5,7 @@ const {
   MAX_BUILD_MESSAGE_LENGTH,
   SEARCH_INDEX_KEYS,
   compareSearchIndex,
-  effectiveDefinition,
+  fillDefinitionDefaults,
   inferSearchIndexType,
   isBeingRemoved,
   isSearchIndexReady,
@@ -262,9 +262,9 @@ describe('normalizing search indexes', () => {
   });
 });
 
-describe('effectiveDefinition', () => {
+describe('fillDefinitionDefaults', () => {
   it('should fill the documented search defaults — searchAnalyzer follows analyzer', () => {
-    assert.deepStrictEqual(effectiveDefinition('search', { mappings: { dynamic: true } }), {
+    assert.deepStrictEqual(fillDefinitionDefaults('search', { mappings: { dynamic: true } }), {
       analyzer: 'lucene.standard',
       searchAnalyzer: 'lucene.standard',
       storedSource: false,
@@ -274,13 +274,13 @@ describe('effectiveDefinition', () => {
       mappings: { dynamic: true, fields: {} },
     });
     assert.strictEqual(
-      effectiveDefinition('search', { analyzer: 'lucene.english', mappings: {} }).searchAnalyzer,
+      fillDefinitionDefaults('search', { analyzer: 'lucene.english', mappings: {} }).searchAnalyzer,
       'lucene.english',
     );
   });
 
   it('should fill vector field defaults and merge partial hnswOptions', () => {
-    const filled = effectiveDefinition('vectorSearch', {
+    const filled = fillDefinitionDefaults('vectorSearch', {
       fields: [
         {
           type: 'vector',
@@ -311,7 +311,7 @@ describe('effectiveDefinition', () => {
   });
 
   it('should fill the defaults mongot writes into field mappings, nested ones too', () => {
-    const { mappings } = effectiveDefinition('search', {
+    const { mappings } = fillDefinitionDefaults('search', {
       mappings: {
         fields: {
           title: {
@@ -355,7 +355,7 @@ describe('effectiveDefinition', () => {
   });
 
   it('should leave a definition that is not an object alone', () => {
-    assert.strictEqual(effectiveDefinition('search', undefined), undefined);
+    assert.strictEqual(fillDefinitionDefaults('search', undefined), undefined);
   });
 });
 

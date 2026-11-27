@@ -1,5 +1,5 @@
 const { ConfigInvalidError, QueueJobInvalidError } = require('../errors/index.js');
-const { ACTOR_FIELDS, actorIssue, pickActor } = require('../utils/actor.js');
+const { ACTOR_FIELDS, checkActor, pickActor } = require('../utils/actor.js');
 const { MAX_ID_LENGTH } = require('../utils/id.js');
 const { isBareFilename } = require('../utils/migration-name.js');
 
@@ -258,10 +258,10 @@ const isPosition = (index, total) => {
  * fragment, or the second file's job would be absorbed as a duplicate of the
  * first's.
  */
-const idFragment = (migration) => {
-  return migration.replace(/[^A-Za-z0-9._-]/gu, (char) => {
+const toIdFragment = (migration) => {
+  return migration.replace(/[^A-Za-z0-9._-]/gu, (character) => {
     let encoded = '';
-    for (const byte of Buffer.from(char, 'utf8')) {
+    for (const byte of Buffer.from(character, 'utf8')) {
       encoded += `~${byte.toString(16).toUpperCase().padStart(2, '0')}`;
     }
     return encoded;
@@ -278,7 +278,7 @@ const dedupId = (direction, migration, { force = false } = {}) => {
   // A forced re-run is a request of its own: a plain job for the same file
   // still waiting must not absorb it. (`~force` can never be part of a
   // fragment — there `~` is always followed by two upper-case hex digits.)
-  return `${direction}${force ? '~force' : ''}-${idFragment(migration)}`;
+  return `${direction}${force ? '~force' : ''}-${toIdFragment(migration)}`;
 };
 
 /**
@@ -288,8 +288,8 @@ const dedupId = (direction, migration, { force = false } = {}) => {
  * earlier converge that sits in front of the new migrations, and nothing would
  * converge after them.
  */
-const convergeDedupId = (after) => {
-  return after === undefined ? 'converge' : `converge-after-${idFragment(after)}`;
+const buildConvergeDedupId = (after) => {
+  return after === undefined ? 'converge' : `converge-after-${toIdFragment(after)}`;
 };
 
 const isGroupId = (value) => {
@@ -319,7 +319,7 @@ const resolveAllow = (allow) => {
 };
 
 /** The permissions a parsed job (or an enqueue request) needs: `'down'`, `'force'`, `'unordered'` */
-const permissionsNeeded = (data) => {
+const listPermissions = (data) => {
   const needed = [];
   if (data.kind === 'migration' && data.direction === JOB_NAMES.DOWN) needed.push('down');
   if (data.force) needed.push('force');
@@ -329,7 +329,7 @@ const permissionsNeeded = (data) => {
 
 /** Refuse a well-formed job this worker is not allowed to run */
 const assertAllowed = (job, data, allow) => {
-  for (const permission of permissionsNeeded(data)) {
+  for (const permission of listPermissions(data)) {
     if (!allow[permission]) {
       throw new QueueJobInvalidError(
         `Refused migration job: ${permission === 'unordered' ? 'ordered: false' : permission} ` +
@@ -346,7 +346,7 @@ const assertAllowed = (job, data, allow) => {
   }
 };
 
-const invalid = (job, issue) => {
+const createInvalidJobError = (job, issue) => {
   return new QueueJobInvalidError(`Invalid migration job: ${issue}`, {
     context: { ...(job?.id !== undefined ? { jobId: `${job.id}` } : {}), issue },
   });
@@ -360,15 +360,15 @@ const invalid = (job, issue) => {
  * above all the migration name, which becomes a filesystem path.
  */
 const parseJobData = (job) => {
-  if (!isObjectLike(job)) throw invalid(job, 'job is not an object');
+  if (!isObjectLike(job)) throw createInvalidJobError(job, 'job is not an object');
   const { name, data } = job;
-  if (!MIGRATION_QUEUE_JOBS.has(name)) throw invalid(job, 'unknown job name');
-  if (!isObjectLike(data)) throw invalid(job, 'data is not an object');
+  if (!MIGRATION_QUEUE_JOBS.has(name)) throw createInvalidJobError(job, 'unknown job name');
+  if (!isObjectLike(data)) throw createInvalidJobError(job, 'data is not an object');
   if (!Number.isSafeInteger(data.v) || data.v < MIN_JOB_DATA_VERSION) {
-    throw invalid(job, 'unsupported job data version');
+    throw createInvalidJobError(job, 'unsupported job data version');
   }
   if (data.v > JOB_DATA_VERSION) {
-    throw invalid(
+    throw createInvalidJobError(
       job,
       `job data version ${data.v} is newer than this worker supports (${JOB_DATA_VERSION}) — ` +
         'roll the workers out before the producers',
@@ -377,7 +377,7 @@ const parseJobData = (job) => {
   const kind = name === JOB_NAMES.SYNC || name === JOB_NAMES.CONVERGE ? name : 'migration';
   for (const key of Object.keys(data)) {
     if (!JOB_FIELDS[kind].has(key)) {
-      throw invalid(
+      throw createInvalidJobError(
         job,
         key === 'prune'
           ? "prune is not accepted from a job — the worker's own definitions decide"
@@ -386,13 +386,13 @@ const parseJobData = (job) => {
     }
   }
   for (const key of ACTOR_FIELDS) {
-    const issue = actorIssue(key, data[key]);
-    if (issue) throw invalid(job, issue);
+    const issue = checkActor(key, data[key]);
+    if (issue) throw createInvalidJobError(job, issue);
   }
 
   if (name === JOB_NAMES.SYNC) {
     if (data.to !== undefined && !isBareFilename(data.to)) {
-      throw invalid(job, 'to is not a bare filename');
+      throw createInvalidJobError(job, 'to is not a bare filename');
     }
     return { kind: 'sync', ...(data.to !== undefined ? { to: data.to } : {}) };
   }
@@ -401,10 +401,10 @@ const parseJobData = (job) => {
     // No `prune`, by design: what may be dropped is decided by the
     // definitions the worker loads, never by a payload sitting in Redis.
     if (data.groupId !== undefined && !isGroupId(data.groupId)) {
-      throw invalid(job, 'groupId is not a short string');
+      throw createInvalidJobError(job, 'groupId is not a short string');
     }
     if (data.ordered !== undefined && typeof data.ordered !== 'boolean') {
-      throw invalid(job, 'ordered is not a boolean');
+      throw createInvalidJobError(job, 'ordered is not a boolean');
     }
     return {
       kind: 'converge',
@@ -414,29 +414,31 @@ const parseJobData = (job) => {
     };
   }
 
-  if (data.direction !== name) throw invalid(job, 'direction does not match the job name');
+  if (data.direction !== name) {
+    throw createInvalidJobError(job, 'direction does not match the job name');
+  }
   if (!isBareFilename(data.migration) || data.migration.length > MAX_MIGRATION_NAME_LENGTH) {
-    throw invalid(job, 'migration is not a bare filename');
+    throw createInvalidJobError(job, 'migration is not a bare filename');
   }
   if (!isGroupId(data.groupId)) {
-    throw invalid(job, 'groupId is not a short string');
+    throw createInvalidJobError(job, 'groupId is not a short string');
   }
   if (!isPosition(data.index, data.total)) {
-    throw invalid(job, 'index/total are not a valid position');
+    throw createInvalidJobError(job, 'index/total are not a valid position');
   }
   const isUp = name === JOB_NAMES.UP;
   const hasBatch = data.batch !== undefined && data.batch !== null;
   if ((isUp || hasBatch) && !isPositiveInteger(data.batch)) {
-    throw invalid(job, 'batch is not a positive integer');
+    throw createInvalidJobError(job, 'batch is not a positive integer');
   }
   if (data.force !== undefined && (data.force !== true || !isUp)) {
-    throw invalid(job, 'force is only valid as `true` on an up job');
+    throw createInvalidJobError(job, 'force is only valid as `true` on an up job');
   }
   if (data.ordered !== undefined && typeof data.ordered !== 'boolean') {
-    throw invalid(job, 'ordered is not a boolean');
+    throw createInvalidJobError(job, 'ordered is not a boolean');
   }
   if (data.checksum !== undefined && !isChecksum(data.checksum)) {
-    throw invalid(job, 'checksum is not a SHA-256 hex digest');
+    throw createInvalidJobError(job, 'checksum is not a SHA-256 hex digest');
   }
 
   return {
@@ -457,20 +459,20 @@ const parseJobData = (job) => {
 /** The version and field checks every job shares — then the fields of `kind` */
 const assertEnvelope = (job, kind) => {
   const { data } = job;
-  if (!isObjectLike(data)) throw invalid(job, 'data is not an object');
+  if (!isObjectLike(data)) throw createInvalidJobError(job, 'data is not an object');
   if (!Number.isSafeInteger(data.v) || data.v < MIN_JOB_DATA_VERSION) {
-    throw invalid(job, 'unsupported job data version');
+    throw createInvalidJobError(job, 'unsupported job data version');
   }
   if (data.v > JOB_DATA_VERSION) {
-    throw invalid(
+    throw createInvalidJobError(
       job,
       `job data version ${data.v} is newer than this worker supports (${JOB_DATA_VERSION}) — ` +
         'roll the workers out before the producers',
     );
   }
-  if (data.kind !== kind) throw invalid(job, 'kind does not match the job name');
+  if (data.kind !== kind) throw createInvalidJobError(job, 'kind does not match the job name');
   for (const key of Object.keys(data)) {
-    if (!JOB_FIELDS[kind].has(key)) throw invalid(job, `unknown field "${key}"`);
+    if (!JOB_FIELDS[kind].has(key)) throw createInvalidJobError(job, `unknown field "${key}"`);
   }
 };
 
@@ -479,27 +481,29 @@ const assertEnvelope = (job, kind) => {
  * copy — as untrusted as any other: the migration name becomes a path.
  */
 const parseBackgroundJobData = (job) => {
-  if (!isObjectLike(job)) throw invalid(job, 'job is not an object');
+  if (!isObjectLike(job)) throw createInvalidJobError(job, 'job is not an object');
   const { name } = job;
-  if (!BACKGROUND_QUEUE_JOBS.has(name)) throw invalid(job, 'unknown background job name');
+  if (!BACKGROUND_QUEUE_JOBS.has(name)) {
+    throw createInvalidJobError(job, 'unknown background job name');
+  }
   assertEnvelope(job, name);
   const { data } = job;
   if (name === JOB_NAMES.BACKGROUND_VERIFY) return { kind: name };
   if (!isBareFilename(data.migration) || data.migration.length > MAX_MIGRATION_NAME_LENGTH) {
-    throw invalid(job, 'migration is not a bare filename');
+    throw createInvalidJobError(job, 'migration is not a bare filename');
   }
   for (const key of LANE_COUNT_FIELDS) {
     if (data[key] !== undefined && !isCount(data[key])) {
-      throw invalid(job, `${key} is not a non-negative integer`);
+      throw createInvalidJobError(job, `${key} is not a non-negative integer`);
     }
   }
   if (name === JOB_NAMES.BACKGROUND) {
     for (const key of ACTOR_FIELDS) {
-      const issue = actorIssue(key, data[key]);
-      if (issue) throw invalid(job, issue);
+      const issue = checkActor(key, data[key]);
+      if (issue) throw createInvalidJobError(job, issue);
     }
     if (data.takeover !== undefined && data.takeover !== true) {
-      throw invalid(job, 'takeover is only valid as `true`');
+      throw createInvalidJobError(job, 'takeover is only valid as `true`');
     }
     return {
       kind: name,
@@ -510,12 +514,14 @@ const parseBackgroundJobData = (job) => {
       ...pickActor(data),
     };
   }
-  if (!isGroupId(data.registration)) throw invalid(job, 'registration is not a short string');
+  if (!isGroupId(data.registration)) {
+    throw createInvalidJobError(job, 'registration is not a short string');
+  }
   for (const key of LANE_REQUIRED_FIELDS) {
-    if (data[key] === undefined) throw invalid(job, `${key} is missing`);
+    if (data[key] === undefined) throw createInvalidJobError(job, `${key} is missing`);
   }
   if (!Number.isSafeInteger(data.lane) || data.lane < 0 || data.lane >= MAX_LANES) {
-    throw invalid(job, `lane is not an integer from 0 to ${MAX_LANES - 1}`);
+    throw createInvalidJobError(job, `lane is not an integer from 0 to ${MAX_LANES - 1}`);
   }
   return {
     kind: name,
@@ -569,7 +575,7 @@ const buildMigrationJob = (options) => {
 };
 
 /** Per-job options: the caller's passthrough, then the ones the contract owns */
-const migrationJobOptions = (jobOptions, direction, migration, { force = false } = {}) => {
+const buildMigrationJobOptions = (jobOptions, direction, migration, { force = false } = {}) => {
   return {
     ...jobOptions,
     ...MIGRATION_JOB_OPTIONS,
@@ -596,7 +602,7 @@ const buildConvergeJob = ({ groupId, ordered, after, jobOptions, requestedBy, re
     opts: {
       ...jobOptions,
       ...MIGRATION_JOB_OPTIONS,
-      deduplication: { id: convergeDedupId(after) },
+      deduplication: { id: buildConvergeDedupId(after) },
     },
   };
 };
@@ -639,7 +645,7 @@ const warnUnknownOptions = (kit, where, options, known) => {
  * the schedule lives. Each tick starts its own instead; the migrations it
  * enqueues still hang under it. A no-op for a queue without telemetry.
  */
-const tickJobOptions = (jobOptions = {}) => {
+const buildTickJobOptions = (jobOptions = {}) => {
   return {
     removeOnComplete: TICK_RETENTION.removeOnComplete,
     removeOnFail: TICK_RETENTION.removeOnFail,
@@ -654,7 +660,7 @@ const buildSyncJobTemplate = ({ to, jobOptions } = {}) => {
   return {
     name: JOB_NAMES.SYNC,
     data: { v: JOB_DATA_VERSION, kind: 'sync', ...(to !== undefined ? { to } : {}) },
-    opts: tickJobOptions(jobOptions),
+    opts: buildTickJobOptions(jobOptions),
   };
 };
 
@@ -663,7 +669,7 @@ const buildConvergeJobTemplate = ({ jobOptions } = {}) => {
   return {
     name: JOB_NAMES.CONVERGE,
     data: { v: JOB_DATA_VERSION, kind: 'converge' },
-    opts: tickJobOptions(jobOptions),
+    opts: buildTickJobOptions(jobOptions),
   };
 };
 
@@ -675,7 +681,7 @@ const backgroundQueueName = (queueName) => `${queueName}${BACKGROUND_QUEUE_SUFFI
  * bounded retention where they set none — a lane per partition per spawn adds
  * up — then what the contract owns.
  */
-const backgroundJobOptions = (jobOptions = {}, owned = {}) => {
+const buildBackgroundJobOptions = (jobOptions = {}, owned = {}) => {
   return {
     removeOnComplete: TICK_RETENTION.removeOnComplete,
     removeOnFail: TICK_RETENTION.removeOnFail,
@@ -692,7 +698,7 @@ const backgroundJobOptions = (jobOptions = {}, owned = {}) => {
  * backoff are the outer safety net — what it decides is all in MongoDB.
  */
 const buildBackgroundJob = ({ migration, takeoverOf, jobOptions, requestedBy, reason }) => {
-  const fragment = idFragment(migration);
+  const fragment = toIdFragment(migration);
   return {
     name: JOB_NAMES.BACKGROUND,
     data: {
@@ -702,7 +708,7 @@ const buildBackgroundJob = ({ migration, takeoverOf, jobOptions, requestedBy, re
       ...(takeoverOf !== undefined ? { takeover: true } : {}),
       ...pickActor({ requestedBy, reason }),
     },
-    opts: backgroundJobOptions(jobOptions, {
+    opts: buildBackgroundJobOptions(jobOptions, {
       attempts: 3,
       backoff: { type: 'fixed', delay: 30_000 },
       deduplication: {
@@ -721,7 +727,7 @@ const buildBackgroundJob = ({ migration, takeoverOf, jobOptions, requestedBy, re
 const buildLaneJob = (options) => {
   const { migration, registration, generation, round, spawn, lane, parent, jobOptions } = options;
 
-  const base = `bgl-${idFragment(migration)}-${idFragment(registration)}-g${generation}`;
+  const base = `bgl-${toIdFragment(migration)}-${toIdFragment(registration)}-g${generation}`;
   return {
     name: JOB_NAMES.BACKGROUND_LANE,
     data: {
@@ -734,7 +740,7 @@ const buildLaneJob = (options) => {
       spawn,
       lane,
     },
-    opts: backgroundJobOptions(
+    opts: buildBackgroundJobOptions(
       jobOptions,
       parent === undefined
         ? { attempts: 1, deduplication: { id: `${base}-l${lane}` } }
@@ -755,7 +761,7 @@ const buildBackgroundVerifyJobTemplate = ({ jobOptions } = {}) => {
   return {
     name: JOB_NAMES.BACKGROUND_VERIFY,
     data: { v: JOB_DATA_VERSION, kind: JOB_NAMES.BACKGROUND_VERIFY },
-    opts: tickJobOptions(jobOptions),
+    opts: buildTickJobOptions(jobOptions),
   };
 };
 
@@ -778,16 +784,16 @@ module.exports = {
   JOB_WRITE_WAIT_MS,
   TICK_RETENTION,
   isObjectLike,
-  idFragment,
+  toIdFragment,
   dedupId,
-  convergeDedupId,
+  buildConvergeDedupId,
   resolveAllow,
-  permissionsNeeded,
+  listPermissions,
   assertAllowed,
   parseJobData,
   parseBackgroundJobData,
   buildMigrationJob,
-  migrationJobOptions,
+  buildMigrationJobOptions,
   buildConvergeJob,
   warnUnknownOptions,
   buildSyncJobTemplate,

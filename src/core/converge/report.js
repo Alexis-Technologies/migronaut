@@ -1,8 +1,8 @@
 const { pickActor } = require('../../utils/actor.js');
-const { errorText } = require('../../utils/error.js');
+const { formatError } = require('../../utils/error.js');
 const { CHANGE_ACTIONS } = require('./plan.js');
-const { notReadyEntry, searchSummary } = require('./search-run.js');
-const { whatOf } = require('./failure.js');
+const { toNotReadyEntry, searchSummary } = require('./search-run.js');
+const { describeTarget } = require('./failure.js');
 
 /**
  * The converge result as it grows: rows settled, tallies, the closing
@@ -47,20 +47,20 @@ const tally = (result, search, settle) => {
     history: [],
     notReady: [],
   };
-  const searching = search?.declared === true;
+  const isSearching = search?.declared === true;
   for (const collection of result.collections) {
-    let touched = false;
+    let isTouched = false;
     for (const action of collection.actions) {
       if (settle && action.status === 'planned') {
         action.status = action.action === 'conflict' ? 'failed' : 'skipped';
       }
       const kind = action.action;
       totals.counts[kind] = (totals.counts[kind] ?? 0) + 1;
-      const change = CHANGE_ACTIONS.has(kind);
-      if (change) {
+      const isChange = CHANGE_ACTIONS.has(kind);
+      if (isChange) {
         totals.changes += 1;
         if (action.status === 'applied') totals.applied += 1;
-        if (result.dryRun || action.status === 'applied') touched = true;
+        if (result.dryRun || action.status === 'applied') isTouched = true;
       } else if (kind === 'conflict') {
         totals.conflicts += 1;
       } else if (kind === 'keep' && action.reason === 'not declared') {
@@ -70,15 +70,15 @@ const tally = (result, search, settle) => {
         else totals.kept.indexes += 1;
       }
       // The history keeps what changed, failed or refused the run.
-      if (change || kind === 'conflict' || action.status === 'failed') {
+      if (isChange || kind === 'conflict' || action.status === 'failed') {
         totals.history.push([collection.name, action]);
       }
-      if (searching) {
-        const entry = notReadyEntry(collection.name, action);
+      if (isSearching) {
+        const entry = toNotReadyEntry(collection.name, action);
         if (entry) totals.notReady.push(entry);
       }
     }
-    if (touched) totals.touched += 1;
+    if (isTouched) totals.touched += 1;
   }
   return totals;
 };
@@ -113,7 +113,7 @@ const announce = (deps, collection, step) => {
       status: 'started',
       ...(action.reason !== undefined ? { reason: action.reason } : {}),
     });
-    const line = `… ${STARTING[action.action] ?? action.action} ${whatOf(action, collection)}`;
+    const line = `… ${STARTING[action.action] ?? action.action} ${describeTarget(action, collection)}`;
     const fields = deps.fields({
       collection,
       target: action.target,
@@ -127,7 +127,7 @@ const announce = (deps, collection, step) => {
 };
 
 /** The history's rows: each kept action, with the collection it is on */
-const historyRows = (history) => {
+const listHistoryRows = (history) => {
   const rows = [];
   for (let i = 0; i < history.length; i++) {
     const entry = history[i];
@@ -154,18 +154,18 @@ const recordHistory = async (deps, options, result, { startedAt, error, history 
       finishedAt,
       durationMs: finishedAt.getTime() - startedAt,
       success: error === undefined,
-      ...(error !== undefined ? { error: errorText(error) } : {}),
+      ...(error !== undefined ? { error: formatError(error) } : {}),
       ...pickActor(options),
       changed: result.changed,
-      actions: historyRows(history),
+      actions: listHistoryRows(history),
       ...(result.fingerprint !== undefined ? { fingerprint: result.fingerprint } : {}),
       ...(result.unstable ? { unstable: result.unstable } : {}),
       ...(result.search ? { search: result.search } : {}),
     });
   } catch (recordError) {
     deps.logger.warn(
-      `⚠ Could not record the converge in its history: ${errorText(recordError)}`,
-      deps.fields({ error: errorText(recordError) }),
+      `⚠ Could not record the converge in its history: ${formatError(recordError)}`,
+      deps.fields({ error: formatError(recordError) }),
     );
   }
 };

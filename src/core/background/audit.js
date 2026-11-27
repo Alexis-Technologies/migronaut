@@ -16,7 +16,7 @@ const STALL_MS = 15 * 60_000;
  * reads the file on disk; `deps.backgroundRecords` the changelog's
  * background records.
  */
-const auditFindings = async (deps, { now = Date.now() } = {}) => {
+const auditBackground = async (deps, { now = Date.now() } = {}) => {
   const states = await deps.store.list({}, { projection: STATE_SUMMARY });
   const records = await deps.backgroundRecords();
   if (states.length === 0 && records.length === 0) return null;
@@ -92,9 +92,9 @@ const auditFindings = async (deps, { now = Date.now() } = {}) => {
       }
       if (state.spec?.mode === 'declarative' && state.direction !== 'revert') {
         const hint = await hintOf(state.spec);
-        const reappeared =
+        const hasReappeared =
           hint !== undefined && (await probeOldShape(deps, state, hint).catch(() => null)) !== null;
-        if (reappeared) {
+        if (hasReappeared) {
           warnings.push(
             `${state.spec.collection} holds old-shape documents again (${name} completed)`,
           );
@@ -139,4 +139,4 @@ const auditFindings = async (deps, { now = Date.now() } = {}) => {
   return { status: 'pass', detail: `${states.length} background migration(s): ${summary}` };
 };
 
-module.exports = { auditFindings };
+module.exports = { auditBackground };

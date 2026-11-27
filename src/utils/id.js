@@ -1,7 +1,7 @@
 const { randomUUID } = require('node:crypto');
 
 const { ConfigInvalidError } = require('../errors/index.js');
-const { errorText } = require('./error.js');
+const { formatError } = require('./error.js');
 
 /**
  * Longest id migronaut accepts. Also the limit a queue worker enforces on a
@@ -15,7 +15,7 @@ const MAX_ID_LENGTH = 128;
  * that mints one — everything else asks for an id through it, which is what
  * lets the `generateId` config option replace the format everywhere at once.
  */
-const randomId = () => randomUUID();
+const createRandomId = () => randomUUID();
 
 /**
  * Return `value` when it is usable as an id, throw otherwise. An id is stored
@@ -37,7 +37,7 @@ const assertId = (value) => {
 
 /**
  * Turn the `generateId` config option into the function the kit mints ids
- * with. `undefined` keeps the default (`randomId`); anything else must be a
+ * with. `undefined` keeps the default (`createRandomId`); anything else must be a
  * function, and every id it returns is checked.
  *
  * The user's function is called bare — no arguments, no receiver — so a
@@ -50,7 +50,7 @@ const assertId = (value) => {
  * non-id.
  */
 const createIdGenerator = (generateId) => {
-  if (generateId === undefined) return randomId;
+  if (generateId === undefined) return createRandomId;
   if (typeof generateId !== 'function') {
     throw new ConfigInvalidError('generateId must be a function', {
       context: { generateId: typeof generateId },
@@ -63,7 +63,7 @@ const createIdGenerator = (generateId) => {
     } catch (error) {
       throw new ConfigInvalidError('generateId threw', {
         cause: error,
-        context: { cause: errorText(error) },
+        context: { cause: formatError(error) },
       });
     }
     if (typeof value?.then === 'function') {
@@ -76,4 +76,4 @@ const createIdGenerator = (generateId) => {
   };
 };
 
-module.exports = { MAX_ID_LENGTH, randomId, assertId, createIdGenerator };
+module.exports = { MAX_ID_LENGTH, createRandomId, assertId, createIdGenerator };

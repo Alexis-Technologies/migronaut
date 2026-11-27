@@ -1,8 +1,8 @@
 const { ConfigInvalidError, MigrationInvalidNameError } = require('../errors/index.js');
-const { ACTOR_FIELDS, actorIssue } = require('../utils/actor.js');
+const { ACTOR_FIELDS, checkActor } = require('../utils/actor.js');
 const { isPlainObject } = require('../utils/canonical.js');
 const { isCollectionName } = require('../utils/collection-name.js');
-const { jobRefIssue } = require('../utils/job-ref.js');
+const { checkJobRef } = require('../utils/job-ref.js');
 
 /**
  * Validation of the options the kit's run methods take. Pure — no config, no
@@ -110,7 +110,7 @@ const assertBatchValid = (batch) => {
  */
 const assertActorValid = (options) => {
   for (const key of ACTOR_FIELDS) {
-    const issue = actorIssue(key, options?.[key]);
+    const issue = checkActor(key, options?.[key]);
     if (issue) {
       throw new ConfigInvalidError(issue, {
         context: {
@@ -129,7 +129,7 @@ const assertActorValid = (options) => {
  * into the run's correlation, so it must be small and exactly that shape.
  */
 const assertJobValid = (job, options) => {
-  const issue = jobRefIssue(job, options);
+  const issue = checkJobRef(job, options);
   if (issue) {
     // For the error's context: the keys of what was given, not its values.
     throw new ConfigInvalidError(issue, {

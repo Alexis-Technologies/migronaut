@@ -38,7 +38,7 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
   `'ALX_ERR_LOCK_LOST'`), so two classes are no longer assignable to each other.
 - **`ALX_ERR_LOCK_RELEASE_FAILED` keeps the driver's reason in `context.cause`**, as every other
   wrap site does, instead of `context.error` — the field every reader of a wrapped error looks in
-  (`errorWithCause`, the queue's failure reason).
+  (`formatErrorWithCause`, the queue's failure reason).
 - **A migration file that does not load is `ALX_ERR_MIGRATION_LOAD_FAILED`** (exit 35), with what
   the loader threw as its `cause` — a syntax error, a throw at module scope, an import that does
   not resolve, a file that cannot be read. It left raw, with no code: `--json` lost the rows a run
@@ -87,6 +87,11 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
   configuration".
 - **`EXIT_CODES` is frozen, with no prototype.** The CLI reads the same object, so a consumer's
   write changed its exit codes for the whole process.
+- **Two environment variables say their unit and their collection**: `MIGRONAUT_LOCK_TTL_SECONDS`
+  (was `MIGRONAUT_LOCK_TTL`) and `MIGRONAUT_MIGRATIONS_COLLECTION` (was `MIGRONAUT_COLLECTION`,
+  beside `MIGRONAUT_LOCK_COLLECTION`). Every scalar key is now `MIGRONAUT_` and its name, but
+  `dbName` (`MIGRONAUT_DB`). A 2.x name is refused with its new one, never ignored: a lock TTL
+  quietly back at its default is what the env layer fails closed against.
 
 ### Added
 
@@ -103,9 +108,9 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 
 ### Changed
 
-- **The converge comparison is two to four times faster**: `canonical()` and `toWire()` — run on
+- **The converge comparison is two to four times faster**: `canonicalize()` and `toWire()` — run on
   every plan, replan, verify and settle read — define a property only for a `__proto__` key and
-  assign every other (`canonical` of an index 430 k → 1.1 M ops/s, `toWire` of a validator
+  assign every other (`canonicalize` of an index 430 k → 1.1 M ops/s, `toWire` of a validator
   580 k → 2.5 M on an M3 Max). The background engine builds each document's write without
   spreads, one result shape and one job shape for every document, and the `_id` partitioner's
   write filter is `null`, not a fresh `{}` per document. The bench's rows did not move.
@@ -175,7 +180,7 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
   anyway — could hold a secret its redaction cannot tell by its shape (`apiKey`).
 - **The secret-manager config scaffold no longer falls back to a production secret name**: with
   `MONGO_SECRET_ID` unset it fetched `prod/myapp/mongo`; it now refuses to start.
-- **A failed migration's `context.cause` masks URI credentials**, through `errorText` as at every
+- **A failed migration's `context.cause` masks URI credentials**, through `formatError` as at every
   other wrap site: `ALX_ERR_MIGRATION_EXECUTION_FAILED` (the changelog-write case included) and
   `ALX_ERR_TRANSACTIONS_UNSUPPORTED` kept the thrown message raw for a caller of the API; the CLI,
   the changelog's failure trace and the spans redacted it on their own.
@@ -234,6 +239,13 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
   helper written twice is one (`assertCount`, `pushAll`, `isVersionAtLeast`), and private
   helpers that never read `this` are module functions. The tests, the bench, the scripts and the
   example start every `let` with a value and call a caught error `error`.
+- **Names say their role, their unit and their verb** (`js-conventions`): the 322 module-level
+  functions named by a noun are verbs (`formatError` was `errorText`, `loadJob` was `jobFor`,
+  `checkDefinition` was `definitionIssues` — `checkX` returns issues, `assertX` throws), 141
+  booleans and ownership fields carry `is`, `has`, `can` or `should`, durations carry `Ms` or
+  `Seconds`, and `msg`, `fn`, `opts`, `ext`, `dir`, `d`/`l` are words. A class and an instance no
+  longer share a name (`bullmq.Queue` splits into `QueueClass` and `queueInstance` where it
+  arrives). The public names are unchanged.
 - **Tests are `describe` and `it('should …')`.** The 60 titles that did not start with `should`
   keep their meaning in a `describe` of the method or the tag they named; the helpers of the tests,
   the bench and the scripts are `const` arrows too.
@@ -300,6 +312,9 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 5. A reader of `ALX_ERR_LOCK_RELEASE_FAILED` takes the reason from `context.cause`, not
    `context.error`.
 6. Catching, `instanceof`, the class names and the shape of the `--json` document are unchanged.
+7. Rename two environment variables: `MIGRONAUT_LOCK_TTL` is `MIGRONAUT_LOCK_TTL_SECONDS` and
+   `MIGRONAUT_COLLECTION` is `MIGRONAUT_MIGRATIONS_COLLECTION`. A 2.x name still set fails the
+   configuration with the new one named, so a deployment that missed it learns at its next run.
 
 ## [2.5.0] - 2026-11-18
 

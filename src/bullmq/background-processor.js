@@ -1,7 +1,7 @@
 const { MigratorKit } = require('../core/migrator.js');
 const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
-const { MAX_TIMER_MS, jitter, settledWithin, waitAtMost } = require('../utils/concurrency.js');
-const { FATAL_SLICE_CODES, codeOf, errorText } = require('../utils/error.js');
+const { MAX_TIMER_MS, jitter, settleWithin, waitAtMost } = require('../utils/concurrency.js');
+const { FATAL_SLICE_CODES, readCode, formatError } = require('../utils/error.js');
 const { redactOutbound } = require('../utils/redact.js');
 const {
   JOB_NAMES,
@@ -15,10 +15,10 @@ const {
   UNRECOVERABLE_ERROR_NAME,
   assertUserlandLogRows,
   isRetryableError,
-  jobRefOf,
+  toJobRef,
   prepareErrorForQueue,
-  userlandOverflowRow,
-  userlandRow,
+  formatOverflowRow,
+  formatUserlandRow,
 } = require('./processor.js');
 const {
   DEFAULT_STALL_MS,
@@ -80,7 +80,7 @@ const PROCESSOR_KEYS = new Set([
  * children) — a typed one, renamed: BullMQ matches the name, and the adapter
  * cannot import its classes.
  */
-const moved = (name) => {
+const createMovedError = (name) => {
   const error = new RunAbortedError(`Moved: ${name}`, { context: { reason: name, moved: true } });
   error.name = name;
   return error;
@@ -134,9 +134,9 @@ const resolveBackgroundProcessorOptions = (options) => {
   if (children !== 'auto' && children !== false) {
     throw new ConfigInvalidError("children must be 'auto' or false", { context: { children } });
   }
-  const badPoll =
+  const isBadPoll =
     !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10 || pollIntervalMs > MAX_TIMER_MS;
-  if (badPoll) {
+  if (isBadPoll) {
     throw new ConfigInvalidError(`pollIntervalMs must be an integer from 10 to ${MAX_TIMER_MS}`, {
       context: { pollIntervalMs },
     });
@@ -164,11 +164,11 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
   const settings = resolveBackgroundProcessorOptions(options);
   const writeWaitMs = internals.writeWaitMs ?? JOB_WRITE_WAIT_MS;
   const { kit: injectedKit, config, kitOptions, queue, jobOptions } = options;
-  const ownsKit = injectedKit === undefined;
+  const isKitOwned = injectedKit === undefined;
   const kit = injectedKit ?? new MigratorKit(config ?? {}, kitOptions);
   const shutdownController = new AbortController();
   const inFlight = new Set();
-  let warnedUnmovable = false;
+  let hasWarnedUnmovable = false;
   /**
    * The lanes working a slice in this process, by job id — lanes run side by
    * side, so a `migration:log` event's `jobId` is what says whose log it goes
@@ -190,7 +190,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
       // Redis is the job's problem, not the background migration's.
       return;
     }
-    await settledWithin(pending, writeWaitMs);
+    await settleWithin(pending, writeWaitMs);
   };
 
   /** A log row on the job */
@@ -207,8 +207,8 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
   const later = async (ctx, delayMs, result, data) => {
     const { job, token } = ctx;
     if (typeof job.moveToDelayed !== 'function' || typeof token !== 'string') {
-      if (!warnedUnmovable) {
-        warnedUnmovable = true;
+      if (!hasWarnedUnmovable) {
+        hasWarnedUnmovable = true;
         kit.logger.warn(
           '⚠ Background jobs run outside a BullMQ Worker (no token to move them with): a ' +
             'coordinator takes one step and a lane one slice per job, and the rest waits for ' +
@@ -220,7 +220,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
     }
     if (data !== undefined) await job.updateData(data);
     await job.moveToDelayed(Date.now() + Math.max(0, delayMs), token);
-    throw moved(DELAYED_ERROR_NAME);
+    throw createMovedError(DELAYED_ERROR_NAME);
   };
 
   /** A row on a lane's job, tracked so the slice's end can wait for it */
@@ -242,7 +242,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
     if (lane === undefined) return;
     if (lane.rows < settings.userlandLogRows) {
       lane.rows += 1;
-      laneLog(lane, userlandRow(event));
+      laneLog(lane, formatUserlandRow(event));
     } else {
       lane.dropped += 1;
     }
@@ -254,23 +254,23 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
    * events, and its userland lines reach the job's log until the slice ends —
    * drained before the job moves on, so none lands after it.
    */
-  const asLane = async (job, fn) => {
-    const ref = jobRefOf(job);
-    if (ref === null) {
+  const asLane = async (job, work) => {
+    const jobRef = toJobRef(job);
+    if (jobRef === null) {
       kit.logger.debug(
         `Lane job ${job?.id} has no id a slice can carry — its lines name no job`,
         {},
       );
-      return fn(null);
+      return work(null);
     }
     const lane = { job, writes: new Set(), rows: 0, dropped: 0 };
-    lanes.set(ref.id, lane);
+    lanes.set(jobRef.id, lane);
     try {
-      return await fn(ref);
+      return await work(jobRef);
     } finally {
-      if (lanes.get(ref.id) === lane) lanes.delete(ref.id);
+      if (lanes.get(jobRef.id) === lane) lanes.delete(jobRef.id);
       if (lane.dropped > 0) {
-        laneLog(lane, userlandOverflowRow(lane.dropped, settings.userlandLogRows));
+        laneLog(lane, formatOverflowRow(lane.dropped, settings.userlandLogRows));
       }
       // Each write is bounded on its own (`write`), so this drain is too.
       await Promise.allSettled(lane.writes);
@@ -285,8 +285,8 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
         ...(jobOptions !== undefined ? { jobOptions } : {}),
       });
     } catch (error) {
-      kit.logger.warn(`⚠ Background heal (${reason}) failed: ${errorText(error)}`, {
-        error: errorText(error),
+      kit.logger.warn(`⚠ Background heal (${reason}) failed: ${formatError(error)}`, {
+        error: formatError(error),
       });
       return { jobs: [] };
     }
@@ -376,7 +376,9 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
         spawn,
         parent: { id: `${job.id}`, queue: parentQueueOf(job) },
       });
-      if (await job.moveToWaitingChildren(ctx.token)) throw moved(WAITING_CHILDREN_ERROR_NAME);
+      if (await job.moveToWaitingChildren(ctx.token)) {
+        throw createMovedError(WAITING_CHILDREN_ERROR_NAME);
+      }
       // Every lane finished before this job could wait for them: look again now.
     }
   };
@@ -411,11 +413,11 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
     if (shutdownController.signal.aborted) return later(ctx, 0, { ...base, outcome: 'stopped' });
     let slice = null;
     try {
-      slice = await asLane(job, (ref) => {
+      slice = await asLane(job, (jobRef) => {
         return kit.runBackgroundSlice(name, {
           signal: ctx.abort,
           ...(settings.sliceMs !== undefined ? { sliceMs: settings.sliceMs } : {}),
-          ...(ref ? { job: ref } : {}),
+          ...(jobRef ? { job: jobRef } : {}),
         });
       });
     } catch (error) {
@@ -425,9 +427,9 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
       // The failure is already counted on its partition, in MongoDB — which
       // fails the partition after `maxSliceFailures`; this lane only backs off.
       const retry = data.retry + 1;
-      const message = errorText(error);
+      const message = formatError(error);
       // A failure no retry fixes gives up at once, as the kit's own lane does.
-      if (retry > settings.maxLaneRetries || FATAL_SLICE_CODES.has(codeOf(error))) {
+      if (retry > settings.maxLaneRetries || FATAL_SLICE_CODES.has(readCode(error))) {
         kit.logger.warn(`⚠ Background lane of ${name} gave up: ${message}`, {
           background: name,
           error: message,
@@ -436,7 +438,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
         return {
           ...base,
           outcome: 'gave-up',
-          ...(codeOf(error) === undefined ? {} : { code: codeOf(error) }),
+          ...(readCode(error) === undefined ? {} : { code: readCode(error) }),
         };
       }
       await log(job, `⚠ slice failed (${message}) — retry ${retry}`);
@@ -519,7 +521,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
         prepareErrorForQueue(error);
         // On the job itself, as a migration job says it: someone reading the
         // queue's dashboard sees why without the worker's log.
-        await log(job, `✖ ${errorText(error)}`);
+        await log(job, `✖ ${formatError(error)}`);
       }
       throw error;
     } finally {
@@ -550,7 +552,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
     const settled = await waitAtMost(draining, closeOptions.timeoutMs);
     const finish = async () => {
       if (typeof kit.off === 'function') kit.off('migration:log', onUserland);
-      if (ownsKit) await kit.disconnect();
+      if (isKitOwned) await kit.disconnect();
     };
     if (settled) return finish();
     kit.logger.warn(
@@ -560,7 +562,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
       },
     );
     draining.then(finish).catch((error) => {
-      kit.logger.debug(`Background processor: could not disconnect — ${errorText(error)}`);
+      kit.logger.debug(`Background processor: could not disconnect — ${formatError(error)}`);
     });
     return undefined;
   };

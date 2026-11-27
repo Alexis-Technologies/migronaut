@@ -2,14 +2,14 @@ const assert = require('node:assert/strict');
 // (table width budget tests stub process.stdout below)
 const { describe, it } = require('node:test');
 const {
-  charWidth,
+  measureChar,
   renderConvergeTable,
   renderImportTable,
   renderStatusTable,
   renderTable,
   sanitize,
   truncate,
-  visibleWidth,
+  measureVisible,
 } = require('../../src/cli/table.js');
 const { stripAnsi } = require('../../src/utils/colors.js');
 
@@ -111,17 +111,17 @@ describe('renderImportTable', () => {
 
 describe('character widths', () => {
   it('should count CJK and fullwidth characters as two columns', () => {
-    assert.strictEqual(charWidth('日'.codePointAt(0)), 2);
-    assert.strictEqual(charWidth('한'.codePointAt(0)), 2);
-    assert.strictEqual(charWidth('Ａ'.codePointAt(0)), 2);
-    assert.strictEqual(charWidth('a'.codePointAt(0)), 1);
-    assert.strictEqual(charWidth('ї'.codePointAt(0)), 1);
+    assert.strictEqual(measureChar('日'.codePointAt(0)), 2);
+    assert.strictEqual(measureChar('한'.codePointAt(0)), 2);
+    assert.strictEqual(measureChar('Ａ'.codePointAt(0)), 2);
+    assert.strictEqual(measureChar('a'.codePointAt(0)), 1);
+    assert.strictEqual(measureChar('ї'.codePointAt(0)), 1);
   });
 
   it('should measure a mixed string in terminal columns, not codepoints', () => {
     // 12 ASCII columns + 3 wide chars at 2 each = 18; String.length says 15.
     assert.strictEqual('20240101-日本語.js'.length, 15);
-    assert.strictEqual(visibleWidth('20240101-日本語.js'), 18);
+    assert.strictEqual(measureVisible('20240101-日本語.js'), 18);
   });
 
   it('should keep a table with CJK filenames aligned', () => {
@@ -144,14 +144,14 @@ describe('character widths', () => {
       },
     ]);
     // Every rendered line occupies the same number of terminal columns.
-    const widths = table.split('\n').map((line) => visibleWidth(line));
+    const widths = table.split('\n').map((line) => measureVisible(line));
     assert.strictEqual(new Set(widths).size, 1);
   });
 
   it('should truncate with an ellipsis only past the limit', () => {
     assert.strictEqual(truncate('short', 10), 'short');
     assert.strictEqual(truncate('abcdefghij', 5), 'abcd…');
-    assert.strictEqual(visibleWidth(truncate('日本語日本語', 5)), 5);
+    assert.strictEqual(measureVisible(truncate('日本語日本語', 5)), 5);
   });
 });
 
@@ -179,7 +179,7 @@ describe('renderStatusTable description column', () => {
   it('should ellipsize a long description and stay aligned', () => {
     const table = renderStatusTable([row({ description: 'x'.repeat(120) })]);
     assert.ok(stripAnsi(table).includes('…'));
-    assert.strictEqual(new Set(table.split('\n').map((l) => visibleWidth(l))).size, 1);
+    assert.strictEqual(new Set(table.split('\n').map((l) => measureVisible(l))).size, 1);
   });
 
   it('should cap the Migration column for an absurdly long filename', () => {
@@ -187,7 +187,7 @@ describe('renderStatusTable description column', () => {
     assert.ok(stripAnsi(table).includes('…'));
     // The 200-char filename is capped at MAX_MIGRATION_WIDTH, so the full
     // table stays far narrower than the raw name would have forced it.
-    assert.ok(visibleWidth(table.split('\n')[0]) < 150);
+    assert.ok(measureVisible(table.split('\n')[0]) < 150);
   });
 });
 
@@ -221,7 +221,7 @@ describe('control-character sanitization', () => {
     const cut = truncate('\x1b[32mgreenish text\x1b[39m', 8);
     // Truncation happens on the stripped text, so no dangling color state.
     assert.ok(!cut.includes('\x1b'));
-    assert.ok(visibleWidth(cut) <= 8);
+    assert.ok(measureVisible(cut) <= 8);
   });
 });
 
@@ -255,7 +255,7 @@ describe('terminal width budget', () => {
     // columns — every row wraps into box-drawing noise over SSH.
     const table = renderAt(80);
     for (const line of stripAnsi(table).split('\n')) {
-      assert.ok(visibleWidth(line) <= 80, `line exceeds 80 columns: ${line.length}`);
+      assert.ok(measureVisible(line) <= 80, `line exceeds 80 columns: ${line.length}`);
     }
   });
 

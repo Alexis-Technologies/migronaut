@@ -1,10 +1,10 @@
 const { ConfigInvalidError } = require('../../errors/index.js');
-const { errorText } = require('../../utils/error.js');
-const { cloneDocument, stampedDiff } = require('../../versioning/document.js');
+const { formatError } = require('../../utils/error.js');
+const { cloneDocument, buildStampedDiff } = require('../../versioning/document.js');
 const {
   applyBatch,
   buildStepContext,
-  idKey,
+  toIdKey,
   matchOf,
   readStepResult,
   transformAll,
@@ -19,7 +19,7 @@ const {
 const { runSandbox } = require('./sandbox.js');
 const { withShardKey } = require('./shard.js');
 const { toRelaxedEjson } = require('./bson-peer.js');
-const { backgroundLogs } = require('../migration-logger.js');
+const { createBackgroundLogs } = require('../migration-logger.js');
 const { READ_OPTIONS } = require('../server-info.js');
 
 /**
@@ -53,7 +53,7 @@ const MAX_DEADLINE_MS = 50_000;
 const MAX_STEPS = 50;
 
 /** `value` as relaxed EJSON — what a person (or `--json`) can read */
-const ejson = (value) => {
+const toEjson = (value) => {
   try {
     return toRelaxedEjson(value);
   } catch {
@@ -62,23 +62,23 @@ const ejson = (value) => {
 };
 
 const sampleSize = ({ sample, first }) => {
-  const n = first ?? sample ?? 5;
-  if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAMPLE) {
+  const count = first ?? sample ?? 5;
+  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_SAMPLE) {
     throw new ConfigInvalidError(`The sample must be 1 to ${MAX_SAMPLE} documents`, {
-      context: { sample: n },
+      context: { sample: count },
     });
   }
   if (sample !== undefined && first !== undefined) {
     throw new ConfigInvalidError('Take either a random sample or the first documents, not both');
   }
-  return n;
+  return count;
 };
 
 /**
  * `ctx.logger` in a dry run: the lines say `dryRun: true`, and nothing is
  * emitted — a preview's logs are not the application's to keep.
  */
-const dryLogs = (logger) => backgroundLogs({ sink: logger, dryRun: true });
+const createDryLogs = (logger) => createBackgroundLogs({ sink: logger, dryRun: true });
 
 /**
  * The partitioner a dry run judges a transformation by: on a sharded
@@ -86,7 +86,7 @@ const dryLogs = (logger) => backgroundLogs({ sink: logger, dryRun: true });
  * refuses a transformation that changes the shard key (`shard-key-changed`),
  * and a preview that said nothing of it would promise what `up` cannot do.
  */
-const dryPartitioner = async (deps, collection) => {
+const chooseDryPartitioner = async (deps, collection) => {
   if (typeof deps.shardKeyOf !== 'function' || (await deps.topology()) !== 'sharded') {
     return idRangePartitioner;
   }
@@ -95,7 +95,7 @@ const dryPartitioner = async (deps, collection) => {
 };
 
 /** The job a dry run works with — no partition, no lease */
-const dryJob = (name, loaded, direction, logger, partitioner) => {
+const buildDryJob = (name, loaded, direction, logger, partitioner) => {
   return {
     name,
     spec: loaded.spec,
@@ -106,7 +106,7 @@ const dryJob = (name, loaded, direction, logger, partitioner) => {
     partitionId: 'dry-run',
     match: matchOf(loaded.spec, direction),
     logger,
-    logs: dryLogs(logger),
+    logs: createDryLogs(logger),
   };
 };
 
@@ -114,16 +114,16 @@ const dryJob = (name, loaded, direction, logger, partitioner) => {
  * Whether a collection is sharded, for the sandbox — asked only behind a
  * mongos; a key that cannot be read is left to the server to judge.
  */
-const shardedCheck = (deps) => {
+const createShardedCheck = (deps) => {
   return async (name) => {
     return (await deps.topology()) === 'sharded' && Boolean(await deps.shardKeyOf?.(name));
   };
 };
 
 /** The first `n` matched documents by `_id` */
-const firstDocuments = (collection, match, n, extra = {}) => {
+const readFirstDocuments = (collection, match, count, extra = {}) => {
   return collection
-    .find(match, { sort: { _id: 1 }, limit: n, ...extra, ...READ_OPTIONS })
+    .find(match, { sort: { _id: 1 }, limit: count, ...extra, ...READ_OPTIONS })
     .toArray();
 };
 
@@ -138,24 +138,26 @@ const firstDocuments = (collection, match, n, extra = {}) => {
  * short is taken match-first after all. Every read is time-boxed: out of
  * time, the first `n` by `_id` stand in — `{ docs, degraded }`.
  */
-const sampleDocuments = async (collection, match, n) => {
+const sampleDocuments = async (collection, match, wanted) => {
   const options = { maxTimeMS: SAMPLE_TIMEOUT_MS, ...READ_OPTIONS };
   const matchFirst = () => {
-    return collection.aggregate([{ $match: match }, { $sample: { size: n } }], options).toArray();
+    return collection
+      .aggregate([{ $match: match }, { $sample: { size: wanted } }], options)
+      .toArray();
   };
   try {
     const count = await collection.countDocuments(match, { limit: MATCH_FIRST_CAP, ...options });
     if (count < MATCH_FIRST_CAP) return { docs: await matchFirst() };
     const total = Math.max(count, await collection.estimatedDocumentCount());
-    const size = sampleRequest(n, count / total, total);
+    const size = sampleRequest(wanted, count / total, total);
     const docs = await collection
-      .aggregate([{ $sample: { size } }, { $match: match }, { $limit: n }], options)
+      .aggregate([{ $sample: { size } }, { $match: match }, { $limit: wanted }], options)
       .toArray();
-    return { docs: docs.length < n ? await matchFirst() : docs };
+    return { docs: docs.length < wanted ? await matchFirst() : docs };
   } catch (error) {
     if (error?.code !== MAX_TIME_EXPIRED) throw error;
     return {
-      docs: await firstDocuments(collection, match, n, { maxTimeMS: SAMPLE_TIMEOUT_MS }),
+      docs: await readFirstDocuments(collection, match, wanted, { maxTimeMS: SAMPLE_TIMEOUT_MS }),
       degraded: 'sample-timeout',
     };
   }
@@ -177,14 +179,14 @@ const previewSample = async (deps, name, loaded, options = {}) => {
   if (direction === 'revert' && !spec.reversible) {
     throw new ConfigInvalidError(`${name} declares no revert`, { context: { migration: name } });
   }
-  const n = sampleSize(options);
-  const partitioner = await dryPartitioner(deps, spec.collection);
-  const job = dryJob(name, loaded, direction, deps.logger, partitioner);
+  const count = sampleSize(options);
+  const partitioner = await chooseDryPartitioner(deps, spec.collection);
+  const job = buildDryJob(name, loaded, direction, deps.logger, partitioner);
   const collection = deps.db.collection(spec.collection);
   const { docs, degraded } =
     options.first !== undefined
-      ? { docs: await firstDocuments(collection, job.match, n) }
-      : await sampleDocuments(collection, job.match, n);
+      ? { docs: await readFirstDocuments(collection, job.match, count) }
+      : await sampleDocuments(collection, job.match, count);
   const base = {
     mode: 'declarative',
     migration: name,
@@ -192,7 +194,7 @@ const previewSample = async (deps, name, loaded, options = {}) => {
     // A sample that ran out of time is the first documents instead, and says so.
     method: options.first !== undefined || degraded !== undefined ? 'first' : 'sample',
     ...(degraded !== undefined ? { degraded } : {}),
-    requested: n,
+    requested: count,
     found: docs.length,
   };
   if (!options.validate) {
@@ -201,7 +203,7 @@ const previewSample = async (deps, name, loaded, options = {}) => {
   }
   return {
     ...base,
-    ...(await validateRows(deps, job, docs, { deadlineMs: deadlineOf(options) })),
+    ...(await validateRows(deps, job, docs, { deadlineMs: resolveDeadline(options) })),
   };
 };
 
@@ -212,20 +214,20 @@ const transformRows = async (job, docs) => {
   const target = job.direction === 'revert' ? job.spec.from : job.spec.to;
   const rows = [];
   for (const { doc, next, error } of transformed) {
-    const row = { _id: ejson(doc._id), before: ejson(doc) };
+    const row = { _id: toEjson(doc._id), before: toEjson(doc) };
     // What the write path would refuse before it wrote: a changed shard key.
     const refused = error === null ? job.partitioner.checkTransform(doc, next) : null;
     if (error !== null) {
-      row.error = errorText(error);
+      row.error = formatError(error);
     } else if (refused) {
       row.error = refused.message;
     } else {
       try {
-        const update = stampedDiff(doc, next, job.spec, { to: target });
-        row.change = ejson(update);
-        row.after = ejson(applyLocally(doc, update));
+        const update = buildStampedDiff(doc, next, job.spec, { to: target });
+        row.change = toEjson(update);
+        row.after = toEjson(applyLocally(doc, update));
       } catch (shapeError) {
-        row.error = errorText(shapeError);
+        row.error = formatError(shapeError);
       }
     }
     rows.push(row);
@@ -260,14 +262,14 @@ const tally = (rows) => {
 };
 
 /** `deadlineMs`, checked: 1 to 50 000 (the default) */
-const deadlineOf = (options) => {
-  const ms = options.deadlineMs ?? MAX_DEADLINE_MS;
-  if (!Number.isSafeInteger(ms) || ms < 1 || ms > MAX_DEADLINE_MS) {
+const resolveDeadline = (options) => {
+  const deadlineMs = options.deadlineMs ?? MAX_DEADLINE_MS;
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > MAX_DEADLINE_MS) {
     throw new ConfigInvalidError(`deadlineMs must be an integer from 1 to ${MAX_DEADLINE_MS}`, {
-      context: { deadlineMs: ms },
+      context: { deadlineMs },
     });
   }
-  return ms;
+  return deadlineMs;
 };
 
 const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
@@ -285,7 +287,7 @@ const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
         db: deps.db,
         forbidden: deps.forbidden,
         topology: await deps.topology(),
-        isSharded: shardedCheck(deps),
+        isSharded: createShardedCheck(deps),
         ...(deadlineMs !== undefined ? { deadlineMs } : {}),
       },
       async (handles) => {
@@ -300,7 +302,7 @@ const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
               dryRun: true,
             },
           });
-          const row = { _id: ejson(doc._id), before: ejson(doc) };
+          const row = { _id: toEjson(doc._id), before: toEjson(doc) };
           const failure = result.errors[0];
           if (failure !== undefined) {
             row.error = failure.error;
@@ -309,12 +311,12 @@ const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
             const stored = await handles.db
               .collection(job.spec.collection)
               .findOne({ _id: doc._id });
-            row.after = ejson(stored);
+            row.after = toEjson(stored);
             row.validation = 'ok';
           } else {
             row.validation = 'skipped';
           }
-          rows.set(idKey(doc._id), row);
+          rows.set(toIdKey(doc._id), row);
           done += 1;
           // A failed write ended the transaction: the rest go to a new sandbox.
           if (failure?.reason === 'write') return;
@@ -333,9 +335,9 @@ const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
     if (stopped !== undefined && done < remaining.length) {
       // The sandbox stopped on something else (a refusal, the deadline): say so on the next row.
       const doc = remaining[done];
-      rows.set(idKey(doc._id), {
-        _id: ejson(doc._id),
-        before: ejson(doc),
+      rows.set(toIdKey(doc._id), {
+        _id: toEjson(doc._id),
+        before: toEjson(doc),
         error: stopped,
         validation: 'failed',
       });
@@ -344,7 +346,7 @@ const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
     remaining = remaining.slice(Math.max(1, done));
   }
   const documents = [];
-  for (let i = 0; i < docs.length; i++) documents.push(rows.get(idKey(docs[i]._id)));
+  for (let i = 0; i < docs.length; i++) documents.push(rows.get(toIdKey(docs[i]._id)));
   return {
     validated: true,
     aborted: true,
@@ -367,8 +369,8 @@ const validateRows = async (deps, job, docs, { deadlineMs } = {}) => {
 const previewSteps = async (deps, name, loaded, options = {}) => {
   const { spec, fns } = loaded;
   const direction = options.direction === 'revert' ? 'revert' : 'forward';
-  const fn = direction === 'revert' ? fns.revertStep : fns.step;
-  if (typeof fn !== 'function') {
+  const runStep = direction === 'revert' ? fns.revertStep : fns.step;
+  if (typeof runStep !== 'function') {
     throw new ConfigInvalidError(`${name} declares no revertStep`, {
       context: { migration: name },
     });
@@ -391,18 +393,18 @@ const previewSteps = async (deps, name, loaded, options = {}) => {
     generation: 0,
     partitionId: 'dry-run',
     logger: deps.logger,
-    logs: dryLogs(deps.logger),
+    logs: createDryLogs(deps.logger),
   };
   const log = [];
   let stoppedBy = 'steps';
-  const deadlineMs = deadlineOf(options);
+  const deadlineMs = resolveDeadline(options);
   const report = await runSandbox(
     {
       client: deps.client,
       db: deps.db,
       forbidden: deps.forbidden,
       topology: await deps.topology(),
-      isSharded: shardedCheck(deps),
+      isSharded: createShardedCheck(deps),
       deadlineMs,
       ...(options.maxDocuments !== undefined ? { maxDocuments: options.maxDocuments } : {}),
     },
@@ -411,7 +413,7 @@ const previewSteps = async (deps, name, loaded, options = {}) => {
       log.length = 0;
       for (let step = 1; step <= steps; step++) {
         handles.nextStep();
-        const entry = { step, checkpointIn: ejson(checkpoint) };
+        const entry = { step, checkpointIn: toEjson(checkpoint) };
         log.push(entry);
         const ctx = {
           ...buildStepContext(job, {
@@ -426,12 +428,12 @@ const previewSteps = async (deps, name, loaded, options = {}) => {
         };
         let result = null;
         try {
-          result = readStepResult(await fn(ctx));
+          result = readStepResult(await runStep(ctx));
         } catch (error) {
-          entry.error = errorText(error);
+          entry.error = formatError(error);
           throw error;
         }
-        entry.checkpointOut = ejson(result.checkpoint);
+        entry.checkpointOut = toEjson(result.checkpoint);
         entry.done = result.done;
         if (result.counters.processed !== undefined) entry.processed = result.counters.processed;
         if (result.counters.migrated !== undefined) entry.migrated = result.counters.migrated;

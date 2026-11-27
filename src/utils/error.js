@@ -45,7 +45,7 @@ const isUnauthorized = (error) => error?.code === UNAUTHORIZED;
  * server's says what happened. (6.x did this only on a retried write, never
  * inside a transaction.) Any other error is its own.
  */
-const serverErrorOf = (error) => {
+const unwrapServerError = (error) => {
   return error?.originalError instanceof Error ? error.originalError : error;
 };
 
@@ -55,36 +55,36 @@ const serverErrorOf = (error) => {
  * everywhere is what keeps driver messages that echo the connection URI from
  * leaking passwords into logs, error context, or `--json` output. It speaks
  * in the server's words where the driver put its own over them
- * ({@link serverErrorOf}).
+ * ({@link unwrapServerError}).
  */
-const errorText = (error) => {
-  return redactUris(error instanceof Error ? serverErrorOf(error).message : String(error));
+const formatError = (error) => {
+  return redactUris(error instanceof Error ? unwrapServerError(error).message : String(error));
 };
 
 /**
- * {@link errorText} joined with the wrapped cause: "Migration up failed: X"
+ * {@link formatError} joined with the wrapped cause: "Migration up failed: X"
  * says WHICH migration failed, and its `context.cause` says WHY — the half
  * forensics actually needs. Both halves are redacted (the cause is the raw
  * thrown message). What the changelog's failure trace and a failed span's
  * status message both carry.
  */
-const errorWithCause = (error) => {
-  const message = errorText(error);
+const formatErrorWithCause = (error) => {
+  const message = formatError(error);
   const cause =
     error instanceof MigronautError && typeof error.context?.cause === 'string'
-      ? errorText(error.context.cause)
+      ? formatError(error.context.cause)
       : undefined;
   return cause ? `${message} — ${cause}` : message;
 };
 
 /**
- * {@link errorText} for an error about the application's data — a background
+ * {@link formatError} for an error about the application's data — a background
  * migration's document errors and failed slices, kept in its state and
  * logged: the values a server error quotes (an E11000's duplicate key — an
  * email, a phone number) are masked too. Migronaut never logs a document's
  * contents; the index name still says which constraint was violated.
  */
-const documentErrorText = (error) => redactOutbound(errorText(error));
+const formatDocumentError = (error) => redactOutbound(formatError(error));
 
 /**
  * Whether a failed transaction is worth running again as it is: the server's
@@ -98,8 +98,8 @@ const documentErrorText = (error) => redactOutbound(errorText(error));
  * server did?", "is this read worth another try?" — and has its own tables.)
  */
 const isTransientTransaction = (error) => {
-  const labelled = error?.hasErrorLabel?.('TransientTransactionError') === true;
-  return labelled || TRANSIENT_TRANSACTION_CODES.has(error?.code);
+  const isLabelled = error?.hasErrorLabel?.('TransientTransactionError') === true;
+  return isLabelled || TRANSIENT_TRANSACTION_CODES.has(error?.code);
 };
 
 /**
@@ -107,7 +107,7 @@ const isTransientTransaction = (error) => {
  * An absolute one names the user's home directory, and with it their account,
  * in every log line and `--json` document that quotes the error.
  */
-const contextPath = (filepath) => path.relative(process.cwd(), filepath) || '.';
+const toContextPath = (filepath) => path.relative(process.cwd(), filepath) || '.';
 
 /**
  * The migronaut code a thrown value carries (`ALX_ERR_…`), or undefined. Told
@@ -115,7 +115,7 @@ const contextPath = (filepath) => path.relative(process.cwd(), filepath) || '.';
  * monorepo's duplicate — throws its own classes, and `instanceof` misses all
  * of them, so every typed failure read as an unknown one.
  */
-const codeOf = (error) => {
+const readCode = (error) => {
   const code = error?.code;
   return typeof code === 'string' && code.startsWith('ALX_ERR_') ? code : undefined;
 };
@@ -133,12 +133,12 @@ module.exports = {
   isDuplicateKey,
   isUnauthorized,
   FATAL_SLICE_CODES,
-  serverErrorOf,
-  errorText,
-  errorWithCause,
-  documentErrorText,
+  unwrapServerError,
+  formatError,
+  formatErrorWithCause,
+  formatDocumentError,
   isTransientTransaction,
-  contextPath,
-  codeOf,
+  toContextPath,
+  readCode,
   isDriverError,
 };

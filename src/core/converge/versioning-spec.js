@@ -1,5 +1,5 @@
 const { isPlainObject } = require('../../utils/canonical.js');
-const { versionIndexKey } = require('../../versioning/document.js');
+const { buildVersionIndexKey } = require('../../versioning/document.js');
 const { toCount } = require('../../versioning/internal.js');
 
 /**
@@ -17,7 +17,7 @@ const { toCount } = require('../../versioning/internal.js');
  */
 
 /** `{ required, properties }` for the managed fields, in a fixed order */
-const versioningRules = (versioning) => {
+const buildVersioningRules = (versioning) => {
   const { field, min, revisionField } = versioning;
   const properties = { [field]: { bsonType: 'int', minimum: min } };
   const required = [field];
@@ -31,7 +31,7 @@ const versioningRules = (versioning) => {
 };
 
 /** The managed field names a validator already constrains itself */
-const managedFieldsIn = (validator, versioning) => {
+const findManagedFields = (validator, versioning) => {
   const managed = [versioning.field];
   if (versioning.revisionField !== null) managed.push(versioning.revisionField);
   const found = new Set();
@@ -53,21 +53,21 @@ const managedFieldsIn = (validator, versioning) => {
  * a managed field itself, or its `$jsonSchema` is not a schema object. Empty
  * when the merge can go ahead.
  */
-const validatorVersioningIssues = (validator, versioning) => {
+const checkValidatorVersioning = (validator, versioning) => {
   if (validator === undefined) return [];
   if (validator === null || !isPlainObject(validator)) {
     return ['is null, which would remove the versioning rules — drop the validator key instead'];
   }
   const issues = [];
   const schema = validator.$jsonSchema;
-  const requiredNotArray =
+  const isRequiredNotArray =
     isPlainObject(schema) && schema.required !== undefined && !Array.isArray(schema.required);
   if (schema !== undefined && !isPlainObject(schema)) {
     issues.push('$jsonSchema must be an object to take the versioning rules');
-  } else if (requiredNotArray) {
+  } else if (isRequiredNotArray) {
     issues.push('$jsonSchema.required must be an array to take the versioning rules');
   }
-  for (const name of managedFieldsIn(validator, versioning)) {
+  for (const name of findManagedFields(validator, versioning)) {
     issues.push(`constrains "${name}", which is managed by versioning — remove that rule`);
   }
   return issues;
@@ -80,7 +80,7 @@ const validatorVersioningIssues = (validator, versioning) => {
  * as a top-level `$jsonSchema`, which the server combines with them.
  */
 const mergeVersioningValidator = (validator, versioning) => {
-  const rules = versioningRules(versioning);
+  const rules = buildVersioningRules(versioning);
   if (validator === undefined || Object.keys(validator).length === 0) {
     return { $jsonSchema: rules };
   }
@@ -93,7 +93,7 @@ const mergeVersioningValidator = (validator, versioning) => {
 };
 
 /** The declared version index — `{ [field]: 1, _id: 1 }`, named by its key */
-const versioningIndex = (versioning) => ({ key: versionIndexKey(versioning) });
+const buildVersioningIndex = (versioning) => ({ key: buildVersionIndexKey(versioning) });
 
 /**
  * The version index of a sharded collection: the shard key between the
@@ -102,7 +102,7 @@ const versioningIndex = (versioning) => ({ key: versionIndexKey(versioning) });
  * document of the shard. A hashed field stays hashed; `_id` is not repeated
  * when the key holds it. On `{ _id: 1 }` it is the ordinary version index.
  */
-const shardedVersionIndexKey = (versioning, shardKey) => {
+const buildShardedVersionIndexKey = (versioning, shardKey) => {
   const key = { [versioning.field]: 1 };
   const fields = Object.keys(shardKey);
   for (let i = 0; i < fields.length; i++) {
@@ -117,7 +117,7 @@ const shardedVersionIndexKey = (versioning, shardKey) => {
 const isVersioningIndexKey = (key, versioning) => {
   if (!isPlainObject(key)) return false;
   const fields = Object.keys(key);
-  const expected = versionIndexKey(versioning);
+  const expected = buildVersionIndexKey(versioning);
   const expectedFields = Object.keys(expected);
   if (fields.length !== expectedFields.length) return false;
   for (let i = 0; i < fields.length; i++) {
@@ -131,7 +131,7 @@ const isVersioningIndexKey = (key, versioning) => {
  * The version floor the live validator enforces — the `minimum` of the version
  * field's `$jsonSchema` rule — or `null` when it enforces none.
  */
-const liveVersionFloor = (options, versioning) => {
+const readLiveVersionFloor = (options, versioning) => {
   const schema = options?.validator?.$jsonSchema;
   const rule = isPlainObject(schema?.properties) ? schema.properties[versioning.field] : undefined;
   return isPlainObject(rule) ? toCount(rule.minimum) : null;
@@ -143,11 +143,11 @@ const liveVersionFloor = (options, versioning) => {
  * collection that does not exist yet (no documents), or a floor already that
  * high. Only a rising floor costs a read — the steady state costs nothing.
  */
-const versionFloorToCheck = (definition, live) => {
+const resolveFloorToCheck = (definition, live) => {
   const versioning = definition.versioning;
   if (!versioning || versioning.min === 0 || !live.exists) return null;
   if (live.type !== undefined && live.type !== 'collection') return null;
-  const floor = liveVersionFloor(live.options, versioning);
+  const floor = readLiveVersionFloor(live.options, versioning);
   return floor !== null && floor >= versioning.min ? null : versioning.min;
 };
 
@@ -156,7 +156,7 @@ const versionFloorToCheck = (definition, live) => {
  * converge read: `{ min, below: true | false | 'unknown', error? }` — or
  * `undefined` when it can. The document ids are never named: they may be PII.
  */
-const versionFloorConflict = (floor) => {
+const explainFloorConflict = (floor) => {
   if (!floor || floor.below === false) return undefined;
   if (floor.below === true) {
     return (
@@ -172,13 +172,13 @@ const versionFloorConflict = (floor) => {
 };
 
 module.exports = {
-  versioningRules,
-  validatorVersioningIssues,
+  buildVersioningRules,
+  checkValidatorVersioning,
   mergeVersioningValidator,
-  versioningIndex,
-  shardedVersionIndexKey,
+  buildVersioningIndex,
+  buildShardedVersionIndexKey,
   isVersioningIndexKey,
-  liveVersionFloor,
-  versionFloorToCheck,
-  versionFloorConflict,
+  readLiveVersionFloor,
+  resolveFloorToCheck,
+  explainFloorConflict,
 };

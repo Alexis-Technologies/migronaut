@@ -1,12 +1,12 @@
 const { ConfigInvalidError, ShapeVersionError } = require('../errors/index.js');
-const { VERSIONING_DEFAULTS, fieldNameIssue, versioningOf } = require('./config.js');
+const { VERSIONING_DEFAULTS, checkFieldName, findVersioning } = require('./config.js');
 const {
   cloneDocument,
   isPlainObject,
-  sameValue,
+  isSameValue,
   setOwn,
   toCount,
-  touchedFields,
+  collectTouchedFields,
 } = require('./internal.js');
 
 /**
@@ -30,7 +30,7 @@ const {
 /** A system field name (`null`: none), or a ConfigInvalidError naming the option `key` */
 const assertFieldName = (key, name) => {
   if (name === null) return;
-  const issue = fieldNameIssue(name);
+  const issue = checkFieldName(name);
   if (issue) throw new ConfigInvalidError(`${key} ${issue}`, { context: { key } });
 };
 
@@ -62,10 +62,10 @@ const countOf = (doc, field) => {
 };
 
 /** The shape version of `doc` — 0 when the field is missing, `null` when it is not a count */
-const versionOf = (doc, field = VERSIONING_DEFAULTS.field) => countOf(doc, field);
+const readVersion = (doc, field = VERSIONING_DEFAULTS.field) => countOf(doc, field);
 
 /** The revision of `doc` — 0 when the field is missing, `null` when it is not a count */
-const revisionOf = (doc, revisionField = VERSIONING_DEFAULTS.revisionField) => {
+const readRevision = (doc, revisionField = VERSIONING_DEFAULTS.revisionField) => {
   return countOf(doc, revisionField);
 };
 
@@ -78,7 +78,7 @@ const revisionOf = (doc, revisionField = VERSIONING_DEFAULTS.revisionField) => {
 const isVersion = (doc, version, { field = VERSIONING_DEFAULTS.field } = {}) => {
   if (doc === null || doc === undefined) return false;
   assertPlainDocument(doc);
-  return versionOf(doc, field) === version;
+  return readVersion(doc, field) === version;
 };
 
 /** A plain document, or a ConfigInvalidError that says how to get one */
@@ -99,7 +99,7 @@ const assertPlainDocument = (doc) => {
  */
 const resolveRevisionField = (revisionField) => {
   const name = revisionField ?? VERSIONING_DEFAULTS.revisionField;
-  const issue = fieldNameIssue(name);
+  const issue = checkFieldName(name);
   if (issue) {
     throw new ConfigInvalidError(`revisionField ${issue}`, { context: { key: 'revisionField' } });
   }
@@ -107,7 +107,7 @@ const resolveRevisionField = (revisionField) => {
 };
 
 /** The revision after one more write */
-const nextRevision = (revision) => (toCount(revision) ?? 0) + 1;
+const incrementRevision = (revision) => (toCount(revision) ?? 0) + 1;
 
 const assertCount = (value, what) => {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -121,13 +121,13 @@ const countFilter = (field, value) => {
 };
 
 /** Documents at exactly `version` (0 = no version field) */
-const versionFilter = (names, version) => {
+const buildVersionFilter = (names, version) => {
   assertCount(version, 'version');
   return countFilter(names.field, version);
 };
 
 /** Documents at exactly `revision` (0 = no revision field) */
-const revisionFilter = (names, revision) => {
+const buildRevisionFilter = (names, revision) => {
   assertCount(revision, 'revision');
   return countFilter(names.revisionField, revision);
 };
@@ -138,13 +138,13 @@ const revisionFilter = (names, revision) => {
  * either). One `$not` range — two intervals of one index scan — rather than
  * an `$or`. `null` for version 0: nothing is below it.
  */
-const belowVersionFilter = (names, version) => {
+const buildBelowVersionFilter = (names, version) => {
   assertCount(version, 'version');
   return version === 0 ? null : { [names.field]: { $not: { $gte: version } } };
 };
 
 /** The key of the index every version-filtered scan uses */
-const versionIndexKey = (names) => ({ [names.field]: 1, _id: 1 });
+const buildVersionIndexKey = (names) => ({ [names.field]: 1, _id: 1 });
 
 /**
  * The optimistic-concurrency filter for rewriting `prev`: its `_id`, the
@@ -152,15 +152,15 @@ const versionIndexKey = (names) => ({ [names.field]: 1, _id: 1 });
  * revisions — the exact revision. A concurrent write moves the revision (or
  * the version), so the rewrite then matches nothing instead of losing it.
  */
-const occFilter = (prev, names, { from } = {}) => {
-  const version = from ?? versionOf(prev, names.field);
+const buildOccFilter = (prev, names, { from } = {}) => {
+  const version = from ?? readVersion(prev, names.field);
   const filter = { _id: prev._id };
   // A value that is not a count is matched as it is stored — `$eq`, so a
   // stored object with `$`-keys is never read as an operator.
   if (version === null) filter[names.field] = { $eq: prev[names.field] };
   else Object.assign(filter, countFilter(names.field, version));
   if (names.revisionField !== null) {
-    const revision = revisionOf(prev, names.revisionField);
+    const revision = readRevision(prev, names.revisionField);
     if (revision === null) filter[names.revisionField] = { $eq: prev[names.revisionField] };
     else Object.assign(filter, countFilter(names.revisionField, revision));
   }
@@ -168,7 +168,7 @@ const occFilter = (prev, names, { from } = {}) => {
 };
 
 /** Why `key` cannot be written as a top-level field with `$set`, or `null` */
-const topLevelKeyIssue = (key) => {
+const checkTopLevelKey = (key) => {
   if (key.length === 0) return 'an empty field name';
   if (key.startsWith('$')) return `a field name starting with '$' ("${key}")`;
   if (key.includes('.')) return `a field name with a dot ("${key}")`;
@@ -176,7 +176,7 @@ const topLevelKeyIssue = (key) => {
   return null;
 };
 
-const invalidShape = (detail, extra) => {
+const createInvalidShapeError = (detail, extra) => {
   return new ShapeVersionError(`The transformation returned ${detail}`, {
     context: { reason: 'invalid', ...extra },
   });
@@ -203,24 +203,26 @@ const hasKeys = (object) => {
  * @throws {ShapeVersionError} (`reason: 'invalid'`) when `next` is not a
  *   document, changes `_id`, or names a field `$set` cannot write
  */
-const stampedDiff = (prev, next, names, { to }) => {
-  if (!isPlainObject(next)) throw invalidShape('something that is not a document');
+const buildStampedDiff = (prev, next, names, { to }) => {
+  if (!isPlainObject(next)) throw createInvalidShapeError('something that is not a document');
   assertCount(to, 'to');
   const { field, revisionField } = names;
   const $set = {};
   const $unset = {};
   for (const key of Object.keys(next)) {
     if (key === '_id') {
-      if (!sameValue(prev._id, next._id)) throw invalidShape('a document with a different _id');
+      if (!isSameValue(prev._id, next._id)) {
+        throw createInvalidShapeError('a document with a different _id');
+      }
       continue;
     }
     if (key === field || key === revisionField) continue;
-    const issue = topLevelKeyIssue(key);
-    if (issue) throw invalidShape(issue, { field: key });
+    const issue = checkTopLevelKey(key);
+    if (issue) throw createInvalidShapeError(issue, { field: key });
     const value = next[key];
     if (value === undefined) {
       if (Object.hasOwn(prev, key)) setOwn($unset, key, '');
-    } else if (!Object.hasOwn(prev, key) || !sameValue(prev[key], value)) {
+    } else if (!Object.hasOwn(prev, key) || !isSameValue(prev[key], value)) {
       setOwn($set, key, value);
     }
   }
@@ -256,13 +258,13 @@ const refuseTouch = (fields, name, role) => {
  * @throws {ConfigInvalidError} on a replacement, or an update that writes a
  *   system field itself
  */
-const stampedUpdate = (names, { to, update }) => {
+const stampUpdate = (names, { to, update }) => {
   const { field, revisionField } = names;
   if (to !== undefined) assertCount(to, 'to');
   if (!Array.isArray(update) && !isPlainObject(update)) {
     throw new ConfigInvalidError('The update must be an update document or a pipeline');
   }
-  const touched = touchedFields(update);
+  const touched = collectTouchedFields(update);
   if (touched.whole) {
     throw new ConfigInvalidError(
       Array.isArray(update)
@@ -308,25 +310,25 @@ const stampDocument = (doc, names, version) => {
 };
 
 module.exports = {
-  fieldNameIssue,
-  versioningOf,
+  checkFieldName,
+  findVersioning,
   cloneDocument,
-  sameValue,
+  isSameValue,
   resolveFieldNames,
-  versionOf,
-  revisionOf,
+  readVersion,
+  readRevision,
   isVersion,
   assertPlainDocument,
   resolveRevisionField,
-  nextRevision,
+  incrementRevision,
   assertCount,
-  versionFilter,
-  revisionFilter,
-  belowVersionFilter,
-  versionIndexKey,
-  occFilter,
-  stampedDiff,
+  buildVersionFilter,
+  buildRevisionFilter,
+  buildBelowVersionFilter,
+  buildVersionIndexKey,
+  buildOccFilter,
+  buildStampedDiff,
   refuseTouch,
-  stampedUpdate,
+  stampUpdate,
   stampDocument,
 };

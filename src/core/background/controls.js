@@ -1,7 +1,7 @@
 const { BackgroundConflictError, BackgroundFailedError } = require('../../errors/index.js');
-const { TERMINAL, matchHash, transition } = require('./spec.js');
+const { TERMINAL, matchHash, resolveTransition } = require('./spec.js');
 const { sleep } = require('./throttle.js');
-const { waitingFor } = require('./coordinator.js');
+const { listWaiting } = require('./coordinator.js');
 
 /**
  * The controls of a background migration — pause, resume, cancel, retry,
@@ -16,7 +16,12 @@ const { waitingFor } = require('./coordinator.js');
  * @throws {BackgroundConflictError} when the action does not fit its state
  * @throws {NotAppliedError} via the kit when it is not registered
  */
-const control = async (deps, name, action, { requestedBy, reason, fromStart = false } = {}) => {
+const applyControl = async (
+  deps,
+  name,
+  action,
+  { requestedBy, reason, fromStart = false } = {},
+) => {
   const { store } = deps;
   const state = await store.get(name);
   if (state === null) {
@@ -25,7 +30,7 @@ const control = async (deps, name, action, { requestedBy, reason, fromStart = fa
     });
   }
   const effective = action === 'retry' && state.status === 'completed' ? 'reopen' : action;
-  const { to, applied } = transition(state.status, effective, { migration: name });
+  const { to, applied } = resolveTransition(state.status, effective, { migration: name });
   if (applied === 'unchanged') return { applied, status: state.status };
 
   const stamp = {
@@ -38,7 +43,7 @@ const control = async (deps, name, action, { requestedBy, reason, fromStart = fa
   const fields = { control: stamp };
   if (action === 'resume') {
     // Back to where it was: blocked if what it requires is still not done.
-    const waitsFor = await waitingFor(deps, state.requires ?? []);
+    const waitsFor = await listWaiting(deps, state.requires ?? []);
     if (waitsFor.length > 0) {
       target = 'blocked';
       fields.waitsFor = waitsFor;
@@ -52,7 +57,7 @@ const control = async (deps, name, action, { requestedBy, reason, fromStart = fa
   }
   // A pass that already closed (its counters rolled up) is not resumed: its
   // partitions' work since would never be counted. A new pass takes what is left.
-  const closed = state.plan !== undefined && (state.rolledGeneration ?? 0) >= state.generation;
+  const isClosed = state.plan !== undefined && (state.rolledGeneration ?? 0) >= state.generation;
   if (action === 'retry' && fromStart) {
     fields.phase = 'partition';
     fields.pass = 0;
@@ -63,7 +68,7 @@ const control = async (deps, name, action, { requestedBy, reason, fromStart = fa
     fields.lastError = null;
   } else if (action === 'retry') {
     fields.failedPartitions = 0;
-    if (closed) fields.phase = 'partition';
+    if (isClosed) fields.phase = 'partition';
   }
   const moved = await store.move(name, {
     from: [state.status],
@@ -75,7 +80,7 @@ const control = async (deps, name, action, { requestedBy, reason, fromStart = fa
   });
   if (moved === null) {
     // Someone moved it first: judge again from what it is now.
-    return control(deps, name, action, { requestedBy, reason, fromStart });
+    return applyControl(deps, name, action, { requestedBy, reason, fromStart });
   }
 
   const plan = state.plan;
@@ -88,7 +93,7 @@ const control = async (deps, name, action, { requestedBy, reason, fromStart = fa
       });
     } else if (action === 'retry' && fromStart) {
       await store.dropGenerations(name, state.generation);
-    } else if (action === 'retry' && effective !== 'reopen' && !closed) {
+    } else if (action === 'retry' && effective !== 'reopen' && !isClosed) {
       await store.setOpenPartitions(name, {
         generation: state.generation,
         plan: plan.token,
@@ -120,22 +125,27 @@ const repin = async (deps, name, { requestedBy, reason } = {}) => {
   const loaded = await deps.load(name);
   const before = state.spec ?? {};
   const after = loaded.spec;
-  const dir = state.direction === 'revert' ? 'revert' : 'forward';
-  const replan =
-    matchHash(before, dir) !== matchHash(after, dir) ||
+  const resolvedDirection = state.direction === 'revert' ? 'revert' : 'forward';
+  const shouldReplan =
+    matchHash(before, resolvedDirection) !== matchHash(after, resolvedDirection) ||
     before.maxParallel !== after.maxParallel ||
     JSON.stringify(before.partitions) !== JSON.stringify(after.partitions);
   const fields = {
     checksum: loaded.checksum,
     spec: after,
-    ...(replan && !TERMINAL.has(state.status) && state.plan !== undefined
+    ...(shouldReplan && !TERMINAL.has(state.status) && state.plan !== undefined
       ? { phase: 'replan' }
       : {}),
     control: { action: 'repin', requestedBy, reason, at: new Date() },
   };
   await store.set(name, fields);
-  deps.emit('background:control', { migration: name, action: 'repin', replan });
-  return { applied: 'changed', status: state.status, replan, checksum: loaded.checksum };
+  deps.emit('background:control', { migration: name, action: 'repin', replan: shouldReplan });
+  return {
+    applied: 'changed',
+    status: state.status,
+    replan: shouldReplan,
+    checksum: loaded.checksum,
+  };
 };
 
 /**
@@ -155,7 +165,7 @@ const waitForLanes = async (deps, name, { signal, timeoutMs = 120_000, pollMs = 
 };
 
 /** Why a failed state failed, for a thrown error */
-const failedError = (state) => {
+const createFailedError = (state) => {
   return new BackgroundFailedError(
     `Background migration ${state._id} failed${state.lastError ? `: ${state.lastError}` : ''}`,
     { context: { migration: state._id, lastError: state.lastError } },
@@ -163,8 +173,8 @@ const failedError = (state) => {
 };
 
 module.exports = {
-  control,
+  applyControl,
   repin,
   waitForLanes,
-  failedError,
+  createFailedError,
 };

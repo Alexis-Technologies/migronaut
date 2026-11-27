@@ -1,10 +1,10 @@
 const os = require('node:os');
 
 const { ConfigInvalidError, LockLostError } = require('../../errors/index.js');
-const { DUPLICATE_KEY, errorText } = require('../../utils/error.js');
-const { randomId } = require('../../utils/id.js');
+const { DUPLICATE_KEY, formatError } = require('../../utils/error.js');
+const { createRandomId } = require('../../utils/id.js');
 const { MAX_BAD_IDS } = require('./spec.js');
-const { backgroundCollectionNames } = require('../config.js');
+const { listBackgroundCollections } = require('../config.js');
 const { READ_OPTIONS } = require('../server-info.js');
 
 /** The collections of the store that carry indexes */
@@ -32,7 +32,7 @@ const INDEXED_COLLECTIONS = Object.freeze(['state', 'partitions']);
 const STATE_SCHEMA = 2;
 
 /** The last document errors kept, per partition and in the state */
-const MAX_DOC_ERRORS = 20;
+const MAX_DOCUMENT_ERRORS = 20;
 
 /** History entries kept on a state document */
 const MAX_HISTORY = 50;
@@ -71,15 +71,15 @@ const INDEXES = [
 const NAMESPACE_NOT_FOUND = 26;
 
 /** A value as itself inside an update pipeline — a string with a leading `$` is not a field path */
-const literal = (value) => ({ $literal: value });
+const toLiteral = (value) => ({ $literal: value });
 
 /** `field + n` inside a pipeline, a missing field counting as 0 */
-const plus = (field, n) => ({ $add: [{ $ifNull: [`$${field}`, 0] }, n] });
+const addToField = (field, amount) => ({ $add: [{ $ifNull: [`$${field}`, 0] }, amount] });
 
 /** An array field with `items` appended, keeping the last `max` */
 const appendSliced = (field, items, max) => {
   return {
-    $slice: [{ $concatArrays: [{ $ifNull: [`$${field}`, []] }, literal(items)] }, -max],
+    $slice: [{ $concatArrays: [{ $ifNull: [`$${field}`, []] }, toLiteral(items)] }, -max],
   };
 };
 
@@ -93,7 +93,7 @@ const isLeaseSlotClash = (error) => {
   if (typeof keyPattern === 'object' && keyPattern !== null) {
     return Object.hasOwn(keyPattern, 'lease.slot');
   }
-  return errorText(error).includes('lease_slot');
+  return formatError(error).includes('lease_slot');
 };
 
 class BackgroundStore {
@@ -110,7 +110,7 @@ class BackgroundStore {
    */
   constructor(db, collection) {
     this.#db = db;
-    this.#names = backgroundCollectionNames(collection);
+    this.#names = listBackgroundCollections(collection);
   }
 
   get names() {
@@ -258,7 +258,7 @@ class BackgroundStore {
     const doc = {
       _id: name,
       schema: STATE_SCHEMA,
-      registration: randomId(),
+      registration: createRandomId(),
       phase: 'partition',
       pass: 0,
       generation: 0,
@@ -315,22 +315,22 @@ class BackgroundStore {
   move(name, { from, to, action, fields = {}, filter = {}, by, reason }) {
     const entry = {
       at: '$$NOW',
-      action: literal(action),
+      action: toLiteral(action),
       from: '$status',
-      to: literal(to),
-      ...(by !== undefined ? { by: literal(by) } : {}),
-      ...(reason !== undefined ? { reason: literal(reason) } : {}),
+      to: toLiteral(to),
+      ...(by !== undefined ? { by: toLiteral(by) } : {}),
+      ...(reason !== undefined ? { reason: toLiteral(reason) } : {}),
     };
     // One stage: `$status` in the entry is the status before it.
     const set = {
-      status: literal(to),
+      status: toLiteral(to),
       updatedAt: '$$NOW',
       history: {
         $slice: [{ $concatArrays: [{ $ifNull: ['$history', []] }, [entry]] }, -MAX_HISTORY],
       },
     };
     const keys = Object.keys(fields);
-    for (let i = 0; i < keys.length; i++) set[keys[i]] = literal(fields[keys[i]]);
+    for (let i = 0; i < keys.length; i++) set[keys[i]] = toLiteral(fields[keys[i]]);
     return this.cas(name, { status: { $in: from }, ...filter }, [{ $set: set }]);
   }
 
@@ -341,12 +341,12 @@ class BackgroundStore {
   note(name, { action, by, reason, ...details }) {
     const entry = {
       at: '$$NOW',
-      action: literal(action),
-      ...(by !== undefined ? { by: literal(by) } : {}),
-      ...(reason !== undefined ? { reason: literal(reason) } : {}),
+      action: toLiteral(action),
+      ...(by !== undefined ? { by: toLiteral(by) } : {}),
+      ...(reason !== undefined ? { reason: toLiteral(reason) } : {}),
     };
     const keys = Object.keys(details);
-    for (let i = 0; i < keys.length; i++) entry[keys[i]] = literal(details[keys[i]]);
+    for (let i = 0; i < keys.length; i++) entry[keys[i]] = toLiteral(details[keys[i]]);
     return this.cas(name, {}, [
       {
         $set: {
@@ -397,7 +397,7 @@ class BackgroundStore {
     const fields = options.fields ?? {};
     const filter = options.filter ?? {};
 
-    const token = randomId();
+    const token = createRandomId();
     const nextGeneration = generation + 1;
     if (partitions.length > 0) {
       const docs = [];
@@ -548,7 +548,7 @@ class BackgroundStore {
     for (const list of badIds) for (let i = 0; i < list.length; i++) ids.push(list[i]);
     const errors = [];
     for (const list of docErrors) for (let i = 0; i < list.length; i++) errors.push(list[i]);
-    return { totals, badIds: ids, docErrors: errors.slice(-MAX_DOC_ERRORS) };
+    return { totals, badIds: ids, docErrors: errors.slice(-MAX_DOCUMENT_ERRORS) };
   }
 
   /**
@@ -653,7 +653,7 @@ class BackgroundStore {
         'lease.slot': { $exists: true },
         $expr: { $lt: ['$lease.renewedAt', { $subtract: ['$$NOW', '$lease.ttlMs'] }] },
       },
-      [{ $set: { reclaims: plus('reclaims', 1) } }, { $unset: 'lease' }],
+      [{ $set: { reclaims: addToField('reclaims', 1) } }, { $unset: 'lease' }],
     );
     return result.modifiedCount;
   }
@@ -756,14 +756,14 @@ class BackgroundStore {
     const offset = Math.floor(Math.random() * free.length);
     for (let i = 0; i < free.length; i++) {
       const slot = free[(offset + i) % free.length];
-      const token = randomId();
+      const token = createRandomId();
       const lease = {
         slot,
-        token: literal(token),
-        owner: literal(owner ?? token),
-        host: literal(os.hostname()),
-        pid: literal(process.pid),
-        ttlMs: literal(ttlMs),
+        token: toLiteral(token),
+        owner: toLiteral(owner ?? token),
+        host: toLiteral(os.hostname()),
+        pid: toLiteral(process.pid),
+        ttlMs: toLiteral(ttlMs),
         renewedAt: '$$NOW',
         claimedAt: '$$NOW',
       };
@@ -800,7 +800,7 @@ class BackgroundStore {
     const set = {
       lease,
       status: 'running',
-      claims: plus('claims', 1),
+      claims: addToField('claims', 1),
       startedAt: { $ifNull: ['$startedAt', '$$NOW'] },
       updatedAt: '$$NOW',
     };
@@ -817,20 +817,20 @@ class BackgroundStore {
     // the next pick, rather than ending the claim as busy. Each round either
     // claims, finds the candidate taken, or rules out one more group.
     const full = new Set(fullGroups);
-    let ungroupedFull = false;
+    let isUngroupedFull = false;
     for (;;) {
       const pick = { ...filter };
       if (full.size > 0) pick.group = { $nin: [...full] };
       // Partitions without a group share one set of group slots (`#k`).
-      if (ungroupedFull) pick.group = { ...pick.group, $exists: true };
+      if (isUngroupedFull) pick.group = { ...pick.group, $exists: true };
       const candidate = await this.#partitions.findOne(pick, {
         sort,
         projection: { group: 1 },
         ...READ_OPTIONS,
       });
       if (candidate === null) return null;
-      let taken = false;
-      for (let k = 0; k < shardConcurrency && !taken; k++) {
+      let isTaken = false;
+      for (let k = 0; k < shardConcurrency && !isTaken; k++) {
         try {
           const claimed = await this.#partitions.findOneAndUpdate(
             { ...filter, _id: candidate._id },
@@ -839,15 +839,15 @@ class BackgroundStore {
           );
           if (claimed !== null) return claimed;
           // Claimed by someone else between the pick and the write: pick again.
-          taken = true;
+          isTaken = true;
         } catch (error) {
           if (error?.code !== DUPLICATE_KEY || isLeaseSlotClash(error)) {
             throw error;
           }
         }
       }
-      if (taken) continue;
-      if (candidate.group === undefined) ungroupedFull = true;
+      if (isTaken) continue;
+      if (candidate.group === undefined) isUngroupedFull = true;
       else full.add(candidate.group);
     }
   }
@@ -899,23 +899,23 @@ class BackgroundStore {
     const { cursor, counters = {}, badIds = [], docErrors = [], done = false, throttle } = update;
     // A checkpoint is progress: `maxSliceFailures` counts failed slices in a
     // row, so a transient error now and then never adds up to a failure.
-    const set = { 'lease.renewedAt': '$$NOW', updatedAt: '$$NOW', failures: literal(0) };
-    if (cursor !== undefined) set.cursor = literal(cursor);
+    const set = { 'lease.renewedAt': '$$NOW', updatedAt: '$$NOW', failures: toLiteral(0) };
+    if (cursor !== undefined) set.cursor = toLiteral(cursor);
     const keys = Object.keys(counters);
     for (let i = 0; i < keys.length; i++) {
       const key = keys[i];
       const value = counters[key];
-      if (value) set[`counters.${key}`] = plus(`counters.${key}`, value);
+      if (value) set[`counters.${key}`] = addToField(`counters.${key}`, value);
     }
     if (badIds.length > 0) {
       set.badIds = {
-        $slice: [{ $setUnion: [{ $ifNull: ['$badIds', []] }, literal(badIds)] }, MAX_BAD_IDS + 1],
+        $slice: [{ $setUnion: [{ $ifNull: ['$badIds', []] }, toLiteral(badIds)] }, MAX_BAD_IDS + 1],
       };
     }
     if (docErrors.length > 0) {
-      set.lastDocErrors = appendSliced('lastDocErrors', docErrors, MAX_DOC_ERRORS);
+      set.lastDocErrors = appendSliced('lastDocErrors', docErrors, MAX_DOCUMENT_ERRORS);
     }
-    if (throttle !== undefined) set.throttle = literal(throttle);
+    if (throttle !== undefined) set.throttle = toLiteral(throttle);
     const pipeline = [{ $set: set }];
     if (done) {
       pipeline.push({ $set: { status: 'done', doneAt: '$$NOW' } }, { $unset: 'lease' });
@@ -951,7 +951,13 @@ class BackgroundStore {
         $or: [{ 'lease.token': lease.token }, { lease: { $exists: false } }],
       },
       [
-        { $set: { failures: plus('failures', 1), lastError: literal(error), updatedAt: '$$NOW' } },
+        {
+          $set: {
+            failures: addToField('failures', 1),
+            lastError: toLiteral(error),
+            updatedAt: '$$NOW',
+          },
+        },
         {
           $set: {
             status: { $cond: [{ $gte: ['$failures', maxSliceFailures] }, 'failed', '$status'] },
@@ -974,11 +980,17 @@ class BackgroundStore {
         $or: [{ 'lease.token': lease.token }, { lease: { $exists: false } }],
       },
       [
-        { $set: { status: 'failed', lastError: literal(error), updatedAt: '$$NOW' } },
+        { $set: { status: 'failed', lastError: toLiteral(error), updatedAt: '$$NOW' } },
         { $unset: 'lease' },
       ],
     );
   }
 }
 
-module.exports = { MAX_BAD_IDS, STATE_SCHEMA, MAX_DOC_ERRORS, OPEN_PARTITION, BackgroundStore };
+module.exports = {
+  MAX_BAD_IDS,
+  STATE_SCHEMA,
+  MAX_DOCUMENT_ERRORS,
+  OPEN_PARTITION,
+  BackgroundStore,
+};

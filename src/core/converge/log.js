@@ -10,7 +10,7 @@
  */
 class ConvergeLog {
   #collectionName;
-  #indexed = false;
+  #isIndexed = false;
 
   constructor(collectionName) {
     this.#collectionName = collectionName;
@@ -35,9 +35,9 @@ class ConvergeLog {
    */
   async append(db, entry, { ensureIndex = true } = {}) {
     const collection = this.#coll(db);
-    if (!this.#indexed && ensureIndex) {
+    if (!this.#isIndexed && ensureIndex) {
       await collection.createIndex({ startedAt: -1 }, { name: 'startedAt' });
-      this.#indexed = true;
+      this.#isIndexed = true;
     }
     if (entry.success === false && entry.fingerprint !== undefined) {
       const rows = await collection
@@ -46,12 +46,12 @@ class ConvergeLog {
         .limit(1)
         .toArray();
       const newest = rows[0];
-      const repeats =
+      const isRepeat =
         newest !== undefined &&
         newest.success === false &&
         newest.fingerprint === entry.fingerprint &&
         newest.error === entry.error;
-      if (repeats) {
+      if (isRepeat) {
         const counted = await collection.updateOne(
           { _id: newest._id },
           { $inc: { repeats: 1 }, $set: { lastAt: entry.finishedAt } },

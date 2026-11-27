@@ -10,8 +10,8 @@ const {
   SPANS,
   SPAN_STATUS_ERROR,
   createTelemetry,
-  errorType,
-  failureText,
+  readErrorType,
+  formatFailure,
 } = require('../../src/utils/telemetry.js');
 const { parentIdOf, startMetrics, startTracing } = require('../helpers/otel.js');
 
@@ -419,18 +419,18 @@ describe('wrap', () => {
   });
 });
 
-describe('errorType', () => {
+describe('readErrorType', () => {
   it('should be the typed code of a migronaut error', () => {
-    assert.strictEqual(errorType(new ConfigInvalidError('x')), 'ALX_ERR_CONFIG_INVALID');
+    assert.strictEqual(readErrorType(new ConfigInvalidError('x')), 'ALX_ERR_CONFIG_INVALID');
   });
 
   it('should be the class name of any other error', () => {
-    assert.strictEqual(errorType(new RangeError('x')), 'RangeError');
+    assert.strictEqual(readErrorType(new RangeError('x')), 'RangeError');
   });
 
   it('should fall back to _OTHER for a thrown value with no usable name', () => {
     for (const value of ['a string', 42, null, undefined, {}, { name: '' }, { name: 7 }]) {
-      assert.strictEqual(errorType(value), '_OTHER');
+      assert.strictEqual(readErrorType(value), '_OTHER');
     }
   });
 
@@ -440,9 +440,9 @@ describe('errorType', () => {
         throw new Error('gotcha');
       },
     };
-    assert.strictEqual(errorType(hostile), '_OTHER');
+    assert.strictEqual(readErrorType(hostile), '_OTHER');
     assert.strictEqual(
-      errorType(
+      readErrorType(
         new Proxy(
           {},
           {
@@ -457,7 +457,7 @@ describe('errorType', () => {
   });
 });
 
-describe('failureText — what a tracing backend receives', () => {
+describe('formatFailure — what a tracing backend receives', () => {
   it('should mask the values a duplicate-key error quotes', () => {
     const error = new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
       context: {
@@ -465,22 +465,22 @@ describe('failureText — what a tracing backend receives', () => {
       },
     });
     assert.strictEqual(
-      failureText(error),
+      formatFailure(error),
       'Migration up failed: 0001-a.js — E11000 duplicate key error index: email_1 dup key: ' +
         '{ <redacted> }',
     );
   });
 
   it('should bound the message', () => {
-    const text = failureText(new Error('x'.repeat(5000)));
+    const text = formatFailure(new Error('x'.repeat(5000)));
     assert.strictEqual(text.length, MAX_STATUS_MESSAGE_LENGTH);
     assert.ok(text.endsWith('…'));
   });
 });
 
-describe('failureText', () => {
+describe('formatFailure', () => {
   it('should mask URI credentials — a driver message can echo the connection string', () => {
-    const text = failureText(new Error('connect failed: mongodb://app:hunter2@db.internal/app'));
+    const text = formatFailure(new Error('connect failed: mongodb://app:hunter2@db.internal/app'));
     assert.strictEqual(text, 'connect failed: mongodb://app:****@db.internal/app');
   });
 
@@ -489,22 +489,22 @@ describe('failureText', () => {
       context: { cause: 'bad auth mongodb://app:hunter2@db.internal/app' },
     });
     assert.strictEqual(
-      failureText(error),
+      formatFailure(error),
       'Migration up failed: 0001-a.js — bad auth mongodb://app:****@db.internal/app',
     );
   });
 
   it('should ignore a cause that is not a string, or not on a migronaut error', () => {
     assert.strictEqual(
-      failureText(
+      formatFailure(
         new ConfigInvalidError('Invalid configuration', { context: { cause: { nested: true } } }),
       ),
       'Invalid configuration',
     );
     const plain = new Error('plain');
     plain.context = { cause: 'not ours' };
-    assert.strictEqual(failureText(plain), 'plain');
-    assert.strictEqual(failureText('thrown string'), 'thrown string');
+    assert.strictEqual(formatFailure(plain), 'plain');
+    assert.strictEqual(formatFailure('thrown string'), 'thrown string');
   });
 });
 

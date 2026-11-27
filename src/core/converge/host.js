@@ -1,6 +1,6 @@
 const os = require('node:os');
 
-const { safeUsername } = require('../../utils/user.js');
+const { resolveUsername } = require('../../utils/user.js');
 const { assertHistoryLimit } = require('../options.js');
 const { readShardKey } = require('../shard-info.js');
 const { ConvergeLog } = require('./log.js');
@@ -47,7 +47,7 @@ class ConvergeHost {
       audit: () => {
         return {
           ...(kit.runId ? { runId: kit.runId } : {}),
-          executedBy: safeUsername(),
+          executedBy: resolveUsername(),
           host: os.hostname(),
           environment: kit.environment(),
         };

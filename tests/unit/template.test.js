@@ -18,20 +18,20 @@ const {
 } = require('../../src/errors/index.js');
 const {
   buildPrefix,
-  configTemplateContent,
+  renderConfigTemplate,
   createConfigFile,
   createMigrationFile,
-  defaultConfigJs,
-  defaultConfigJson,
-  defaultConfigTs,
-  defaultTemplateJs,
-  defaultTemplateTs,
+  renderConfigJs,
+  renderConfigJson,
+  renderConfigTs,
+  renderMigrationJs,
+  renderMigrationTs,
   isEsmProject,
   maskUriCredentials,
-  nextSequenceIndex,
+  findNextSequenceIndex,
   resolveTemplateContent,
-  secretConfigJs,
-  secretConfigTs,
+  renderSecretConfigJs,
+  renderSecretConfigTs,
   slugify,
 } = require('../../src/utils/template.js');
 
@@ -65,29 +65,29 @@ describe('buildPrefix', () => {
   });
 });
 
-describe('nextSequenceIndex', () => {
+describe('findNextSequenceIndex', () => {
   it('should return 1 for a missing directory', async () => {
-    assert.strictEqual(await nextSequenceIndex(path.join(tmp, 'nope'), ['.ts', '.js']), 1);
+    assert.strictEqual(await findNextSequenceIndex(path.join(tmp, 'nope'), ['.ts', '.js']), 1);
   });
 
   it('should count existing migration files', async () => {
     writeFileSync(path.join(tmp, '0001-a.ts'), '');
     writeFileSync(path.join(tmp, '0002-b.js'), '');
     writeFileSync(path.join(tmp, 'README.md'), '');
-    assert.strictEqual(await nextSequenceIndex(tmp, ['.ts', '.js']), 3);
+    assert.strictEqual(await findNextSequenceIndex(tmp, ['.ts', '.js']), 3);
   });
 });
 
 describe('default templates', () => {
   it('should include up and down in the TS template', () => {
-    const tpl = defaultTemplateTs();
+    const tpl = renderMigrationTs();
     assert.ok(tpl.includes('async function up'));
     assert.ok(tpl.includes('async function down'));
     assert.ok(tpl.includes('MigrationContext'));
   });
 
   it('should include up and down in the JS template', () => {
-    const tpl = defaultTemplateJs();
+    const tpl = renderMigrationJs();
     assert.ok(tpl.includes('async function up'));
     assert.ok(tpl.includes('async function down'));
   });
@@ -95,10 +95,10 @@ describe('default templates', () => {
   it('should default to CommonJS and switch to ESM for a module project', () => {
     // An ESM migration in a CommonJS project makes Node reparse it and warn on
     // every run — the generator follows the project instead of assuming.
-    assert.ok(defaultTemplateJs().includes('module.exports = { description, up, down };'));
-    assert.ok(defaultTemplateTs().includes('module.exports = { description, up, down };'));
-    assert.ok(defaultTemplateJs(true).includes('export async function up'));
-    assert.ok(defaultTemplateTs(true).includes('export async function up'));
+    assert.ok(renderMigrationJs().includes('module.exports = { description, up, down };'));
+    assert.ok(renderMigrationTs().includes('module.exports = { description, up, down };'));
+    assert.ok(renderMigrationJs(true).includes('export async function up'));
+    assert.ok(renderMigrationTs(true).includes('export async function up'));
   });
 });
 
@@ -195,7 +195,7 @@ describe('createMigrationFile', () => {
 
 describe('config templates', () => {
   it('should fill the TS template with provided values and the MigronautConfig type', () => {
-    const tpl = defaultConfigTs({ uri: 'mongodb://db:1', dbName: 'shop' });
+    const tpl = renderConfigTs({ uri: 'mongodb://db:1', dbName: 'shop' });
     assert.ok(tpl.includes("import type { MigronautConfig } from '@alexify/migronaut'"));
     assert.ok(tpl.includes('uri: "mongodb://db:1"'));
     assert.ok(tpl.includes('dbName: "shop"'));
@@ -204,31 +204,31 @@ describe('config templates', () => {
   });
 
   it('should fall back to defaults for omitted values', () => {
-    const tpl = defaultConfigTs();
+    const tpl = renderConfigTs();
     assert.ok(tpl.includes('uri: "mongodb://localhost:27017"'));
     assert.ok(tpl.includes('dbName: "myapp"'));
     assert.ok(tpl.includes('migrationsDir: "./migrations"'));
   });
 
   it('should produce valid parseable JSON', () => {
-    const parsed = JSON.parse(defaultConfigJson({ dbName: 'shop' }));
+    const parsed = JSON.parse(renderConfigJson({ dbName: 'shop' }));
     assert.strictEqual(parsed.dbName, 'shop');
     assert.strictEqual(parsed.migrationsCollection, '_migronaut_migrations');
   });
 
   it('should dispatch on format', () => {
-    assert.ok(configTemplateContent('js').includes('const config = {'));
-    assert.ok(configTemplateContent('json').includes('"lockTTLSeconds": 60'));
-    assert.ok(configTemplateContent('ts').includes('Partial<MigronautConfig>'));
+    assert.ok(renderConfigTemplate('js').includes('const config = {'));
+    assert.ok(renderConfigTemplate('json').includes('"lockTTLSeconds": 60'));
+    assert.ok(renderConfigTemplate('ts').includes('Partial<MigronautConfig>'));
   });
 
   it('should seed createExtension to match the config file language', () => {
-    assert.ok(defaultConfigTs().includes("createExtension: 'ts'"));
-    assert.ok(defaultConfigJs().includes("createExtension: 'js'"));
+    assert.ok(renderConfigTs().includes("createExtension: 'ts'"));
+    assert.ok(renderConfigJs().includes("createExtension: 'js'"));
   });
 
   it('should document the full set of options, not just the required ones', () => {
-    const tpl = defaultConfigTs();
+    const tpl = renderConfigTs();
     for (const key of [
       'fileExtensions',
       'createExtension',
@@ -244,7 +244,7 @@ describe('config templates', () => {
   });
 
   it('should include createExtension in the JSON template', () => {
-    assert.strictEqual(JSON.parse(defaultConfigJson()).createExtension, 'js');
+    assert.strictEqual(JSON.parse(renderConfigJson()).createExtension, 'js');
   });
 });
 
@@ -254,8 +254,8 @@ describe('config template injection safety', () => {
   const payload = "x', evil: (() => { throw new Error('INJECTED'); })(), z: '";
 
   for (const [name, render] of [
-    ['ts', (v, esm) => defaultConfigTs(v, esm)],
-    ['js', (v, esm) => defaultConfigJs(v, esm)],
+    ['ts', (v, esm) => renderConfigTs(v, esm)],
+    ['js', (v, esm) => renderConfigJs(v, esm)],
   ]) {
     it(`should neutralize a quote-breaking dbName in the ${name} template`, () => {
       const tpl = render({ dbName: payload });
@@ -291,7 +291,7 @@ describe('config template injection safety', () => {
   }
 
   it('should neutralize a quote-breaking migrationsDir in secret-provider templates', () => {
-    const tpl = secretConfigJs({ migrationsDir: payload });
+    const tpl = renderSecretConfigJs({ migrationsDir: payload });
     assert.ok(tpl.includes(`migrationsDir: ${JSON.stringify(payload)},`));
     assert.ok(!/^\s*evil:/m.test(tpl));
   });
@@ -299,25 +299,25 @@ describe('config template injection safety', () => {
 
 describe('config template credential masking', () => {
   it('should mask the password in the generated js/ts config and explain why', () => {
-    const tpl = defaultConfigJs({ uri: 'mongodb://admin:hunter2@db:27017' });
+    const tpl = renderConfigJs({ uri: 'mongodb://admin:hunter2@db:27017' });
     assert.ok(tpl.includes('uri: "mongodb://admin:****@db:27017"'));
     assert.ok(!tpl.includes('hunter2'));
     assert.ok(tpl.includes('masked at generation time'));
   });
 
   it('should mask the password in the generated json config', () => {
-    const parsed = JSON.parse(defaultConfigJson({ uri: 'mongodb://admin:hunter2@db:27017' }));
+    const parsed = JSON.parse(renderConfigJson({ uri: 'mongodb://admin:hunter2@db:27017' }));
     assert.strictEqual(parsed.uri, 'mongodb://admin:****@db:27017');
   });
 
   it('should not add the masking note when the URI carries no password', () => {
-    assert.ok(!defaultConfigJs({ uri: 'mongodb://localhost:27017' }).includes('masked at'));
+    assert.ok(!renderConfigJs({ uri: 'mongodb://localhost:27017' }).includes('masked at'));
   });
 });
 
 describe('secret-provider config templates', () => {
   it('should emit an async factory that fetches from a secret manager (JS)', () => {
-    const tpl = secretConfigJs();
+    const tpl = renderSecretConfigJs();
     assert.ok(tpl.includes('async function loadMongoSecret'));
     assert.ok(tpl.includes('module.exports = async () =>'));
     assert.ok(tpl.includes('@aws-sdk/client-secrets-manager'));
@@ -326,13 +326,13 @@ describe('secret-provider config templates', () => {
   });
 
   it('should be provider-agnostic — document swapping AWS for another provider', () => {
-    const tpl = secretConfigJs();
+    const tpl = renderSecretConfigJs();
     assert.ok(tpl.includes('Provider-agnostic'));
     assert.ok(tpl.includes('@google-cloud/secret-manager'));
   });
 
   it('should emit a typed async factory for TS with the MigronautConfig type', () => {
-    const tpl = secretConfigTs();
+    const tpl = renderSecretConfigTs();
     assert.ok(tpl.includes("import type { MigronautConfig } from '@alexify/migronaut'"));
     assert.ok(tpl.includes('async function loadMongoSecret(): Promise<{ uri: string'));
     assert.ok(tpl.includes('Promise<Partial<MigronautConfig>>'));
@@ -341,19 +341,19 @@ describe('secret-provider config templates', () => {
 
   it('should seed migrationsDir from provided values', () => {
     assert.ok(
-      secretConfigJs({ migrationsDir: './db/migrations' }).includes(
+      renderSecretConfigJs({ migrationsDir: './db/migrations' }).includes(
         'migrationsDir: "./db/migrations"',
       ),
     );
   });
 
-  it('should dispatch to the secret template via configTemplateContent', () => {
-    assert.ok(configTemplateContent('js', {}, true).includes('loadMongoSecret'));
-    assert.ok(configTemplateContent('ts', {}, true).includes('loadMongoSecret'));
+  it('should dispatch to the secret template via renderConfigTemplate', () => {
+    assert.ok(renderConfigTemplate('js', {}, true).includes('loadMongoSecret'));
+    assert.ok(renderConfigTemplate('ts', {}, true).includes('loadMongoSecret'));
   });
 
   it('should throw ConfigInvalidError when secret-provider is requested for json', () => {
-    assert.throws(() => configTemplateContent('json', {}, true), ConfigInvalidError);
+    assert.throws(() => renderConfigTemplate('json', {}, true), ConfigInvalidError);
   });
 });
 
@@ -389,16 +389,16 @@ describe('config template module system', () => {
   it('should default to CommonJS, matching a project with no "type" field', () => {
     // An ESM-syntax config in a CommonJS project makes Node reparse the file
     // and warn on every command.
-    assert.ok(defaultConfigJs().includes('module.exports = config;'));
-    assert.ok(defaultConfigTs().includes('module.exports = config;'));
-    assert.ok(secretConfigJs().includes('module.exports = async () =>'));
-    assert.ok(secretConfigTs().includes('module.exports = async ('));
+    assert.ok(renderConfigJs().includes('module.exports = config;'));
+    assert.ok(renderConfigTs().includes('module.exports = config;'));
+    assert.ok(renderSecretConfigJs().includes('module.exports = async () =>'));
+    assert.ok(renderSecretConfigTs().includes('module.exports = async ('));
   });
 
   it('should emit ESM syntax for a "type": "module" project', () => {
-    assert.ok(defaultConfigJs({}, true).includes('export default config;'));
-    assert.ok(defaultConfigTs({}, true).includes('export default config;'));
-    assert.ok(secretConfigJs({}, true).includes('export default async () =>'));
+    assert.ok(renderConfigJs({}, true).includes('export default config;'));
+    assert.ok(renderConfigTs({}, true).includes('export default config;'));
+    assert.ok(renderSecretConfigJs({}, true).includes('export default async () =>'));
   });
 });
 
@@ -456,10 +456,10 @@ describe('generated config defaults stay pinned to DEFAULT_CONFIG', () => {
   const renderedExtensions = `[${DEFAULT_CONFIG.fileExtensions.map((e) => `'${e}'`).join(', ')}]`;
 
   for (const [label, content] of [
-    ['defaultConfigJs', defaultConfigJs()],
-    ['defaultConfigTs', defaultConfigTs()],
-    ['secretConfigJs', secretConfigJs()],
-    ['secretConfigTs', secretConfigTs()],
+    ['renderConfigJs', renderConfigJs()],
+    ['renderConfigTs', renderConfigTs()],
+    ['renderSecretConfigJs', renderSecretConfigJs()],
+    ['renderSecretConfigTs', renderSecretConfigTs()],
   ]) {
     it(`should show the current defaults in ${label}`, () => {
       for (const key of displayed) {
@@ -476,12 +476,12 @@ describe('generated config defaults stay pinned to DEFAULT_CONFIG', () => {
   }
 
   it('should keep the JSON template deep-equal to DEFAULT_CONFIG for shared keys', () => {
-    const config = JSON.parse(defaultConfigJson());
+    const config = JSON.parse(renderConfigJson());
     for (const key of [...displayed, 'fileExtensions', 'createExtension', 'migrationsDir']) {
       assert.deepStrictEqual(
         config[key],
         DEFAULT_CONFIG[key],
-        `defaultConfigJson drifted from DEFAULT_CONFIG for '${key}'`,
+        `renderConfigJson drifted from DEFAULT_CONFIG for '${key}'`,
       );
     }
   });

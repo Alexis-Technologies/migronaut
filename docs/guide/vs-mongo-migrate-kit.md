@@ -96,7 +96,7 @@ migronaut up --config ./migronaut.config.js
 ```
 
 with `migrationsCollection: '_mmk_migrations'` and `lockCollection: '_mmk_locks'` in that config —
-or set `MIGRONAUT_COLLECTION` and `MIGRONAUT_LOCK_COLLECTION`. The record shape is a compatible
+or set `MIGRONAUT_MIGRATIONS_COLLECTION` and `MIGRONAUT_LOCK_COLLECTION`. The record shape is a compatible
 superset of `mmk`'s (`firstAppliedAt` and `runId` were added, both optional), so `migronaut status`
 reads an `mmk` changelog directly and rollbacks keep working.
 

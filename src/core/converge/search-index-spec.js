@@ -1,10 +1,10 @@
 const {
   assign,
-  canonical,
-  deepEqual,
+  canonicalize,
+  isDeepEqual,
   isPlainObject,
   toWire,
-  unsendable,
+  findUnsendable,
 } = require('../../utils/canonical.js');
 
 /** The keys of a search field mapping that hold field mappings of their own */
@@ -126,8 +126,8 @@ const searchIndexIssues = (index, path) => {
   if (index.name !== undefined && (typeof index.name !== 'string' || index.name.length === 0)) {
     report('name', 'must be a non-empty string');
   }
-  const typeValid = index.type === undefined || SEARCH_INDEX_TYPE_SET.has(index.type);
-  if (!typeValid) report('type', "must be 'search' or 'vectorSearch'");
+  const isTypeValid = index.type === undefined || SEARCH_INDEX_TYPE_SET.has(index.type);
+  if (!isTypeValid) report('type', "must be 'search' or 'vectorSearch'");
 
   const { definition } = index;
   if (definition === undefined) {
@@ -138,12 +138,12 @@ const searchIndexIssues = (index, path) => {
     report('definition', 'must be an object');
     return issues;
   }
-  const reason = unsendable(definition);
+  const reason = findUnsendable(definition);
   if (reason) {
     report('definition', reason);
     return issues;
   }
-  if (!typeValid) return issues;
+  if (!isTypeValid) return issues;
   if ((index.type ?? DEFAULT_SEARCH_INDEX_TYPE) === 'search') {
     if (Array.isArray(definition.fields) && definition.mappings === undefined) {
       report(
@@ -155,11 +155,11 @@ const searchIndexIssues = (index, path) => {
     }
     return issues;
   }
-  vectorDefinitionIssues(definition, `${path}.definition`, issues);
+  checkVectorDefinition(definition, `${path}.definition`, issues);
   return issues;
 };
 
-const vectorDefinitionIssues = (definition, base, issues) => {
+const checkVectorDefinition = (definition, base, issues) => {
   if (definition.mappings !== undefined && definition.fields === undefined) {
     return void issues.push({
       path: base,
@@ -178,13 +178,13 @@ const vectorDefinitionIssues = (definition, base, issues) => {
   for (let position = 0; position < fields.length; position++) {
     const field = fields[position];
     const fieldPath = `${base}.fields[${position}]`;
-    const usable =
+    const isUsable =
       isPlainObject(field) &&
       typeof field.type === 'string' &&
       field.type.length > 0 &&
       typeof field.path === 'string' &&
       field.path.length > 0;
-    if (!usable) {
+    if (!isUsable) {
       issues.push({ path: fieldPath, message: 'must be an object with a string type and path' });
       continue;
     }
@@ -242,7 +242,7 @@ const isUpdating = (raw, version) => {
   return false;
 };
 
-const shortMessage = (message) => {
+const shortenMessage = (message) => {
   return message.length > MAX_BUILD_MESSAGE_LENGTH
     ? `${message.slice(0, MAX_BUILD_MESSAGE_LENGTH - 1)}…`
     : message;
@@ -260,7 +260,7 @@ const normalizeLiveSearchIndex = (raw) => {
     status: typeof raw.status === 'string' ? raw.status : undefined,
     queryable: raw.queryable === true,
     ...(typeof raw.message === 'string' && raw.message !== ''
-      ? { message: shortMessage(raw.message) }
+      ? { message: shortenMessage(raw.message) }
       : {}),
     ...(typeof version === 'number' ? { version } : {}),
     updating: isUpdating(raw, typeof version === 'number' ? version : undefined),
@@ -285,7 +285,7 @@ const withDefaults = (value, defaults) => {
   return out;
 };
 
-const effectiveVectorField = (field) => {
+const fillVectorFieldDefaults = (field) => {
   if (!isPlainObject(field)) return field;
   const defaults = VECTOR_FIELD_DEFAULTS_BY_TYPE.get(field.type);
   if (!defaults) return field;
@@ -312,7 +312,7 @@ const sortFields = (fields, transform) => {
       field,
       type: `${field?.type ?? ''}`,
       path: `${field?.path ?? ''}`,
-      text: JSON.stringify(canonical(field)),
+      text: JSON.stringify(canonicalize(field)),
     });
   }
   keyed.sort(byTypePathText);
@@ -340,13 +340,13 @@ const byText = (a, b) => compareText(a.text, b.text);
  * too. A list is a set to the server (it reports the types in its own
  * order), so it is sorted.
  */
-const effectiveFieldMapping = (mapping) => {
-  if (Array.isArray(mapping)) return sortMappings(mapping, effectiveFieldMapping);
+const fillFieldMappingDefaults = (mapping) => {
+  if (Array.isArray(mapping)) return sortMappings(mapping, fillFieldMappingDefaults);
   if (!isPlainObject(mapping)) return mapping;
   const defaults = FIELD_DEFAULTS[mapping.type];
   const filled = defaults ? withDefaults(mapping, defaults) : { ...mapping };
-  if (isPlainObject(filled.fields)) filled.fields = effectiveFields(filled.fields);
-  if (isPlainObject(filled.multi)) filled.multi = effectiveFields(filled.multi);
+  if (isPlainObject(filled.fields)) filled.fields = fillFieldsDefaults(filled.fields);
+  if (isPlainObject(filled.multi)) filled.multi = fillFieldsDefaults(filled.multi);
   return filled;
 };
 
@@ -358,7 +358,7 @@ const sortMappings = (mappings, transform) => {
   const keyed = [];
   for (let position = 0; position < mappings.length; position++) {
     const item = transform ? transform(mappings[position]) : mappings[position];
-    keyed.push({ item, text: JSON.stringify(canonical(item)) });
+    keyed.push({ item, text: JSON.stringify(canonicalize(item)) });
   }
   keyed.sort(byText);
   for (let position = 0; position < keyed.length; position++) {
@@ -368,11 +368,11 @@ const sortMappings = (mappings, transform) => {
 };
 
 /** `{ name: mapping }` with every mapping's defaults filled in */
-const effectiveFields = (fields) => {
+const fillFieldsDefaults = (fields) => {
   const out = {};
   const names = Object.keys(fields);
   for (let i = 0; i < names.length; i++) {
-    assign(out, names[i], effectiveFieldMapping(fields[names[i]]));
+    assign(out, names[i], fillFieldMappingDefaults(fields[names[i]]));
   }
   return out;
 };
@@ -382,12 +382,12 @@ const effectiveFields = (fields) => {
  * means by it. Only the defaults are filled; anything else stays as written,
  * so a real difference is never hidden.
  */
-const effectiveDefinition = (type, definition) => {
+const fillDefinitionDefaults = (type, definition) => {
   if (!isPlainObject(definition)) return definition;
   if (type === 'vectorSearch') {
     const filled = withDefaults(definition, { storedSource: false });
     if (Array.isArray(filled.fields)) {
-      filled.fields = sortFields(filled.fields, effectiveVectorField);
+      filled.fields = sortFields(filled.fields, fillVectorFieldDefaults);
     }
     return filled;
   }
@@ -396,7 +396,7 @@ const effectiveDefinition = (type, definition) => {
   if (isPlainObject(filled.mappings)) {
     filled.mappings = withDefaults(filled.mappings, MAPPINGS_DEFAULTS);
     if (isPlainObject(filled.mappings.fields)) {
-      filled.mappings.fields = effectiveFields(filled.mappings.fields);
+      filled.mappings.fields = fillFieldsDefaults(filled.mappings.fields);
     }
   }
   return filled;
@@ -407,7 +407,7 @@ const effectiveDefinition = (type, definition) => {
  * pass: `autoEmbed` the automated-embedding ones, `all` those and the vector
  * ones — to tell a vector field turning into an autoEmbed one.
  */
-const embeddingFields = (definition) => {
+const collectEmbeddingFields = (definition) => {
   const all = new Map();
   const autoEmbed = new Map();
   for (const field of Array.isArray(definition?.fields) ? definition.fields : []) {
@@ -423,7 +423,7 @@ const embeddingFields = (definition) => {
 };
 
 /** Whether two maps hold the same keys */
-const sameKeys = (a, b) => {
+const hasSameKeys = (a, b) => {
   if (a.size !== b.size) return false;
   for (const key of a.keys()) {
     if (!b.has(key)) return false;
@@ -436,9 +436,9 @@ const sameKeys = (a, b) => {
  * automated-embedding field that the server refuses to change in place:
  * `path.attribute` entries (`plot.model`, `plot.type`, `path`), or none.
  */
-const immutableChanges = (declared, live) => {
-  const { all: wantedAll, autoEmbed: wanted } = embeddingFields(declared);
-  const { all: haveAll, autoEmbed: have } = embeddingFields(live);
+const findImmutableChanges = (declared, live) => {
+  const { all: wantedAll, autoEmbed: wanted } = collectEmbeddingFields(declared);
+  const { all: haveAll, autoEmbed: have } = collectEmbeddingFields(live);
   if (wanted.size === 0 && have.size === 0) return [];
   const changes = [];
   for (const entry of wantedAll) {
@@ -450,14 +450,14 @@ const immutableChanges = (declared, live) => {
     }
   }
   if (changes.length > 0) return changes;
-  if (have.size > 0 && !sameKeys(wanted, have)) return ['path'];
+  if (have.size > 0 && !hasSameKeys(wanted, have)) return ['path'];
   for (const entry of wanted) {
     const path = entry[0];
     const field = entry[1];
     const current = have.get(path);
     if (!current) continue;
     for (const attribute of AUTO_EMBED_IMMUTABLE) {
-      if (!deepEqual(field[attribute], current[attribute])) changes.push(`${path}.${attribute}`);
+      if (!isDeepEqual(field[attribute], current[attribute])) changes.push(`${path}.${attribute}`);
     }
   }
   return changes;
@@ -578,7 +578,7 @@ const trimSearchDefinition = (want, have, ignored) => {
 /**
  * The live definition without the options the server reports that the
  * declaration does not set. Both sides have their documented defaults filled
- * in first ({@link effectiveDefinition}), so these are exactly the options
+ * in first ({@link fillDefinitionDefaults}), so these are exactly the options
  * whose default migronaut does not know — a newer mongot writing one into
  * every definition it reports. Compared, they would make every converge
  * "update" the index, and Atlas rebuilds a search index on every update.
@@ -603,7 +603,7 @@ const tolerateServerOptions = (type, want, have) => {
 };
 
 /** The keys of `a` and `b`, once each, sorted */
-const unionKeys = (a, b) => {
+const mergeKeys = (a, b) => {
   const keys = Object.keys(a);
   for (const key of Object.keys(b)) {
     if (!Object.hasOwn(a, key)) keys.push(key);
@@ -618,12 +618,12 @@ const unionKeys = (a, b) => {
  * {@link MAX_DIFF_PATHS} dotted paths, depth first, and `total` how many there
  * are. Objects are walked key by key, lists of the same length item by item;
  * anything else is a leaf — the same value is the same, and only where `===`
- * cannot tell is it compared under {@link canonical} (an `Int32` and a number).
+ * cannot tell is it compared under {@link canonicalize} (an `Int32` and a number).
  */
 const walkDiff = (want, have, path, top, out) => {
   if (want === have) return;
   if (isPlainObject(want) && isPlainObject(have)) {
-    for (const key of unionKeys(want, have)) {
+    for (const key of mergeKeys(want, have)) {
       walkDiff(
         Object.hasOwn(want, key) ? want[key] : undefined,
         Object.hasOwn(have, key) ? have[key] : undefined,
@@ -640,7 +640,7 @@ const walkDiff = (want, have, path, top, out) => {
     }
     return;
   }
-  if (deepEqual(want, have)) return;
+  if (isDeepEqual(want, have)) return;
   out.top.add(top);
   out.total += 1;
   if (out.paths.length < MAX_DIFF_PATHS) out.paths.push(path);
@@ -669,18 +669,18 @@ const compareSearchIndex = (declared, live) => {
       ignored: [],
     };
   }
-  const want = effectiveDefinition(declared.type, declared.definition);
+  const want = fillDefinitionDefaults(declared.type, declared.definition);
   const { have, ignored } = tolerateServerOptions(
     declared.type,
     want,
-    effectiveDefinition(live.type, live.definition),
+    fillDefinitionDefaults(live.type, live.definition),
   );
   // One walk: the top-level keys that differ, and the paths within them.
   const found = { top: new Set(), paths: [], total: 0 };
   walkDiff(want, have, '', undefined, found);
   const diffs = [...found.top];
   const immutable =
-    diffs.length > 0 && declared.type === 'vectorSearch' ? immutableChanges(want, have) : [];
+    diffs.length > 0 && declared.type === 'vectorSearch' ? findImmutableChanges(want, have) : [];
   return {
     diffs,
     paths: found.paths,
@@ -713,8 +713,8 @@ const searchBuildState = (build) => {
   if (ABSENT_STATUSES.has(status)) return 'removing';
   if (build.queryable !== true) return 'building';
   if (build.updating) return 'updating';
-  const ready = status === undefined || status === 'READY' || status === 'UNKNOWN';
-  return ready ? 'serving' : 'building';
+  const isReady = status === undefined || status === 'READY' || status === 'UNKNOWN';
+  return isReady ? 'serving' : 'building';
 };
 
 /**
@@ -773,7 +773,7 @@ module.exports = {
   normalizeDeclaredSearchIndex,
   normalizeLiveSearchIndex,
   isBeingRemoved,
-  effectiveDefinition,
+  fillDefinitionDefaults,
   tolerateServerOptions,
   compareSearchIndex,
   searchBuildState,

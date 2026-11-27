@@ -1,11 +1,11 @@
 const { LockLostError, MigronautError } = require('../../errors/index.js');
-const { documentErrorText, errorText } = require('../../utils/error.js');
+const { formatDocumentError, formatError } = require('../../utils/error.js');
 const { addCounters, processPartition } = require('./engine.js');
 const { STATE_SCHEMA } = require('./store.js');
 const { createAdaptive, createThrottle } = require('./throttle.js');
 const { runWithLock } = require('../lock.js');
-const { assertTransactions, CONTROL_FIELDS, jobFor, planMismatch } = require('./job.js');
-const { anySignal, failState, withSpan } = require('./coordinator.js');
+const { assertTransactions, CONTROL_FIELDS, loadJob, planMismatch } = require('./job.js');
+const { combineSignals, failState, withSpan } = require('./coordinator.js');
 
 /**
  * A lane's slice: claim a partition, rewrite it batch by batch under the
@@ -14,7 +14,7 @@ const { anySignal, failState, withSpan } = require('./coordinator.js');
  */
 
 /** How a slice that threw ended: its lease lost, the lane stopped, or an error */
-const thrownOutcome = (lost, stopped) => {
+const classifyThrow = (lost, stopped) => {
   if (lost) return 'lost';
   return stopped ? 'stopped' : 'error';
 };
@@ -44,7 +44,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
   if (state.schema > STATE_SCHEMA) return { outcome: 'stale', counters: {} };
   let job = null;
   try {
-    job = await jobFor(deps, name, state);
+    job = await loadJob(deps, name, state);
     // A plan this job cannot work (made before a reshard, or by the other
     // partitioner): the coordinator must re-split first.
     if (planMismatch(job, state.plan) !== undefined) return { outcome: 'stale', counters: {} };
@@ -58,7 +58,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
   }
   job.generation = state.generation;
   const now = deps.now ?? Date.now;
-  const deadline = now() + (sliceMs ?? job.spec.sliceMs);
+  const deadlineMs = now() + (sliceMs ?? job.spec.sliceMs);
   const counters = {};
   const throttle = createThrottle({
     spec: { ...job.spec, throttle: job.fns.throttle },
@@ -68,11 +68,11 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
     warned: deps.warned,
     ...(deps.lagWaits ? { lagWaits: deps.lagWaits } : {}),
   });
-  let worked = false;
+  let hasWorked = false;
   for (;;) {
     if (signal?.aborted) return { outcome: 'stopped', counters };
     // The first claim is always made: a slice shorter than its setup still works a batch.
-    if (worked && now() >= deadline) return { outcome: 'yielded', counters };
+    if (hasWorked && now() >= deadlineMs) return { outcome: 'yielded', counters };
     const claimed = await store.claim(name, {
       generation: state.generation,
       plan: state.plan.token,
@@ -85,17 +85,17 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
     });
     if (claimed.exhausted) return { outcome: 'exhausted', counters };
     if (claimed.busy) {
-      return worked
+      return hasWorked
         ? { outcome: 'yielded', counters }
         : { outcome: 'busy', counters, retryAfterMs: claimed.retryAfterMs };
     }
-    worked = true;
+    hasWorked = true;
     const { partition, lease } = claimed;
     job.partitionId = partition._id;
     const adaptive =
       job.spec.adaptive === false
         ? undefined
-        : adaptiveFor(deps, name, partition, job.spec.adaptive);
+        : getAdaptive(deps, name, partition, job.spec.adaptive);
     deps.emit('background:slice:start', {
       migration: name,
       generation: state.generation,
@@ -104,7 +104,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
     });
     const runLease = () => {
       return runWithLock(lease, { logger: deps.logger, owner }, (leaseSignal) => {
-        job.signal = anySignal(signal, leaseSignal);
+        job.signal = combineSignals(signal, leaseSignal);
         return processPartition(job, {
           store,
           lease,
@@ -112,7 +112,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
           db: deps.db,
           client: deps.client,
           signal: job.signal,
-          deadline,
+          deadline: deadlineMs,
           throttle,
           adaptive,
           now,
@@ -161,22 +161,22 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
       // One span per lease held — it exists only once the claim succeeded.
       result = await withSpan(deps, 'slice', name, runLease);
     } catch (error) {
-      const lost = error instanceof LockLostError;
+      const isLost = error instanceof LockLostError;
       // The caller stopped the lane (a shutdown, a deploy): whatever a wait
       // rejected with is the stop, not a fault of the partition — counting it
       // would fail a partition after a few rolling deploys.
-      const stopped = !lost && signal?.aborted === true;
+      const isStopped = !isLost && signal?.aborted === true;
       deps.telemetry?.backgroundSliceEnded({
         name,
         durationMs: now() - sliceStarted,
-        outcome: thrownOutcome(lost, stopped),
-        ...(stopped ? {} : { error }),
+        outcome: classifyThrow(isLost, isStopped),
+        ...(isStopped ? {} : { error }),
       });
-      if (lost) {
+      if (isLost) {
         deps.emit('background:lease:lost', { migration: name, partition: `${partition._id}` });
         return { outcome: 'lost', counters };
       }
-      if (stopped) {
+      if (isStopped) {
         deps.emit('background:slice:end', {
           migration: name,
           partition: `${partition._id}`,
@@ -191,13 +191,13 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
       deps.shardKeyCache?.delete(job.spec.collection);
       const partitionFailed = await store
         .failSlice(lease, {
-          error: documentErrorText(error),
+          error: formatDocumentError(error),
           maxSliceFailures: job.spec.maxSliceFailures,
         })
         .catch((countError) => {
           // The slice's own error is what is thrown; this one is only said.
           deps.logger.debug(
-            `Could not count a failed slice of ${name}: ${errorText(countError)}`,
+            `Could not count a failed slice of ${name}: ${formatError(countError)}`,
             deps.fields({ background: name }),
           );
           return false;
@@ -206,7 +206,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
         migration: name,
         partition: `${partition._id}`,
         outcome: 'error',
-        error: documentErrorText(error),
+        error: formatDocumentError(error),
       });
       if (error instanceof MigronautError) {
         error.context = { ...error.context, background: name, partitionFailed };
@@ -229,15 +229,15 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
     });
     if (result.outcome === 'failed' && result.error) {
       await store
-        .failPartition(lease, { error: documentErrorText(result.error) })
+        .failPartition(lease, { error: formatDocumentError(result.error) })
         .catch((error) => {
           // The state below fails the migration whatever the partition says.
           deps.logger.debug(
-            `Background migration ${name}: could not mark the partition failed — ${errorText(error)}`,
-            deps.fields({ background: name, error: errorText(error) }),
+            `Background migration ${name}: could not mark the partition failed — ${formatError(error)}`,
+            deps.fields({ background: name, error: formatError(error) }),
           );
         });
-      await failState(deps, state, documentErrorText(result.error));
+      await failState(deps, state, formatDocumentError(result.error));
       return { outcome: 'failed', counters, error: result.error };
     }
     if (result.outcome !== 'exhausted') return { outcome: result.outcome, counters };
@@ -252,7 +252,7 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
  * must reach a runner that has been up for days: the controller is made
  * anew, from what the old one had learned, within the new bounds.
  */
-const adaptiveFor = (deps, name, partition, settings) => {
+const getAdaptive = (deps, name, partition, settings) => {
   const cache = deps.adaptiveCache;
   const key = `${name}:${partition.group ?? ''}`;
   const signature =
@@ -268,5 +268,5 @@ const adaptiveFor = (deps, name, partition, settings) => {
 
 module.exports = {
   runSlice,
-  adaptiveFor,
+  getAdaptive,
 };

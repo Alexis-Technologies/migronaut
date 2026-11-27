@@ -4,10 +4,10 @@ const { normalizeDefinition } = require('../../src/core/converge/collections.js'
 const {
   SEARCH_UNAVAILABLE_REASON,
   UNIQUE_REBUILD_REASON,
-  desiredValidator,
+  resolveDesiredValidator,
   managesValidator,
   isDestructive,
-  liveValidator,
+  readLiveValidator,
   needsConfirmation,
   planCollection,
 } = require('../../src/core/converge/plan.js');
@@ -163,11 +163,11 @@ describe('planCollection — validators', () => {
 
   it('should expose the desired and live validator states', () => {
     assert.strictEqual(managesValidator({}), false);
-    assert.strictEqual(desiredValidator({}), null);
+    assert.strictEqual(resolveDesiredValidator({}), null);
     assert.strictEqual(managesValidator({ validator: {} }), true);
-    assert.strictEqual(desiredValidator({ validator: {} }), null);
-    assert.strictEqual(liveValidator(undefined), null);
-    assert.deepStrictEqual(liveValidator({ validator: { a: 1 }, validationAction: 'warn' }), {
+    assert.strictEqual(resolveDesiredValidator({ validator: {} }), null);
+    assert.strictEqual(readLiveValidator(undefined), null);
+    assert.deepStrictEqual(readLiveValidator({ validator: { a: 1 }, validationAction: 'warn' }), {
       validator: { a: 1 },
       validationLevel: 'strict',
       validationAction: 'warn',

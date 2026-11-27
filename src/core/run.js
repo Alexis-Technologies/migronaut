@@ -1,5 +1,5 @@
 const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
+const { formatError } = require('../utils/error.js');
 const { assertLockWaitOptions, withLockWait } = require('./lock-wait.js');
 const { MigratorKit, RECORD_LOCK_WAIT } = require('./migrator.js');
 const { assertRunFlags } = require('./options.js');
@@ -90,7 +90,7 @@ const runMigrations = async (config = {}, options = {}) => {
   try {
     if (signal?.aborted) {
       throw new RunAbortedError('Aborted before the run started', {
-        context: { reason: errorText(signal.reason ?? 'aborted'), results: [] },
+        context: { reason: formatError(signal.reason ?? 'aborted'), results: [] },
       });
     }
     await kit.connect();
@@ -134,7 +134,7 @@ const runMigrations = async (config = {}, options = {}) => {
     kit.off('background:waiting', onWaiting);
     await kit.disconnect().catch((error) => {
       // What the call returns or throws is the answer; a failed close is said at debug.
-      kit.logger.debug(`Could not disconnect: ${errorText(error)}`);
+      kit.logger.debug(`Could not disconnect: ${formatError(error)}`);
     });
   }
 };
@@ -163,7 +163,7 @@ const pendingMigrations = async (config = {}, options = {}) => {
   } finally {
     await kit.disconnect().catch((error) => {
       // What the call returns or throws is the answer; a failed close is said at debug.
-      kit.logger.debug(`Could not disconnect: ${errorText(error)}`);
+      kit.logger.debug(`Could not disconnect: ${formatError(error)}`);
     });
   }
 };

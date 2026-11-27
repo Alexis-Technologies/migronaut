@@ -1,6 +1,6 @@
 const { BackgroundConflictError } = require('../../errors/index.js');
-const { errorText } = require('../../utils/error.js');
-const { control } = require('./controls.js');
+const { formatError } = require('../../utils/error.js');
+const { applyControl } = require('./controls.js');
 const { STATE_SUMMARY, probeHint } = require('./job.js');
 const { excludeBadIds, matchOf } = require('./engine.js');
 const { READ_OPTIONS } = require('../server-info.js');
@@ -39,7 +39,7 @@ const probeOldShape = async (deps, state, hint) => {
  * migration, no version index, a probe that ran out of time) the status is
  * trusted — a scan of the whole collection on every `up` is not an option.
  */
-const stillDirty = async (deps, state) => {
+const isStillDirty = async (deps, state) => {
   const spec = state.spec;
   if (!spec || spec.mode !== 'declarative' || state.direction === 'revert') return false;
   const hint = await probeHint(deps, spec);
@@ -48,7 +48,7 @@ const stillDirty = async (deps, state) => {
     return (await probeOldShape(deps, state, hint)) !== null;
   } catch (error) {
     deps.logger.warn(
-      `⚠ Could not check ${state._id} for old-shape documents: ${errorText(error)} — trusting its status`,
+      `⚠ Could not check ${state._id} for old-shape documents: ${formatError(error)} — trusting its status`,
       deps.fields({ background: state._id }),
     );
     return false;
@@ -96,7 +96,7 @@ const verify = async (deps, { onDrift = 'reopen', collections, streaming } = {})
       found = await probeOldShape(deps, state, hint);
     } catch (error) {
       deps.logger.warn(
-        `⚠ Drift check of ${state._id} failed: ${errorText(error)}`,
+        `⚠ Drift check of ${state._id} failed: ${formatError(error)}`,
         deps.fields({ background: state._id }),
       );
       result.skipped += 1;
@@ -107,14 +107,14 @@ const verify = async (deps, { onDrift = 'reopen', collections, streaming } = {})
     const action = onDrift === 'reopen' ? 'reopened' : 'reported';
     if (action === 'reopened') {
       try {
-        await control(deps, state._id, 'retry', { reason: 'old-shape documents reappeared' });
+        await applyControl(deps, state._id, 'retry', { reason: 'old-shape documents reappeared' });
       } catch (error) {
         // Someone moved it since the list was read — paused or cancelled it,
         // or another runner's watch reopened it first. Its drift is theirs to
         // see; the migrations after it in the list are still this round's.
         if (!(error instanceof BackgroundConflictError)) throw error;
         deps.logger.debug(
-          `Drift check of ${state._id}: not reopened — ${errorText(error)}`,
+          `Drift check of ${state._id}: not reopened — ${formatError(error)}`,
           deps.fields({ background: state._id }),
         );
         continue;
@@ -137,4 +137,4 @@ const verify = async (deps, { onDrift = 'reopen', collections, streaming } = {})
   return result;
 };
 
-module.exports = { probeOldShape, stillDirty, verify };
+module.exports = { probeOldShape, isStillDirty, verify };

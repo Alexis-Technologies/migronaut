@@ -120,9 +120,9 @@ src/
 ├── index.js                 # Public API barrel of the package root
 ├── errors/index.js          # MigronautError base + one subclass per error code
 ├── versioning/              # The versioning runtime — requires nothing but its siblings and errors/
-│   ├── internal.js          # PURE: plain-object/BSON helpers, counts, BSON-aware sameValue, touched fields
-│   ├── config.js            # PURE: versioning keys, defaults, validation, resolve, versioningOf
-│   ├── document.js          # PURE: the shared contract — version/revision filters, occFilter, stampedDiff
+│   ├── internal.js          # PURE: plain-object/BSON helpers, counts, BSON-aware isSameValue, touched fields
+│   ├── config.js            # PURE: versioning keys, defaults, validation, resolve, findVersioning
+│   ├── document.js          # PURE: the shared contract — version/revision filters, buildOccFilter, buildStampedDiff
 │   ├── occ.js               # updateWithRevision & co., retryOnConflict, bumpRevision
 │   ├── registry.js          # defineShapes() — stamp, onInsert, stampUpsert, upcaster, plugin
 │   ├── upcaster.js          # The in-memory upcaster (and its step() for background migrations)
@@ -164,7 +164,7 @@ src/
 │   │   └── versioning-spec.js # PURE: a collection's versioning as validator rules, an index, a floor guard
 │   └── background/          # Background migrations (its own CLAUDE.md)
 │       ├── host.js          # BackgroundHost — the kit's background side: stores, deps, caches, controls
-│       ├── job.js           # jobFor(): what one runs as — spec, match, the partitioner; planMismatch
+│       ├── job.js           # loadJob(): what one runs as — spec, match, the partitioner; planMismatch
 │       ├── coordinator.js   # One coordinator step: plan, wait for lanes, finalize; requires
 │       ├── lane.js          # runSlice(): a lane's slice over the partitions
 │       ├── controls.js      # pause, resume, cancel, retry, repin, the wait for lanes
@@ -172,7 +172,7 @@ src/
 │       ├── partition.js     # The _id-range partitioner (sampled _id quantiles per BSON bracket)
 │       ├── shard.js         # The shard-aware partitioner, targeted writes, the shard-key guard
 │       ├── store.js         # BackgroundStore — state, partitions, leases (= slots), fenced checkpoints
-│       ├── engine.js        # One batch / one partition: read, transform, stampedDiff, OCC write
+│       ├── engine.js        # One batch / one partition: read, transform, buildStampedDiff, OCC write
 │       ├── throttle.js      # pauseMs, the throttle hook, replication lag, the AIMD controller
 │       ├── drift.js         # The drift probes: the requires guard's, the poll's (verifyBackground)
 │       ├── audit.js         # What audit says about background migrations
@@ -192,22 +192,22 @@ src/
 │   ├── checksum.js          # SHA-256 file hashing
 │   ├── redact.js            # Mask credentials (userinfo + query secrets) leaving the process; redactBounded
 │   ├── sanitize.js          # Strip terminal control chars (C0 + full C1) from untrusted text
-│   ├── error.js             # errorText()/errorWithCause() — stringify caught errors, redaction built in
+│   ├── error.js             # formatError()/formatErrorWithCause() — stringify caught errors, redaction built in
 │   ├── actor.js             # requestedBy/reason — limits, validation, changelog fields
 │   ├── job-ref.js           # job: { id, groupId? } — the queue job a run works for: limits, fields
-│   ├── canonical.js         # canonical()/deepEqual()/toWire() — declared vs. stored value comparison
+│   ├── canonical.js         # canonicalize()/isDeepEqual()/toWire() — declared vs. stored value comparison
 │   ├── collection-name.js   # isCollectionName() — the one rule for a usable collection name
 │   ├── id.js                # The one place an id is minted — randomUUID, or the user's generateId
 │   ├── loader.js            # Dynamic-import user files (migrations, collection definitions)
 │   ├── migration-name.js    # isBareFilename() — the one rule for a safe migration name
 │   ├── telemetry.js         # OpenTelemetry through the injected tracer/meter — guarded spans + instruments
 │   ├── template.js          # Generate migration files & config files
-│   ├── user.js              # safeUsername() — MIGRONAUT_USER, else the OS user
+│   ├── user.js              # resolveUsername() — MIGRONAUT_USER, else the OS user
 │   └── date.js              # Dependency-free timestamp formatting
 ├── cli/
 │   ├── index.js             # CLI root: registers commands + global flags
 │   ├── args.js              # Zero-dependency commander-compatible arg parser
-│   ├── shared.js            # withMigrator(), confirm(), emitJson(), partialFromOpts()
+│   ├── shared.js            # withMigrator(), confirm(), emitJson(), toPartialConfig()
 │   ├── spinner.js           # Minimal TTY spinner — start/stop, no-op when piped
 │   ├── table.js             # Box-drawing table renderers (status/list/import/converge)
 │   └── commands/*.js        # One file per command — thin wrappers over MigratorKit
@@ -304,11 +304,11 @@ bin/migronaut.js
   └─ run(process.argv)                              [cli/index.js]
        └─ args.js parses → up command action        [cli/commands/up.js]
             ├─ pre-flight validation (--force/--json rules) — presentation only
-            └─ withMigrator(opts, fn, {spinner})    [cli/shared.js]
-                 ├─ partialFromOpts(opts) → Partial<MigronautConfig>   (flags only)
+            └─ withMigrator(flags, work, {spinner}) [cli/shared.js]
+                 ├─ toPartialConfig(flags) → Partial<MigronautConfig>  (flags only)
                  ├─ new MigratorKit(partial, {progress: spinnerReporter})
                  ├─ migrator.connect()              ← spinner: "Connecting…"
-                 └─ fn(migrator):
+                 └─ work(migrator):
                       └─ migrator.up(file, {noLock, force, step})  [core/migrator.js]
                            ├─ ensureConfig()         → loadConfig()          [config.js]
                            │     flags > env > file > defaults, built-in validation
@@ -388,7 +388,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
   - The env layer is the table-driven `ENV_KEYS` (`{env, path, parse}`) — every *scalar* config key
     has an entry, and a unit test pins the table against `CONFIG_KEYS` so the two cannot drift.
     `parse` fails closed (`ConfigInvalidError` naming the variable) rather than coercing: a typo in
-    `MIGRONAUT_STRICT`/`MIGRONAUT_LOCK_TTL`/`MIGRONAUT_CREATE_EXTENSION` must never silently
+    `MIGRONAUT_STRICT`/`MIGRONAUT_LOCK_TTL_SECONDS`/`MIGRONAUT_CREATE_EXTENSION` must never silently
     disable a safety setting. `MIGRONAUT_ENV_FILE` is the one env-settable option outside the
     table — it selects which `.env` to load, so it has to resolve before the table runs.
   - The config file may export an **object or a (sync/async) factory function** — the factory is
@@ -401,7 +401,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
   - `generateId` is code-only like those, but it has exactly one valid shape, so `validateConfig`
     checks it (`must be a function`) outside the `CONFIG_KEYS` table — the table is pinned against
     the JSON schema and the env table, and a function belongs in neither.
-  - `telemetry` is checked the same way (`telemetryIssues`): an object whose `tracer`, if present,
+  - `telemetry` is checked the same way (`checkTelemetry`): an object whose `tracer`, if present,
     has `startActiveSpan`, and whose `meter` has `createHistogram` and `createCounter`. Absent,
     `null` and `{}` all mean "off", so a config that builds it conditionally needs no special
     case. A stray key inside it (the whole `@opentelemetry/api` module is the usual one) is
@@ -476,13 +476,13 @@ Each entry: **responsibility · key exports · nuances you must know.**
 ### `src/core/migration-logger.js` — what a migration logs
 - **Responsibility:** `ctx.run` and `ctx.logger`, and the `migration:log` event. Mechanism only —
   the sink is the kit's resolved logger, the emitter the kit's event channel.
-- **Key exports:** `runInfo(base, direction)` / `migrationRunInfo(run, { migration, batch, attempt })`
-  (frozen `ctx.run`), `correlationOf(kind, info, direction)` — **the one mapping** from `ctx.run`
+- **Key exports:** `runInfo(base, direction)` / `buildRunInfo(run, { migration, batch, attempt })`
+  (frozen `ctx.run`), `resolveCorrelation(kind, info, direction)` — **the one mapping** from `ctx.run`
   or a background migration's `ctx.background` to what a line binds and what the event carries
   (`id`→`runId`, `name`→`migration`; `requestedBy`/`reason` on the event only) —
   `createMigrationLogger(...)`, `sequence()`, `notices()`; `createRunLog({ id, job, actor, sink,
   emitter })` — an ordinary run's log side (its job as a copy and as log fields, `ctx.run` once per
-  direction, `attempt(direction, …)` → `{ run, logger }`) — and `backgroundLogs({ sink, emitter,
+  direction, `attempt(direction, …)` → `{ run, logger }`) — and `createBackgroundLogs({ sink, emitter,
   dryRun })`, the `logs(info, direction)` of a lane slice, a watcher or a dry run.
 - **Nuances:** every call is a line on the sink with the correlation merged over the user's fields;
   only fields with `userland: true` (exactly) also emit, and only while someone listens (`wanted()`
@@ -575,9 +575,9 @@ Each entry: **responsibility · key exports · nuances you must know.**
 
 ### `src/core/sequence.js` — the migration sequence
 - **Responsibility:** the migration files on disk (`listMigrationFiles` — dotfiles, directories and
-  `.d.ts` files skipped), measured against the applied names: `pendingIn` (a failed trace counts
-  as pending), `truncateAtTarget` (`--to`), `lateArrivals` (the out-of-order check's input),
-  `revertOrder`, and `blockedError` — the one wording of an ordered step's refusal. Pure apart from
+  `.d.ts` files skipped), measured against the applied names: `selectPending` (a failed trace counts
+  as pending), `truncateAtTarget` (`--to`), `findLateArrivals` (the out-of-order check's input),
+  `revertOrder`, and `createBlockedError` — the one wording of an ordered step's refusal. Pure apart from
   the directory read; refusing, warning or waiting is the kit's call.
 
 ### `src/core/run-recorder.js` — the record of a locked run
@@ -611,7 +611,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
 
 ### `src/core/converge/collections.js` — declared collections
 - **Responsibility:** everything about a collection definition that is not the database:
-  `definitionIssues` / `collectionsIssues` (strict validation — unknown keys and index options are
+  `checkDefinition` / `checkCollections` (strict validation — unknown keys and index options are
   errors, with nested paths like `collections[2].indexes[0].key` or `users.ts: indexes[0]`),
   `normalizeDefinition` (the planner's shape), `loadCollectionsDir` and `resolveDefinitions`
   (inline definitions first, then one file per collection; a name declared twice is an issue).
@@ -620,10 +620,10 @@ Each entry: **responsibility · key exports · nuances you must know.**
   is refused rather than called (a Mongoose model is a function).
 
 ### `src/core/converge/index-spec.js` — declared index vs live index (pure)
-- **Responsibility:** `indexIssues` (the option whitelist), `normalizeDeclaredIndex` (effective
+- **Responsibility:** `checkIndex` (the option whitelist), `normalizeDeclaredIndex` (effective
   name, server-form key, the spec to send — key as a `Map`, `false` booleans dropped),
-  `normalizeLiveIndex`, `compareIndex` (`{ diffs, inPlace, rebuild }`), `sameSignature`,
-  `defaultIndexName` (the driver's rule), `restoreSpec`.
+  `normalizeLiveIndex`, `compareIndex` (`{ diffs, inPlace, rebuild }`), `isSameSignature`,
+  `buildDefaultIndexName` (the driver's rule), `restoreSpec`.
 - **The invariant:** what the server stores for a declaration must compare as unchanged against
   that declaration — see [§6.7](#67-declared-collections-converge).
 
@@ -633,7 +633,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
   `normalizeDeclaredSearchIndex` (default name `default`, type `search`),
   `normalizeLiveSearchIndex` (a `$listSearchIndexes` document — type inferred where a self-managed
   `mongot` reports none, `updating` from a staged index or an older served version),
-  `effectiveDefinition` (`SEARCH_DEFAULTS` & co. filled in), `tolerateServerOptions`,
+  `fillDefinitionDefaults` (`SEARCH_DEFAULTS` & co. filled in), `tolerateServerOptions`,
   `compareSearchIndex` (`{ diffs, paths, more, typeChange, immutable, ignored }`),
   `searchBuildState` (`serving`/`updating`/`building`/`stale`/`failed`/`removing` — the one word
   every reporter uses), `isSearchIndexReady`, `searchBuild`, `searchIndexSpec`.
@@ -653,7 +653,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
   `listSearchIndexes`, `probeSearch` (does the server have Search at all — see
   [§6.7](#67-declared-collections-converge)), `isSearchUnavailable` / `searchHint` (what the
   server's errors mean), `isTransientError` (a read worth trying again), and
-  `awaitSearchIndexes` / `nextPollDelay` (the optional wait). Returns outcomes; converge/converge.js
+  `awaitSearchIndexes` / `computePollDelay` (the optional wait). Returns outcomes; converge/converge.js
   decides what they do to a run.
 
 ### `src/core/converge/search-run.js` — the search half of a converge run
@@ -750,7 +750,7 @@ range).
 The `./versioning` subpath: see [§6.9](#69-document-versioning-and-the-versioning-subpath). It
 requires nothing outside itself and `src/errors/` — no core, no `mongodb`, no `mongoose` (a
 test pins that). `document.js` is the contract the background engine shares with application code
-(version and revision filters, `occFilter`, `stampedDiff`), so a background migration and a
+(version and revision filters, `buildOccFilter`, `buildStampedDiff`), so a background migration and a
 repository write by the same rules.
 
 ### `src/bullmq/` — the queue adapter
@@ -759,7 +759,7 @@ the design.
 - **`jobs.js`** — the contract shared by producer and worker: job names
   (`up`/`down`/`sync`/`converge`, and `background`/`background-lane`/`background-verify` on the
   background queue), the versioned data shape, `parseJobData` (validation of
-  *untrusted* payloads), `dedupId` / `convergeDedupId`, the job and scheduler templates.
+  *untrusted* payloads), `dedupId` / `buildConvergeDedupId`, the job and scheduler templates.
 - **`producer.js`** — `planUpJobs`/`planDownJobs` (the plan *is* `kit.dryRun`, so it can never
   disagree with a run), `enqueueUp`/`enqueueDown` (one atomic `addBulk`, returns the group
   handle) and `enqueueConverge`. The group id comes from `kit.generateId()`, so it follows the
@@ -795,19 +795,19 @@ the design.
 - **redact.js / error.js** — `redactUris`/`redactDeep` mask `user:password@` in any string leaving
   the process (`redactBounded` is `redactDeep` within bounds, for data that leaves as a document —
   what a `migration:log` event's `data` is: an allowlist of values kept as they are, an `Error` as
-  plain data); `errorText(error)` is the single chokepoint for stringifying caught errors, with
-  redaction built in. Use it instead of `error.message` everywhere. `errorWithCause(error)` adds the
+  plain data); `formatError(error)` is the single chokepoint for stringifying caught errors, with
+  redaction built in. Use it instead of `error.message` everywhere. `formatErrorWithCause(error)` adds the
   wrapped `context.cause` (which migration *and* why) — the changelog's failure trace and a failed
   span's status message.
-- **actor.js** — `requestedBy` / `reason`: their limits (`ACTOR_LIMITS`), `actorIssue`,
-  `pickActor`, and `actorFields` (the changelog field names, `revert`-prefixed for a rollback).
+- **actor.js** — `requestedBy` / `reason`: their limits (`ACTOR_LIMITS`), `checkActor`,
+  `pickActor`, and `toActorFields` (the changelog field names, `revert`-prefixed for a rollback).
   Shared by the kit's options and the queue's job contract, so a producer cannot send what its
   worker refuses.
 - **job-ref.js** — `job: { id, groupId? }`, the queue job a run works for: `JOB_REF_LIMITS`
-  (`id` ≤ 1024 — custom BullMQ ids can be long — `groupId` ≤ `MAX_ID_LENGTH`), `jobRefIssue` (a
-  lane's `{ id }` refuses `groupId`) and `jobFields` (→ `{ jobId, groupId? }`). In `utils/` so the
+  (`id` ≤ 1024 — custom BullMQ ids can be long — `groupId` ≤ `MAX_ID_LENGTH`), `checkJobRef` (a
+  lane's `{ id }` refuses `groupId`) and `toJobFields` (→ `{ jobId, groupId? }`). In `utils/` so the
   queue adapter can check what it passes without requiring a core mechanism module.
-- **id.js** — the only module that mints an identifier. `randomId()` is the default
+- **id.js** — the only module that mints an identifier. `createRandomId()` is the default
   (`crypto.randomUUID()`); `createIdGenerator(generateId)` wraps the user's function so that every
   call is bare (no arguments, no receiver), synchronous, and checked by `assertId` (a non-empty
   string of at most `MAX_ID_LENGTH` = 128 characters — the same limit a queue worker enforces on a
@@ -817,20 +817,20 @@ the design.
   into what the kit reports through: `open(name, attributes, fn)` (run `fn` with a new span active;
   the caller ends it), `wrap(...)` (the same, ended when `fn` settles), and one method per metric
   (`runEnded`, `migrationEnded`, `lockAcquired`, `lockRefused`, `lockLost`). Every call into the
-  SDK goes through one `safe()`, and `open` runs the work exactly once whatever the tracer does —
+  SDK goes through one `callSafely()`, and `open` runs the work exactly once whatever the tracer does —
   throws before calling back, throws after, calls back twice or late. A failure becomes
-  `setStatus({ code: 2, message })` with the message through `errorText` (plus the redacted
+  `setStatus({ code: 2, message })` with the message through `formatError` (plus the redacted
   `context.cause`) and `error.type`; `recordException` and span events are not used. The span and
   metric names, the attribute keys, the histogram buckets (seconds) and the `SPAN_STATUS_ERROR = 2`
   constant all live here — nothing else in `src/` knows an OpenTelemetry name.
 - **loader.js** — `loadMigrationFile(filepath)`: dynamic `import()`, `mod.default ?? mod` for CJS,
   validates `up`/`down` are functions. Translates the `.ts`-can't-load failure into a clear error —
   see the [loader deep dive](#64-the-loader-and-the-ts-runtime-caveat). `importUserFile` (the
-  `reload` cache-busting import) and `tsLoadMessageOrNull` are shared with the collection
+  `reload` cache-busting import) and `explainTsLoad` are shared with the collection
   definition loader.
-- **canonical.js** — `canonical(value)` maps a declared value and what the server returns onto one
+- **canonical.js** — `canonicalize(value)` maps a declared value and what the server returns onto one
   key-sorted, JSON-safe shape (BSON number wrappers → numbers, `undefined` properties dropped,
-  arrays kept in order), so `deepEqual` is a string comparison; `toWire` strips `undefined` from
+  arrays kept in order), so `isDeepEqual` is a string comparison; `toWire` strips `undefined` from
   what converge sends, which a client with `ignoreUndefined: false` would otherwise store as `null`.
 - **collection-name.js** — `isCollectionName`, moved out of `config.js` so `core/converge/collections.js`
   can use it without a require cycle (`config.js` re-exports it).
@@ -863,7 +863,7 @@ the design.
     `fn` gets `{ logger, json, opts, spinner, stopRequested }` — the last two for a command that
     reads, asks, then acts (`converge`): a signal during the prompt makes `migrator.stop()` a
     no-op, so the command checks `stopRequested()` itself.
-  - `partialFromOpts` — flags → `Partial<MigronautConfig>`.
+  - `toPartialConfig` — flags → `Partial<MigronautConfig>`.
   - `emitJson` — one JSON doc to stdout.
   - `confirm` — `y/N` prompt via `node:readline/promises`.
 - **spinner.js** — minimal spinner with the `start(text)`/`stop()` surface, writing to stderr;
@@ -878,7 +878,7 @@ the design.
 ### `bin/migronaut.js`
 - The CLI shebang entry: require `run`, call it with `process.argv`, and hold the last-resort
   handlers — EPIPE-tolerant stream error handlers (a closed pipe after printing what fit is
-  success), `unhandledRejection`/`uncaughtException` formatted through `errorText` +
+  success), `unhandledRejection`/`uncaughtException` formatted through `formatError` +
   `sanitizeTerminal` so even an escaped error never prints a raw credentialed URI or terminal
   escapes. The shipped binary **is** this file — plain CJS with a `#!/usr/bin/env node` shebang,
   no build.
@@ -933,7 +933,7 @@ else would renew or release that document before its TTL.
 The two fields do different jobs. `owner` is the **run id** — the kit passes it in, so the lock
 document, the changelog records and the log lines of one run carry one value. Its format, and
 therefore its uniqueness, belongs to the user's `generateId`. `nonce` is minted by `acquire()`
-itself (`randomId()`, never the user's generator) and exists for exactly that reason: with
+itself (`createRandomId()`, never the user's generator) and exists for exactly that reason: with
 `owner` alone, a generator that hands two runs the same id — `() => process.env.DEPLOY_ID`, or a
 counter that starts at 1 in every process — would let the second run pass the readback and migrate
 alongside the first, then delete the first run's lock on its way out. Correlation is the user's to
@@ -1009,7 +1009,7 @@ loaded* needs.
 **The caveat that confuses everyone:** the *shipped* CLI (`bin/migronaut.js`) runs as plain Node,
 with no bundler and no `tsx` at runtime. So a `.ts` migration imports natively only on **Node ≥ 22.18**
 (built-in type stripping) or under a user-provided loader such as `tsx`. On older Node, `import('foo.ts')`
-throws `ERR_UNKNOWN_FILE_EXTENSION`. `tsLoadErrorOrNull()` detects exactly that and rethrows an
+throws `ERR_UNKNOWN_FILE_EXTENSION`. `toTsLoadError()` detects exactly that and rethrows an
 actionable `MigrationInvalidExportError` ("use Node ≥ 22.18 / a TS loader / a .js file") instead of a
 cryptic Node error. This is why `createExtension` defaults to `'js'`. The real-world behavior is
 verified by [tests/integration/runtime-ts.test.js](tests/integration/runtime-ts.test.js), which spawns
@@ -1223,10 +1223,10 @@ flowchart LR
 **What a migration logs.** Each run is told its job (`job: { id, groupId }`; a lane's slice
 `{ id }`), so `ctx.run`, the run's lines and its `migration:log` events name it. The processors
 listen to `migration:log` and write `userland: true` lines into the job's log (`✎ …`,
-`userlandRow`: one line — breaks shown as `⏎`, control characters dropped — ≤ 1024 characters,
+`formatUserlandRow`: one line — breaks shown as `⏎`, control characters dropped — ≤ 1024 characters,
 the data's JSON written only that far), up to `userlandLogRows` per job (a lane: per slice; default
 1000), the rest counted in one closing row. The migration processor matches by **job id and run
-id** (`ownLine`), not by `current` alone — a body that outlived its timeout may still log while the
+id** (`isOwnLine`), not by `current` alone — a body that outlived its timeout may still log while the
 next job runs, or while the same job runs again after it was put back in the queue — and seals a
 job before its final flush, so no row lands after BullMQ removed it. A background migration an
 `up` drives inline (`backgroundInline`) logs from lanes of its own, which carry the run's
@@ -1267,7 +1267,7 @@ filled in (`3`, `false`, `false`) so a live strength-2 index never passes for `{
 an undeclared one must equal the collection default, `{ locale: 'simple' }` means none; a compound
 `Map` key may hold an integer-like field only first (the driver reads keys back as plain
 objects, which move such fields to the front); key directions compare by sign, TTLs by `Number()`;
-validators via `canonical` (verbatim storage, any key order). Reads force primary and BSON
+validators via `canonicalize` (verbatim storage, any key order). Reads force primary and BSON
 promotion, so an injected client's settings cannot make everything look changed. And because one
 server version is what CI proves, a runtime **fixed-point check** re-plans each collection after
 its steps: anything still differing goes to `result.unstable` and a warning, never into a loop.
@@ -1287,7 +1287,7 @@ best-effort, with the run id, who and where, `requestedBy`/`reason`, and each ro
 The collection and its `startedAt` index are created by the first entry, never at connect.
 
 **What the server can do decides how.** `readServer` asks `hello` (a `mongos`?) and `buildInfo` (the
-version) once per run. The version feeds `inPlaceCapabilities`: unique-ization by `collMod`
+version) once per run. The version feeds `resolveInPlaceCapabilities`: unique-ization by `collMod`
 (`prepareUnique` → `unique`, 7.0+, rolled back on duplicates) and adding a TTL (5.1+) become
 `modify` steps; behind a `mongos` the shard keys are read so prune keeps their indexes (and a
 refused drop is kept, not failed).
@@ -1380,7 +1380,7 @@ flowchart TB
   ST[("&lt;backgroundCollection&gt;<br/>status · plan · pass · totals")]
   PA[("…_partitions<br/>range · cursor · counters · lease")]
   WA[("…_watch<br/>resume tokens")]
-  DOCS[("the collection<br/>stampedDiff under the OCC filter")]
+  DOCS[("the collection<br/>buildStampedDiff under the OCC filter")]
   UP --> ST
   RT --> COORD
   RT --> LANE
@@ -1415,7 +1415,7 @@ Completion is decided by that count alone; partitions only spread the work. The 
 are a pure table (`background/spec.js`).
 
 **One batch.** Read through the version index (`READ_OPTIONS` — the transform sees plain JS
-values), transform a copy, `stampedDiff` it against what was read — `$set` only the top-level
+values), transform a copy, `buildStampedDiff` it against what was read — `$set` only the top-level
 fields that changed, `$unset` those that went, `$set __v`, `$inc __rev` — and write with the
 optimistic filter (`_id`, the exact version and revision read; on a sharded collection the shard
 key too). A write that matched nothing is re-read: still old → transformed again (up to
@@ -1704,7 +1704,7 @@ The high-impact ones for code changes:
   heartbeat therefore sit outside the run span — under whatever span was active around the call.
 - **The span status code is the literal `2`, and no exception is recorded.** `SpanStatusCode`
   lives in a package migronaut never imports; and `span.recordException(error)` would ship the
-  raw message and stack past `errorText` — the status message is the redacted record.
+  raw message and stack past `formatError` — the status message is the redacted record.
 - **A span's status is never set to OK.** OpenTelemetry leaves that to the application; a library
   that succeeds leaves it unset.
 - **`telemetry.open` takes its result from the callback, not from the tracer**, and remembers
@@ -1805,7 +1805,7 @@ The high-impact ones for code changes:
 - **Lanes complete; they do not fail.** On the queue a lane completes for every outcome the kit
   recorded and only gives up after `maxLaneRetries`; its coordinator decides from MongoDB. A lane
   job id is new for every spawn and coordinators are deduplicated, never lanes under a parent.
-- **`stampedDiff` writes only what changed.** A full replace would rewrite every field the engine
+- **`buildStampedDiff` writes only what changed.** A full replace would rewrite every field the engine
   read through `READ_OPTIONS` with its promoted JS type; the diff leaves them as they are. A changed
   nested field rewrites its whole top-level subdocument.
 - **No `maximum` on the version**, and `moderate` for a validator synthesized for versioning alone:
@@ -1815,8 +1815,8 @@ The high-impact ones for code changes:
 - **Errors speak the server's words where driver 7 put its own over them.** From 7.x the driver
   replaces any refused write of code 20 (IllegalOperation) with "This MongoDB deployment does not
   support retryable writes. Please add retryWrites=false…" — no code, the server's error under
-  `originalError` (6.x did so only on a retried write). `serverErrorOf` (utils/error.js) reads
-  through it: `errorText` prints the server's message, and `isTransactionsUnsupported` judges by
+  `originalError` (6.x did so only on a retried write). `unwrapServerError` (utils/error.js) reads
+  through it: `formatError` prints the server's message, and `isTransactionsUnsupported` judges by
   the server's error — told by the driver's alone, a standalone server refusing a transaction was
   `ALX_ERR_MIGRATION_EXECUTION_FAILED` with advice that does not apply. The sharded suite's probe for a
   refused shard-key change reads the same way.
@@ -1838,7 +1838,7 @@ The high-impact ones for code changes:
 - **`ctx.background` is frozen and carries the lane.** `runId` is the lane's (or the watcher's)
   owner — the runId of its `background:*` events — taken from the deps' explicit `runId` (the
   watcher's deps override `owner` with a string). `attempt` counts transactions where the engine
-  runs user code again in a new one: each turn of `transactionalBatch`, each try of a
+  runs user code again in a new one: each turn of `writeTransactionalBatch`, each try of a
   transactional `step`, each `withTransaction` callback of the watcher's rewrite; it is 1 for the
   conflict rounds of a plain batch. A dry run's logger marks lines `dryRun: true` and has no
   emitter. Lanes an `up` drives inline (`backgroundInline`) get the run's job — `jobId` **and**

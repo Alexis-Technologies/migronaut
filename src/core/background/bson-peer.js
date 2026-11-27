@@ -15,9 +15,9 @@ const loadBson = () => {
 };
 
 /** The size of `value` as a BSON document, in bytes */
-const bsonSize = (value) => loadBson().calculateObjectSize(value);
+const measureBsonSize = (value) => loadBson().calculateObjectSize(value);
 
 /** `value` as relaxed EJSON — plain JSON a person can read, types tagged where JSON has none */
 const toRelaxedEjson = (value) => loadBson().EJSON.serialize(value, { relaxed: true });
 
-module.exports = { loadBson, bsonSize, toRelaxedEjson };
+module.exports = { loadBson, measureBsonSize, toRelaxedEjson };

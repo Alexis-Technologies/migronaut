@@ -1,7 +1,7 @@
 const fs = require('node:fs/promises');
 
 const { ConfigInvalidError } = require('../errors/index.js');
-const { contextPath } = require('./error.js');
+const { toContextPath } = require('./error.js');
 
 /** Larger than any sane `.env`, JSON config or template */
 const MAX_SMALL_FILE_BYTES = 1024 * 1024;
@@ -27,12 +27,12 @@ const readSmallFile = async (filepath, what) => {
     const stats = await handle.stat();
     if (!stats.isFile()) {
       throw new ConfigInvalidError(`${what} is not a regular file`, {
-        context: { path: contextPath(filepath) },
+        context: { path: toContextPath(filepath) },
       });
     }
     if (stats.size > MAX_SMALL_FILE_BYTES) {
       throw new ConfigInvalidError(`${what} is too large (max 1 MB)`, {
-        context: { path: contextPath(filepath), size: stats.size },
+        context: { path: toContextPath(filepath), size: stats.size },
       });
     }
     return await handle.readFile('utf8');

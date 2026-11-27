@@ -1,5 +1,5 @@
 const { mapLimit } = require('../../utils/concurrency.js');
-const { errorText, isUnauthorized } = require('../../utils/error.js');
+const { formatError, isUnauthorized } = require('../../utils/error.js');
 const {
   isSearchIndexReady,
   normalizeLiveSearchIndex,
@@ -95,13 +95,13 @@ const TRANSIENT_LABELS = [
 const isSearchUnavailable = (error) => {
   if (SEARCH_UNAVAILABLE_CODES.has(error?.code)) return true;
   if (error?.codeName === 'SearchNotEnabled') return true;
-  return SEARCH_UNAVAILABLE_MESSAGE.test(errorText(error));
+  return SEARCH_UNAVAILABLE_MESSAGE.test(formatError(error));
 };
 
 /** What usually fixes the server error behind a failed search index command */
 const searchHint = (error) => {
   if (isSearchUnavailable(error)) return SEARCH_UNAVAILABLE_HINT;
-  const text = errorText(error);
+  const text = formatError(error);
   if (NEEDS_TYPE.test(text)) return VECTOR_UPDATE_HINT;
   if (isUnauthorized(error)) {
     return (
@@ -153,8 +153,9 @@ const searchManagement = async (db) => {
     return typeof value === 'string' ? value.length > 0 : undefined;
   } catch (error) {
     // "no option found to get" — with its code on 7.0, without one on 5.0/6.0.
-    const unknown = error?.code === INVALID_OPTIONS || /no option found/i.test(errorText(error));
-    return unknown ? false : undefined;
+    const isUnknown =
+      error?.code === INVALID_OPTIONS || /no option found/i.test(formatError(error));
+    return isUnknown ? false : undefined;
   }
 };
 
@@ -188,7 +189,7 @@ const probeSearch = async (db, server, { collection, readOptions }) => {
     listed = await listSearchIndexes(db, collection, readOptions);
   } catch (error) {
     if (!isSearchUnavailable(error)) throw error;
-    return { available: false, evidence: 'error', reason: errorText(error) };
+    return { available: false, evidence: 'error', reason: formatError(error) };
   }
   if (listed.length > 0 || isVersionAtLeast(version, 7, 2, 1)) {
     return { available: true, evidence: 'listed', listed };
@@ -214,13 +215,13 @@ const updateSearchIndex = async (db, collection, step) => {
   try {
     await db.command(command);
   } catch (error) {
-    if (step.type !== 'vectorSearch' || !NEEDS_TYPE.test(errorText(error))) throw error;
+    if (step.type !== 'vectorSearch' || !NEEDS_TYPE.test(formatError(error))) throw error;
     try {
       await db.command({ ...command, type: step.type });
     } catch (retryError) {
       // A server that does not know the field at all (MongoDB 8.0): the
       // first refusal is the one that says what is wrong.
-      if (retryError?.code === UNKNOWN_FIELD || /unknown field/i.test(errorText(retryError))) {
+      if (retryError?.code === UNKNOWN_FIELD || /unknown field/i.test(formatError(retryError))) {
         throw error;
       }
       throw retryError;
@@ -234,7 +235,7 @@ const dropSearchIndex = async (db, collection, name) => {
     await db.command({ dropSearchIndex: collection, name });
   } catch (error) {
     if (error?.code === NAMESPACE_NOT_FOUND || error?.code === INDEX_NOT_FOUND) return;
-    if (/not found|does not exist/i.test(errorText(error))) return;
+    if (/not found|does not exist/i.test(formatError(error))) return;
     throw error;
   }
 };
@@ -281,7 +282,7 @@ const isTransientError = (error) => {
  * The pause before the next poll: from a second, half as long again each
  * time, never more than ten seconds — nor more than the budget has left.
  */
-const nextPollDelay = (attempt, remainingMs) => {
+const computePollDelay = (attempt, remainingMs) => {
   return Math.max(0, Math.round(Math.min(1000 * 1.5 ** attempt, 10_000, remainingMs)));
 };
 
@@ -352,7 +353,7 @@ const awaitSearchIndexes = async (options) => {
         throw error;
       }
       onReadError(error, failedReads);
-      await sleep(nextPollDelay(attempt, remaining()));
+      await sleep(computePollDelay(attempt, remaining()));
       continue;
     }
     onPoll(live);
@@ -388,7 +389,7 @@ const awaitSearchIndexes = async (options) => {
     if (notReady.length === 0) return { outcome: 'ready', notReady, preexisting, waitedMs };
     const remainingMs = remaining();
     if (remainingMs <= 0) return { outcome: 'timeout', notReady, preexisting, waitedMs };
-    await sleep(nextPollDelay(attempt, remainingMs));
+    await sleep(computePollDelay(attempt, remainingMs));
   }
 };
 
@@ -401,6 +402,6 @@ module.exports = {
   probeSearch,
   runSearchStep,
   isTransientError,
-  nextPollDelay,
+  computePollDelay,
   awaitSearchIndexes,
 };

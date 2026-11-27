@@ -25,7 +25,13 @@ const validConfig = (overrides = {}) => ({
 // silently fell behind (it never learned about MIGRONAUT_ENVIRONMENT), which
 // would leak an ambient value into every case below. MIGRONAUT_ENV_FILE is
 // appended because it is read outside the table, before the .env load.
-const MIGRONAUT_ENV_KEYS = [...ENV_KEYS.map((spec) => spec.env), 'MIGRONAUT_ENV_FILE'];
+const MIGRONAUT_ENV_KEYS = [
+  ...ENV_KEYS.map((spec) => spec.env),
+  'MIGRONAUT_ENV_FILE',
+  // The 2.x names, refused since 3.0.
+  'MIGRONAUT_COLLECTION',
+  'MIGRONAUT_LOCK_TTL',
+];
 
 let tmp = null;
 const savedEnv = {};
@@ -255,13 +261,41 @@ describe('loadConfig', () => {
 
   it('should report every env var that does not parse at once, with the other issues', async () => {
     process.env.MIGRONAUT_STRICT = 'on';
-    process.env.MIGRONAUT_LOCK_TTL = 'abc';
+    process.env.MIGRONAUT_LOCK_TTL_SECONDS = 'abc';
     await assert.rejects(loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017' } }), (error) => {
       const paths = [];
       for (const issue of error.context.issues) paths.push(issue.path);
-      assert.deepStrictEqual(paths.sort(), ['MIGRONAUT_LOCK_TTL', 'MIGRONAUT_STRICT', 'dbName']);
+      assert.deepStrictEqual(paths.sort(), [
+        'MIGRONAUT_LOCK_TTL_SECONDS',
+        'MIGRONAUT_STRICT',
+        'dbName',
+      ]);
       return true;
     });
+  });
+
+  it('should refuse a variable 3.0 renamed, with its new name, rather than ignore it', async () => {
+    // A lock TTL quietly back at its default is what this layer fails closed against.
+    process.env.MIGRONAUT_LOCK_TTL = '600';
+    process.env.MIGRONAUT_COLLECTION = '_seeds';
+    await assert.rejects(
+      loadConfig({ cwd: tmp, flags: { uri: 'mongodb://x:27017', dbName: 'x' } }),
+      (error) => {
+        assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
+        assert.deepStrictEqual(error.context.issues, [
+          {
+            path: 'MIGRONAUT_COLLECTION',
+            message: 'was renamed to MIGRONAUT_MIGRATIONS_COLLECTION in 3.0',
+          },
+          {
+            path: 'MIGRONAUT_LOCK_TTL',
+            message: 'was renamed to MIGRONAUT_LOCK_TTL_SECONDS in 3.0',
+          },
+        ]);
+        assert.match(error.message, /MIGRONAUT_LOCK_TTL was renamed to MIGRONAUT_LOCK_TTL_SECONDS/);
+        return true;
+      },
+    );
   });
 
   it('should reject unrecognized values for every boolean env var', async () => {
@@ -285,7 +319,7 @@ describe('loadConfig', () => {
   it('should name the variable when a numeric env var is not a positive integer', async () => {
     // A bare Number() turned `abc` into NaN, which surfaced as a generic
     // validateConfig issue that never mentioned the variable the user set.
-    for (const key of ['MIGRONAUT_LOCK_TTL', 'MIGRONAUT_TIMEOUT_MS']) {
+    for (const key of ['MIGRONAUT_LOCK_TTL_SECONDS', 'MIGRONAUT_TIMEOUT_MS']) {
       for (const value of ['abc', '0', '-5', '1.5', '']) {
         process.env[key] = value;
         await assert.rejects(
@@ -1048,7 +1082,7 @@ describe('envFile control', () => {
 
 describe('background config', () => {
   const {
-    backgroundCollectionNames,
+    listBackgroundCollections,
     validateConfig: validate,
   } = require('../../src/core/config.js');
   /** What ENV_KEYS makes of a set of variables */
@@ -1086,7 +1120,7 @@ describe('background config', () => {
   });
 
   it('should keep the background collections apart from every other bookkeeping one', () => {
-    assert.deepStrictEqual(backgroundCollectionNames('_bg'), {
+    assert.deepStrictEqual(listBackgroundCollections('_bg'), {
       state: '_bg',
       partitions: '_bg_partitions',
       watch: '_bg_watch',

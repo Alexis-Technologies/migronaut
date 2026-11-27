@@ -77,7 +77,7 @@ const classifyStreamError = (error) => {
 const isEnding = (event) => ENDING.has(event?.operationType);
 
 /** Milliseconds since the event happened — the stream's lag — or `undefined` without a time */
-const lagOf = (event, now) => {
+const measureLagMs = (event, now) => {
   const time = event?.clusterTime;
   if (time === undefined || time === null) return undefined;
   // A BSON Timestamp: seconds in `t` (the high 32 bits), an ordinal in `i`.
@@ -86,7 +86,7 @@ const lagOf = (event, now) => {
 };
 
 /** Whether a resume token is due: at most every `checkpointMs`, and always when told to */
-const tokenDue = (lastSavedAt, now, checkpointMs, { force = false } = {}) => {
+const isTokenDue = (lastSavedAt, now, checkpointMs, { force = false } = {}) => {
   return force || lastSavedAt === undefined || now - lastSavedAt >= checkpointMs;
 };
 
@@ -129,7 +129,7 @@ module.exports = {
   watchPipeline,
   classifyStreamError,
   isEnding,
-  lagOf,
-  tokenDue,
+  measureLagMs,
+  isTokenDue,
   watchView,
 };

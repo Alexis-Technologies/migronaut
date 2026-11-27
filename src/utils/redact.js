@@ -80,7 +80,7 @@ const isDigit = (code) => code >= 48 && code <= 57;
 const isSchemeChar = (code) => isLetter(code) || isDigit(code) || SCHEME_PUNCTUATION.has(code);
 
 /** Whether a scheme ends right before `at` — a letter, then scheme characters only */
-const schemeEndsAt = (text, at) => {
+const isSchemeEnd = (text, at) => {
   for (let i = at - 1; i >= 0; i--) {
     const code = text.charCodeAt(i);
     if (isLetter(code)) return true;
@@ -102,7 +102,7 @@ const maskCredentials = (text, cut = false) => {
   while (at !== -1) {
     const start = at + 3;
     let next = start;
-    if (schemeEndsAt(text, at)) {
+    if (isSchemeEnd(text, at)) {
       USERINFO.lastIndex = start;
       let match = USERINFO.exec(text);
       let tail = '@';
@@ -163,13 +163,13 @@ const redactOutbound = (text) => {
  * whether the input was longer than what was read.
  */
 const redactWithin = (text, limit) => {
-  const cut = text.length > limit * 2;
-  if (!cut) return { text: redactOutbound(text), cut };
+  const shouldCut = text.length > limit * 2;
+  if (!shouldCut) return { text: redactOutbound(text), cut: shouldCut };
   const head = maskCredentials(text.slice(0, limit * 2), true).replace(
     CUT_DUPLICATE_KEY_VALUES,
     '$1{ <redacted> }',
   );
-  return { text: redactOutbound(head), cut };
+  return { text: redactOutbound(head), cut: shouldCut };
 };
 
 /**
@@ -193,7 +193,7 @@ const redactDeep = (value) => {
 };
 
 /** The size of binary data — a Buffer or another Uint8Array, a BSON Binary — or undefined */
-const byteLength = (item) => {
+const measureBytes = (item) => {
   if (item instanceof Uint8Array) return item.byteLength;
   if (item._bsontype === 'Binary') return item.position;
   return undefined;
@@ -207,7 +207,7 @@ const byteLength = (item) => {
  * `errmsg`), and its `message` is not even enumerable, so the error itself
  * would be stored as an empty document.
  */
-const errorData = (error) => {
+const toErrorData = (error) => {
   const data = {
     name: String(error.name),
     message: redactOutbound(typeof error.message === 'string' ? error.message : ''),
@@ -232,11 +232,11 @@ const errorData = (error) => {
  */
 const redactBounded = (value, { omit } = {}) => {
   let entries = 0;
-  let truncated = false;
+  let isTruncated = false;
   /** One more entry, or false once the budget is spent */
   const take = () => {
     if (entries >= BOUNDS.entries) {
-      truncated = true;
+      isTruncated = true;
       return false;
     }
     entries += 1;
@@ -248,21 +248,21 @@ const redactBounded = (value, { omit } = {}) => {
       // field (`{ error: err.message }`) loses the values it quotes too.
       const { text, cut } = redactWithin(item, BOUNDS.string);
       if (!cut && text.length <= BOUNDS.string) return text;
-      truncated = true;
+      isTruncated = true;
       return `${text.slice(0, BOUNDS.string)}…`;
     }
     if (item === null || typeof item !== 'object') return item;
     if (item instanceof Date || item instanceof RegExp) return item;
-    const bytes = byteLength(item);
+    const bytes = measureBytes(item);
     if (bytes !== undefined) {
       if (bytes <= BOUNDS.bytes) return item;
-      truncated = true;
+      isTruncated = true;
       return TRUNCATED;
     }
     if (typeof item._bsontype === 'string') return item;
-    if (item instanceof Error) return copy(errorData(item), depth);
+    if (item instanceof Error) return copy(toErrorData(item), depth);
     if (depth >= BOUNDS.depth) {
-      truncated = true;
+      isTruncated = true;
       return TRUNCATED;
     }
     if (Array.isArray(item) || item instanceof Set) {
@@ -294,7 +294,7 @@ const redactBounded = (value, { omit } = {}) => {
     return out;
   };
   const result = copy(value, 0);
-  return { value: result, truncated };
+  return { value: result, truncated: isTruncated };
 };
 
 module.exports = { BOUNDS, redactUris, redactOutbound, redactWithin, redactDeep, redactBounded };

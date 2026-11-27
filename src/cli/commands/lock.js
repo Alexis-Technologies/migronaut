@@ -6,7 +6,7 @@ const { defineCommand } = require('../shared.js');
  * to diagnose a stuck lock — crashing on the document it came to inspect
  * would fail at exactly the moment it is most needed.
  */
-const lockedAtText = (value) => (value instanceof Date ? value.toISOString() : `${value}`);
+const formatLockedAt = (value) => (value instanceof Date ? value.toISOString() : `${value}`);
 
 /** Register the `lock` command (inspect the migration lock without touching it) */
 const registerLock = (program) => {
@@ -21,11 +21,11 @@ const registerLock = (program) => {
       if (!holder) return void logger.info('No migration lock is currently held');
       logger.info(
         `Lock held by pid ${holder.pid} on ${holder.host} (${holder.executedBy}) ` +
-          `since ${lockedAtText(holder.lockedAt)}` +
+          `since ${formatLockedAt(holder.lockedAt)}` +
           (holder.runId ? ` — run ${holder.runId}` : ''),
       );
     },
   });
 };
 
-module.exports = { lockedAtText, registerLock };
+module.exports = { formatLockedAt, registerLock };

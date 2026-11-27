@@ -1,6 +1,6 @@
 const { addAbortListener } = require('node:events');
 
-const { errorText } = require('../../utils/error.js');
+const { formatError } = require('../../utils/error.js');
 const { isUnauthorized } = require('../../utils/error.js');
 
 /**
@@ -57,15 +57,15 @@ const THROTTLE_REPORT_INTERVAL_MS = 10_000;
 const FIRST_BACKOFF_MS = 100;
 
 /** Sleep `ms`, cut short (rejecting with the reason) when `signal` aborts */
-const sleep = (ms, signal) => {
+const sleep = (delayMs, signal) => {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return void reject(signal.reason);
-    if (ms <= 0) return void resolve();
+    if (delayMs <= 0) return void resolve();
     let listening = null;
     const timer = setTimeout(() => {
       listening?.[Symbol.dispose]();
       resolve();
-    }, ms);
+    }, delayMs);
     if (signal === undefined || signal === null) return;
     listening = addAbortListener(signal, () => {
       clearTimeout(timer);
@@ -79,7 +79,7 @@ const sleep = (ms, signal) => {
  * members are left out: a delayed one lags on purpose, and a hidden one
  * serves no reads.
  */
-const replicationLagMs = (status, excluded) => {
+const measureReplicationLagMs = (status, excluded) => {
   const members = Array.isArray(status?.members) ? status.members : [];
   let primary = null;
   for (const member of members) {
@@ -91,18 +91,18 @@ const replicationLagMs = (status, excluded) => {
   for (const member of members) {
     if (member.stateStr !== 'SECONDARY' || excluded.has(member.name)) continue;
     if (member.optimeDate === undefined) continue;
-    const lag = primaryTime - new Date(member.optimeDate).getTime();
-    if (lag > worst) worst = lag;
+    const lagMs = primaryTime - new Date(member.optimeDate).getTime();
+    if (lagMs > worst) worst = lagMs;
   }
   return worst;
 };
 
 /** Hidden or delayed member hosts, from the replica set config */
-const excludedMembers = (config) => {
+const listExcludedMembers = (config) => {
   const hosts = new Set();
   for (const member of config?.config?.members ?? []) {
-    const delay = member.secondaryDelaySecs ?? member.slaveDelay ?? 0;
-    if (member.hidden === true || Number(delay) > 0) hosts.add(member.host);
+    const delaySeconds = member.secondaryDelaySecs ?? member.slaveDelay ?? 0;
+    if (member.hidden === true || Number(delaySeconds) > 0) hosts.add(member.host);
   }
   return hosts;
 };
@@ -124,13 +124,13 @@ const createThrottle = (options) => {
   const lagWaits = options.lagWaits ?? new Map();
 
   const maxLag = spec.maxReplicationLagMs;
-  let lagEnabled = maxLag !== false && typeof db?.admin === 'function';
+  let isLagEnabled = maxLag !== false && typeof db?.admin === 'function';
   let lastLagCheck = -Infinity;
   let lastConfigCheck = -Infinity;
   let excluded = new Set();
-  let first = true;
+  let isFirst = true;
   // Set when the last wait was for a lagging secondary — an overload signal.
-  let lagged = false;
+  let isLagged = false;
   // One warning per process for a lag that cannot be read for lack of rights.
   const warnings = warned ?? new Set();
 
@@ -139,12 +139,12 @@ const createThrottle = (options) => {
     if (now() - lastConfigCheck >= CONFIG_CHECK_INTERVAL_MS) {
       lastConfigCheck = now();
       try {
-        excluded = excludedMembers(await admin.command({ replSetGetConfig: 1 }));
+        excluded = listExcludedMembers(await admin.command({ replSetGetConfig: 1 }));
       } catch {
         // Without the config every secondary counts — the cautious reading.
       }
     }
-    return replicationLagMs(await admin.command({ replSetGetStatus: 1 }), excluded);
+    return measureReplicationLagMs(await admin.command({ replSetGetStatus: 1 }), excluded);
   };
 
   /**
@@ -153,7 +153,7 @@ const createThrottle = (options) => {
    * a lane that holds its lease and writes nothing looks healthy to every
    * other check there is.
    */
-  const reportLag = (lag, onLag) => {
+  const reportLag = (lagMs, onLag) => {
     const at = now();
     let entry = lagWaits.get(name);
     if (entry === undefined) {
@@ -163,52 +163,52 @@ const createThrottle = (options) => {
     const waitedMs = at - entry.since;
     if (at - entry.reportedAt >= LAG_REPORT_INTERVAL_MS) {
       entry.reportedAt = at;
-      onLag?.({ reason: 'lag', lagMs: lag, waitedMs });
+      onLag?.({ reason: 'lag', lagMs, waitedMs });
     }
     if (waitedMs >= LAG_WARN_AFTER_MS && at - entry.warnedAt >= LAG_WARN_EVERY_MS) {
       entry.warnedAt = at;
       logger.warn(
-        `⚠ ${name}: a secondary lags ${lag}ms (maxReplicationLagMs ${maxLag}) — its lanes ` +
+        `⚠ ${name}: a secondary lags ${lagMs}ms (maxReplicationLagMs ${maxLag}) — its lanes ` +
           `have been waiting for ${Math.round(waitedMs / 1000)}s and write nothing meanwhile`,
-        { background: name, lagMs: lag, waitedMs },
+        { background: name, lagMs, waitedMs },
       );
     }
   };
 
   /** Wait while a secondary lags too far; resolves to whether the slice ran out meanwhile */
   const waitForLag = async (signal, { deadline, onLag } = {}) => {
-    if (!lagEnabled || now() - lastLagCheck < LAG_CHECK_INTERVAL_MS) return false;
+    if (!isLagEnabled || now() - lastLagCheck < LAG_CHECK_INTERVAL_MS) return false;
     for (;;) {
       lastLagCheck = now();
-      let lag = 0;
+      let lagMs = 0;
       try {
-        lag = await currentLag();
+        lagMs = await currentLag();
       } catch (error) {
-        lagEnabled = false;
+        isLagEnabled = false;
         if (isUnauthorized(error) && !warnings.has('lag')) {
           warnings.add('lag');
           logger.warn(
             '⚠ Background migrations cannot read the replication lag (replSetGetStatus needs ' +
               'the clusterMonitor role) — they no longer wait for secondaries',
-            { background: name, error: errorText(error) },
+            { background: name, error: formatError(error) },
           );
         } else if (!NO_REPLICATION.has(error?.code)) {
-          logger.debug(`Replication lag unreadable — not waiting for it: ${errorText(error)}`, {
+          logger.debug(`Replication lag unreadable — not waiting for it: ${formatError(error)}`, {
             background: name,
           });
         }
         return false;
       }
-      if (lag <= maxLag) {
+      if (lagMs <= maxLag) {
         lagWaits.delete(name);
         return false;
       }
-      lagged = true;
-      logger.debug(`Replication lag ${lag}ms > ${maxLag}ms — waiting`, {
+      isLagged = true;
+      logger.debug(`Replication lag ${lagMs}ms > ${maxLag}ms — waiting`, {
         background: name,
-        lagMs: lag,
+        lagMs,
       });
-      reportLag(lag, onLag);
+      reportLag(lagMs, onLag);
       await wait(LAG_WAIT_MS, signal);
       // The slice is over: the lane gives its slot back and reads its
       // controls again, instead of holding both through a lag of hours — a
@@ -220,8 +220,8 @@ const createThrottle = (options) => {
   return {
     /** Whether the last `beforeBatch` waited for a lagging secondary — read once */
     takeLagged() {
-      const was = lagged;
-      lagged = false;
+      const was = isLagged;
+      isLagged = false;
       return was;
     },
     /**
@@ -238,9 +238,9 @@ const createThrottle = (options) => {
       deadline,
       onLag,
     }) {
-      const pause = (first ? 0 : spec.pauseMs) + extraPauseMs;
+      const pause = (isFirst ? 0 : spec.pauseMs) + extraPauseMs;
       if (pause > 0) await wait(pause, signal);
-      first = false;
+      isFirst = false;
       if (typeof spec.throttle === 'function') {
         const extra = await spec.throttle({
           name,
@@ -280,7 +280,7 @@ const createAdaptive = (settings, { initial, now = Date.now } = {}) => {
   const increase = Math.max(1, Math.floor(maxBatchSize / 20));
   let size = clamp(initial?.batchSize ?? maxBatchSize, minBatchSize, maxBatchSize);
   let pause = clamp(initial?.pauseMs ?? 0, 0, maxPauseMs);
-  let warm = initial !== undefined;
+  let isWarm = initial !== undefined;
   let lastDecrease = -Infinity;
   let lastReport = -Infinity;
   let pendingReason = '';
@@ -295,13 +295,13 @@ const createAdaptive = (settings, { initial, now = Date.now } = {}) => {
      * `'overload'` or `'recover'` — at most every 10 s, else `undefined`.
      */
     record({ latencyMs, overloaded = false }) {
-      if (!warm) {
-        warm = true;
+      if (!isWarm) {
+        isWarm = true;
         return undefined;
       }
-      const slow = latencyMs > targetLatencyMs;
+      const isSlow = latencyMs > targetLatencyMs;
       let reason = '';
-      if (overloaded || slow) {
+      if (overloaded || isSlow) {
         // Once per round trip: the batch that saw the last decrease does not count twice.
         if (now() - lastDecrease < Math.max(latencyMs, 1)) return undefined;
         lastDecrease = now();
@@ -333,8 +333,8 @@ module.exports = {
   MAX_HOOK_PAUSE_MS,
   THROTTLE_REPORT_INTERVAL_MS,
   sleep,
-  replicationLagMs,
-  excludedMembers,
+  measureReplicationLagMs,
+  listExcludedMembers,
   createThrottle,
   createAdaptive,
 };

@@ -5,9 +5,9 @@ const {
   ConfigInvalidError,
   MigrationInvalidExportError,
 } = require('../../errors/index.js');
-const { canonical, isPlainObject, toWire, unsendable } = require('../../utils/canonical.js');
+const { canonicalize, isPlainObject, toWire, findUnsendable } = require('../../utils/canonical.js');
 const { isCollectionName } = require('../../utils/collection-name.js');
-const { fieldNameIssue } = require('../../versioning/config.js');
+const { checkFieldName } = require('../../versioning/config.js');
 const { resolveFieldNames } = require('../../versioning/document.js');
 const { filterTouches } = require('../../versioning/internal.js');
 
@@ -174,13 +174,13 @@ const usesServerJs = (value) => {
 };
 
 /** The `[key, min, max]` row of `key` in a settings table */
-const settingRow = (table, key) => {
+const findSettingRow = (table, key) => {
   for (let i = 0; i < table.length; i++) if (table[i][0] === key) return table[i];
   return undefined;
 };
 
 /** The longest slice — for a caller that overrides the spec's (a runner, the CLI, a test) too */
-const MAX_SLICE_MS = settingRow(INTEGER_SETTINGS, 'sliceMs')[2];
+const MAX_SLICE_MS = findSettingRow(INTEGER_SETTINGS, 'sliceMs')[2];
 
 /**
  * A caller's `sliceMs`: a positive integer up to the spec's maximum. A slice
@@ -224,38 +224,38 @@ const DECLARATIVE_KEYS = new Set([
 
 const STEP_KEYS = new Set([...SETTING_KEYS, 'collection', 'step', 'revertStep']);
 
-const inRange = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
+const isInRange = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 
-const rangeIssues = (value, table, base, report) => {
+const checkRange = (value, table, base, report) => {
   for (let i = 0; i < table.length; i++) {
     const key = table[i][0];
     const min = table[i][1];
     const max = table[i][2];
-    if (value[key] !== undefined && !inRange(value[key], min, max)) {
+    if (value[key] !== undefined && !isInRange(value[key], min, max)) {
       report(`${base}${key}`, `must be an integer from ${min} to ${max}`);
     }
   }
 };
 
 /** The keys of a settings table */
-const namesOf = (table) => {
+const listNames = (table) => {
   const names = new Set();
   for (let i = 0; i < table.length; i++) names.add(table[i][0]);
   return names;
 };
 
-const objectSettingIssues = (value, key, table, report) => {
+const checkObjectSetting = (value, key, table, report) => {
   if (value === undefined || typeof value === 'boolean') return;
   if (!isPlainObject(value)) return void report(key, 'must be a boolean or an object');
-  const known = namesOf(table);
+  const known = listNames(table);
   for (const name of Object.keys(value)) {
     if (!known.has(name)) report(`${key}.${name}`, `is not one of the ${key} settings`);
   }
-  rangeIssues(value, table, `${key}.`, report);
+  checkRange(value, table, `${key}.`, report);
 };
 
-const settingIssues = (spec, report) => {
-  rangeIssues(spec, INTEGER_SETTINGS, '', report);
+const checkSettings = (spec, report) => {
+  checkRange(spec, INTEGER_SETTINGS, '', report);
   if (spec.description !== undefined && typeof spec.description !== 'string') {
     report('description', 'must be a string');
   }
@@ -264,29 +264,29 @@ const settingIssues = (spec, report) => {
   } else if (spec.writeConcern?.w === 0) {
     report('writeConcern', 'must be acknowledged — with w: 0 no conflict can be seen');
   }
-  const lag = spec.maxReplicationLagMs;
-  if (lag !== undefined && lag !== false && !inRange(lag, 0, 3_600_000)) {
+  const maxLagMs = spec.maxReplicationLagMs;
+  if (maxLagMs !== undefined && maxLagMs !== false && !isInRange(maxLagMs, 0, 3_600_000)) {
     report('maxReplicationLagMs', 'must be false or an integer from 0 to 3600000');
   }
   if (spec.partitions !== undefined) {
     if (!isPlainObject(spec.partitions)) {
       report('partitions', 'must be an object');
     } else {
-      const known = namesOf(PARTITION_SETTINGS);
+      const known = listNames(PARTITION_SETTINGS);
       for (const name of Object.keys(spec.partitions)) {
         if (!known.has(name)) report(`partitions.${name}`, 'is not one of the partitions settings');
       }
-      rangeIssues(spec.partitions, PARTITION_SETTINGS, 'partitions.', report);
+      checkRange(spec.partitions, PARTITION_SETTINGS, 'partitions.', report);
     }
   }
-  objectSettingIssues(spec.transaction, 'transaction', TRANSACTION_SETTINGS, report);
-  objectSettingIssues(spec.adaptive, 'adaptive', ADAPTIVE_SETTINGS, report);
-  const inverted =
+  checkObjectSetting(spec.transaction, 'transaction', TRANSACTION_SETTINGS, report);
+  checkObjectSetting(spec.adaptive, 'adaptive', ADAPTIVE_SETTINGS, report);
+  const isInverted =
     isPlainObject(spec.adaptive) &&
     Number.isSafeInteger(spec.adaptive.minBatchSize) &&
     Number.isSafeInteger(spec.adaptive.maxBatchSize) &&
     spec.adaptive.minBatchSize > spec.adaptive.maxBatchSize;
-  if (inverted) {
+  if (isInverted) {
     report('adaptive.minBatchSize', 'must not exceed adaptive.maxBatchSize');
   }
 };
@@ -296,20 +296,20 @@ const settingIssues = (spec, report) => {
  * `{ path, message }` issues, empty when it is. `versioning` is the declared
  * collection's resolved versioning, when it has one.
  */
-const backgroundIssues = (spec, { versioning } = {}) => {
+const checkBackground = (spec, { versioning } = {}) => {
   if (!isPlainObject(spec)) {
     return [{ path: 'background', message: 'must be an object' }];
   }
   const issues = [];
   const report = (key, message) => issues.push({ path: `background.${key}`, message });
-  const step = spec.step !== undefined;
-  const allowed = step ? STEP_KEYS : DECLARATIVE_KEYS;
+  const isStep = spec.step !== undefined;
+  const allowed = isStep ? STEP_KEYS : DECLARATIVE_KEYS;
   for (const key of Object.keys(spec)) {
     if (RESERVED_KEYS.has(key)) report(key, RESERVED_KEYS.get(key));
     else if (!allowed.has(key)) {
       report(
         key,
-        step && DECLARATIVE_KEYS.has(key)
+        isStep && DECLARATIVE_KEYS.has(key)
           ? 'is not a step background migration key (step owns its own writes)'
           : 'is not a background migration key',
       );
@@ -320,9 +320,9 @@ const backgroundIssues = (spec, { versioning } = {}) => {
       report(key, 'must be a function');
     }
   }
-  settingIssues(spec, report);
+  checkSettings(spec, report);
 
-  if (step) {
+  if (isStep) {
     if (spec.collection !== undefined && !isCollectionName(spec.collection)) {
       report('collection', 'must be a valid collection name');
     }
@@ -341,8 +341,8 @@ const backgroundIssues = (spec, { versioning } = {}) => {
   } else if (!isCollectionName(spec.collection)) {
     report('collection', 'must be a valid collection name');
   }
-  const fromValid = inRange(spec.from, 0, Number.MAX_SAFE_INTEGER);
-  const toValid = inRange(spec.to, 0, Number.MAX_SAFE_INTEGER);
+  const fromValid = isInRange(spec.from, 0, Number.MAX_SAFE_INTEGER);
+  const toValid = isInRange(spec.to, 0, Number.MAX_SAFE_INTEGER);
   if (spec.from === undefined) report('from', 'is required');
   else if (!fromValid) report('from', 'must be an integer ≥ 0 (0: documents without a version)');
   if (spec.to === undefined) report('to', 'is required');
@@ -363,7 +363,7 @@ const backgroundIssues = (spec, { versioning } = {}) => {
   }
   for (const key of FIELD_NAME_KEYS) {
     if (spec[key] === undefined) continue;
-    const issue = fieldNameIssue(spec[key]);
+    const issue = checkFieldName(spec[key]);
     if (issue) report(key, issue);
   }
   const versionName = spec.versionField ?? versioning?.field ?? '__v';
@@ -371,7 +371,7 @@ const backgroundIssues = (spec, { versioning } = {}) => {
     if (!isPlainObject(spec.filter)) {
       report('filter', 'must be a query document');
     } else {
-      const reason = unsendable(spec.filter);
+      const reason = findUnsendable(spec.filter);
       if (reason) report('filter', reason);
       else if (usesServerJs(spec.filter)) {
         report(
@@ -411,7 +411,7 @@ const backgroundIssues = (spec, { versioning } = {}) => {
   return issues;
 };
 
-const settingOr = (value, fallback) => (value === undefined ? fallback : value);
+const pickSetting = (value, fallback) => (value === undefined ? fallback : value);
 
 /**
  * A valid `background` export resolved with every default — split into what
@@ -421,14 +421,14 @@ const settingOr = (value, fallback) => (value === undefined ? fallback : value);
  * @throws {MigrationInvalidExportError} with every issue in `context.issues`
  */
 const resolveBackgroundSpec = (raw, { name, versioning } = {}) => {
-  const issues = backgroundIssues(raw, { versioning });
+  const issues = checkBackground(raw, { versioning });
   if (issues.length > 0) {
     throw new MigrationInvalidExportError(
       `Invalid background migration${name ? ` ${name}` : ''}: ${issues[0].path} ${issues[0].message}`,
       { context: { ...(name ? { name } : {}), issues } },
     );
   }
-  const step = raw.step !== undefined;
+  const isStep = raw.step !== undefined;
   const transaction =
     raw.transaction === true || isPlainObject(raw.transaction)
       ? {
@@ -438,7 +438,7 @@ const resolveBackgroundSpec = (raw, { name, versioning } = {}) => {
       : false;
   const batchSize =
     raw.batchSize ?? (transaction ? DEFAULTS.transactionBatchSize : DEFAULTS.batchSize);
-  const maxParallel = step ? 1 : (raw.maxParallel ?? DEFAULTS.maxParallel);
+  const maxParallel = isStep ? 1 : (raw.maxParallel ?? DEFAULTS.maxParallel);
   const adaptive =
     raw.adaptive === false
       ? false
@@ -460,7 +460,7 @@ const resolveBackgroundSpec = (raw, { name, versioning } = {}) => {
     maxPasses: raw.maxPasses ?? DEFAULTS.maxPasses,
     maxConflictRetries: raw.maxConflictRetries ?? DEFAULTS.maxConflictRetries,
     maxSliceFailures: raw.maxSliceFailures ?? DEFAULTS.maxSliceFailures,
-    maxReplicationLagMs: settingOr(raw.maxReplicationLagMs, DEFAULTS.maxReplicationLagMs),
+    maxReplicationLagMs: pickSetting(raw.maxReplicationLagMs, DEFAULTS.maxReplicationLagMs),
     maxParallel,
     shardConcurrency: raw.shardConcurrency ?? DEFAULTS.shardConcurrency,
     partitions: {
@@ -474,10 +474,10 @@ const resolveBackgroundSpec = (raw, { name, versioning } = {}) => {
     transaction,
     adaptive,
   };
-  const fns = {};
-  for (const key of FUNCTION_KEYS) if (typeof raw[key] === 'function') fns[key] = raw[key];
+  const functions = {};
+  for (const key of FUNCTION_KEYS) if (typeof raw[key] === 'function') functions[key] = raw[key];
 
-  if (step) {
+  if (isStep) {
     return {
       spec: {
         mode: 'step',
@@ -486,7 +486,7 @@ const resolveBackgroundSpec = (raw, { name, versioning } = {}) => {
         ...(raw.description !== undefined ? { description: raw.description } : {}),
         ...settings,
       },
-      fns,
+      fns: functions,
     };
   }
   const occ = raw.occ ?? 'revision';
@@ -510,7 +510,7 @@ const resolveBackgroundSpec = (raw, { name, versioning } = {}) => {
       ...(raw.description !== undefined ? { description: raw.description } : {}),
       ...settings,
     },
-    fns,
+    fns: functions,
   };
 };
 
@@ -527,7 +527,7 @@ const matchHash = (spec, direction = 'forward') => {
           collection: spec.collection,
           from: spec.from,
           to: spec.to,
-          filter: canonical(spec.filter),
+          filter: canonicalize(spec.filter),
           field: spec.field,
           revisionField: spec.revisionField,
           direction,
@@ -544,19 +544,20 @@ const matchHash = (spec, direction = 'forward') => {
  * conflict.
  */
 /** One action's rule: the statuses it moves from, where to, and where it is already done */
-const rule = (from, to, done) => Object.freeze({ from: new Set(from), to, done: new Set(done) });
+const defineRule = (from, to, done) =>
+  Object.freeze({ from: new Set(from), to, done: new Set(done) });
 
 const TRANSITIONS = Object.freeze({
   __proto__: null,
-  unblock: rule(['blocked'], 'pending', ['pending', 'running', 'paused']),
-  plan: rule(['pending'], 'running', ['running']),
-  complete: rule(['running'], 'completed', ['completed']),
-  fail: rule(['blocked', 'pending', 'running'], 'failed', ['failed']),
-  pause: rule(['blocked', 'pending', 'running'], 'paused', ['paused']),
-  resume: rule(['paused'], 'pending', ['blocked', 'pending', 'running']),
-  cancel: rule(['blocked', 'pending', 'running', 'paused'], 'cancelled', ['cancelled']),
-  retry: rule(['failed', 'cancelled'], 'pending', ['pending']),
-  reopen: rule(['completed'], 'running', ['running']),
+  unblock: defineRule(['blocked'], 'pending', ['pending', 'running', 'paused']),
+  plan: defineRule(['pending'], 'running', ['running']),
+  complete: defineRule(['running'], 'completed', ['completed']),
+  fail: defineRule(['blocked', 'pending', 'running'], 'failed', ['failed']),
+  pause: defineRule(['blocked', 'pending', 'running'], 'paused', ['paused']),
+  resume: defineRule(['paused'], 'pending', ['blocked', 'pending', 'running']),
+  cancel: defineRule(['blocked', 'pending', 'running', 'paused'], 'cancelled', ['cancelled']),
+  retry: defineRule(['failed', 'cancelled'], 'pending', ['pending']),
+  reopen: defineRule(['completed'], 'running', ['running']),
 });
 
 /**
@@ -565,7 +566,7 @@ const TRANSITIONS = Object.freeze({
  *
  * @throws {BackgroundConflictError} when the action does not fit the status
  */
-const transition = (status, action, { migration } = {}) => {
+const resolveTransition = (status, action, { migration } = {}) => {
   const found = TRANSITIONS[action];
   if (found === undefined) {
     throw new BackgroundConflictError(`Unknown background action "${action}"`, {
@@ -588,10 +589,10 @@ for (const bracket of ID_BRACKETS) {
 }
 
 /** The bracket of a `$type` name — `exotic` for anything this table does not list */
-const bracketOfType = (type) => BRACKET_OF_TYPE.get(type) ?? 'exotic';
+const toBracket = (type) => BRACKET_OF_TYPE.get(type) ?? 'exotic';
 
 /** The filter that keeps a scan inside a partition's scope */
-const scopeFilter = (scope) => {
+const buildScopeFilter = (scope) => {
   if (scope.kind !== 'id-range') return {};
   const condition = { $type: BRACKETS_BY_NAME.get(scope.bracket).aliases };
   if (scope.gte !== undefined) condition.$gte = scope.gte;
@@ -600,7 +601,7 @@ const scopeFilter = (scope) => {
 };
 
 /** Resume a keyset scan after `lastId` — within one bracket, `$gt` alone is enough */
-const keysetFilter = (lastId) => (lastId === undefined ? {} : { _id: { $gt: lastId } });
+const buildKeysetFilter = (lastId) => (lastId === undefined ? {} : { _id: { $gt: lastId } });
 
 module.exports = {
   BACKGROUND_DEFAULTS: DEFAULTS,
@@ -610,12 +611,12 @@ module.exports = {
   TERMINAL,
   ID_BRACKETS,
   assertSliceMs,
-  backgroundIssues,
+  checkBackground,
   resolveBackgroundSpec,
   matchHash,
   TRANSITIONS,
-  transition,
-  bracketOfType,
-  scopeFilter,
-  keysetFilter,
+  resolveTransition,
+  toBracket,
+  buildScopeFilter,
+  buildKeysetFilter,
 };

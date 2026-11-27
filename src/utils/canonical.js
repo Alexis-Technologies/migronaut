@@ -6,7 +6,7 @@
  * keys may come back in another order, an `Int32` or a `Long` may stand where
  * the declaration had a plain number, and an `undefined` property is either
  * dropped or stored as `null` depending on the client's `ignoreUndefined`.
- * `canonical` maps both sides onto one JSON-safe shape so that a plain string
+ * `canonicalize` maps both sides onto one JSON-safe shape so that a plain string
  * comparison decides equality.
  *
  * Arrays keep their order — `required: ['a', 'b']` and `['b', 'a']` are
@@ -33,21 +33,21 @@ const isPlainObject = (value) => {
 };
 
 /** A BSON value class from the driver (`Int32`, `Long`, `ObjectId`, …) */
-const bsonType = (value) => {
+const readBsonType = (value) => {
   return value !== null && typeof value === 'object' && typeof value._bsontype === 'string'
     ? value._bsontype
     : undefined;
 };
 
-const canonicalNumber = (number) => {
+const canonicalizeNumber = (number) => {
   if (Number.isNaN(number)) return { $number: 'NaN' };
   if (!Number.isFinite(number)) return { $number: number > 0 ? 'Infinity' : '-Infinity' };
   // -0 and 0 are the same BSON value for every purpose a validator has.
   return number === 0 ? 0 : number;
 };
 
-const canonicalBson = (type, value) => {
-  if (type === 'Int32' || type === 'Double') return canonicalNumber(Number(value.valueOf()));
+const canonicalizeBson = (type, value) => {
+  if (type === 'Int32' || type === 'Double') return canonicalizeNumber(Number(value.valueOf()));
   if (type === 'Long') {
     const number = value.toNumber();
     return Number.isSafeInteger(number) ? number : { $long: value.toString() };
@@ -58,16 +58,16 @@ const canonicalBson = (type, value) => {
   // Binary, Timestamp, MinKey, … — rare in a validator. Their JSON form is
   // stable and type-tagged, which is all equality needs.
   const json = typeof value.toJSON === 'function' ? value.toJSON() : `${value}`;
-  return { $bson: type, value: canonical(json) };
+  return { $bson: type, value: canonicalize(json) };
 };
 
 const sortFlags = (flags) => {
-  const chars = [...`${flags}`];
-  chars.sort();
-  return chars.join('');
+  const characters = [...`${flags}`];
+  characters.sort();
+  return characters.join('');
 };
 
-const storedFlags = (flags) => {
+const toStoredFlags = (flags) => {
   let out = '';
   for (const flag of `${flags}`) out += DRIVER_REGEXP_FLAGS[flag] ?? '';
   return out;
@@ -78,7 +78,7 @@ const storedFlags = (flags) => {
  * changes (`g` becomes dotAll) or drops (`s`, `u`, `y`, `d`, `v`) — or null.
  * A `BSONRegExp` states server options directly and is always fine.
  */
-const regExpIssue = (value, seen = new Set()) => {
+const checkRegExp = (value, seen = new Set()) => {
   if (value instanceof RegExp) {
     const bad = value.flags.match(UNSTORABLE_FLAGS);
     return bad
@@ -91,14 +91,14 @@ const regExpIssue = (value, seen = new Set()) => {
   seen.add(value);
   if (value instanceof Map) {
     for (const item of value.values()) {
-      const issue = regExpIssue(item, seen);
+      const issue = checkRegExp(item, seen);
       if (issue) return issue;
     }
     return null;
   }
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      const issue = regExpIssue(value[i], seen);
+      const issue = checkRegExp(value[i], seen);
       if (issue) return issue;
     }
     return null;
@@ -106,7 +106,7 @@ const regExpIssue = (value, seen = new Set()) => {
   if (!isPlainObject(value)) return null;
   const keys = Object.keys(value);
   for (let i = 0; i < keys.length; i++) {
-    const issue = regExpIssue(value[keys[i]], seen);
+    const issue = checkRegExp(value[keys[i]], seen);
     if (issue) return issue;
   }
   return null;
@@ -114,12 +114,12 @@ const regExpIssue = (value, seen = new Set()) => {
 
 /**
  * Why `value` cannot be sent as declared — a function, a symbol, a cycle, or a
- * RegExp the driver would change (see {@link regExpIssue}) — or null. Walks
+ * RegExp the driver would change (see {@link checkRegExp}) — or null. Walks
  * plain objects and arrays, the shapes a declaration is written in.
  */
-const unsendable = (value, seen = new Set()) => {
+const findUnsendable = (value, seen = new Set()) => {
   if (seen.size === 0) {
-    const issue = regExpIssue(value);
+    const issue = checkRegExp(value);
     if (issue) return issue;
   }
   const type = typeof value;
@@ -130,13 +130,13 @@ const unsendable = (value, seen = new Set()) => {
   seen.add(value);
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      const reason = unsendable(value[i], seen);
+      const reason = findUnsendable(value[i], seen);
       if (reason) return reason;
     }
   } else if (isPlainObject(value)) {
     const keys = Object.keys(value);
     for (let i = 0; i < keys.length; i++) {
-      const reason = unsendable(value[keys[i]], seen);
+      const reason = findUnsendable(value[keys[i]], seen);
       if (reason) return reason;
     }
   }
@@ -174,11 +174,11 @@ const byKey = (a, b) => {
 };
 
 /** A JSON-safe, key-sorted stand-in for `value` (see the module comment) */
-const canonical = (value) => {
+const canonicalize = (value) => {
   if (value === undefined || value === null) return null;
   const type = typeof value;
   if (type === 'string' || type === 'boolean') return value;
-  if (type === 'number') return canonicalNumber(value);
+  if (type === 'number') return canonicalizeNumber(value);
   if (type === 'bigint') {
     const number = Number(value);
     return Number.isSafeInteger(number) ? number : { $long: value.toString() };
@@ -186,7 +186,7 @@ const canonical = (value) => {
   if (type !== 'object') return { $opaque: type };
   if (Array.isArray(value)) {
     const out = [];
-    for (let i = 0; i < value.length; i++) out.push(canonical(value[i]));
+    for (let i = 0; i < value.length; i++) out.push(canonicalize(value[i]));
     return out;
   }
   if (value instanceof Date) {
@@ -194,10 +194,10 @@ const canonical = (value) => {
     return { $date: Number.isNaN(time) ? 'invalid' : value.toISOString() };
   }
   if (value instanceof RegExp) {
-    return { $regex: value.source, $options: sortFlags(storedFlags(value.flags)) };
+    return { $regex: value.source, $options: sortFlags(toStoredFlags(value.flags)) };
   }
-  const bson = bsonType(value);
-  if (bson !== undefined) return canonicalBson(bson, value);
+  const bson = readBsonType(value);
+  if (bson !== undefined) return canonicalizeBson(bson, value);
   const isMap = value instanceof Map;
   if (!isMap && !isPlainObject(value)) return { $opaque: 'object' };
   // An `undefined` item is dropped, not nulled: that is what the declaration
@@ -218,12 +218,12 @@ const canonical = (value) => {
   }
   pairs.sort(byKey);
   const out = {};
-  for (let i = 0; i < pairs.length; i++) assign(out, pairs[i][0], canonical(pairs[i][1]));
+  for (let i = 0; i < pairs.length; i++) assign(out, pairs[i][0], canonicalize(pairs[i][1]));
   return out;
 };
 
-/** Deep equality under {@link canonical} */
-const deepEqual = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+/** Deep equality under {@link canonicalize} */
+const isDeepEqual = (a, b) => JSON.stringify(canonicalize(a)) === JSON.stringify(canonicalize(b));
 
 /**
  * A copy of a declared value fit to send: plain objects lose their
@@ -255,11 +255,11 @@ const toWire = (value) => {
 
 module.exports = {
   isPlainObject,
-  bsonType,
-  regExpIssue,
-  unsendable,
+  readBsonType,
+  checkRegExp,
+  findUnsendable,
   assign,
-  canonical,
-  deepEqual,
+  canonicalize,
+  isDeepEqual,
   toWire,
 };

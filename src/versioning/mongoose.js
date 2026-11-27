@@ -1,6 +1,6 @@
 const { ConfigInvalidError } = require('../errors/index.js');
 const { resolveVersioning } = require('./config.js');
-const { isPlainObject, topField, unwrapDefinition } = require('./internal.js');
+const { isPlainObject, readTopField, unwrapDefinition } = require('./internal.js');
 
 /** What a value must have to be taken for a Mongoose schema */
 const SCHEMA_METHODS = Object.freeze(['set', 'get', 'add', 'path', 'pre']);
@@ -42,14 +42,14 @@ const assertSchema = (schema) => {
  * to Mongoose (it wraps them at cast time), and the `$setOnInsert` of the
  * version key that Mongoose itself adds to every upsert is not the caller's.
  */
-const updatedFields = (update, revisionField) => {
+const collectUpdatedFields = (update, revisionField) => {
   const fields = new Set();
   const keys = Object.keys(update);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
     const spec = update[key];
     if (!key.startsWith('$')) {
-      fields.add(topField(key));
+      fields.add(readTopField(key));
       continue;
     }
     if (!isPlainObject(spec)) continue;
@@ -58,8 +58,8 @@ const updatedFields = (update, revisionField) => {
       const path = paths[j];
       const value = spec[path];
       if (key === '$setOnInsert' && path === revisionField && value === 0) continue;
-      fields.add(topField(path));
-      if (key === '$rename' && typeof value === 'string') fields.add(topField(value));
+      fields.add(readTopField(path));
+      if (key === '$rename' && typeof value === 'string') fields.add(readTopField(value));
     }
   }
   return fields;
@@ -124,7 +124,7 @@ const applyVersioningPlugin = (schema, versioning) => {
   schema.pre(UPDATE_HOOKS, function bumpRevision() {
     const update = this.getUpdate();
     if (!isPlainObject(update)) return;
-    const fields = updatedFields(update, revisionField);
+    const fields = collectUpdatedFields(update, revisionField);
     if (fields.has(revisionField)) return;
     const next = { ...update, $inc: { ...update.$inc, [revisionField]: 1 } };
     // Mongoose adds `$setOnInsert: { versionKey: 0 }` to an upsert, which

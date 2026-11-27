@@ -2,10 +2,10 @@ const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { Binary, Long, MongoServerError, ObjectId } = require('mongodb');
 const {
-  errorText,
+  formatError,
   isDriverError,
   isTransientTransaction,
-  serverErrorOf,
+  unwrapServerError,
 } = require('../../src/utils/error.js');
 const {
   BOUNDS,
@@ -142,18 +142,18 @@ describe('isDriverError', () => {
   });
 });
 
-describe('errorText', () => {
+describe('formatError', () => {
   it('should stringify Errors and non-Errors with credentials masked', () => {
     assert.strictEqual(
-      errorText(new Error('Invalid URL: mongodb://u:s3cret@:27017')),
+      formatError(new Error('Invalid URL: mongodb://u:s3cret@:27017')),
       'Invalid URL: mongodb://u:****@:27017',
     );
-    assert.strictEqual(errorText('plain string'), 'plain string');
-    assert.strictEqual(errorText(7), '7');
+    assert.strictEqual(formatError('plain string'), 'plain string');
+    assert.strictEqual(formatError(7), '7');
   });
 });
 
-describe('errorText — the server’s words behind the driver’s', () => {
+describe('formatError — the server’s words behind the driver’s', () => {
   it('should speak for the error the driver wrapped, credentials masked all the same', () => {
     // Driver 7: a refused write of code 20 comes back as this, the server's
     // error under `originalError`.
@@ -162,19 +162,19 @@ describe('errorText — the server’s words behind the driver’s', () => {
       { originalError: new Error('Must run update to shard key field of mongodb://u:pw@h/db') },
     );
     assert.strictEqual(
-      errorText(wrapped),
+      formatError(wrapped),
       'Must run update to shard key field of mongodb://u:****@h/db',
     );
-    assert.strictEqual(serverErrorOf(wrapped), wrapped.originalError);
+    assert.strictEqual(unwrapServerError(wrapped), wrapped.originalError);
   });
 
   it('should take any other error as its own', () => {
     const plain = new Error('boom');
-    assert.strictEqual(serverErrorOf(plain), plain);
+    assert.strictEqual(unwrapServerError(plain), plain);
     // Not an Error under that name: nothing to speak for.
     const odd = Object.assign(new Error('outer'), { originalError: 'a string' });
-    assert.strictEqual(errorText(odd), 'outer');
-    assert.strictEqual(serverErrorOf(undefined), undefined);
+    assert.strictEqual(formatError(odd), 'outer');
+    assert.strictEqual(unwrapServerError(undefined), undefined);
   });
 });
 

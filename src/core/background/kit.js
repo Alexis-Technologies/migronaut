@@ -5,11 +5,11 @@ const {
   RunAbortedError,
 } = require('../../errors/index.js');
 const { jitter } = require('../../utils/concurrency.js');
-const { FATAL_SLICE_CODES, errorText } = require('../../utils/error.js');
-const { control, failedError, waitForLanes } = require('./controls.js');
-const { coordinate, requiresStatus, tryUnblock } = require('./coordinator.js');
+const { FATAL_SLICE_CODES, formatError } = require('../../utils/error.js');
+const { applyControl, createFailedError, waitForLanes } = require('./controls.js');
+const { coordinate, readRequiresStatus, tryUnblock } = require('./coordinator.js');
 const { runSlice } = require('./lane.js');
-const { stillDirty } = require('./drift.js');
+const { isStillDirty } = require('./drift.js');
 const { sleep } = require('./throttle.js');
 
 /**
@@ -38,7 +38,7 @@ const PAUSABLE = new Set(['blocked', 'pending', 'running']);
 const STREAMING_FRESH_MS = 60_000;
 
 /** A background migration that has rewritten documents and declares no way back */
-const irreversibleBackground = (name) => {
+const createIrreversibleError = (name) => {
   return new IrreversibleMigrationError(
     `Background migration ${name} has already rewritten documents and declares no revert — ` +
       'write a background migration back instead',
@@ -81,7 +81,7 @@ const drive = async (host, name, options) => {
     if (answer.next === 'process') {
       const state = await host.registered(name);
       const count = Math.max(1, Math.min(concurrency, state.spec?.maxParallel ?? 1));
-      await lanes(host, name, count, { signal, sliceMs, untilDone, jobOption });
+      await runLanes(host, name, count, { signal, sliceMs, untilDone, jobOption });
     } else {
       if (inline && answer.reason === 'checksum') {
         throw new ChecksumMismatchError(
@@ -101,18 +101,18 @@ const drive = async (host, name, options) => {
   }
   if (signal?.aborted) throw stopped();
   const state = await host.registered(name);
-  if (state.status === 'failed') throw failedError(state);
+  if (state.status === 'failed') throw createFailedError(state);
   return host.status(name);
 };
 
 /** `count` lanes at once: the first that fails for good stops the others, and its error is thrown */
-const lanes = async (host, name, count, { signal, sliceMs, untilDone, jobOption }) => {
+const runLanes = async (host, name, count, { signal, sliceMs, untilDone, jobOption }) => {
   const stop = new AbortController();
   const laneSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
   const running = [];
   for (let i = 0; i < count; i++) {
     running.push(
-      lane(host, name, { signal: laneSignal, sliceMs, untilDone, jobOption }).catch((error) => {
+      runLane(host, name, { signal: laneSignal, sliceMs, untilDone, jobOption }).catch((error) => {
         if (!stop.signal.aborted) stop.abort(error);
         throw error;
       }),
@@ -129,7 +129,7 @@ const lanes = async (host, name, count, { signal, sliceMs, untilDone, jobOption 
  * retry can fix — the file changed or is gone, the deployment cannot run it
  * — ends the lane, and so do `MAX_LANE_FAILURES` in a row.
  */
-const lane = async (host, name, { signal, sliceMs, untilDone, jobOption = {} }) => {
+const runLane = async (host, name, { signal, sliceMs, untilDone, jobOption = {} }) => {
   let failures = 0;
   for (;;) {
     if (signal?.aborted) return;
@@ -143,8 +143,8 @@ const lane = async (host, name, { signal, sliceMs, untilDone, jobOption = {} }) 
       failures += 1;
       if (FATAL_SLICE_CODES.has(error?.code) || failures >= MAX_LANE_FAILURES) throw error;
       host.logger.warn(
-        `⚠ Background migration ${name}: a slice failed (${errorText(error)}) — retrying`,
-        { background: name, runId: owner, error: errorText(error) },
+        `⚠ Background migration ${name}: a slice failed (${formatError(error)}) — retrying`,
+        { background: name, runId: owner, error: formatError(error) },
       );
       if (!untilDone) return;
       try {
@@ -193,18 +193,19 @@ const withdraw = async (host, name, spec, session) => {
   const withdrawn = { status: 'withdrawn', direction: 'forward' };
   const state = await store.get(name);
   if (state === null) return withdrawn;
-  if (await hasRewritten(store, name, spec)) throw irreversibleBackground(name);
+  if (await hasRewritten(store, name, spec)) throw createIrreversibleError(name);
   const removed =
     (state.generation ?? 0) === 0 &&
     (await store.remove(name, { session, filter: { generation: 0 } }));
   if (removed) return withdrawn;
   const deps = host.deps();
   const paused = PAUSABLE.has(state.status)
-    ? (await control(deps, name, 'pause', { reason: 'down withdraws it' })).applied === 'changed'
+    ? (await applyControl(deps, name, 'pause', { reason: 'down withdraws it' })).applied ===
+      'changed'
     : false;
   const stopped = await waitForLanes(deps, name);
   if (!stopped || (await hasRewritten(store, name, spec))) {
-    if (paused) await control(deps, name, 'resume', { reason: 'down refused' });
+    if (paused) await applyControl(deps, name, 'resume', { reason: 'down refused' });
     if (!stopped) {
       throw new BackgroundConflictError(
         `Background migration ${name} still has lanes at work — down cannot tell whether ` +
@@ -212,7 +213,7 @@ const withdraw = async (host, name, spec, session) => {
         { context: { migration: name, action: 'withdraw' } },
       );
     }
-    throw irreversibleBackground(name);
+    throw createIrreversibleError(name);
   }
   await store.remove(name, { session });
   return withdrawn;
@@ -224,15 +225,17 @@ const withdraw = async (host, name, spec, session) => {
  * and, unless this is only a preview (`reopen: false`), reopened when old
  * shapes reappeared.
  */
-const unsatisfied = async (host, requires, { reopen = true } = {}) => {
+const listUnsatisfied = async (host, requires, { reopen = true } = {}) => {
   const deps = host.deps();
   const waiting = [];
-  for (const row of await requiresStatus(deps, requires)) {
+  for (const row of await readRequiresStatus(deps, requires)) {
     if (!row.done) {
       waiting.push({ migration: row.migration, status: row.status });
-    } else if (row.state !== undefined && (await stillDirty(deps, row.state))) {
+    } else if (row.state !== undefined && (await isStillDirty(deps, row.state))) {
       if (reopen) {
-        await control(deps, row.migration, 'retry', { reason: 'old-shape documents reappeared' });
+        await applyControl(deps, row.migration, 'retry', {
+          reason: 'old-shape documents reappeared',
+        });
         host.emit('background:drift', {
           migration: row.migration,
           source: 'requires',
@@ -248,7 +251,7 @@ const unsatisfied = async (host, requires, { reopen = true } = {}) => {
 // ─── What it says ─────────────────────────────────────────────────────────────
 
 /** Who drove it last — and a queue chain's round */
-const coordinatorView = (state) => {
+const buildCoordinatorView = (state) => {
   return state.coordinator
     ? {
         coordinator: {
@@ -261,20 +264,20 @@ const coordinatorView = (state) => {
 };
 
 /** How a background migration's plan used the shard key — for its status */
-const shardingView = (sharding) => {
-  let hashed = false;
+const buildShardingView = (sharding) => {
+  let isHashed = false;
   const key = sharding.key ?? {};
   const fields = Object.keys(key);
-  for (let i = 0; i < fields.length; i++) if (key[fields[i]] === 'hashed') hashed = true;
+  for (let i = 0; i < fields.length; i++) if (key[fields[i]] === 'hashed') isHashed = true;
   return {
     mode: sharding.mode,
-    ...(sharding.key !== undefined ? { shardKey: sharding.key, hashed } : {}),
+    ...(sharding.key !== undefined ? { shardKey: sharding.key, hashed: isHashed } : {}),
     ...(sharding.groups !== undefined ? { groups: sharding.groups } : {}),
   };
 };
 
 /** The public view of a state document, with its current plan's partition counts */
-const stateView = async (store, state) => {
+const buildStateView = async (store, state) => {
   const spec = state.spec ?? {};
   const counts =
     state.plan !== undefined
@@ -303,7 +306,7 @@ const stateView = async (store, state) => {
     waitsFor: state.waitsFor ?? [],
     ...(counts ? { partitions: counts } : {}),
     liveLeases: leases.live,
-    ...coordinatorView(state),
+    ...buildCoordinatorView(state),
     ...(state.plan
       ? {
           plan: {
@@ -315,7 +318,7 @@ const stateView = async (store, state) => {
           },
         }
       : {}),
-    ...(state.plan?.sharding ? { sharding: shardingView(state.plan.sharding) } : {}),
+    ...(state.plan?.sharding ? { sharding: buildShardingView(state.plan.sharding) } : {}),
     registeredAt: state.registeredAt,
     ...(state.startedAt ? { startedAt: state.startedAt } : {}),
     ...(state.completedAt ? { completedAt: state.completedAt } : {}),
@@ -361,7 +364,7 @@ const partitionView = (partition) => {
  * are met are unblocked on the way — with what a heal needs to tell a
  * stalled one (live leases read for all of them at once).
  */
-const runnable = async (host) => {
+const listRunnable = async (host) => {
   const { store } = host;
   const deps = host.deps();
   const states = [];
@@ -383,7 +386,7 @@ const runnable = async (host) => {
       registeredAt: state.registeredAt,
       ...(state.startedAt ? { startedAt: state.startedAt } : {}),
       ...(state.lastProgressAt ? { lastProgressAt: state.lastProgressAt } : {}),
-      ...coordinatorView(state),
+      ...buildCoordinatorView(state),
     });
   }
   return rows;
@@ -407,13 +410,13 @@ const watchRow = (row) => {
 
 module.exports = {
   STREAMING_FRESH_MS,
-  irreversibleBackground,
+  createIrreversibleError,
   drive,
   hasRewritten,
   withdraw,
-  unsatisfied,
-  stateView,
+  listUnsatisfied,
+  buildStateView,
   partitionView,
-  runnable,
+  listRunnable,
   watchRow,
 };

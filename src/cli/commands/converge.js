@@ -9,7 +9,7 @@ const { renderConvergeHistory, renderConvergeTable } = require('../table.js');
  * rebuilt index, a dropped search index, or a validator change on a
  * collection that holds data.
  */
-const actionsToConfirm = (plan) => {
+const listActionsToConfirm = (plan) => {
   const found = [];
   for (const collection of plan.collections) {
     for (const action of collection.actions) {
@@ -39,9 +39,9 @@ const hasConflict = (plan) => {
 };
 
 /** The plan-only flag a `--wait-search` came with, as the operator typed it */
-const planOnlyFlag = (opts) => {
-  if (opts.history) return '--history';
-  if (opts.check) return '--check';
+const planOnlyFlag = (flags) => {
+  if (flags.history) return '--history';
+  if (flags.check) return '--check';
   return '--dry-run';
 };
 
@@ -93,29 +93,29 @@ const registerConverge = (program) => {
     // been read, so the confirmation cannot live in a preflight: plan first,
     // ask only when the plan drops or rebuilds an index, then apply — the way
     // `unlock` reads the lock before asking.
-    run: async (migrator, opts, _positionals, { logger, json, spinner, stopRequested }) => {
-      const waitSearch = typeof opts.waitSearch === 'boolean' ? opts.waitSearch : undefined;
-      if (waitSearch !== undefined && (opts.history || opts.dryRun || opts.check)) {
+    run: async (migrator, flags, _positionals, { logger, json, spinner, stopRequested }) => {
+      const waitSearch = typeof flags.waitSearch === 'boolean' ? flags.waitSearch : undefined;
+      if (waitSearch !== undefined && (flags.history || flags.dryRun || flags.check)) {
         throw new ConfigInvalidError(
           `--${waitSearch ? '' : 'no-'}wait-search applies to a real converge — not to ` +
-            planOnlyFlag(opts),
+            planOnlyFlag(flags),
         );
       }
-      if (opts.history) {
+      if (flags.history) {
         return migrator.convergeHistory(
-          opts.limit !== undefined ? { limit: Number(opts.limit) } : {},
+          flags.limit !== undefined ? { limit: Number(flags.limit) } : {},
         );
       }
-      if (opts.limit !== undefined) {
+      if (flags.limit !== undefined) {
         throw new ConfigInvalidError('--limit only applies to --history');
       }
       const prune = {
-        ...(opts.prune ? { prune: true } : {}),
-        ...(opts.rebuildUnique ? { rebuildUnique: true } : {}),
+        ...(flags.prune ? { prune: true } : {}),
+        ...(flags.rebuildUnique ? { rebuildUnique: true } : {}),
       };
-      const ordered = opts.ordered ? { ordered: true } : {};
-      const planOnly = Boolean(opts.dryRun || opts.check);
-      if (planOnly || !opts.yes) {
+      const ordered = flags.ordered ? { ordered: true } : {};
+      const isPlanOnly = Boolean(flags.dryRun || flags.check);
+      if (isPlanOnly || !flags.yes) {
         spinner?.start('Comparing declared collections with the database…');
         let plan = null;
         try {
@@ -123,9 +123,9 @@ const registerConverge = (program) => {
         } finally {
           spinner?.stop();
         }
-        if (planOnly) return plan;
+        if (isPlanOnly) return plan;
         assertNotStopped(stopRequested);
-        const destructive = actionsToConfirm(plan);
+        const destructive = listActionsToConfirm(plan);
         // A plan with a conflict is refused by the run itself — asking first
         // would be a question whose answer changes nothing.
         if (destructive.length > 0 && !hasConflict(plan)) {
@@ -141,7 +141,7 @@ const registerConverge = (program) => {
             );
           }
           logger.info(renderConvergeTable(plan));
-          if (opts.rebuildUnique && hasAction(destructive, 'recreate')) {
+          if (flags.rebuildUnique && hasAction(destructive, 'recreate')) {
             logger.warn(
               '⚠ --rebuild-unique: a rebuilt unique index enforces nothing until it is built ' +
                 'again — a duplicate written in between makes it unbuildable',
@@ -158,27 +158,27 @@ const registerConverge = (program) => {
       spinner?.start('Converging…');
       try {
         return await migrator.converge({
-          noLock: opts.noLock,
+          noLock: flags.noLock,
           ...prune,
           ...ordered,
           ...(waitSearch !== undefined ? { waitForSearchIndexes: waitSearch } : {}),
-          ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
+          ...(flags.reason !== undefined ? { reason: flags.reason } : {}),
         });
       } finally {
         spinner?.stop();
       }
     },
-    render: (result, { logger, opts }) => {
+    render: (result, { logger, flags }) => {
       if (Array.isArray(result)) return void logger.info(renderConvergeHistory(result));
       // A real run's own lines (✔ Created …, the rollup) are already out.
       if (!result.dryRun) return;
       if (result.collections.length === 0) {
         return void logger.info('No collections declared — set collections or collectionsDir');
       }
-      logger.info(renderConvergeTable(result, { all: Boolean(opts.verbose) }));
+      logger.info(renderConvergeTable(result, { all: Boolean(flags.verbose) }));
     },
-    after: (result, { logger, opts }) => {
-      if (!opts.check || result === undefined) return;
+    after: (result, { logger, flags }) => {
+      if (!flags.check || result === undefined) return;
       // A search index that failed to build serves nothing, whatever its
       // definition says — the gate fails on it too, though converge cannot fix it.
       // .error writes to stderr, so JSON stdout stays a single clean document.

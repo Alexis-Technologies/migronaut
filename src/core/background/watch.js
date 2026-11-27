@@ -6,20 +6,20 @@ const {
   RunAbortedError,
 } = require('../../errors/index.js');
 const { jitter } = require('../../utils/concurrency.js');
-const { errorText } = require('../../utils/error.js');
-const { belowVersionFilter, versionOf } = require('../../versioning/document.js');
-const { applyBatch, transactionOptions } = require('./engine.js');
+const { formatError } = require('../../utils/error.js');
+const { buildBelowVersionFilter, readVersion } = require('../../versioning/document.js');
+const { applyBatch, buildTransactionOptions } = require('./engine.js');
 const { sleep } = require('./throttle.js');
 const {
   classifyStreamError,
   isEnding,
-  lagOf,
-  tokenDue,
+  measureLagMs,
+  isTokenDue,
   watchPipeline,
   watchView,
 } = require('./watch-plan.js');
-const { control } = require('./controls.js');
-const { STATE_SUMMARY, jobFor } = require('./job.js');
+const { applyControl } = require('./controls.js');
+const { STATE_SUMMARY, loadJob } = require('./job.js');
 const { verify } = require('./drift.js');
 const { runWithLock } = require('../lock.js');
 const { READ_OPTIONS } = require('../server-info.js');
@@ -61,7 +61,7 @@ const stopReason = (reason) => new RunAbortedError(reason, { context: { reason }
  * The live drift watcher: after a background migration completed, an
  * old-shape write (an old pod, a forgotten worker) is upgraded within moments
  * instead of at the next poll — through a change stream per collection, by
- * the same write path a lane uses (the transform, stampedDiff, the optimistic
+ * the same write path a lane uses (the transform, buildStampedDiff, the optimistic
  * filter, targeted writes and the shard-key guard).
  *
  * One leader per collection, across every process: the watcher holding the
@@ -138,7 +138,7 @@ const watchOptions = (options) => {
 };
 
 /** The background migration that takes a collection to its target — the edge reaching highest */
-const lastEdge = (edges) => {
+const findLastEdge = (edges) => {
   let last = null;
   for (const edge of edges.values()) if (last === null || edge.to > last.to) last = edge;
   return last?.name;
@@ -149,7 +149,7 @@ const lastEdge = (edges) => {
  * from `hello`'s `localTime`, halfway through the round trip. 0 when the
  * server will not say.
  */
-const clockSkew = async (db) => {
+const measureClockSkew = async (db) => {
   try {
     const before = Date.now();
     const hello = await db.admin().command({ hello: 1 });
@@ -177,7 +177,7 @@ const startWatch = (deps, options = {}) => {
   const owner = deps.owner;
   /** collection → { controller, done, state, leading, counters, lastEventAt } */
   const followers = new Map();
-  let unsupported = false;
+  let isUnsupported = false;
 
   const report = (error, collection) => {
     try {
@@ -186,8 +186,8 @@ const startWatch = (deps, options = {}) => {
       // A throwing onError is its own problem.
     }
     deps.logger.warn(
-      `⚠ Drift watcher${collection ? ` (${collection})` : ''}: ${errorText(error)}`,
-      deps.fields({ ...(collection ? { collection } : {}), error: errorText(error) }),
+      `⚠ Drift watcher${collection ? ` (${collection})` : ''}: ${formatError(error)}`,
+      deps.fields({ ...(collection ? { collection } : {}), error: formatError(error) }),
     );
   };
 
@@ -202,7 +202,7 @@ const startWatch = (deps, options = {}) => {
       await deps.watchStore.save(collection, owner, { fields: { state } }).catch((error) => {
         // The state is shown again with the next save; a lost one is only said.
         deps.logger.debug(
-          `Drift watcher (${collection}): could not save its state: ${errorText(error)}`,
+          `Drift watcher (${collection}): could not save its state: ${formatError(error)}`,
           deps.fields({ collection }),
         );
       });
@@ -240,7 +240,7 @@ const startWatch = (deps, options = {}) => {
   const supervise = async () => {
     while (!signal.aborted) {
       // A follower found no change streams here at all: nothing to supervise.
-      if (unsupported) break;
+      if (isUnsupported) break;
       try {
         const wanted = wantedCollections(await deps.store.list({}, { projection: STATE_SUMMARY }));
         for (const collection of wanted) {
@@ -296,7 +296,7 @@ const startWatch = (deps, options = {}) => {
       }
       if (outcome === 'fallback' || outcome === 'gone') return;
       if (outcome === 'unsupported') {
-        unsupported = true;
+        isUnsupported = true;
         return void controller.abort(stopReason('change streams are not supported here'));
       }
       await sleep(jitter(settings.leaderRetryMs), followSignal).catch(() => undefined);
@@ -365,9 +365,8 @@ const startWatch = (deps, options = {}) => {
     const jobs = new Map();
     const refreshAt = Date.now() + settings.refreshMs;
     const saveToken = async (force = false) => {
-      if (token === undefined || !tokenDue(savedAt, Date.now(), settings.checkpointMs, { force })) {
-        return;
-      }
+      const isDue = isTokenDue(savedAt, Date.now(), settings.checkpointMs, { force });
+      if (token === undefined || !isDue) return;
       const counters = follower?.pending ?? {};
       if (follower) follower.pending = {};
       const names = [];
@@ -385,7 +384,7 @@ const startWatch = (deps, options = {}) => {
     };
     // Lag is judged against the server's clock: a host running ahead would
     // otherwise read every event as late and shed the collection each time.
-    const skew = await clockSkew(deps.db);
+    const skew = await measureClockSkew(deps.db);
     try {
       // The first read opens the cursor: from here on the stream has every
       // write. Only then is a fresh start's past probed — from "now" (no
@@ -418,14 +417,14 @@ const startWatch = (deps, options = {}) => {
             end: event.operationType === 'invalidate' ? undefined : 'gone',
           };
         }
-        const lag = lagOf(event, Date.now() - skew);
-        if (lag !== undefined && lag > settings.maxLagMs) {
+        const lagMs = measureLagMs(event, Date.now() - skew);
+        if (lagMs !== undefined && lagMs > settings.maxLagMs) {
           await shed(collection, edges);
           token = undefined;
           await deps.watchStore.save(collection, owner, { unset: ['resumeToken'] });
           return { token: undefined };
         }
-        await upgrade(collection, event, context, jobs, lag);
+        await upgrade(collection, event, context, jobs, lagMs);
         // Past this event only once it is served: a failure reopens before it.
         token = event._id;
         await saveToken();
@@ -446,10 +445,10 @@ const startWatch = (deps, options = {}) => {
    */
   const windDown = async (stream, saveToken) => {
     await stream.close().catch((error) => {
-      deps.logger.debug(`Drift watcher: could not close a change stream — ${errorText(error)}`);
+      deps.logger.debug(`Drift watcher: could not close a change stream — ${formatError(error)}`);
     });
     await saveToken(true).catch((error) => {
-      deps.logger.debug(`Drift watcher: could not save its position — ${errorText(error)}`);
+      deps.logger.debug(`Drift watcher: could not save its position — ${formatError(error)}`);
     });
   };
 
@@ -457,7 +456,7 @@ const startWatch = (deps, options = {}) => {
   const shed = async (collection, edges) => {
     await setState(collection, 'overloaded', { leading: true });
     for (const edge of edges.values()) {
-      await control(deps, edge.name, 'retry', {
+      await applyControl(deps, edge.name, 'retry', {
         reason: 'the drift watcher fell behind',
       }).catch((error) => report(error, collection));
     }
@@ -469,7 +468,7 @@ const startWatch = (deps, options = {}) => {
   };
 
   /** Upgrade the one document an event names, edge by edge, up to the target shape */
-  const upgrade = async (collection, event, context, jobs, lag) => {
+  const upgrade = async (collection, event, context, jobs, lagMs) => {
     const { edges, byName, target, field } = context;
     const follower = followers.get(collection);
     const count = (key) => {
@@ -481,17 +480,17 @@ const startWatch = (deps, options = {}) => {
     count('events');
     if (follower) follower.lastEventAt = new Date();
     const key = event.documentKey;
-    const coll = deps.db.collection(collection);
-    const below = belowVersionFilter({ field }, target);
+    const handle = deps.db.collection(collection);
+    const below = buildBelowVersionFilter({ field }, target);
     for (let hop = 0; hop < MAX_HOPS; hop++) {
-      const doc = await coll.findOne(below ? { $and: [key, below] } : key, READ_OPTIONS);
+      const doc = await handle.findOne(below ? { $and: [key, below] } : key, READ_OPTIONS);
       if (doc === null) {
         if (hop === 0) count('skipped');
         return;
       }
-      const edge = edges.get(versionOf(doc, field));
+      const edge = edges.get(readVersion(doc, field));
       if (edge === undefined || !settings.upgrade) {
-        return void drift(collection, edge?.name ?? lastEdge(edges), 'reported');
+        return void drift(collection, edge?.name ?? findLastEdge(edges), 'reported');
       }
       let job = jobs.get(edge.name);
       // A file that would not load stays so until the stream's refresh: said
@@ -499,7 +498,7 @@ const startWatch = (deps, options = {}) => {
       if (job === null) return;
       if (job === undefined) {
         try {
-          job = await jobFor(deps, edge.name, byName.get(edge.name));
+          job = await loadJob(deps, edge.name, byName.get(edge.name));
         } catch (error) {
           // Mid-deploy: another version of the file — the lanes take the document.
           jobs.set(edge.name, null);
@@ -509,7 +508,7 @@ const startWatch = (deps, options = {}) => {
         }
         jobs.set(edge.name, job);
       }
-      const fresh = await coll.findOne({ $and: [key, job.match] }, READ_OPTIONS);
+      const fresh = await handle.findOne({ $and: [key, job.match] }, READ_OPTIONS);
       if (fresh === null) return;
       const result = await rewrite(job, fresh);
       if (result === null) {
@@ -522,7 +521,7 @@ const startWatch = (deps, options = {}) => {
         count('failed');
         drift(collection, edge.name, 'failed');
         if (deps.onDrift === 'reopen') {
-          await control(deps, edge.name, 'retry', {
+          await applyControl(deps, edge.name, 'retry', {
             reason: 'the drift watcher could not upgrade a document',
           }).catch((error) => report(error, collection));
         }
@@ -531,8 +530,8 @@ const startWatch = (deps, options = {}) => {
       if (result.migrated !== 1) return;
       count('upgraded');
       drift(collection, edge.name, 'upgraded');
-      if (lag !== undefined) {
-        deps.telemetry?.backgroundWatchDelay({ name: edge.name, delayMs: lag });
+      if (lagMs !== undefined) {
+        deps.telemetry?.backgroundWatchDelay({ name: edge.name, delayMs: lagMs });
       }
     }
   };
@@ -564,7 +563,7 @@ const startWatch = (deps, options = {}) => {
             strict: true,
             attempt: transactions,
           });
-        }, transactionOptions(job.spec));
+        }, buildTransactionOptions(job.spec));
         return result;
       } catch (error) {
         if (error?.context?.reason === 'document') {
@@ -579,7 +578,7 @@ const startWatch = (deps, options = {}) => {
         if (current === null) return { migrated: 0, errors: [] };
       } finally {
         await session.endSession().catch((error) => {
-          deps.logger.debug(`Drift watcher: could not end a session — ${errorText(error)}`);
+          deps.logger.debug(`Drift watcher: could not end a session — ${formatError(error)}`);
         });
       }
     }
@@ -598,7 +597,7 @@ const startWatch = (deps, options = {}) => {
     // even when the reopening failed, which is no reopening: then the drift
     // is only reported.
     try {
-      await control(deps, migration, 'retry', { reason });
+      await applyControl(deps, migration, 'retry', { reason });
     } catch (error) {
       report(error, collection);
       return void drift(collection, migration, 'reported');

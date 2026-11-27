@@ -3,8 +3,8 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const { afterEach, beforeEach, describe, it } = require('node:test');
 const {
-  collectionsIssues,
-  definitionIssues,
+  checkCollections,
+  checkDefinition,
   loadCollectionsDir,
   normalizeDefinition,
   resolveDefinitions,
@@ -14,10 +14,10 @@ const { ConfigInvalidError } = require('../../src/errors/index.js');
 
 const RESERVED = ['_migronaut_migrations', '_migronaut_locks'];
 const issuesOf = (definition, options = {}) =>
-  definitionIssues(definition, { path: 'collections[0]', reserved: RESERVED, ...options });
+  checkDefinition(definition, { path: 'collections[0]', reserved: RESERVED, ...options });
 const pathsOf = (definition, options) => issuesOf(definition, options).map((issue) => issue.path);
 
-describe('definitionIssues', () => {
+describe('checkDefinition', () => {
   it('should accept indexes, a validator, or both', () => {
     assert.deepStrictEqual(issuesOf({ name: 'users', indexes: [] }), []);
     assert.deepStrictEqual(issuesOf({ name: 'users', validator: null }), []);
@@ -187,13 +187,13 @@ describe('definitionIssues', () => {
 
   it('should refuse a non-object definition', () => {
     assert.deepStrictEqual(pathsOf(null), ['collections[0]']);
-    assert.deepStrictEqual(definitionIssues([], { path: 'x.json:' })[0].path, 'x.json');
+    assert.deepStrictEqual(checkDefinition([], { path: 'x.json:' })[0].path, 'x.json');
   });
 });
 
-describe('collectionsIssues', () => {
+describe('checkCollections', () => {
   it('should refuse a collection declared twice', () => {
-    const issues = collectionsIssues(
+    const issues = checkCollections(
       [
         { name: 'a', indexes: [] },
         { name: 'a', validator: null },
@@ -207,9 +207,9 @@ describe('collectionsIssues', () => {
   });
 
   it('should treat undefined as nothing declared and refuse a non-array', () => {
-    assert.deepStrictEqual(collectionsIssues(undefined), []);
+    assert.deepStrictEqual(checkCollections(undefined), []);
     assert.deepStrictEqual(
-      collectionsIssues({}).map((issue) => issue.path),
+      checkCollections({}).map((issue) => issue.path),
       ['collections'],
     );
   });

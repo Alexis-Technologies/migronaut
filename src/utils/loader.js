@@ -9,8 +9,8 @@ const {
   MigrationLoadFailedError,
 } = require('../errors/index.js');
 const { MAX_TIMER_MS } = require('./concurrency.js');
-const { contextPath, errorText } = require('./error.js');
-const { requiresIssues } = require('./migration-name.js');
+const { toContextPath, formatError } = require('./error.js');
+const { checkRequires } = require('./migration-name.js');
 
 /** What `fs.access` says when the file is simply not there */
 const MISSING_FILE_CODES = new Set(['ENOENT', 'ENOTDIR']);
@@ -70,9 +70,9 @@ const isUnsupportedTsSyntaxError = (error) => {
  * `--no-experimental-strip-types`), and non-erasable syntax such as `enum` or
  * `namespace` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`).
  */
-const tsLoadMessageOrNull = (filepath, error, noun) => {
-  const ext = path.extname(filepath).toLowerCase();
-  if (!TS_EXTENSIONS.has(ext)) {
+const explainTsLoad = (filepath, error, noun) => {
+  const extension = path.extname(filepath).toLowerCase();
+  if (!TS_EXTENSIONS.has(extension)) {
     return null;
   }
   const name = path.basename(filepath);
@@ -87,17 +87,17 @@ const tsLoadMessageOrNull = (filepath, error, noun) => {
 
 /**
  * Translate a dynamic-import failure of a migration into a clear
- * MigrationInvalidExportError (see {@link tsLoadMessageOrNull}), or return
+ * MigrationInvalidExportError (see {@link explainTsLoad}), or return
  * null to let the original error propagate.
  */
-const tsLoadErrorOrNull = (filepath, error) => {
-  const message = tsLoadMessageOrNull(filepath, error, 'migration');
+const toTsLoadError = (filepath, error) => {
+  const message = explainTsLoad(filepath, error, 'migration');
   if (message === null) {
     return null;
   }
   return new MigrationInvalidExportError(message, {
     cause: error,
-    context: { filepath: contextPath(filepath), cause: errorText(error) },
+    context: { filepath: toContextPath(filepath), cause: formatError(error) },
   });
 };
 
@@ -156,12 +156,12 @@ const importMigrationModule = async (filepath, options = {}) => {
   } catch (error) {
     if (MISSING_FILE_CODES.has(error?.code)) {
       throw new MigrationFileNotFoundError('Migration file not found', {
-        context: { filepath: contextPath(filepath) },
+        context: { filepath: toContextPath(filepath) },
       });
     }
     throw new MigrationLoadFailedError('Migration file cannot be read', {
       cause: error,
-      context: { filepath: contextPath(filepath), cause: errorText(error) },
+      context: { filepath: toContextPath(filepath), cause: formatError(error) },
     });
   }
 
@@ -169,13 +169,13 @@ const importMigrationModule = async (filepath, options = {}) => {
   try {
     imported = await importUserFile(filepath, { reload: options.reload });
   } catch (error) {
-    const tsError = tsLoadErrorOrNull(filepath, error);
+    const tsError = toTsLoadError(filepath, error);
     if (tsError) {
       throw tsError;
     }
     throw new MigrationLoadFailedError('Migration file failed to load', {
       cause: error,
-      context: { filepath: contextPath(filepath), cause: errorText(error) },
+      context: { filepath: toContextPath(filepath), cause: formatError(error) },
     });
   }
   // `mod.default ?? mod` handles the CommonJS default-export case
@@ -183,19 +183,19 @@ const importMigrationModule = async (filepath, options = {}) => {
 };
 
 /** The `requires` export, validated against the file's own name — undefined when it has none */
-const requiresOf = (resolved, filepath) => {
+const readRequiresExport = (resolved, filepath) => {
   if (resolved.requires === undefined) return undefined;
-  const issues = requiresIssues(resolved.requires, path.basename(filepath));
+  const issues = checkRequires(resolved.requires, path.basename(filepath));
   if (issues.length > 0) {
     throw new MigrationInvalidExportError(`Invalid ${issues[0].path}: ${issues[0].message}`, {
-      context: { filepath: contextPath(filepath), issues },
+      context: { filepath: toContextPath(filepath), issues },
     });
   }
   return [...resolved.requires];
 };
 
 /** `name` as {@link EXPORT_SPELLINGS} keys it */
-const spellingOf = (name) => {
+const normalizeSpelling = (name) => {
   const lower = name.toLowerCase();
   return lower.endsWith('s') ? lower.slice(0, -1) : lower;
 };
@@ -209,10 +209,10 @@ const assertNoNearMiss = (resolved, filepath) => {
   const names = Object.keys(resolved);
   for (let i = 0; i < names.length; i++) {
     const name = names[i];
-    const meant = EXPORT_SPELLINGS.get(spellingOf(name));
+    const meant = EXPORT_SPELLINGS.get(normalizeSpelling(name));
     if (meant === undefined || meant === name) continue;
     throw new MigrationInvalidExportError(`Unknown export '${name}' — did you mean '${meant}'?`, {
-      context: { filepath: contextPath(filepath), export: name, expected: meant },
+      context: { filepath: toContextPath(filepath), export: name, expected: meant },
     });
   }
 };
@@ -223,7 +223,7 @@ const assertOptionalExports = (resolved, filepath) => {
   if (useTransaction !== undefined && typeof useTransaction !== 'boolean') {
     throw new MigrationInvalidExportError('useTransaction must be a boolean', {
       context: {
-        filepath: contextPath(filepath),
+        filepath: toContextPath(filepath),
         export: 'useTransaction',
         type: typeof useTransaction,
       },
@@ -233,12 +233,18 @@ const assertOptionalExports = (resolved, filepath) => {
   if (timeoutMs !== undefined && !isTimeout) {
     throw new MigrationInvalidExportError(
       `timeoutMs must be a positive integer, at most ${MAX_TIMER_MS}`,
-      { context: { filepath: contextPath(filepath), export: 'timeoutMs', type: typeof timeoutMs } },
+      {
+        context: { filepath: toContextPath(filepath), export: 'timeoutMs', type: typeof timeoutMs },
+      },
     );
   }
   if (description !== undefined && typeof description !== 'string') {
     throw new MigrationInvalidExportError('description must be a string', {
-      context: { filepath: contextPath(filepath), export: 'description', type: typeof description },
+      context: {
+        filepath: toContextPath(filepath),
+        export: 'description',
+        type: typeof description,
+      },
     });
   }
 };
@@ -261,20 +267,20 @@ const resolveMigrationExports = (resolved, filepath) => {
       throw new MigrationInvalidExportError(
         'A background migration exports no up() or down() — put the expand steps in a ' +
           'migration of their own',
-        { context: { filepath: contextPath(filepath) } },
+        { context: { filepath: toContextPath(filepath) } },
       );
     }
     return {
       kind: 'background',
       background: resolved.background,
       description: resolved.description,
-      requires: requiresOf(resolved, filepath),
+      requires: readRequiresExport(resolved, filepath),
     };
   }
 
   if (!isFunction(resolved.up) || !isFunction(resolved.down)) {
     throw new MigrationInvalidExportError('Migration must export async up() and down() functions', {
-      context: { filepath: contextPath(filepath) },
+      context: { filepath: toContextPath(filepath) },
     });
   }
 
@@ -287,7 +293,7 @@ const resolveMigrationExports = (resolved, filepath) => {
     useTransaction: resolved.useTransaction,
     timeoutMs: resolved.timeoutMs,
     description: resolved.description,
-    requires: requiresOf(resolved, filepath),
+    requires: readRequiresExport(resolved, filepath),
   };
 };
 
@@ -313,8 +319,8 @@ const loadMigrationFile = async (filepath, options = {}) => {
 };
 
 module.exports = {
-  tsLoadMessageOrNull,
-  tsLoadErrorOrNull,
+  explainTsLoad,
+  toTsLoadError,
   importUserFile,
   importMigrationModule,
   resolveMigrationExports,

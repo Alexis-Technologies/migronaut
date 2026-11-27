@@ -5,20 +5,25 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { ConfigInvalidError } = require('../../src/errors/index.js');
-const { MAX_ID_LENGTH, assertId, createIdGenerator, randomId } = require('../../src/utils/id.js');
+const {
+  MAX_ID_LENGTH,
+  assertId,
+  createIdGenerator,
+  createRandomId,
+} = require('../../src/utils/id.js');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-describe('randomId', () => {
+describe('createRandomId', () => {
   it('should mint a UUID, different every time', () => {
-    const first = randomId();
+    const first = createRandomId();
     assert.match(first, UUID);
-    assert.notStrictEqual(randomId(), first);
+    assert.notStrictEqual(createRandomId(), first);
   });
 
   it('should stay under the limit it shares with every other id', () => {
     assert.strictEqual(MAX_ID_LENGTH, 128);
-    assert.ok(randomId().length <= MAX_ID_LENGTH);
+    assert.ok(createRandomId().length <= MAX_ID_LENGTH);
   });
 });
 
@@ -72,8 +77,8 @@ describe('assertId', () => {
 
 describe('createIdGenerator', () => {
   it('should keep the default when no generator is configured', () => {
-    assert.strictEqual(createIdGenerator(undefined), randomId);
-    assert.strictEqual(createIdGenerator(), randomId);
+    assert.strictEqual(createIdGenerator(undefined), createRandomId);
+    assert.strictEqual(createIdGenerator(), createRandomId);
   });
 
   it('should refuse a generator that is not a function', () => {

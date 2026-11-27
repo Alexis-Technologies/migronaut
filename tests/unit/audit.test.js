@@ -72,7 +72,7 @@ describe('runAudit (mocked deps)', () => {
     );
     assert.strictEqual(report.ok, false);
     assert.strictEqual(check(report, 'connection').status, 'fail');
-    // Redacted through errorText — a driver message echoing the URI must not
+    // Redacted through formatError — a driver message echoing the URI must not
     // leak the password into the report.
     assert.ok(!check(report, 'connection').detail.includes('secret'));
   });

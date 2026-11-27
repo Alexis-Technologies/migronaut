@@ -3,7 +3,7 @@ const { createInterface } = require('node:readline/promises');
 const { createSpinner } = require('./spinner.js');
 const { EXIT_CODES } = require('./exit-codes.js');
 const { ConfigInvalidError, MigronautError, RunAbortedError } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
+const { formatError } = require('../utils/error.js');
 const { createLogger } = require('../utils/logger.js');
 const { redactDeep, redactUris } = require('../utils/redact.js');
 
@@ -28,19 +28,19 @@ const emitJson = (value) => {
 };
 
 /** Build the partial config passed to MigratorKit from CLI flags */
-const partialFromOpts = (opts) => {
+const toPartialConfig = (flags) => {
   const partial = {};
-  if (opts.uri) partial.uri = opts.uri;
-  if (opts.db) partial.dbName = opts.db;
-  if (opts.dir) partial.migrationsDir = opts.dir;
-  if (opts.strict) partial.strict = true;
-  if (opts.env === false) partial.envFile = false;
-  else if (opts.envFile) partial.envFile = opts.envFile;
+  if (flags.uri) partial.uri = flags.uri;
+  if (flags.db) partial.dbName = flags.db;
+  if (flags.dir) partial.migrationsDir = flags.dir;
+  if (flags.strict) partial.strict = true;
+  if (flags.env === false) partial.envFile = false;
+  else if (flags.envFile) partial.envFile = flags.envFile;
   return partial;
 };
 
 /** The exit code for a failure — see {@link EXIT_CODES} */
-const exitCodeFor = (error) => {
+const resolveExitCode = (error) => {
   if (!(error instanceof MigronautError)) return 1;
   return EXIT_CODES[error.code] ?? 1;
 };
@@ -49,9 +49,9 @@ const exitCodeFor = (error) => {
  * Log level from the verbosity flags. `--quiet` keeps errors — the point is to
  * drop the running commentary, not to hide failures.
  */
-const resolveLevel = (opts) => {
-  if (opts.verbose) return 'debug';
-  if (opts.quiet) return 'error';
+const resolveLevel = (flags) => {
+  if (flags.verbose) return 'debug';
+  if (flags.quiet) return 'error';
   return 'info';
 };
 
@@ -69,11 +69,11 @@ const resolveLevel = (opts) => {
  * handler's "then stopping" promise above would be a lie.
  */
 const attachSignalHandlers = (migrator, spinner, logger) => {
-  let stopping = false;
+  let isStopping = false;
   const handlers = [];
   for (const signal of STOP_SIGNALS) {
     const handler = () => {
-      if (stopping) {
+      if (isStopping) {
         spinner?.stop();
         // process.exit(), not exitCode: the operator pressed twice — an
         // immediate abort is exactly what they asked for, and the output
@@ -81,7 +81,7 @@ const attachSignalHandlers = (migrator, spinner, logger) => {
         // accepted cost here.
         process.exit(SIGNAL_EXIT_CODES[signal]);
       }
-      stopping = true;
+      isStopping = true;
       spinner?.stop();
       logger.warn(
         `⚠ ${signal} received — finishing the current migration, then stopping. ` +
@@ -98,7 +98,7 @@ const attachSignalHandlers = (migrator, spinner, logger) => {
       process.off(signal, handler);
     }
   };
-  detach.stopRequested = () => stopping;
+  detach.stopRequested = () => isStopping;
   return detach;
 };
 
@@ -139,7 +139,7 @@ const attachCleanupHandlers = (spinner) => {
  * Wrap a logger so every line clears and re-renders an active spinner instead
  * of splicing into the middle of its frame.
  */
-const spinnerAwareLogger = (logger, spinner) => {
+const wrapSpinnerLogger = (logger, spinner) => {
   const wrap = (method) => {
     return (message, fields) => spinner.interrupt(() => logger[method](message, fields));
   };
@@ -154,7 +154,7 @@ const spinnerAwareLogger = (logger, spinner) => {
  * errors, and those surface as message, context.cause, and stack alike.
  */
 const reportError = (error, { json, verbose, logger }) => {
-  const message = errorText(error);
+  const message = formatError(error);
   if (json) {
     // `context` carries the detail that used to be dropped entirely —
     // validation issues, the driver's cause — and `partial` the migrations
@@ -181,7 +181,7 @@ const reportError = (error, { json, verbose, logger }) => {
     logger.error(`✖ ${message}`);
     if (verbose && error instanceof Error && error.stack) logger.debug(redactUris(error.stack));
   }
-  process.exitCode = exitCodeFor(error);
+  process.exitCode = resolveExitCode(error);
 };
 
 /**
@@ -200,7 +200,7 @@ const reportUsageError = (message, { json = false, help } = {}) => {
 /**
  * Construct a MigratorKit from CLI options, run `fn(migrator, cli)`, always
  * disconnect, and translate failures into a non-zero exit code with a
- * readable message. `cli` is `{ logger, json, opts, spinner, stopRequested }`:
+ * readable message. `cli` is `{ logger, json, flags, spinner, stopRequested }`:
  * the one level-aware logger every command must render through, so
  * `--quiet`/`--verbose` apply to command output and not only to core's log
  * lines; the spinner (undefined in JSON or quiet mode) for a command that
@@ -208,28 +208,28 @@ const reportUsageError = (message, { json = false, help } = {}) => {
  * command that reads, asks, then acts must check between those steps, since
  * `migrator.stop()` is a no-op while no run is in flight.
  */
-const withMigrator = async (opts, fn, options = {}) => {
+const withMigrator = async (flags, work, options = {}) => {
   // Required here, not at module top: the orchestrator is the CLI's one heavy
   // import, and `--help`/`--version` never reach this function.
   const { MigratorKit } = require('../core/migrator.js');
   const json = options.json ?? false;
-  const verbose = opts.verbose ?? false;
-  const level = resolveLevel(opts);
+  const verbose = flags.verbose ?? false;
+  const level = resolveLevel(flags);
   // In JSON mode the spinner is suppressed and all human output goes to stderr,
   // so stdout carries exactly one JSON document. `--quiet` also suppresses it:
   // the spinner is running commentary.
   const spinner = options.spinner && !json && level === 'info' ? createSpinner() : undefined;
 
-  const partial = partialFromOpts(opts);
+  const partial = toPartialConfig(flags);
   // One level-aware logger per invocation (defineCommand hands its own in so
   // preflight and run render identically); while a spinner is active every
   // line interrupts it instead of colliding.
   const baseLogger =
     options.baseLogger ?? createLogger(json ? process.stderr : process.stdout, level);
-  const cliLogger = spinner ? spinnerAwareLogger(baseLogger, spinner) : baseLogger;
+  const cliLogger = spinner ? wrapSpinnerLogger(baseLogger, spinner) : baseLogger;
 
   const migratorOptions = {
-    ...(opts.config ? { configPath: opts.config } : {}),
+    ...(flags.config ? { configPath: flags.config } : {}),
     // A *fallback*, not an override: a `logger` in the user's config file
     // (pino, or `null` for silence) wins over the CLI's console logger — the
     // README documents that pattern, and clobbering it silently broke it.
@@ -283,10 +283,10 @@ const withMigrator = async (opts, fn, options = {}) => {
         context: { results: [] },
       });
     }
-    await fn(migrator, {
+    await work(migrator, {
       logger,
       json,
-      opts,
+      flags,
       spinner,
       stopRequested: () => detachSignals.stopRequested?.() ?? false,
     });
@@ -300,7 +300,7 @@ const withMigrator = async (opts, fn, options = {}) => {
     spinner?.stop();
     // A failing close must not replace whatever this command was reporting.
     await migrator.disconnect().catch((error) => {
-      logger.debug(`Could not disconnect: ${errorText(error)}`);
+      logger.debug(`Could not disconnect: ${formatError(error)}`);
     });
   }
 };
@@ -317,10 +317,10 @@ const withMigrator = async (opts, fn, options = {}) => {
  */
 const confirm = async (question) => {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
-  let settled = false;
+  let isSettled = false;
   const closedEarly = new Promise((_resolve, reject) => {
     rl.once('close', () => {
-      if (!settled) {
+      if (!isSettled) {
         reject(
           new ConfigInvalidError(
             'stdin closed before the confirmation was answered — pass --yes to confirm non-interactively',
@@ -333,7 +333,7 @@ const confirm = async (question) => {
     const answer = await Promise.race([rl.question(question), closedEarly]);
     return /^y(es)?$/i.test(answer.trim());
   } finally {
-    settled = true;
+    isSettled = true;
     rl.close();
   }
 };
@@ -352,21 +352,21 @@ const defineCommand = (program, spec) => {
   const options = spec.options ?? [];
   for (let i = 0; i < options.length; i++) command.option(options[i][0], options[i][1]);
   // `lockable: true` declares the option AND computes the inversion once —
-  // the `--no-x` flag arriving as `opts.lock === false` is subtle enough that
+  // the `--no-x` flag arriving as `flags.lock === false` is subtle enough that
   // a per-command copy will eventually get it wrong.
   if (spec.lockable) command.option('--no-lock', 'Skip the concurrency lock (dev only)');
   command.action(async (...actionArgs) => {
     const invoked = actionArgs[actionArgs.length - 1];
     const positionals = actionArgs.slice(0, -2);
-    const opts = invoked.optsWithGlobals();
-    if (spec.lockable) opts.noLock = opts.lock === false;
-    const json = spec.jsonOutput === false ? false : Boolean(opts.json);
-    const verbose = opts.verbose ?? false;
-    const logger = createLogger(json ? process.stderr : process.stdout, resolveLevel(opts));
+    const flags = invoked.optsWithGlobals();
+    if (spec.lockable) flags.noLock = flags.lock === false;
+    const json = spec.jsonOutput === false ? false : Boolean(flags.json);
+    const verbose = flags.verbose ?? false;
+    const logger = createLogger(json ? process.stderr : process.stdout, resolveLevel(flags));
 
     if (spec.preflight) {
       try {
-        const proceed = await spec.preflight(opts, positionals, { logger, json });
+        const proceed = await spec.preflight(flags, positionals, { logger, json });
         if (proceed === false) return;
       } catch (error) {
         return void reportError(error, { json, verbose, logger });
@@ -374,9 +374,9 @@ const defineCommand = (program, spec) => {
     }
 
     await withMigrator(
-      opts,
+      flags,
       async (migrator, cli) => {
-        const data = await spec.run(migrator, opts, positionals, cli);
+        const data = await spec.run(migrator, flags, positionals, cli);
         if (data !== undefined) {
           if (json) emitJson(data);
           else spec.render?.(data, cli);
@@ -400,8 +400,8 @@ const defineCommand = (program, spec) => {
 module.exports = {
   EXIT_CODES,
   emitJson,
-  partialFromOpts,
-  exitCodeFor,
+  toPartialConfig,
+  resolveExitCode,
   resolveLevel,
   attachSignalHandlers,
   stopActiveMigrators,

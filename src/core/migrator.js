@@ -23,15 +23,15 @@ const {
   RunAbortedError,
   RunInFlightError,
 } = require('../errors/index.js');
-const { actorFields, pickActor } = require('../utils/actor.js');
+const { toActorFields, pickActor } = require('../utils/actor.js');
 const { computeChecksum } = require('../utils/checksum.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const {
-  errorText,
-  errorWithCause,
+  formatError,
+  formatErrorWithCause,
   isDriverError,
   isDuplicateKey,
-  serverErrorOf,
+  unwrapServerError,
 } = require('../utils/error.js');
 const { createIdGenerator } = require('../utils/id.js');
 const { loadMigrationFile } = require('../utils/loader.js');
@@ -43,13 +43,13 @@ const {
   createMigrationFile,
   maskUriCredentials,
 } = require('../utils/template.js');
-const { safeUsername } = require('../utils/user.js');
+const { resolveUsername } = require('../utils/user.js');
 const { runAudit } = require('./audit.js');
-const { auditFindings } = require('./background/audit.js');
+const { auditBackground } = require('./background/audit.js');
 const { runBaseline } = require('./baseline.js');
 const { Changelog } = require('./changelog.js');
 const { resolveDefinitions } = require('./converge/collections.js');
-const { backgroundCollectionNames, loadConfig } = require('./config.js');
+const { listBackgroundCollections, loadConfig } = require('./config.js');
 const { buildContext } = require('./context.js');
 const { runConverge } = require('./converge/converge.js');
 
@@ -71,11 +71,11 @@ const { BackgroundHost } = require('./background/host.js');
 const { ConvergeHost } = require('./converge/host.js');
 const { runMigration } = require('./runner.js');
 const {
-  blockedError,
-  lateArrivals,
+  createBlockedError,
+  findLateArrivals,
   listMigrationFiles,
-  newestOf,
-  pendingIn,
+  findNewest,
+  selectPending,
   revertOrder,
   truncateAtTarget,
 } = require('./sequence.js');
@@ -111,13 +111,13 @@ const WEAK_TLS_OPTIONS = Object.freeze([
 const MISSING_FILE_CODES = new Set(['ENOENT', 'ENOTDIR']);
 
 /** The label of a migration's success line, by its kind and direction */
-const successLabel = (kind, direction) => {
+const formatSuccessLabel = (kind, direction) => {
   if (kind === 'background') return direction === 'up' ? '⧗ Registered' : '⧗ Reverting';
   return direction === 'up' ? '✔ Applied ' : '↩ Reverted';
 };
 
 /** What a migration waits for, as a person reads it: `a (running), b (paused)` */
-const waitingText = (waiting) => {
+const formatWaiting = (waiting) => {
   let text = '';
   for (let i = 0; i < waiting.length; i++) {
     if (i > 0) text += ', ';
@@ -127,14 +127,14 @@ const waitingText = (waiting) => {
 };
 
 /** The `migration` of each `{ migration, … }` entry, in order */
-const migrationsOf = (entries) => {
+const pluckMigrations = (entries) => {
   const names = [];
   for (let i = 0; i < entries.length; i++) names.push(entries[i].migration);
   return names;
 };
 
 /** The result of a converge with nothing declared */
-const emptyConverge = (dryRun) => ({ dryRun, changed: 0, inSync: true, collections: [] });
+const createEmptyConverge = (dryRun) => ({ dryRun, changed: 0, inSync: true, collections: [] });
 
 /**
  * The error a run leaves with. A driver error that got this far — a changelog
@@ -143,15 +143,15 @@ const emptyConverge = (dryRun) => ({ dryRun, changed: 0, inSync: true, collectio
  * exit code was 1 and the queue saw `UNKNOWN`. Anything else is typed already,
  * or a bug, and leaves as it is.
  */
-const typedRunFailure = (error, operation) => {
+const toRunFailure = (error, operation) => {
   if (error instanceof MigronautError || !isDriverError(error)) return error;
-  const serverCode = serverErrorOf(error).code;
+  const serverCode = unwrapServerError(error).code;
   return new DatabaseOperationFailedError(`A database operation failed during ${operation}`, {
     cause: error,
     context: {
       operation,
       ...(serverCode !== undefined ? { serverCode } : {}),
-      cause: errorText(error),
+      cause: formatError(error),
     },
   });
 };
@@ -162,7 +162,7 @@ const typedRunFailure = (error, operation) => {
  * deserves to see the failure), or 'pending' (including reverted history —
  * the `revertedAt` field carries that story).
  */
-const rowStatus = (record) => {
+const resolveRowStatus = (record) => {
   if (record?.status === 'applied') return 'applied';
   if (record?.status === 'failed') return 'failed';
   return 'pending';
@@ -197,13 +197,13 @@ class MigratorKit extends EventEmitter {
   /** Spans and metrics through the injected `telemetry` (a no-op without one); set with the config */
   #telemetry = null;
   /** Whether changelog indexes have already been ensured on this instance */
-  #indexesEnsured = false;
+  #hasEnsuredIndexes = false;
   /** Memoized resolved logger — resolveLogger allocates on every call otherwise */
   #resolvedLogger = null;
   /** Used only when the resolved config supplies no `logger` of its own (CLI injection) */
   #fallbackLogger;
   /** False when the client was injected by the caller, who keeps ownership of it */
-  #ownsClient = true;
+  #isClientOwned = true;
   /** The connect() in flight, so overlapping callers share one client instead of racing */
   #connecting = null;
   /** Bumped by disconnect(): a connect() begun before it opens nothing after it */
@@ -336,8 +336,8 @@ class MigratorKit extends EventEmitter {
         // A listener's failure is its own problem — but an invisible one is
         // undebuggable, so leave a trace at debug level.
         this.#logger.debug(
-          `Event listener for '${event}' threw: ${errorText(error)}`,
-          this.#fields({ event, error: errorText(error) }),
+          `Event listener for '${event}' threw: ${formatError(error)}`,
+          this.#fields({ event, error: formatError(error) }),
         );
       }
     }
@@ -352,8 +352,8 @@ class MigratorKit extends EventEmitter {
     try {
       const name = String(event);
       this.#logger.debug(
-        `Event listener for '${name}' rejected: ${errorText(error)}`,
-        this.#fields({ event: name, error: errorText(error) }),
+        `Event listener for '${name}' rejected: ${formatError(error)}`,
+        this.#fields({ event: name, error: formatError(error) }),
       );
     } catch {
       // Reporting a listener's failure must not become a failure of its own.
@@ -389,10 +389,10 @@ class MigratorKit extends EventEmitter {
    * from "nothing running — no-op". The latch is cleared on the way out so it
    * can never leak into a later, unrelated run.
    */
-  async #runWindow(fn) {
+  async #runWindow(work) {
     this.#runSetupDepth += 1;
     try {
-      return await fn();
+      return await work();
     } finally {
       this.#runSetupDepth -= 1;
       if (this.#runSetupDepth === 0) {
@@ -507,14 +507,14 @@ class MigratorKit extends EventEmitter {
         // A client the caller owns: reuse its pool (and whatever auth, TLS or
         // proxying it was built with) and never close it — see disconnect().
         this.#client = config.client;
-        this.#ownsClient = false;
+        this.#isClientOwned = false;
       } else {
         this.#warnOnWeakTls(config.clientOptions);
         const { MongoClient } = require('mongodb');
         // clientOptions is the escape hatch for everything a URI cannot carry:
         // TLS certificates, AWS IAM / X.509 auth, proxies, pool sizing.
         this.#client = new MongoClient(config.uri, config.clientOptions);
-        this.#ownsClient = true;
+        this.#isClientOwned = true;
         await this.#client.connect();
       }
       this.#db = this.#client.db(config.dbName);
@@ -522,7 +522,7 @@ class MigratorKit extends EventEmitter {
       // Once per instance, not once per connect: re-issuing createIndexes on
       // every command is a wasted round trip. `ensureIndexes: false` skips it
       // entirely, for deployments where the app user cannot create indexes.
-      if (!this.#indexesEnsured && config.ensureIndexes) {
+      if (!this.#hasEnsuredIndexes && config.ensureIndexes) {
         try {
           await this.#changelog.ensureIndexes(this.#db);
         } catch (error) {
@@ -533,10 +533,10 @@ class MigratorKit extends EventEmitter {
             `Connected to MongoDB, but could not create the indexes of ` +
               `${config.migrationsCollection} — create them yourself and set ` +
               'ensureIndexes: false, or grant createIndex on it',
-            { cause: error, context: { cause: errorText(error), phase: 'ensure-indexes' } },
+            { cause: error, context: { cause: formatError(error), phase: 'ensure-indexes' } },
           );
         }
-        this.#indexesEnsured = true;
+        this.#hasEnsuredIndexes = true;
       }
       // "Which database did it actually write to?" is the most common support
       // question — answerable from --verbose output instead of a separate audit.
@@ -545,25 +545,25 @@ class MigratorKit extends EventEmitter {
         this.#fields({
           dbName: config.dbName,
           durationMs: Date.now() - startedAt,
-          injectedClient: !this.#ownsClient,
+          injectedClient: !this.#isClientOwned,
         }),
       );
     } catch (error) {
       // Close and forget the half-built client. Leaving it assigned would leak
       // its connection pool, since a retry of connect() overwrites the field.
-      const dangling = this.#ownsClient ? this.#client : undefined;
+      const dangling = this.#isClientOwned ? this.#client : undefined;
       this.#client = null;
       this.#db = null;
       this.#changelog = null;
       await dangling?.close().catch((closeError) => {
         // The connect failure is what this call reports; the close is said at debug.
-        this.#logger.debug(`Could not close the half-built client: ${errorText(closeError)}`);
+        this.#logger.debug(`Could not close the half-built client: ${formatError(closeError)}`);
       });
       // Already says what failed, and it was not the connection.
       if (error instanceof ConnectionFailedError) throw error;
       throw new ConnectionFailedError('Failed to connect to MongoDB', {
         cause: error,
-        context: { cause: errorText(error) },
+        context: { cause: formatError(error) },
       });
     }
   }
@@ -587,7 +587,7 @@ class MigratorKit extends EventEmitter {
     this.#connectEpoch += 1;
     if (!this.#client) return;
     const client = this.#client;
-    const owned = this.#ownsClient;
+    const owned = this.#isClientOwned;
     // Restore the full pre-connect invariant: every connection-scoped field is
     // cleared together, so nothing half-connected survives a disconnect.
     this.#client = null;
@@ -596,7 +596,7 @@ class MigratorKit extends EventEmitter {
     // The background stores bind the Db they were made with, and what was read
     // through it: a later connect() reads them anew, maybe of another deployment.
     this.#background.reset();
-    this.#ownsClient = true;
+    this.#isClientOwned = true;
     if (owned) await client.close();
   }
 
@@ -630,7 +630,8 @@ class MigratorKit extends EventEmitter {
    * lock.js — which stays kit-agnostic and cannot stamp runId itself.
    */
   #lockLogger() {
-    const wrap = (method) => (msg, fields) => this.#logger[method](msg, this.#fields(fields ?? {}));
+    const wrap = (method) => (message, fields) =>
+      this.#logger[method](message, this.#fields(fields ?? {}));
     return { debug: wrap('debug'), info: wrap('info'), warn: wrap('warn'), error: wrap('error') };
   }
 
@@ -657,7 +658,7 @@ class MigratorKit extends EventEmitter {
       const errorOptions =
         cause === undefined
           ? { context: { reason } }
-          : { cause, context: { reason, cause: errorText(cause) } };
+          : { cause, context: { reason, cause: formatError(cause) } };
       stopper.abort(new RunAbortedError(reason, errorOptions));
     };
     if (this.#stopRequested !== null) {
@@ -667,7 +668,7 @@ class MigratorKit extends EventEmitter {
     }
     const abortFromSignal = () => {
       return this.#abort({
-        reason: errorText(external.reason ?? 'Aborted'),
+        reason: formatError(external.reason ?? 'Aborted'),
         cause: external.reason,
       });
     };
@@ -676,7 +677,7 @@ class MigratorKit extends EventEmitter {
     return { signal: stopper.signal, listening };
   }
 
-  async #withLock(options, info, fn) {
+  async #withLock(options, info, work) {
     // Not reentrant: a second overlapping run on this instance would clobber
     // the first one's runId/abort state in its `finally`. The DB lock already
     // rejects the overlap — this rejects it before any state is disturbed.
@@ -734,13 +735,13 @@ class MigratorKit extends EventEmitter {
           // recorder after the release, so the span's outcome is the run's.
           return this.#telemetry.open(SPANS.RUN, recorder.spanAttributes(), (span) => {
             recorder.spanOpened(span);
-            return fn(AbortSignal.any([lockSignal, stop.signal]), lockControl);
+            return work(AbortSignal.any([lockSignal, stop.signal]), lockControl);
           });
         },
       );
       return result;
     } catch (error) {
-      failure = typedRunFailure(error, info.command);
+      failure = toRunFailure(error, info.command);
       throw failure;
     } finally {
       stop.listening?.[Symbol.dispose]();
@@ -863,10 +864,10 @@ class MigratorKit extends EventEmitter {
    * directory. A final containment check guards against any residual escape.
    */
   #filepath(name) {
-    const dir = this.#migrationsPath();
+    const directory = this.#migrationsPath();
     assertMigrationName(name);
-    const resolved = path.join(dir, name);
-    const relative = path.relative(dir, resolved);
+    const resolved = path.join(directory, name);
+    const relative = path.relative(directory, resolved);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
       throw new MigrationInvalidNameError('Migration name escapes the migrations directory', {
         context: { name },
@@ -895,9 +896,9 @@ class MigratorKit extends EventEmitter {
    */
   async #assertUpNotBlocked(name, appliedNames, sequence) {
     const files = sequence ?? (await this.#listMigrationFiles());
-    const blockedBy = pendingIn(files, appliedNames, name);
+    const blockedBy = selectPending(files, appliedNames, name);
     if (blockedBy.length === 0) return;
-    throw blockedError(name, 'earlier migration(s) still pending', {
+    throw createBlockedError(name, 'earlier migration(s) still pending', {
       name,
       direction: 'up',
       blockedBy,
@@ -926,7 +927,7 @@ class MigratorKit extends EventEmitter {
     if (newer.length === 0) return;
     const blockedBy = [];
     for (const later of newer) blockedBy.push(later.name);
-    throw blockedError(record.name, 'later migration(s) still applied', {
+    throw createBlockedError(record.name, 'later migration(s) still applied', {
       name: record.name,
       direction: 'down',
       blockedBy,
@@ -955,13 +956,13 @@ class MigratorKit extends EventEmitter {
         }
         throw new MigrationLoadFailedError('Migration file cannot be read', {
           cause: error,
-          context: { filename, cause: errorText(error) },
+          context: { filename, cause: formatError(error) },
         });
       }
       return [filename];
     }
     const files = await this.#listMigrationFiles();
-    const targets = pendingIn(files, appliedNames);
+    const targets = selectPending(files, appliedNames);
     return options.to !== undefined ? truncateAtTarget(targets, files, options.to) : targets;
   }
 
@@ -979,7 +980,7 @@ class MigratorKit extends EventEmitter {
   #assertOrderIntact(targets, appliedNames) {
     const policy = this.#config?.onOutOfOrder ?? 'warn';
     if (policy === 'allow') return;
-    const arrivals = lateArrivals(targets, appliedNames);
+    const arrivals = findLateArrivals(targets, appliedNames);
     if (arrivals === null) return;
     const { late, newestApplied } = arrivals;
     if (policy === 'error') {
@@ -1024,14 +1025,14 @@ class MigratorKit extends EventEmitter {
         if (outcome === 'stop') break;
       }
     } catch (error) {
-      failure = typedRunFailure(error, direction);
+      failure = toRunFailure(error, direction);
       // Failures before the migration body — beforeEach, a file that fails to
       // load — bypass #executeMigration's catch, so the partial results must be
       // attached here too or a --json consumer loses the applied-so-far list
       // exactly when it matters. Copy-on-write makes a re-attach harmless.
       this.#attachResults(failure, results);
     }
-    const succeeded = failure === undefined;
+    const hasSucceeded = failure === undefined;
     // afterAll runs on the failure path too — which is exactly when a
     // cleanup/notification hook matters most. Mirrors runWithLock's release
     // discipline: when the body already failed, a throwing afterAll must not
@@ -1040,10 +1041,10 @@ class MigratorKit extends EventEmitter {
     try {
       await this.#runHook(config.hooks?.afterAll, 'afterAll', [
         runContext,
-        { success: succeeded, applied: doneCount, direction },
+        { success: hasSucceeded, applied: doneCount, direction },
       ]);
     } catch (hookError) {
-      if (succeeded) {
+      if (hasSucceeded) {
         // Every migration of the run committed: what was applied goes with
         // the hook's error, as it goes with any other failure — or `--json`
         // and `run:end` would report an empty run that changed the database.
@@ -1051,8 +1052,8 @@ class MigratorKit extends EventEmitter {
         throw hookError;
       }
       this.#logger.warn(
-        `⚠ afterAll hook failed after a failed run: ${errorText(hookError)}`,
-        this.#fields({ hook: 'afterAll', error: errorText(hookError) }),
+        `⚠ afterAll hook failed after a failed run: ${formatError(hookError)}`,
+        this.#fields({ hook: 'afterAll', error: formatError(hookError) }),
       );
     }
     if (failure !== undefined) throw failure;
@@ -1073,7 +1074,7 @@ class MigratorKit extends EventEmitter {
     const telemetry = this.#telemetry;
     const startedAt = Date.now();
     try {
-      const duration = await telemetry.wrap(
+      const durationMs = await telemetry.wrap(
         SPANS.MIGRATION,
         {
           [ATTRIBUTES.MIGRATION_NAME]: name,
@@ -1085,8 +1086,8 @@ class MigratorKit extends EventEmitter {
         },
         (span) => this.#executeMigrationSteps(step, span),
       );
-      telemetry.migrationEnded({ direction, durationMs: duration });
-      return duration;
+      telemetry.migrationEnded({ direction, durationMs });
+      return durationMs;
     } catch (error) {
       // The runner's own measurement when it got as far as the body; the
       // elapsed time here otherwise (a failing beforeEach, a file that does
@@ -1154,7 +1155,7 @@ class MigratorKit extends EventEmitter {
         logger,
         attemptContext,
         ...(config.timeoutMs ? { timeoutMs: config.timeoutMs } : {}),
-        onSuccess: (elapsed, session) => onSuccess(migration, elapsed, session),
+        onSuccess: (elapsedMs, session) => onSuccess(migration, elapsedMs, session),
         ...(config.hooks ? { hooks: config.hooks } : {}),
       });
       this.#progress?.onStop('success');
@@ -1168,7 +1169,7 @@ class MigratorKit extends EventEmitter {
         durationMs: duration,
         ...retried,
       });
-      const label = successLabel(migration.kind, direction);
+      const label = formatSuccessLabel(migration.kind, direction);
       logger.info(
         `${label} ${name}   [${duration}ms]`,
         this.#fields({
@@ -1213,7 +1214,7 @@ class MigratorKit extends EventEmitter {
           : undefined;
       if (attempts !== undefined) span.set({ [ATTRIBUTES.MIGRATION_ATTEMPTS]: attempts });
       const retried = attempts > 1 ? { attempts } : {};
-      // errorText, not the raw Error: a driver message can echo the
+      // formatError, not the raw Error: a driver message can echo the
       // credentialed URI, and event subscribers (Sentry, JSON logs) would
       // ship it — the same redaction the log line below already gets. The
       // typed code goes with it: a subscriber tells a timeout from a throw
@@ -1224,7 +1225,7 @@ class MigratorKit extends EventEmitter {
         ...batchField,
         ...durationField,
         ...retried,
-        error: errorText(error),
+        error: formatError(error),
         ...(error instanceof MigronautError ? { code: error.code } : {}),
       });
       logger.error(
@@ -1235,14 +1236,14 @@ class MigratorKit extends EventEmitter {
           ...batchField,
           ...durationField,
           ...retried,
-          error: errorText(error),
+          error: formatError(error),
         }),
       );
       results.push({
         file: name,
         status: 'error',
         ...(durationMs !== undefined ? { duration: durationMs } : {}),
-        error: errorText(error),
+        error: formatError(error),
       });
       // Best-effort DB-side trace of the failed attempt (up only — marking a
       // failed `down` would demote a record that is still truthfully applied).
@@ -1253,9 +1254,9 @@ class MigratorKit extends EventEmitter {
           await this.#requireChangelog().markFailed(this.#requireDb(), {
             name,
             // Which migration failed, and why.
-            error: errorWithCause(error),
+            error: formatErrorWithCause(error),
             environment: this.#environment(),
-            executedBy: safeUsername(),
+            executedBy: resolveUsername(),
             ...batchField,
             ...(durationMs !== undefined ? { duration: durationMs } : {}),
             ...(this.#runId ? { runId: this.#runId } : {}),
@@ -1268,8 +1269,8 @@ class MigratorKit extends EventEmitter {
           // must be explainable from the log.
           if (!isDuplicateKey(traceError)) {
             logger.debug(
-              `Could not record the failed attempt of ${name}: ${errorText(traceError)}`,
-              this.#fields({ migration: name, error: errorText(traceError) }),
+              `Could not record the failed attempt of ${name}: ${formatError(traceError)}`,
+              this.#fields({ migration: name, error: formatError(traceError) }),
             );
           }
         }
@@ -1336,9 +1337,9 @@ class MigratorKit extends EventEmitter {
   }
 
   /** Run `fn`, keeping the cached after-up definitions only when it is refused for the lock */
-  async #keepDefinitionsWhileRefused(fn) {
+  async #keepDefinitionsWhileRefused(work) {
     try {
-      const result = await fn();
+      const result = await work();
       this.#upDefinitions = null;
       return result;
     } catch (error) {
@@ -1359,8 +1360,8 @@ class MigratorKit extends EventEmitter {
     // the full applied set, and with it the strict drift check and the
     // out-of-order policy apply — otherwise splitting a run into jobs would
     // silently drop both.
-    const ordered = filename !== undefined && options.ordered === true;
-    const fullSet = !filename || ordered;
+    const isOrdered = filename !== undefined && options.ordered === true;
+    const fullSet = !filename || isOrdered;
     // A strict full-set run needs the applied records' checksums anyway, so
     // fetch full records once and derive the name set from them; a plain
     // single-file run needs only that file's record, so one getByName is both
@@ -1392,8 +1393,8 @@ class MigratorKit extends EventEmitter {
     // next to the migrations is never one — and importing it would run its
     // top-level code. The name may come from a queue payload; a plain
     // single-file `up` keeps accepting any file it is pointed at.
-    const sequence = ordered ? await this.#listMigrationFiles() : undefined;
-    if (ordered && !sequence.includes(filename)) {
+    const sequence = isOrdered ? await this.#listMigrationFiles() : undefined;
+    if (isOrdered && !sequence.includes(filename)) {
       throw new MigrationFileNotFoundError(
         'Not a migration of the sequence — a dotfile, a declaration file or an extension ' +
           'outside fileExtensions',
@@ -1402,7 +1403,7 @@ class MigratorKit extends EventEmitter {
     }
     // An already-applied target is exempt (unless forced): a duplicate job
     // for it must report the usual "skipped", not a failure.
-    if (ordered && (force || !appliedNames.has(filename))) {
+    if (isOrdered && (force || !appliedNames.has(filename))) {
       await this.#assertUpNotBlocked(filename, appliedNames, sequence);
     }
     // The file the caller planned with (a queue job's checksum) must be the
@@ -1449,13 +1450,13 @@ class MigratorKit extends EventEmitter {
         if (appliedNames.has(name)) {
           if (!force) {
             const existing = singleRecord ?? (await changelog.getByName(db, name));
-            const mismatch = existing !== null && existing.checksum !== checksum;
-            if (mismatch && config.strict) {
+            const hasChecksumMismatch = existing !== null && existing.checksum !== checksum;
+            if (hasChecksumMismatch && config.strict) {
               throw new ChecksumMismatchError(`Checksum mismatch for ${name}`, {
                 context: { name, expected: existing?.checksum, actual: checksum },
               });
             }
-            if (mismatch) {
+            if (hasChecksumMismatch) {
               logger.warn(
                 `⚠ Warning  Checksum mismatch: ${name}`,
                 this.#fields({ migration: name, direction: 'up', expected: existing?.checksum }),
@@ -1486,17 +1487,17 @@ class MigratorKit extends EventEmitter {
         // leaves no failed trace.
         const waiting = await this.#background.requiresGuard(name, signal);
         if (waiting.length > 0) {
-          const list = waitingText(waiting);
+          const waitingText = formatWaiting(waiting);
           if ((options.onBackgroundPending ?? 'error') === 'stop') {
             logger.info(
-              `⧗ Waiting   ${name} — requires ${list}`,
+              `⧗ Waiting   ${name} — requires ${waitingText}`,
               this.#fields({ migration: name, direction: 'up', waitsFor: waiting.length }),
             );
             this.#emit('background:waiting', { migration: name, waitsFor: waiting });
             return 'stop';
           }
           throw new BackgroundPendingError(
-            `${name} requires background migration(s) that have not completed: ${list}`,
+            `${name} requires background migration(s) that have not completed: ${waitingText}`,
             { context: { migration: name, waitsFor: waiting } },
           );
         }
@@ -1512,7 +1513,7 @@ class MigratorKit extends EventEmitter {
           batch,
           // No appliedAt: the changelog stamps it in server time, so the
           // revert-selection sorts are immune to this host's clock skew.
-          onSuccess: (migration, elapsed, session) => {
+          onSuccess: (migration, elapsedMs, session) => {
             return changelog.markApplied(
               db,
               {
@@ -1521,12 +1522,12 @@ class MigratorKit extends EventEmitter {
                 status: 'applied',
                 checksum,
                 environment: this.#environment(),
-                executedBy: safeUsername(),
-                duration: elapsed,
+                executedBy: resolveUsername(),
+                duration: elapsedMs,
                 ...(this.#runId ? { runId: this.#runId } : {}),
                 ...(migration.description ? { description: migration.description } : {}),
                 ...(migration.kind === 'background' ? { kind: 'background' } : {}),
-                ...actorFields(options),
+                ...toActorFields(options),
               },
               session,
             );
@@ -1534,7 +1535,7 @@ class MigratorKit extends EventEmitter {
           // What a failed attempt's trace records besides the failure: the
           // version of the file that failed (a breaker compares it), and who
           // asked for the run.
-          failureFields: { checksum, ...actorFields(options) },
+          failureFields: { checksum, ...toActorFields(options) },
         });
         appliedCount += 1;
         if (this.#config.backgroundInline && (await this.#peek(name))?.kind === 'background') {
@@ -1593,7 +1594,7 @@ class MigratorKit extends EventEmitter {
     } catch (error) {
       throw new HookFailedError(`The ${hookName} hook failed`, {
         cause: error,
-        context: { hook: hookName, cause: errorText(error) },
+        context: { hook: hookName, cause: formatError(error) },
       });
     }
   }
@@ -1626,7 +1627,7 @@ class MigratorKit extends EventEmitter {
     const changelog = this.#requireChangelog();
 
     let records = null;
-    let preserveOrder = false;
+    let shouldPreserveOrder = false;
     if (filename) {
       const record = await changelog.getByName(db, filename);
       if (!record || record.status !== 'applied') {
@@ -1638,7 +1639,7 @@ class MigratorKit extends EventEmitter {
       // Server-side sort+limit on the status_appliedAt_name index — never the
       // whole applied history transferred and re-sorted in JS to slice N.
       records = await changelog.getLastAppliedN(db, options.steps);
-      preserveOrder = true;
+      shouldPreserveOrder = true;
     } else if (options.to !== undefined) {
       // Roll the database back *to* that point: everything applied after the
       // named migration goes, the named one stays. Exclusive, so `up --to X`
@@ -1667,7 +1668,7 @@ class MigratorKit extends EventEmitter {
     // records are forward-only. Refuse the whole rollback up front with a clear
     // reason so the changelog and collection are never left half-reverted.
     if (records.length > 0) this.#assertReversible(records);
-    return { records, preserveOrder };
+    return { records, preserveOrder: shouldPreserveOrder };
   }
 
   async #runDown(filename, options = {}, signal) {
@@ -1903,8 +1904,8 @@ class MigratorKit extends EventEmitter {
     } catch (error) {
       // The real run reports a file that does not load; the preview says it here.
       this.#logger.debug(
-        `Dry run: ${name} did not load — ${errorText(error)}`,
-        this.#fields({ migration: name, error: errorText(error) }),
+        `Dry run: ${name} did not load — ${formatError(error)}`,
+        this.#fields({ migration: name, error: formatError(error) }),
       );
       return;
     }
@@ -1919,12 +1920,12 @@ class MigratorKit extends EventEmitter {
       .catch((error) => {
         // A preview without its waitsFor is still a preview; the reason is not lost.
         this.#logger.debug(
-          `Dry run: could not read what ${name} waits for — ${errorText(error)}`,
-          this.#fields({ migration: name, error: errorText(error) }),
+          `Dry run: could not read what ${name} waits for — ${formatError(error)}`,
+          this.#fields({ migration: name, error: formatError(error) }),
         );
         return [];
       });
-    if (waiting.length > 0) row.waitsFor = migrationsOf(waiting);
+    if (waiting.length > 0) row.waitsFor = pluckMigrations(waiting);
   }
 
   /** Full migration status for all known files and records */
@@ -1951,7 +1952,7 @@ class MigratorKit extends EventEmitter {
     for (const row of rows) {
       if (row.status === 'applied') applied.push(row.file);
     }
-    const newestApplied = newestOf(applied);
+    const newestApplied = findNewest(applied);
     if (newestApplied !== '') {
       for (const row of rows) {
         if (row.status !== 'applied' && row.file < newestApplied) row.outOfOrder = true;
@@ -1974,7 +1975,7 @@ class MigratorKit extends EventEmitter {
       definitions: () => this.#resolveCollections(),
       background: async () => {
         const deps = this.#background.deps();
-        return auditFindings({
+        return auditBackground({
           ...deps,
           checksumOf: (name) => computeChecksum(this.#filepath(name)),
           backgroundRecords: () => {
@@ -2027,7 +2028,7 @@ class MigratorKit extends EventEmitter {
     await this.connect();
     const applied = new Set(await this.#requireChangelog().getAppliedNames(this.#requireDb()));
     const rows = [];
-    for (const file of pendingIn(await this.#listMigrationFiles(), applied)) {
+    for (const file of selectPending(await this.#listMigrationFiles(), applied)) {
       rows.push({
         file,
         status: 'pending',
@@ -2086,7 +2087,7 @@ class MigratorKit extends EventEmitter {
   /** Build a StatusRow for a migration, verifying checksum when possible */
   async #buildStatusRow(name, record, { checksums = true } = {}) {
     const isApplied = record?.status === 'applied';
-    const status = rowStatus(record);
+    const status = resolveRowStatus(record);
     let filepath = '';
     try {
       filepath = this.#filepath(name);
@@ -2146,8 +2147,8 @@ class MigratorKit extends EventEmitter {
       );
     }
     const config = await this.#ensureConfig(false, true);
-    const dir = this.#migrationsPath();
-    await fs.mkdir(dir, { recursive: true });
+    const directory = this.#migrationsPath();
+    await fs.mkdir(directory, { recursive: true });
     // Against the kit's cwd, like migrationsDir and collectionsDir: a relative
     // `templatePath` in a config loaded from elsewhere is relative to that
     // config's place, not to wherever the process happened to start.
@@ -2155,7 +2156,7 @@ class MigratorKit extends EventEmitter {
     const templatePath = template ? path.resolve(this.#cwd ?? process.cwd(), template) : undefined;
     const js = options.js ?? config.createExtension === 'js';
     const filepath = await createMigrationFile({
-      dir,
+      dir: directory,
       name,
       sequential: config.sequential,
       js,
@@ -2224,7 +2225,7 @@ class MigratorKit extends EventEmitter {
             nextBatch: () => this.#nextBatch(),
             truncateAtTarget,
             environment: () => this.#environment(),
-            executedBy: () => safeUsername(),
+            executedBy: () => resolveUsername(),
             runId: () => this.#runId,
             assertNotAborted: (abortSignal) => this.#assertNotAborted(abortSignal),
           },
@@ -2289,7 +2290,7 @@ class MigratorKit extends EventEmitter {
     if (options.dryRun) {
       await this.#ensureConfig();
       const definitions = await this.#resolveCollections();
-      if (definitions.length === 0) return emptyConverge(true);
+      if (definitions.length === 0) return createEmptyConverge(true);
       await this.connect();
       return runConverge(
         this.#converge.deps(),
@@ -2313,7 +2314,7 @@ class MigratorKit extends EventEmitter {
           'No collections declared — set collections or collectionsDir',
           this.#fields({ command: 'converge' }),
         );
-        return emptyConverge(false);
+        return createEmptyConverge(false);
       }
       await this.connect();
       return this.#withLock(options, { command: 'converge' }, async (signal, lock) => {
@@ -2342,8 +2343,9 @@ class MigratorKit extends EventEmitter {
    */
   async convergesAfterUp() {
     const config = await this.#ensureConfig();
-    const declares = (config.collections?.length ?? 0) > 0 || config.collectionsDir !== undefined;
-    return config.convergeAfterUp === true && declares;
+    const hasDeclaredCollections =
+      (config.collections?.length ?? 0) > 0 || config.collectionsDir !== undefined;
+    return config.convergeAfterUp === true && hasDeclaredCollections;
   }
 
   /** Every declared collection, normalized — the config key first, then `collectionsDir` */
@@ -2369,7 +2371,7 @@ class MigratorKit extends EventEmitter {
       config.convergeLogCollection,
     ];
     if (config.backgroundCollection !== undefined) {
-      const background = backgroundCollectionNames(config.backgroundCollection);
+      const background = listBackgroundCollections(config.backgroundCollection);
       names.push(background.state, background.partitions, background.watch);
     }
     return names;
@@ -2469,7 +2471,7 @@ class MigratorKit extends EventEmitter {
       checksum = await this.#cachedChecksum(this.#filepath(name));
     } catch (error) {
       // Nothing to read ahead: the load that follows reports the file itself.
-      this.#logger.debug(`Could not read ${name} ahead: ${errorText(error)}`);
+      this.#logger.debug(`Could not read ${name} ahead: ${formatError(error)}`);
       return null;
     }
     const cached = this.#moduleCache.get(name);
@@ -2491,9 +2493,9 @@ class MigratorKit extends EventEmitter {
    */
   async #assertNothingPending() {
     const applied = new Set(await this.#requireChangelog().getAppliedNames(this.#requireDb()));
-    const blockedBy = pendingIn(await this.#listMigrationFiles(), applied);
+    const blockedBy = selectPending(await this.#listMigrationFiles(), applied);
     if (blockedBy.length === 0) return;
-    throw blockedError('converge', 'migration(s) still pending', {
+    throw createBlockedError('converge', 'migration(s) still pending', {
       command: 'converge',
       blockedBy,
       failed: await this.#failedAmong(blockedBy),

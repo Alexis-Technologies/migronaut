@@ -6,9 +6,9 @@ const {
   createMigrationProcessor,
   isRetryableError,
   isTransientForJob,
-  jobRefOf,
-  ownLine,
-  userlandRow,
+  toJobRef,
+  isOwnLine,
+  formatUserlandRow,
 } = require('../../src/bullmq/processor.js');
 const { MigratorKit } = require('../../src/core/migrator.js');
 const {
@@ -1548,7 +1548,7 @@ describe('userland lines in the job log', () => {
   });
 });
 
-describe('ownLine', () => {
+describe('isOwnLine', () => {
   const ctx = { runId: 'run-1', jobRef: { id: '7', groupId: 'g' } };
   const line = (extra) => ({
     kind: 'migration',
@@ -1559,54 +1559,57 @@ describe('ownLine', () => {
   });
 
   it("should take the job's own run, and nothing of another run or job", () => {
-    assert.strictEqual(ownLine(ctx, line()), true);
-    assert.strictEqual(ownLine(ctx, line({ runId: 'run-0' })), false);
-    assert.strictEqual(ownLine(ctx, line({ jobId: '8' })), false);
-    assert.strictEqual(ownLine({ jobRef: ctx.jobRef }, line()), false, 'no run yet');
-    assert.strictEqual(ownLine({ runId: 'run-1', jobRef: null }, line({ jobId: undefined })), true);
-    assert.strictEqual(ownLine(ctx, line({ kind: 'other' })), false);
+    assert.strictEqual(isOwnLine(ctx, line()), true);
+    assert.strictEqual(isOwnLine(ctx, line({ runId: 'run-0' })), false);
+    assert.strictEqual(isOwnLine(ctx, line({ jobId: '8' })), false);
+    assert.strictEqual(isOwnLine({ jobRef: ctx.jobRef }, line()), false, 'no run yet');
+    assert.strictEqual(
+      isOwnLine({ runId: 'run-1', jobRef: null }, line({ jobId: undefined })),
+      true,
+    );
+    assert.strictEqual(isOwnLine(ctx, line({ kind: 'other' })), false);
   });
 
   it("should take an inline lane's line only by the job and its group", () => {
     const lane = (extra) => line({ kind: 'background', runId: 'lane-1', ...extra });
-    assert.strictEqual(ownLine(ctx, lane()), true);
-    assert.strictEqual(ownLine(ctx, lane({ groupId: undefined })), false);
-    assert.strictEqual(ownLine(ctx, lane({ groupId: 'h' })), false);
-    assert.strictEqual(ownLine(ctx, lane({ jobId: '8' })), false);
-    assert.strictEqual(ownLine({ runId: 'run-1', jobRef: { id: '7' } }, lane()), false);
-    assert.strictEqual(ownLine({ runId: 'run-1' }, lane()), false);
+    assert.strictEqual(isOwnLine(ctx, lane()), true);
+    assert.strictEqual(isOwnLine(ctx, lane({ groupId: undefined })), false);
+    assert.strictEqual(isOwnLine(ctx, lane({ groupId: 'h' })), false);
+    assert.strictEqual(isOwnLine(ctx, lane({ jobId: '8' })), false);
+    assert.strictEqual(isOwnLine({ runId: 'run-1', jobRef: { id: '7' } }, lane()), false);
+    assert.strictEqual(isOwnLine({ runId: 'run-1' }, lane()), false);
   });
 });
 
-describe('jobRefOf', () => {
+describe('toJobRef', () => {
   it("should name the job by its id and group, as the kit's job option", () => {
-    assert.deepStrictEqual(jobRefOf({ id: 11 }, 'g'), { id: '11', groupId: 'g' });
-    assert.deepStrictEqual(jobRefOf({ id: '11' }), { id: '11' });
+    assert.deepStrictEqual(toJobRef({ id: 11 }, 'g'), { id: '11', groupId: 'g' });
+    assert.deepStrictEqual(toJobRef({ id: '11' }), { id: '11' });
   });
 
   it('should drop what the kit would refuse', () => {
-    assert.strictEqual(jobRefOf({}), null);
-    assert.strictEqual(jobRefOf({ id: null }), null);
-    assert.strictEqual(jobRefOf({ id: 'x'.repeat(1025) }), null);
-    assert.deepStrictEqual(jobRefOf({ id: '11' }, 'g'.repeat(200)), { id: '11' });
+    assert.strictEqual(toJobRef({}), null);
+    assert.strictEqual(toJobRef({ id: null }), null);
+    assert.strictEqual(toJobRef({ id: 'x'.repeat(1025) }), null);
+    assert.deepStrictEqual(toJobRef({ id: '11' }, 'g'.repeat(200)), { id: '11' });
   });
 });
 
-describe('userlandRow', () => {
+describe('formatUserlandRow', () => {
   const base = { kind: 'migration', level: 'info', msg: 'done', data: {}, attempt: 1 };
 
   it('should show the level only when it is not info, and the data as JSON', () => {
-    assert.strictEqual(userlandRow(base), '✎ done');
+    assert.strictEqual(formatUserlandRow(base), '✎ done');
     assert.strictEqual(
-      userlandRow({ ...base, level: 'warn', data: { n: 1, big: 2n } }),
+      formatUserlandRow({ ...base, level: 'warn', data: { n: 1, big: 2n } }),
       '✎ warn: done {"n":1,"big":"2"}',
     );
   });
 
   it('should name a retried attempt and a background partition', () => {
-    assert.strictEqual(userlandRow({ ...base, attempt: 2 }), '✎ done (attempt 2)');
+    assert.strictEqual(formatUserlandRow({ ...base, attempt: 2 }), '✎ done (attempt 2)');
     assert.strictEqual(
-      userlandRow({ ...base, kind: 'background', partition: '3' }),
+      formatUserlandRow({ ...base, kind: 'background', partition: '3' }),
       '✎ done [partition 3]',
     );
   });
@@ -1618,10 +1621,10 @@ describe('userlandRow', () => {
       }
     }
     assert.strictEqual(
-      userlandRow({ ...base, data: { broken: new Broken() } }),
+      formatUserlandRow({ ...base, data: { broken: new Broken() } }),
       '✎ done [data not serializable]',
     );
-    const row = userlandRow({ ...base, msg: 'x'.repeat(2000) });
+    const row = formatUserlandRow({ ...base, msg: 'x'.repeat(2000) });
     assert.strictEqual(row.length, 1024);
     assert.ok(row.endsWith('…'));
   });
@@ -1629,27 +1632,30 @@ describe('userlandRow', () => {
   it('should write data only as far as the row shows it', () => {
     const data = {};
     for (let index = 0; index < 1000; index++) data[`k${index}`] = 'v'.repeat(4096);
-    const row = userlandRow({ ...base, data });
+    const row = formatUserlandRow({ ...base, data });
     assert.strictEqual(row.length, 1024);
     assert.ok(row.startsWith('✎ done {"k0":"vvv'));
     assert.ok(row.endsWith('…'));
     // A cycle (never from the kit, whose copies are acyclic) ends at the bound too.
     const cyclic = {};
     cyclic.self = cyclic;
-    assert.strictEqual(userlandRow({ ...base, data: cyclic }).length, 1024);
+    assert.strictEqual(formatUserlandRow({ ...base, data: cyclic }).length, 1024);
   });
 
   it('should keep a row on one line, with no control characters', () => {
     assert.strictEqual(
-      userlandRow({ ...base, msg: 'done\n✔ Applied 0002-x.js\r\nnext\u2028\u001b[2J' }),
+      formatUserlandRow({ ...base, msg: 'done\n✔ Applied 0002-x.js\r\nnext\u2028\u001b[2J' }),
       '✎ done⏎✔ Applied 0002-x.js⏎next⏎[2J',
     );
-    assert.strictEqual(userlandRow({ ...base, data: { note: 'a\nb' } }), '✎ done {"note":"a\\nb"}');
+    assert.strictEqual(
+      formatUserlandRow({ ...base, data: { note: 'a\nb' } }),
+      '✎ done {"note":"a\\nb"}',
+    );
   });
 
   it('should show dates and ids by their JSON, and skip what JSON skips', () => {
     assert.strictEqual(
-      userlandRow({
+      formatUserlandRow({
         ...base,
         data: { at: new Date(0), none: undefined, fn: () => 1, list: [undefined, 1n] },
       }),

@@ -1,6 +1,6 @@
 const { mapLimit } = require('../../utils/concurrency.js');
-const { sameValue } = require('../../versioning/internal.js');
-const { ID_BRACKETS, bracketOfType, keysetFilter, scopeFilter } = require('./spec.js');
+const { isSameValue } = require('../../versioning/internal.js');
+const { ID_BRACKETS, toBracket, buildKeysetFilter, buildScopeFilter } = require('./spec.js');
 const { READ_CONCURRENCY, READ_OPTIONS } = require('../server-info.js');
 
 /**
@@ -35,7 +35,7 @@ const MAX_SAMPLE = 100_000;
 const RANDOM_CURSOR_SHARE = 0.04;
 
 /** The number of partitions to aim for: one per lane with no parallelism, a few per lane otherwise */
-const targetPartitions = (settings, maxParallel) => {
+const countTargetPartitions = (settings, maxParallel) => {
   if (maxParallel === 1) return 1;
   const { overPartition, maxPartitions } = settings;
   return Math.max(1, Math.min(overPartition * maxParallel, maxPartitions));
@@ -47,7 +47,7 @@ const withHint = (hint) => (hint === undefined ? {} : { hint });
  * The brackets the matched documents' `_id`s fall in — one indexed `findOne`
  * each (`_id` is the second key of the version index), no admin rights.
  */
-const presentBrackets = async (collection, match, hint) => {
+const findPresentBrackets = async (collection, match, hint) => {
   const found = await mapLimit(ID_BRACKETS, READ_CONCURRENCY, async (bracket) => {
     const doc = await collection.findOne(
       { $and: [match, { _id: { $type: bracket.aliases } }] },
@@ -104,7 +104,7 @@ const sliceBracket = (bracket, ids, parts) => {
     const previous = bounds.length > 0 ? bounds[bounds.length - 1].id : ids[0];
     // A boundary equal to the one before (or to the very first id) would
     // make an empty range — skip it.
-    if (!sameValue(candidate, previous)) bounds.push({ id: candidate, position });
+    if (!isSameValue(candidate, previous)) bounds.push({ id: candidate, position });
   }
   const ranges = [];
   let start = 0;
@@ -130,7 +130,7 @@ const sliceBracket = (bracket, ids, parts) => {
 };
 
 /** One partition per bracket present, no bounds — the plan when sampling is not worth it */
-const perBracket = (brackets, estimate) => {
+const planPerBracket = (brackets, estimate) => {
   const partitions = [];
   for (let i = 0; i < brackets.length; i++) {
     partitions.push({
@@ -142,7 +142,7 @@ const perBracket = (brackets, estimate) => {
 };
 
 /** Largest first: a lane starts on the work that would otherwise finish last */
-const largestFirst = (partitions) => partitions.toSorted((a, b) => b.estimate - a.estimate);
+const sortLargestFirst = (partitions) => partitions.toSorted((a, b) => b.estimate - a.estimate);
 
 /**
  * Plan the partitions of one pass. `ctx`:
@@ -153,7 +153,7 @@ const largestFirst = (partitions) => partitions.toSorted((a, b) => b.estimate - 
  * ran out of time.
  */
 const planIdRanges = async ({ collection, match, hint, maxParallel, settings, maxTimeMS }) => {
-  const target = targetPartitions(settings, maxParallel);
+  const target = countTargetPartitions(settings, maxParallel);
   const cap = target * settings.minPartitionDocs;
   const count = await collection.countDocuments(match, {
     limit: cap,
@@ -162,7 +162,7 @@ const planIdRanges = async ({ collection, match, hint, maxParallel, settings, ma
   });
   if (count === 0) return { epoch: null, method: 'empty', estimate: 0, partitions: [] };
   const parts = Math.max(1, Math.min(target, Math.ceil(count / settings.minPartitionDocs)));
-  const brackets = await presentBrackets(collection, match, hint);
+  const brackets = await findPresentBrackets(collection, match, hint);
   if (brackets.length === 0) {
     // Matched a moment ago, gone now — the next pass will know.
     return { epoch: null, method: 'empty', estimate: 0, partitions: [] };
@@ -174,14 +174,14 @@ const planIdRanges = async ({ collection, match, hint, maxParallel, settings, ma
       estimate: count,
       // The count stopped at its limit: there are at least that many.
       ...(count >= cap ? { atLeast: true } : {}),
-      partitions: perBracket(brackets, count),
+      partitions: planPerBracket(brackets, count),
     };
   }
 
-  const large = count >= cap;
+  const isLarge = count >= cap;
   let total = count;
   let ratio = 1;
-  if (large) {
+  if (isLarge) {
     total = Math.max(count, await collection.estimatedDocumentCount());
     ratio = count / total;
   }
@@ -189,12 +189,12 @@ const planIdRanges = async ({ collection, match, hint, maxParallel, settings, ma
   // A large match samples the whole collection first, oversampled by how
   // little of it matches — but below the share past which `$sample` stops
   // walking a random cursor and scans and sorts every document instead.
-  const requested = large ? sampleRequest(size, ratio, total) : size;
+  const requested = isLarge ? sampleRequest(size, ratio, total) : size;
   let sample = null;
   try {
     sample = await sampleIds(collection, match, {
       size: requested,
-      large,
+      large: isLarge,
       hint,
       maxTimeMS: maxTimeMS ?? SAMPLE_TIMEOUT_MS,
     });
@@ -206,20 +206,20 @@ const planIdRanges = async ({ collection, match, hint, maxParallel, settings, ma
       estimate: count,
       ...(count >= cap ? { atLeast: true } : {}),
       degraded: 'sample-timeout',
-      partitions: perBracket(brackets, count),
+      partitions: planPerBracket(brackets, count),
     };
   }
   // How many documents match, as far as the sample can tell: the bounded
   // count when it was not capped, the matched share of the sampled ones when
   // it was.
-  const estimate = large
+  const estimate = isLarge
     ? Math.max(count, Math.round(total * Math.min(1, sample.length / requested)))
     : count;
 
   // The sample grouped by bracket, in server order — it arrives sorted.
   const groups = new Map();
   for (const { _id: id, t } of sample) {
-    const bracket = bracketOfType(t);
+    const bracket = toBracket(t);
     if (!groups.has(bracket)) groups.set(bracket, []);
     groups.get(bracket).push(id);
   }
@@ -245,9 +245,9 @@ const planIdRanges = async ({ collection, match, hint, maxParallel, settings, ma
   }
   return {
     epoch: null,
-    method: large ? 'sample-first' : 'match-first',
+    method: isLarge ? 'sample-first' : 'match-first',
     estimate,
-    partitions: largestFirst(partitions),
+    partitions: sortLargestFirst(partitions),
   };
 };
 
@@ -255,9 +255,9 @@ const planIdRanges = async ({ collection, match, hint, maxParallel, settings, ma
  * The batch query of an `_id`-range partition: its scope and the keyset after
  * the last id, sorted by `_id` through the version index.
  */
-const idRangeBatchQuery = (scope, cursor, { limit, match, hint }) => {
-  const conditions = [match, scopeFilter(scope)];
-  if (cursor?.lastId !== undefined) conditions.push(keysetFilter(cursor.lastId));
+const buildIdRangeQuery = (scope, cursor, { limit, match, hint }) => {
+  const conditions = [match, buildScopeFilter(scope)];
+  if (cursor?.lastId !== undefined) conditions.push(buildKeysetFilter(cursor.lastId));
   return {
     filter: { $and: conditions },
     options: { sort: { _id: 1 }, limit, ...withHint(hint), ...READ_OPTIONS },
@@ -265,24 +265,24 @@ const idRangeBatchQuery = (scope, cursor, { limit, match, hint }) => {
 };
 
 /** The cursor after a batch: the last id read — `null` when the partition is done */
-const idRangeAdvance = (cursor, docs, { limit }) => {
+const advanceIdRange = (cursor, docs, { limit }) => {
   if (docs.length < limit) return null;
-  return idRangePast(cursor, docs);
+  return moveIdRangePast(cursor, docs);
 };
 
 /** The cursor just past `docs` — where a batch cut short (or a document stepped over) ends */
-const idRangePast = (cursor, docs) => ({ ...cursor, lastId: docs[docs.length - 1]._id });
+const moveIdRangePast = (cursor, docs) => ({ ...cursor, lastId: docs[docs.length - 1]._id });
 
 const idRangePartitioner = Object.freeze({
   id: 'id',
   plan: planIdRanges,
-  batchQuery: idRangeBatchQuery,
-  advance: idRangeAdvance,
-  past: idRangePast,
+  batchQuery: buildIdRangeQuery,
+  advance: advanceIdRange,
+  past: moveIdRangePast,
   /** Nothing to add to the optimistic filter — `_id` is already in it */
   // No shard key to add: null, not a fresh `{}` for every document written.
   writeFilter: () => null,
-  /** Every transformation is fine: `_id` is checked by stampedDiff itself */
+  /** Every transformation is fine: `_id` is checked by buildStampedDiff itself */
   checkTransform: () => null,
   /** An `_id` range never goes stale */
   stale: () => false,
@@ -292,9 +292,9 @@ module.exports = {
   MAX_TIME_EXPIRED,
   SAMPLE_TIMEOUT_MS,
   RANDOM_CURSOR_SHARE,
-  targetPartitions,
+  countTargetPartitions,
   sampleRequest,
   sliceBracket,
-  largestFirst,
+  sortLargestFirst,
   idRangePartitioner,
 };

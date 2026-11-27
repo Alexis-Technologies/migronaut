@@ -3,14 +3,14 @@ const { describe, it } = require('node:test');
 const { MongoServerError } = require('mongodb');
 const {
   MAX_MESSAGE_LENGTH,
-  backgroundLogs,
-  correlationOf,
+  createBackgroundLogs,
+  resolveCorrelation,
   createMigrationLogger,
   createRunLog,
-  migrationRunInfo,
-  notices,
+  buildRunInfo,
+  createNotices,
   runInfo,
-  sequence,
+  createSequence,
 } = require('../../src/core/migration-logger.js');
 
 /** A sink that keeps its lines, and an emitter that keeps its events */
@@ -44,21 +44,21 @@ const ordinary = (options = {}) => {
     kind: 'migration',
     info: FULL_RUN,
     emitter: parts.emitter,
-    nextSeq: sequence(),
+    nextSeq: createSequence(),
     ...options.logger,
   });
   return { ...parts, logger };
 };
 
-describe('sequence', () => {
+describe('createSequence', () => {
   it('should count from 1, separately per counter', () => {
-    const a = sequence();
-    const b = sequence();
+    const a = createSequence();
+    const b = createSequence();
     assert.deepStrictEqual([a(), a(), b(), a()], [1, 2, 1, 3]);
   });
 });
 
-describe('runInfo / migrationRunInfo', () => {
+describe('runInfo / buildRunInfo', () => {
   it('should build a frozen run-level ctx.run without undefined fields', () => {
     const run = runInfo({ id: 'r', requestedBy: undefined, reason: 'why' }, 'down');
     assert.deepStrictEqual(run, { id: 'r', direction: 'down', reason: 'why' });
@@ -67,7 +67,7 @@ describe('runInfo / migrationRunInfo', () => {
 
   it('should add the migration, its batch and the attempt in a new frozen object', () => {
     const run = runInfo({ id: 'r' }, 'up');
-    const first = migrationRunInfo(run, { migration: 'a.js', batch: 4, attempt: 1 });
+    const first = buildRunInfo(run, { migration: 'a.js', batch: 4, attempt: 1 });
     assert.deepStrictEqual(first, {
       id: 'r',
       direction: 'up',
@@ -76,14 +76,14 @@ describe('runInfo / migrationRunInfo', () => {
       attempt: 1,
     });
     assert.ok(Object.isFrozen(first));
-    const down = migrationRunInfo(runInfo({ id: 'r' }, 'down'), { migration: 'a.js', attempt: 1 });
+    const down = buildRunInfo(runInfo({ id: 'r' }, 'down'), { migration: 'a.js', attempt: 1 });
     assert.ok(!('batch' in down), 'no batch on a down');
   });
 });
 
-describe('correlationOf', () => {
+describe('resolveCorrelation', () => {
   it('should map every ctx.run field — the actor to the event only', () => {
-    const { event, line } = correlationOf('migration', FULL_RUN);
+    const { event, line } = resolveCorrelation('migration', FULL_RUN);
     assert.deepStrictEqual(event, {
       kind: 'migration',
       runId: 'run-1',
@@ -116,7 +116,7 @@ describe('correlationOf', () => {
       jobId: 'bgl-x',
       attempt: 1,
     };
-    const { event, line } = correlationOf('background', background, 'forward');
+    const { event, line } = resolveCorrelation('background', background, 'forward');
     assert.deepStrictEqual(event, {
       kind: 'background',
       runId: 'lane-1',
@@ -283,7 +283,7 @@ describe('createMigrationLogger', () => {
       },
       kind: 'migration',
       info: FULL_RUN,
-      nextSeq: sequence(),
+      nextSeq: createSequence(),
     });
     assert.doesNotThrow(() => throwingSink.info('y'));
     assert.strictEqual(events.length, 0);
@@ -296,14 +296,14 @@ describe('createMigrationLogger', () => {
 
   it('should say once per run that calls were dropped or cut, whichever logger made them', () => {
     const parts = harness();
-    const noticed = notices();
+    const noticed = createNotices();
     const make = (attempt) =>
       createMigrationLogger({
         sink: parts.sink,
         kind: 'migration',
         info: { ...FULL_RUN, attempt },
         emitter: parts.emitter,
-        nextSeq: sequence(),
+        nextSeq: createSequence(),
         noticed,
       });
     const hostile = {
@@ -330,7 +330,7 @@ describe('createMigrationLogger', () => {
       sink,
       kind: 'migration',
       info: FULL_RUN,
-      nextSeq: sequence(),
+      nextSeq: createSequence(),
     });
     logger.info('x', { userland: true });
     assert.deepStrictEqual(lines, ['x']);
@@ -393,7 +393,7 @@ describe('createRunLog', () => {
   });
 });
 
-describe('backgroundLogs', () => {
+describe('createBackgroundLogs', () => {
   const info = Object.freeze({
     name: 'bg.js',
     generation: 1,
@@ -404,7 +404,7 @@ describe('backgroundLogs', () => {
 
   it("should number a slice's loggers in one sequence", () => {
     const { events, sink, emitter } = harness();
-    const logs = backgroundLogs({ sink, emitter });
+    const logs = createBackgroundLogs({ sink, emitter });
     logs(info, 'forward').info('a', { userland: true });
     logs({ ...info, attempt: 2 }, 'forward').info('b', { userland: true });
     assert.deepStrictEqual(
@@ -418,7 +418,9 @@ describe('backgroundLogs', () => {
 
   it('should emit nothing in a dry run, even given an emitter', () => {
     const { lines, events, sink, emitter } = harness();
-    backgroundLogs({ sink, emitter, dryRun: true })(info, 'forward').info('a', { userland: true });
+    createBackgroundLogs({ sink, emitter, dryRun: true })(info, 'forward').info('a', {
+      userland: true,
+    });
     assert.strictEqual(events.length, 0);
     assert.strictEqual(lines[0].fields.dryRun, true);
   });

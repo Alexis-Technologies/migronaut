@@ -2,20 +2,20 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 
 const { ConfigInvalidError } = require('../../errors/index.js');
-const { isPlainObject, toWire, unsendable } = require('../../utils/canonical.js');
+const { isPlainObject, toWire, findUnsendable } = require('../../utils/canonical.js');
 const { isCollectionName } = require('../../utils/collection-name.js');
 const { mapLimit } = require('../../utils/concurrency.js');
-const { contextPath, errorText } = require('../../utils/error.js');
-const { importUserFile, tsLoadMessageOrNull } = require('../../utils/loader.js');
-const { indexIssues, normalizeDeclaredIndex, sameDeclaredSignature } = require('./index-spec.js');
+const { toContextPath, formatError } = require('../../utils/error.js');
+const { importUserFile, explainTsLoad } = require('../../utils/loader.js');
+const { checkIndex, normalizeDeclaredIndex, isSameDeclaredSignature } = require('./index-spec.js');
 const { pushAll } = require('./plan.js');
 const { normalizeDeclaredSearchIndex, searchIndexIssues } = require('./search-index-spec.js');
-const { resolveVersioning, versioningIssues } = require('../../versioning/config.js');
+const { resolveVersioning, checkVersioning } = require('../../versioning/config.js');
 const {
   isVersioningIndexKey,
   mergeVersioningValidator,
-  validatorVersioningIssues,
-  versioningIndex,
+  checkValidatorVersioning,
+  buildVersioningIndex,
 } = require('./versioning-spec.js');
 
 /**
@@ -48,7 +48,7 @@ const VALIDATION_ACTIONS = ['error', 'warn', 'errorAndLog'];
 const FS_CONCURRENCY = 16;
 
 /** `'a', 'b', 'c'` */
-const quotedList = (items) => {
+const quoteList = (items) => {
   let text = '';
   for (let i = 0; i < items.length; i++) {
     if (i > 0) text += ', ';
@@ -62,12 +62,12 @@ const VALIDATION_OPTIONS = [
   {
     key: 'validationLevel',
     allowed: new Set(VALIDATION_LEVELS),
-    expected: quotedList(VALIDATION_LEVELS),
+    expected: quoteList(VALIDATION_LEVELS),
   },
   {
     key: 'validationAction',
     allowed: new Set(VALIDATION_ACTIONS),
-    expected: quotedList(VALIDATION_ACTIONS),
+    expected: quoteList(VALIDATION_ACTIONS),
   },
 ];
 
@@ -76,7 +76,7 @@ const join = (base, key) => (base.endsWith(':') ? `${base} ${key}` : `${base}.${
 
 const isEmptyObject = (value) => isPlainObject(value) && Object.keys(value).length === 0;
 
-const indexListIssues = (indexes, base, issues) => {
+const checkIndexList = (indexes, base, issues) => {
   if (!Array.isArray(indexes)) {
     return void issues.push({
       path: join(base, 'indexes'),
@@ -87,7 +87,7 @@ const indexListIssues = (indexes, base, issues) => {
   for (let position = 0; position < indexes.length; position++) {
     const index = indexes[position];
     const indexPath = `${join(base, 'indexes')}[${position}]`;
-    const found = indexIssues(index, indexPath);
+    const found = checkIndex(index, indexPath);
     pushAll(issues, found);
     if (found.length === 0) {
       valid.push({ position, path: indexPath, index: normalizeDeclaredIndex(index) });
@@ -102,7 +102,7 @@ const indexListIssues = (indexes, base, issues) => {
         message = `has the same name as indexes[${earlier.position}] ("${later.index.name}")`;
       } else if (later.index.isText && earlier.index.isText) {
         message = `is a second text index (after indexes[${earlier.position}]) — a collection has at most one`;
-      } else if (sameDeclaredSignature(later.index, earlier.index)) {
+      } else if (isSameDeclaredSignature(later.index, earlier.index)) {
         message =
           `has the same key, partialFilterExpression and collation as indexes[${earlier.position}] ` +
           '— the server keeps only one of them';
@@ -153,15 +153,15 @@ const searchIndexListIssues = (searchIndexes, base, issues) => {
  * is versioned (valid or not), so the validator checks below know a
  * validator is coming.
  */
-const versioningDefinitionIssues = (definition, base, issues) => {
+const checkVersioningDefinition = (definition, base, issues) => {
   if (definition.versioning === undefined) return false;
   const versioningPath = join(base, 'versioning');
-  const found = versioningIssues(definition.versioning, versioningPath);
+  const found = checkVersioning(definition.versioning, versioningPath);
   pushAll(issues, found);
   if (found.length > 0) return true;
   const versioning = resolveVersioning(definition.versioning);
   if (isPlainObject(definition.validator) || definition.validator === null) {
-    for (const message of validatorVersioningIssues(definition.validator, versioning)) {
+    for (const message of checkValidatorVersioning(definition.validator, versioning)) {
       issues.push({ path: join(base, 'validator'), message });
     }
   }
@@ -188,7 +188,7 @@ const versioningDefinitionIssues = (definition, base, issues) => {
  * `users.ts:` for a file); `reserved` are migronaut's own collection names;
  * `fallbackName` is the name a file-based definition gets when it sets none.
  */
-const definitionIssues = (definition, { path: base, reserved = [], fallbackName } = {}) => {
+const checkDefinition = (definition, { path: base, reserved = [], fallbackName } = {}) => {
   const self = base.endsWith(':') ? base.slice(0, -1) : base;
   if (!isPlainObject(definition)) {
     return [{ path: self, message: 'must be a collection definition object' }];
@@ -220,29 +220,29 @@ const definitionIssues = (definition, { path: base, reserved = [], fallbackName 
     report('name', `"${name}" is one of migronaut's own collections`);
   }
 
-  const managesNothing =
+  const hasNothingManaged =
     definition.indexes === undefined &&
     definition.searchIndexes === undefined &&
     definition.validator === undefined &&
     definition.versioning === undefined;
-  if (managesNothing) {
+  if (hasNothingManaged) {
     issues.push({
       path: self,
       message: 'declares no indexes, searchIndexes, validator or versioning — nothing to manage',
     });
   }
-  if (definition.indexes !== undefined) indexListIssues(definition.indexes, base, issues);
+  if (definition.indexes !== undefined) checkIndexList(definition.indexes, base, issues);
   if (definition.searchIndexes !== undefined) {
     searchIndexListIssues(definition.searchIndexes, base, issues);
   }
-  const versioning = versioningDefinitionIssues(definition, base, issues);
+  const versioning = checkVersioningDefinition(definition, base, issues);
 
   const { validator } = definition;
   if (validator !== undefined && validator !== null) {
     if (!isPlainObject(validator)) {
       report('validator', 'must be an object (a query or { $jsonSchema }), or null for none');
     } else {
-      const reason = unsendable(validator);
+      const reason = findUnsendable(validator);
       if (reason) report('validator', reason);
     }
   }
@@ -268,7 +268,7 @@ const definitionIssues = (definition, { path: base, reserved = [], fallbackName 
  * Validate the `collections` config key: each definition, plus no collection
  * declared twice. `reserved` are the changelog and lock collection names.
  */
-const collectionsIssues = (list, { reserved = [] } = {}) => {
+const checkCollections = (list, { reserved = [] } = {}) => {
   if (list === undefined) return [];
   if (!Array.isArray(list)) {
     return [{ path: 'collections', message: 'must be an array of collection definitions' }];
@@ -278,7 +278,7 @@ const collectionsIssues = (list, { reserved = [] } = {}) => {
   for (let position = 0; position < list.length; position++) {
     const definition = list[position];
     const base = `collections[${position}]`;
-    pushAll(issues, definitionIssues(definition, { path: base, reserved }));
+    pushAll(issues, checkDefinition(definition, { path: base, reserved }));
     const name = isPlainObject(definition) ? definition.name : undefined;
     if (typeof name !== 'string') continue;
     if (seen.has(name)) {
@@ -323,7 +323,7 @@ const normalizeDefinition = (definition, { name, source } = {}) => {
   let indexes = normalizeIndexes(definition.indexes);
   let validationLevel = definition.validationLevel;
   let versioning = null;
-  let indexesPartial = false;
+  let isIndexesPartial = false;
   if (definition.versioning !== undefined) {
     // Folded into an ordinary validator and an ordinary index, so the planner
     // needs to know nothing about versioning.
@@ -334,10 +334,13 @@ const normalizeDefinition = (definition, { name, source } = {}) => {
     wireValidator = mergeVersioningValidator(wireValidator, versioning);
     if (versioning.index) {
       // Marked: on a sharded collection the planner swaps in the shard-key-prefixed form.
-      const index = { ...normalizeDeclaredIndex(versioningIndex(versioning)), versionIndex: true };
+      const index = {
+        ...normalizeDeclaredIndex(buildVersioningIndex(versioning)),
+        versionIndex: true,
+      };
       // Declaring the version index alone must not make every other index of
       // the collection "undeclared" — and so a candidate for prune.
-      indexesPartial = indexes === undefined;
+      isIndexesPartial = indexes === undefined;
       indexes = [...(indexes ?? []), index];
     }
   }
@@ -345,7 +348,7 @@ const normalizeDefinition = (definition, { name, source } = {}) => {
     name: definition.name ?? name,
     source,
     indexes,
-    ...(indexesPartial ? { indexesPartial } : {}),
+    ...(isIndexesPartial ? { indexesPartial: isIndexesPartial } : {}),
     ...(definition.searchIndexes !== undefined
       ? { searchIndexes: normalizeSearchIndexes(definition.searchIndexes) }
       : {}),
@@ -360,12 +363,14 @@ const normalizeDefinition = (definition, { name, source } = {}) => {
 };
 
 /** The extensions a definition file may have: `fileExtensions`, dotted, plus `.json` — longest first */
-const definitionExtensions = (extensions) => {
-  const set = new Set(['.json']);
-  for (const ext of extensions) set.add(ext.startsWith('.') ? ext : `.${ext}`);
-  const list = [...set];
-  list.sort((a, b) => b.length - a.length);
-  return list;
+const listDefinitionExtensions = (extensions) => {
+  const dotted = new Set(['.json']);
+  for (const extension of extensions) {
+    dotted.add(extension.startsWith('.') ? extension : `.${extension}`);
+  }
+  const longestFirst = [...dotted];
+  longestFirst.sort((a, b) => b.length - a.length);
+  return longestFirst;
 };
 
 /**
@@ -383,33 +388,33 @@ const loadDefinitionFile = async (filepath, options) => {
     } catch (error) {
       throw new ConfigInvalidError('Collection definition file is not valid JSON', {
         cause: error,
-        context: { path: contextPath(filepath), cause: errorText(error) },
+        context: { path: toContextPath(filepath), cause: formatError(error) },
       });
     }
   }
-  let mod = null;
+  let loaded = null;
   try {
-    mod = await importUserFile(filepath, { reload: options.reload });
+    loaded = await importUserFile(filepath, { reload: options.reload });
   } catch (error) {
     throw new ConfigInvalidError(
-      tsLoadMessageOrNull(filepath, error, 'collection definition') ??
+      explainTsLoad(filepath, error, 'collection definition') ??
         'Collection definition file failed to load',
-      { cause: error, context: { path: contextPath(filepath), cause: errorText(error) } },
+      { cause: error, context: { path: toContextPath(filepath), cause: formatError(error) } },
     );
   }
-  const exported = mod.default ?? mod;
+  const exported = loaded.default ?? loaded;
   if (typeof exported === 'function') {
     throw new ConfigInvalidError(
       'A collection definition file must export one definition object, not a function',
-      { context: { path: contextPath(filepath) } },
+      { context: { path: toContextPath(filepath) } },
     );
   }
   // A shallow copy: an ES module namespace is an exotic object, not a plain one.
-  return isPlainObject(exported) || exported === mod ? { ...exported } : exported;
+  return isPlainObject(exported) || exported === loaded ? { ...exported } : exported;
 };
 
 /** The extension of `accepted` that `file` has (with a name before it), or `''` */
-const extensionOf = (file, accepted) => {
+const matchExtension = (file, accepted) => {
   for (let i = 0; i < accepted.length; i++) {
     const candidate = accepted[i];
     if (file.endsWith(candidate) && file.length > candidate.length) return candidate;
@@ -429,34 +434,34 @@ const byFile = (a, b) => {
  * like in the migrations directory. An explicitly configured directory that
  * does not exist is an error, not "no definitions".
  */
-const loadCollectionsDir = async (dir, { extensions, reload = false }) => {
+const loadCollectionsDir = async (directory, { extensions, reload = false }) => {
   let entries = null;
   try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
+    entries = await fs.readdir(directory, { withFileTypes: true });
   } catch (error) {
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
       throw new ConfigInvalidError('collectionsDir not found', {
-        context: { path: contextPath(dir) },
+        context: { path: toContextPath(directory) },
       });
     }
     throw new ConfigInvalidError('collectionsDir could not be read', {
       cause: error,
-      context: { path: contextPath(dir), cause: errorText(error) },
+      context: { path: toContextPath(directory), cause: formatError(error) },
     });
   }
-  const accepted = definitionExtensions(extensions);
+  const accepted = listDefinitionExtensions(extensions);
   const files = [];
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     const file = entry.name;
     if (file.startsWith('.')) continue;
     if (file.endsWith('.d.ts') || file.endsWith('.d.mts') || file.endsWith('.d.cts')) continue;
-    const ext = extensionOf(file, accepted);
-    if (ext) files.push({ file, name: file.slice(0, -ext.length) });
+    const extension = matchExtension(file, accepted);
+    if (extension) files.push({ file, name: file.slice(0, -extension.length) });
   }
   files.sort(byFile);
   return mapLimit(files, FS_CONCURRENCY, async ({ file, name }) => {
-    const filepath = path.join(dir, file);
+    const filepath = path.join(directory, file);
     return { file, name, definition: await loadDefinitionFile(filepath, { reload }) };
   });
 };
@@ -477,9 +482,9 @@ const resolveDefinitions = async (options) => {
 
   const definitions = [];
   const declaredBy = new Map();
-  const list = inline ?? [];
-  for (let position = 0; position < list.length; position++) {
-    const definition = list[position];
+  const declared = inline ?? [];
+  for (let position = 0; position < declared.length; position++) {
+    const definition = declared[position];
     const source = `collections[${position}]`;
     definitions.push(normalizeDefinition(definition, { source }));
     declaredBy.set(definition.name, source);
@@ -490,7 +495,7 @@ const resolveDefinitions = async (options) => {
   const issues = [];
   for (const { file, name: fallbackName, definition } of files) {
     const base = `${file}:`;
-    const found = definitionIssues(definition, { path: base, reserved, fallbackName });
+    const found = checkDefinition(definition, { path: base, reserved, fallbackName });
     if (found.length > 0) {
       pushAll(issues, found);
       continue;
@@ -508,7 +513,7 @@ const resolveDefinitions = async (options) => {
   }
   if (issues.length > 0) {
     throw new ConfigInvalidError('Invalid collection definition(s)', {
-      context: { path: contextPath(dir), issues },
+      context: { path: toContextPath(dir), issues },
     });
   }
   return definitions;
@@ -516,8 +521,8 @@ const resolveDefinitions = async (options) => {
 
 module.exports = {
   DEFINITION_KEYS,
-  definitionIssues,
-  collectionsIssues,
+  checkDefinition,
+  checkCollections,
   normalizeDefinition,
   loadCollectionsDir,
   resolveDefinitions,

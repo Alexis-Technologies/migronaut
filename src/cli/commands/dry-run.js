@@ -24,11 +24,11 @@ const registerDryRun = (program) => {
         });
       }
     },
-    run: (migrator, opts, positionals) => {
+    run: (migrator, flags, positionals) => {
       return migrator.dryRun(positionals[0], positionals[1], {
-        ...(opts.steps !== undefined ? { steps: Number(opts.steps) } : {}),
-        ...(opts.batch !== undefined ? { batch: Number(opts.batch) } : {}),
-        ...(opts.to ? { to: opts.to } : {}),
+        ...(flags.steps !== undefined ? { steps: Number(flags.steps) } : {}),
+        ...(flags.batch !== undefined ? { batch: Number(flags.batch) } : {}),
+        ...(flags.to ? { to: flags.to } : {}),
       });
     },
     render: (rows, { logger }) => {

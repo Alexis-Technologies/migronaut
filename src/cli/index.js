@@ -65,14 +65,14 @@ const run = async (argv) => {
   // Tokens after a `--` terminator are positionals, never flags.
   const boundary = argv.indexOf('--');
   const flagTokens = boundary === -1 ? argv : argv.slice(0, boundary);
-  const noColor = flagTokens.includes('--no-color');
-  const saved = noColor
+  const hasNoColorFlag = flagTokens.includes('--no-color');
+  const saved = hasNoColorFlag
     ? {
         MIGRONAUT_FORCE_COLOR: process.env.MIGRONAUT_FORCE_COLOR,
         MIGRONAUT_NO_COLOR: process.env.MIGRONAUT_NO_COLOR,
       }
     : undefined;
-  if (noColor) {
+  if (hasNoColorFlag) {
     // An explicit flag on this invocation outranks every ambient signal.
     // MIGRONAUT_NO_COLOR is the top of supportsColor()'s precedence chain once
     // MIGRONAUT_FORCE_COLOR is cleared, so setting these two is enough to beat
@@ -83,9 +83,9 @@ const run = async (argv) => {
   }
   // Read from the tokens, like --no-color: a command line that does not parse
   // has no parsed options to ask.
-  const json = flagTokens.includes('--json');
+  const hasJsonFlag = flagTokens.includes('--json');
   const program = buildProgram().onUsageError((message, help) => {
-    return reportUsageError(message, { json, help });
+    return reportUsageError(message, { json: hasJsonFlag, help });
   });
   try {
     await program.parseAsync(argv);

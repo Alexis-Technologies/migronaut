@@ -2,8 +2,8 @@ const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const {
   createThrottle,
-  excludedMembers,
-  replicationLagMs,
+  listExcludedMembers,
+  measureReplicationLagMs,
   sleep,
   MAX_HOOK_PAUSE_MS,
 } = require('../../src/core/background/throttle.js');
@@ -41,7 +41,7 @@ const logger = () => {
 describe('replication lag', () => {
   it('should measure the worst secondary that counts', () => {
     assert.strictEqual(
-      replicationLagMs(
+      measureReplicationLagMs(
         status([
           ['s:1', 99_000],
           ['s:2', 97_000],
@@ -51,7 +51,7 @@ describe('replication lag', () => {
       3000,
     );
     assert.strictEqual(
-      replicationLagMs(
+      measureReplicationLagMs(
         status([
           ['s:1', 99_000],
           ['s:2', 10_000],
@@ -60,10 +60,10 @@ describe('replication lag', () => {
       ),
       1000,
     );
-    assert.strictEqual(replicationLagMs({ members: [] }, new Set()), 0);
-    assert.strictEqual(replicationLagMs(undefined, new Set()), 0);
+    assert.strictEqual(measureReplicationLagMs({ members: [] }, new Set()), 0);
+    assert.strictEqual(measureReplicationLagMs(undefined, new Set()), 0);
     assert.deepStrictEqual(
-      excludedMembers({
+      listExcludedMembers({
         config: {
           members: [
             { host: 'a', hidden: true },
@@ -78,38 +78,38 @@ describe('replication lag', () => {
   });
 });
 
-describe('adaptiveFor — the controller a process keeps per migration and group', () => {
-  const { adaptiveFor } = require('../../src/core/background/lane.js');
+describe('getAdaptive — the controller a process keeps per migration and group', () => {
+  const { getAdaptive } = require('../../src/core/background/lane.js');
   const settings = { targetLatencyMs: 100, minBatchSize: 10, maxBatchSize: 500, maxPauseMs: 5000 };
   const partition = { group: 'shard-a' };
 
   it('should share one controller between the lanes of a migration and group', () => {
     const deps = { adaptiveCache: new Map() };
-    const first = adaptiveFor(deps, 'm.js', partition, settings);
-    assert.strictEqual(adaptiveFor(deps, 'm.js', partition, { ...settings }), first);
-    assert.notStrictEqual(adaptiveFor(deps, 'm.js', { group: 'shard-b' }, settings), first);
-    assert.notStrictEqual(adaptiveFor(deps, 'other.js', partition, settings), first);
+    const first = getAdaptive(deps, 'm.js', partition, settings);
+    assert.strictEqual(getAdaptive(deps, 'm.js', partition, { ...settings }), first);
+    assert.notStrictEqual(getAdaptive(deps, 'm.js', { group: 'shard-b' }, settings), first);
+    assert.notStrictEqual(getAdaptive(deps, 'other.js', partition, settings), first);
   });
 
   it('should follow settings that changed, keeping what was learned within the new bounds', () => {
     const deps = { adaptiveCache: new Map() };
-    const before = adaptiveFor(deps, 'm.js', partition, settings);
+    const before = getAdaptive(deps, 'm.js', partition, settings);
     assert.strictEqual(before.batchSize(), 500);
     // A repin that lowers batchSize: a runner up for days must not go on
     // writing batches of 500.
     const lowered = { ...settings, maxBatchSize: 50 };
-    const after = adaptiveFor(deps, 'm.js', partition, lowered);
+    const after = getAdaptive(deps, 'm.js', partition, lowered);
     assert.notStrictEqual(after, before);
     assert.strictEqual(after.batchSize(), 50);
-    assert.strictEqual(adaptiveFor(deps, 'm.js', partition, lowered), after);
+    assert.strictEqual(getAdaptive(deps, 'm.js', partition, lowered), after);
   });
 
   it('should start a new process where the partition says the last one stopped', () => {
     const saved = { group: 'shard-a', throttle: { batchSize: 40, pauseMs: 200 } };
-    const controller = adaptiveFor({ adaptiveCache: new Map() }, 'm.js', saved, settings);
+    const controller = getAdaptive({ adaptiveCache: new Map() }, 'm.js', saved, settings);
     assert.deepStrictEqual(controller.state(), { batchSize: 40, pauseMs: 200 });
     // No cache (a caller that keeps none): a controller of its own each time.
-    assert.notStrictEqual(adaptiveFor({}, 'm.js', saved, settings), controller);
+    assert.notStrictEqual(getAdaptive({}, 'm.js', saved, settings), controller);
   });
 });
 

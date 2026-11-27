@@ -21,8 +21,8 @@ const adapters = new WeakMap();
 const noop = () => {};
 
 /** warn/error always go to stderr, whatever stream debug/info write to */
-const writeErr = (msg) => {
-  process.stderr.write(`${msg}\n`);
+const writeErr = (message) => {
+  process.stderr.write(`${message}\n`);
 };
 
 /**
@@ -41,8 +41,8 @@ const createLogger = (stream = process.stdout, level = 'info') => {
   const outColors = createColors(stream);
   const errColors = createColors(process.stderr);
   const threshold = LEVELS[level] ?? LEVELS.info;
-  const writeOut = (msg) => {
-    stream.write(`${msg}\n`);
+  const writeOut = (message) => {
+    stream.write(`${message}\n`);
   };
   const at = (name, write) => (LEVELS[name] >= threshold ? write : () => {});
   // Sanitized by construction: messages routinely embed migration names and
@@ -53,10 +53,10 @@ const createLogger = (stream = process.stdout, level = 'info') => {
   // exempt (their sink is not necessarily a terminal) — this is the default
   // terminal logger only.
   return {
-    debug: at('debug', (msg) => writeOut(outColors.dim(sanitizeTerminal(msg)))),
-    info: at('info', (msg) => writeOut(sanitizeTerminal(msg))),
-    warn: at('warn', (msg) => writeErr(errColors.yellow(sanitizeTerminal(msg)))),
-    error: at('error', (msg) => writeErr(errColors.red(sanitizeTerminal(msg)))),
+    debug: at('debug', (message) => writeOut(outColors.dim(sanitizeTerminal(message)))),
+    info: at('info', (message) => writeOut(sanitizeTerminal(message))),
+    warn: at('warn', (message) => writeErr(errColors.yellow(sanitizeTerminal(message)))),
+    error: at('error', (message) => writeErr(errColors.red(sanitizeTerminal(message)))),
   };
 };
 
@@ -76,12 +76,12 @@ const isUsableSink = (value) => {
  * and its ecosystem expect for structured logging; everyone else gets
  * `(msg, fields)` so a plain `(msg) => …` logger keeps working unchanged.
  */
-const guard = (fn, pinoStyle) => {
-  return (msg, fields) => {
+const guard = (method, pinoStyle) => {
+  return (message, fields) => {
     try {
-      if (fields === undefined) fn(msg);
-      else if (pinoStyle) fn(fields, msg);
-      else fn(msg, fields);
+      if (fields === undefined) method(message);
+      else if (pinoStyle) method(fields, message);
+      else method(message, fields);
     } catch {
       // Logging must never break a migration run.
     }
@@ -111,8 +111,8 @@ const resolveLogger = (logger) => {
   }
   const cached = adapters.get(logger);
   if (cached !== undefined) return cached;
-  const pinoStyle = hasMethod(logger, 'child');
-  const child = pinoStyle ? logger.child({ component: 'migronaut' }) : null;
+  const isPinoStyle = hasMethod(logger, 'child');
+  const child = isPinoStyle ? logger.child({ component: 'migronaut' }) : null;
   const sink = child && isUsableSink(child) ? child : logger;
   // Fallback preference per level: same severity first, then the neighbors a
   // reader of that sink would expect. debug/info never escalate to warn/error
@@ -125,10 +125,10 @@ const resolveLogger = (logger) => {
     return noop;
   };
   const adapter = {
-    debug: guard(pick(['debug', 'info']), pinoStyle),
-    info: guard(pick(['info', 'debug']), pinoStyle),
-    warn: guard(pick(['warn', 'info', 'debug', 'error']), pinoStyle),
-    error: guard(pick(['error', 'warn', 'info', 'debug']), pinoStyle),
+    debug: guard(pick(['debug', 'info']), isPinoStyle),
+    info: guard(pick(['info', 'debug']), isPinoStyle),
+    warn: guard(pick(['warn', 'info', 'debug', 'error']), isPinoStyle),
+    error: guard(pick(['error', 'warn', 'info', 'debug']), isPinoStyle),
   };
   adapters.set(logger, adapter);
   return adapter;

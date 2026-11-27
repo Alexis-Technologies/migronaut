@@ -2,9 +2,9 @@ const { ConfigInvalidError } = require('../../errors/index.js');
 const { defineCommand } = require('../shared.js');
 
 /** Tri-state: an explicit flag wins; otherwise undefined, so the config decides */
-const jsFlag = (opts) => {
-  if (opts.ts) return false;
-  if (opts.js) return true;
+const readJsFlag = (flags) => {
+  if (flags.ts) return false;
+  if (flags.js) return true;
   return undefined;
 };
 
@@ -22,16 +22,16 @@ const registerCreate = (program) => {
     ],
     // Writing a file needs no database — no spinner, no pre-connect.
     spinner: false,
-    run: async (migrator, opts, positionals) => {
+    run: async (migrator, flags, positionals) => {
       const name = positionals[0];
-      const js = jsFlag(opts);
-      if (opts.background && opts.template) {
+      const js = readJsFlag(flags);
+      if (flags.background && flags.template) {
         throw new ConfigInvalidError('--background and --template cannot be combined');
       }
       const path = await migrator.create(name, {
         ...(js !== undefined ? { js } : {}),
-        ...(opts.template ? { template: opts.template } : {}),
-        ...(opts.background ? { background: true } : {}),
+        ...(flags.template ? { template: flags.template } : {}),
+        ...(flags.background ? { background: true } : {}),
       });
       return { path };
     },

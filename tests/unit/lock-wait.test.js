@@ -5,8 +5,8 @@ const {
   DEFAULT_LOCK_WAIT_TIMEOUT_MS,
   MAX_LOCK_POLL_INTERVAL_MS,
   assertLockWaitOptions,
-  backoffDelay,
-  jitteredDelay,
+  computeBackoff,
+  jitterDelay,
   waitBudget,
   withLockWait,
 } = require('../../src/core/lock-wait.js');
@@ -431,31 +431,31 @@ describe('waitBudget', () => {
   });
 });
 
-describe('backoffDelay', () => {
+describe('computeBackoff', () => {
   it('should double from the base, jittered, up to the cap', () => {
     const within = (value, expected) =>
       value >= expected * 0.75 && value <= Math.ceil(expected * 1.25);
-    assert.ok(within(backoffDelay(500, 1), 500));
-    assert.ok(within(backoffDelay(500, 2), 1000));
-    assert.ok(within(backoffDelay(500, 3), 2000));
-    assert.ok(within(backoffDelay(500, 50), MAX_LOCK_POLL_INTERVAL_MS));
+    assert.ok(within(computeBackoff(500, 1), 500));
+    assert.ok(within(computeBackoff(500, 2), 1000));
+    assert.ok(within(computeBackoff(500, 3), 2000));
+    assert.ok(within(computeBackoff(500, 50), MAX_LOCK_POLL_INTERVAL_MS));
   });
 
   it('should never sleep through more than a quarter of the budget, nor below the base', () => {
     for (let attempt = 1; attempt < 20; attempt++) {
-      assert.ok(backoffDelay(10, attempt, 100) <= Math.ceil(25 * 1.25));
+      assert.ok(computeBackoff(10, attempt, 100) <= Math.ceil(25 * 1.25));
     }
     // A base above the cap is kept: the caller asked for it.
-    assert.ok(backoffDelay(8000, 5) >= 8000 * 0.75);
+    assert.ok(computeBackoff(8000, 5) >= 8000 * 0.75);
   });
 });
 
-describe('jitteredDelay', () => {
+describe('jitterDelay', () => {
   it('should stay within ±25% of the base and never drop below 1ms', () => {
     for (let run = 0; run < 200; run++) {
-      const value = jitteredDelay(100);
+      const value = jitterDelay(100);
       assert.ok(value >= 75 && value <= 125, `out of range: ${value}`);
     }
-    assert.ok(jitteredDelay(0.1) >= 1);
+    assert.ok(jitterDelay(0.1) >= 1);
   });
 });

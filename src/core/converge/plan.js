@@ -1,11 +1,11 @@
-const { deepEqual } = require('../../utils/canonical.js');
-const { shardedVersionIndexKey, versionFloorConflict } = require('./versioning-spec.js');
+const { isDeepEqual } = require('../../utils/canonical.js');
+const { buildShardedVersionIndexKey, explainFloorConflict } = require('./versioning-spec.js');
 const {
   compareIndex,
   normalizeDeclaredIndex,
   normalizeLiveIndex,
   restoreSpec,
-  sameSignature,
+  isSameSignature,
 } = require('./index-spec.js');
 const {
   compareSearchIndex,
@@ -117,7 +117,7 @@ const needsConfirmation = (action, collectionActions = []) => {
  * an object, without the server-managed `v`/`ns` — what a reader of `--json`
  * or of the converge history needs to see what changed.
  */
-const indexValue = (spec) => {
+const toIndexValue = (spec) => {
   const { key, v: _v, ns: _ns, background: _background, ...rest } = spec;
   return { key: key instanceof Map ? Object.fromEntries(key) : { ...key }, ...rest };
 };
@@ -132,7 +132,7 @@ const isEmptyValidator = (validator) => {
 const managesValidator = (definition) => definition.validator !== undefined;
 
 /** The validator a managing definition asks for — `null` for none (an empty one) */
-const desiredValidator = (definition) => {
+const resolveDesiredValidator = (definition) => {
   if (definition.validator === undefined || isEmptyValidator(definition.validator)) return null;
   return {
     validator: definition.validator,
@@ -142,7 +142,7 @@ const desiredValidator = (definition) => {
 };
 
 /** The validator a collection has (`null` = none). Level and action are omitted until set. */
-const liveValidator = (options) => {
+const readLiveValidator = (options) => {
   const validator = options?.validator;
   if (validator === undefined || validator === null || isEmptyValidator(validator)) return null;
   return {
@@ -163,7 +163,7 @@ const planValidator = (name, desired, current, row, steps) => {
     return void steps.push({ op: 'collMod', command: { ...desired }, actions: [action] });
   }
   const diffs = [];
-  if (!deepEqual(desired.validator, current.validator)) diffs.push('validator');
+  if (!isDeepEqual(desired.validator, current.validator)) diffs.push('validator');
   if (desired.validationLevel !== current.validationLevel) diffs.push('validationLevel');
   if (desired.validationAction !== current.validationAction) diffs.push('validationAction');
   if (diffs.length === 0) return void row({ target: 'validator', name, action: 'unchanged' });
@@ -211,13 +211,13 @@ const joinReasons = (first, second) => (first ? `${first}; ${second}` : second);
  * `_id` (versioning-spec.js). `displaced` names the ordinary version index it
  * replaces, when the two differ.
  */
-const indexesFor = (definition, live) => {
+const resolveIndexes = (definition, live) => {
   const indexes = definition.indexes;
   if (indexes === undefined || !definition.versioning || !live.shardKey) {
     return { indexes, displaced: '' };
   }
   const sharded = normalizeDeclaredIndex({
-    key: shardedVersionIndexKey(definition.versioning, live.shardKey),
+    key: buildShardedVersionIndexKey(definition.versioning, live.shardKey),
   });
   const result = [];
   let displaced = '';
@@ -270,7 +270,7 @@ const planIndexes = (declaredIndexes, live, options, row, steps) => {
         target: 'index',
         name: declared.name,
         action: 'create',
-        to: indexValue(declared.spec),
+        to: toIndexValue(declared.spec),
       });
       pending.push({ declared, live: undefined, reason: undefined, action });
       continue;
@@ -290,8 +290,8 @@ const planIndexes = (declaredIndexes, live, options, row, steps) => {
         name: declared.name,
         action: 'modify',
         reason: diffs.join(', '),
-        from: indexValue(current.raw),
-        to: indexValue(declared.spec),
+        from: toIndexValue(current.raw),
+        to: toIndexValue(declared.spec),
       });
       const { unique, ...rest } = inPlace;
       modifies.push(
@@ -312,15 +312,15 @@ const planIndexes = (declaredIndexes, live, options, row, steps) => {
         name: declared.name,
         action: 'recreate',
         reason,
-        from: indexValue(current.raw),
-        to: indexValue(declared.spec),
+        from: toIndexValue(current.raw),
+        to: toIndexValue(declared.spec),
       });
       pending.push({ declared, live: current, reason, action });
     }
   }
 
   const collides = (declared, index) => {
-    return sameSignature(declared, index, defaultCollation) || (declared.isText && index.isText);
+    return isSameSignature(declared, index, defaultCollation) || (declared.isText && index.isText);
   };
 
   // A declaration that the server would refuse next to an undeclared index:
@@ -345,14 +345,14 @@ const planIndexes = (declaredIndexes, live, options, row, steps) => {
     const drops = item.live ? [item.live] : [];
 
     if (blockers.length > 0) {
-      const identical =
+      const isIdentical =
         !item.live &&
         blockers.length === 1 &&
         compareIndex(declared, blockers[0], defaultCollation).diffs.length === 0;
       action.liveName = blockers[0].name;
-      action.from = indexValue(blockers[0].raw);
+      action.from = toIndexValue(blockers[0].raw);
       if (!prune) {
-        if (identical) {
+        if (isIdentical) {
           // The index the declaration describes exists, only under another
           // name. Renaming means a full rebuild (and, for a unique index, a
           // window without the constraint) — not something to do unasked.
@@ -368,7 +368,7 @@ const planIndexes = (declaredIndexes, live, options, row, steps) => {
       }
       pushAll(drops, blockers);
       action.action = 'recreate';
-      action.reason = identical ? 'name' : joinReasons(item.reason, `replaces ${names}`);
+      action.reason = isIdentical ? 'name' : joinReasons(item.reason, `replaces ${names}`);
     }
 
     if (drops.length === 0) {
@@ -437,7 +437,7 @@ const planIndexes = (declaredIndexes, live, options, row, steps) => {
       name: displaced,
       action: 'keep',
       reason: DISPLACED_REASON,
-      from: indexValue(old.raw),
+      from: toIndexValue(old.raw),
     });
   }
 
@@ -451,7 +451,7 @@ const planIndexes = (declaredIndexes, live, options, row, steps) => {
         name: index.name,
         action: 'keep',
         reason: 'backs the shard key',
-        from: indexValue(index.raw),
+        from: toIndexValue(index.raw),
       });
     } else if (prune) {
       const action = row({
@@ -459,7 +459,7 @@ const planIndexes = (declaredIndexes, live, options, row, steps) => {
         name: index.name,
         action: 'drop',
         reason: 'not declared',
-        from: indexValue(index.raw),
+        from: toIndexValue(index.raw),
       });
       steps.push({ op: 'dropIndex', name: index.name, actions: [action] });
     } else {
@@ -468,24 +468,24 @@ const planIndexes = (declaredIndexes, live, options, row, steps) => {
         name: index.name,
         action: 'keep',
         reason: 'not declared',
-        from: indexValue(index.raw),
+        from: toIndexValue(index.raw),
       });
     }
   }
 };
 
-const typeChangeReason = (from, to) => {
+const explainTypeChange = (from, to) => {
   return `the type cannot change in place (${from} → ${to}) — ${NEW_NAME_RECIPE}`;
 };
 
-const autoEmbedReason = (changes) => {
+const explainAutoEmbed = (changes) => {
   return `autoEmbed ${changes.join(', ')} cannot change in place — ${NEW_NAME_RECIPE}`;
 };
 
 /** `mappings.fields.title.norms, storedSource (+2 more)` */
 const diffReason = (paths, more) => `${paths.join(', ')}${more > 0 ? ` (+${more} more)` : ''}`;
 
-const deletingReason = (status) => {
+const explainDeleting = (status) => {
   return `is being deleted on the server (${status}) — converge again once it is gone`;
 };
 
@@ -537,7 +537,7 @@ const planSearchIndexes = (declaredList, live, { prune, search }, row, submit, d
         target: 'searchIndex',
         name: declared.name,
         action: 'conflict',
-        reason: deletingReason(current.status),
+        reason: explainDeleting(current.status),
         build,
       });
       continue;
@@ -556,8 +556,8 @@ const planSearchIndexes = (declaredList, live, { prune, search }, row, submit, d
         name: declared.name,
         action: 'conflict',
         reason: typeChange
-          ? typeChangeReason(current.type, declared.type)
-          : autoEmbedReason(immutable),
+          ? explainTypeChange(current.type, declared.type)
+          : explainAutoEmbed(immutable),
         from,
         to,
         build,
@@ -686,8 +686,8 @@ const planCollectionSteps = (definition, live, settings = {}) => {
     return { name, actions, steps };
   }
 
-  const desired = desiredValidator(definition);
-  const { indexes: declaredIndexes, displaced } = indexesFor(definition, live);
+  const desired = resolveDesiredValidator(definition);
+  const { indexes: declaredIndexes, displaced } = resolveIndexes(definition, live);
   const declaredSearch = definition.searchIndexes;
   const indexSteps = [];
   const searchSubmit = [];
@@ -714,7 +714,7 @@ const planCollectionSteps = (definition, live, settings = {}) => {
         target: 'index',
         name: declared.name,
         action: 'create',
-        to: indexValue(declared.spec),
+        to: toIndexValue(declared.spec),
       });
       indexSteps.push({ op: 'createIndex', spec: declared.spec, actions: [action] });
     }
@@ -729,20 +729,20 @@ const planCollectionSteps = (definition, live, settings = {}) => {
 
   if (managesValidator(definition)) {
     // Raising versioning.min over documents still below it: refused, so the
-    // whole run stops before its first write (see versionFloorToCheck).
-    const refused = versionFloorConflict(live.versionFloor);
+    // whole run stops before its first write (see resolveFloorToCheck).
+    const refused = explainFloorConflict(live.versionFloor);
     if (refused) {
       row({ target: 'validator', name, action: 'conflict', reason: refused, to: desired });
     } else {
-      planValidator(name, desired, liveValidator(live.options), row, steps);
+      planValidator(name, desired, readLiveValidator(live.options), row, steps);
     }
   }
   if (declaredIndexes !== undefined) {
-    const partial = definition.indexesPartial === true;
+    const isPartial = definition.indexesPartial === true;
     planIndexes(
       declaredIndexes,
       live,
-      { prune, rebuildUnique, capabilities, partial, displaced },
+      { prune, rebuildUnique, capabilities, partial: isPartial, displaced },
       row,
       indexSteps,
     );
@@ -768,10 +768,10 @@ module.exports = {
   pushAll,
   isDestructive,
   needsConfirmation,
-  indexValue,
+  toIndexValue,
   isEmptyValidator,
   managesValidator,
-  desiredValidator,
-  liveValidator,
+  resolveDesiredValidator,
+  readLiveValidator,
   planCollection,
 };

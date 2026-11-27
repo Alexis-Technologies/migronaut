@@ -8,27 +8,27 @@ const {
   NotAppliedError,
 } = require('../../errors/index.js');
 const { computeChecksum } = require('../../utils/checksum.js');
-const { errorText } = require('../../utils/error.js');
-const { jobFields } = require('../../utils/job-ref.js');
+const { formatError } = require('../../utils/error.js');
+const { toJobFields } = require('../../utils/job-ref.js');
 const { loadMigrationFile } = require('../../utils/loader.js');
 const { assertMigrationName } = require('../../utils/migration-name.js');
 const { ATTRIBUTES, SPANS } = require('../../utils/telemetry.js');
 const {
-  control: controlBackground,
+  applyControl: controlBackground,
   repin: repinBackgroundState,
   waitForLanes,
 } = require('./controls.js');
-const { coordinate, tryUnblock, waitingFor } = require('./coordinator.js');
+const { coordinate, tryUnblock, listWaiting } = require('./coordinator.js');
 const { runSlice } = require('./lane.js');
 const {
   STREAMING_FRESH_MS,
   drive,
   hasRewritten,
-  irreversibleBackground,
+  createIrreversibleError,
   partitionView,
-  runnable,
-  stateView,
-  unsatisfied,
+  listRunnable,
+  buildStateView,
+  listUnsatisfied,
   watchRow,
   withdraw,
 } = require('./kit.js');
@@ -42,7 +42,7 @@ const { readServer } = require('../server-info.js');
 const { readChunks, readShardKey } = require('../shard-info.js');
 
 const { MigrationLock } = require('../lock.js');
-const { backgroundLogs } = require('../migration-logger.js');
+const { createBackgroundLogs } = require('../migration-logger.js');
 const { assertActorValid, assertJobValid } = require('../options.js');
 
 /**
@@ -172,7 +172,7 @@ class BackgroundHost {
           if (!tolerant) throw error;
           this.#warnOnce(
             `definitions:${collection}`,
-            `⚠ The collection definitions do not load (${errorText(error)}) — ${name} goes by ` +
+            `⚠ The collection definitions do not load (${formatError(error)}) — ${name} goes by ` +
               'the spec it was registered with',
             { background: name },
           );
@@ -215,7 +215,7 @@ class BackgroundHost {
 
   /** The required background migrations not done yet, in order */
   #waitsFor(requires) {
-    return waitingFor(this.deps(), requires);
+    return listWaiting(this.deps(), requires);
   }
 
   /** Register a background migration (again): `blocked` while what it requires is not done */
@@ -248,7 +248,7 @@ class BackgroundHost {
     const { spec } = await this.#registeredSpec(name, loaded);
     if (spec.reversible) return;
     if (await hasRewritten(this.#backgroundStore(), name, spec)) {
-      throw irreversibleBackground(name);
+      throw createIrreversibleError(name);
     }
   }
 
@@ -309,7 +309,7 @@ class BackgroundHost {
     const send = outsideRun
       ? (event, payload) => this.#kit.deliver(event, payload)
       : (event, payload) => this.#kit.emit(event, payload);
-    const lineStamp = job ? { ...stamp, ...jobFields(job) } : stamp;
+    const lineStamp = job ? { ...stamp, ...toJobFields(job) } : stamp;
     return {
       db,
       client: this.#kit.client,
@@ -319,7 +319,7 @@ class BackgroundHost {
       // reads it here; the watcher's deps carry it as the string `owner`.
       ...(owner ? { runId: owner } : {}),
       // One counter per lane slice (or watcher): orders its migration:log events.
-      logs: backgroundLogs({ sink: this.#kit.logger, emitter: this.#kit.logEmitter() }),
+      logs: createBackgroundLogs({ sink: this.#kit.logger, emitter: this.#kit.logEmitter() }),
       ...(job ? { job } : {}),
       fields: (extra) => ({ ...lineStamp, ...extra }),
       emit: (event, payload) => send(event, { ...stamp, ...payload }),
@@ -340,12 +340,12 @@ class BackgroundHost {
       telemetry: this.#kit.telemetry,
       // The third wrap site: a span per lease held (slice) and per coordinator
       // step — each opened only once the lease or the lock is held.
-      span: (kind, name, fn) => {
+      span: (kind, name, work) => {
         return this.#kit.telemetry.wrap(
           kind === 'slice' ? SPANS.BACKGROUND_SLICE : SPANS.BACKGROUND_COORDINATE,
           { [ATTRIBUTES.BACKGROUND_NAME]: name },
           async (span) => {
-            const result = await fn();
+            const result = await work();
             span.set({ [ATTRIBUTES.BACKGROUND_OUTCOME]: result?.outcome ?? result?.next });
             return result;
           },
@@ -390,8 +390,8 @@ class BackgroundHost {
       if (strict) throw error;
       // Best-effort: no declared versioning to read, and the reason said at debug.
       this.#kit.logger.debug(
-        `Could not load the collection definitions: ${errorText(error)}`,
-        this.#kit.fields({ collection, error: errorText(error) }),
+        `Could not load the collection definitions: ${formatError(error)}`,
+        this.#kit.fields({ collection, error: formatError(error) }),
       );
       return undefined;
     }
@@ -552,7 +552,7 @@ class BackgroundHost {
    * `[{ migration, status }]` — background/kit.js.
    */
   pendingRequires(requires, options) {
-    return unsatisfied(this.#backgroundHost(), requires, options);
+    return listUnsatisfied(this.#backgroundHost(), requires, options);
   }
 
   /**
@@ -717,10 +717,10 @@ class BackgroundHost {
     const store = this.#backgroundStore();
     if (name !== undefined) {
       const state = await store.get(name);
-      return state === null ? null : stateView(store, state);
+      return state === null ? null : buildStateView(store, state);
     }
     const views = [];
-    for (const state of await store.list()) views.push(await stateView(store, state));
+    for (const state of await store.list()) views.push(await buildStateView(store, state));
     return views;
   }
 
@@ -747,7 +747,7 @@ class BackgroundHost {
    */
   async runnableBackground() {
     await this.#backgroundReady();
-    return runnable(this.#backgroundHost());
+    return listRunnable(this.#backgroundHost());
   }
 
   /** A control action, after the checks every one shares */
@@ -856,17 +856,22 @@ class BackgroundHost {
   async unlockBackground(name) {
     await this.#backgroundReady(name);
     const deps = this.deps();
-    const lock = (await deps.lockFor(name).forceRelease()) !== null;
+    const isLockReleased = (await deps.lockFor(name).forceRelease()) !== null;
     const leases = await deps.store.unlockAll(name);
     // It fences every live lane: an operator's act, recorded like any control.
-    await deps.store.note(name, { action: 'unlock', lock, leases });
-    this.#kit.emit('background:control', { migration: name, action: 'unlock', lock, leases });
+    await deps.store.note(name, { action: 'unlock', lock: isLockReleased, leases });
+    this.#kit.emit('background:control', {
+      migration: name,
+      action: 'unlock',
+      lock: isLockReleased,
+      leases,
+    });
     this.#kit.logger.warn(
-      `⚠ ${name}: unlocked — coordinator lock ${lock ? 'cleared' : 'not held'}, ${leases} ` +
+      `⚠ ${name}: unlocked — coordinator lock ${isLockReleased ? 'cleared' : 'not held'}, ${leases} ` +
         'lease(s) dropped (their lanes stop at their next write)',
-      this.#kit.fields({ background: name, lock, leases }),
+      this.#kit.fields({ background: name, lock: isLockReleased, leases }),
     );
-    return { lock, leases };
+    return { lock: isLockReleased, leases };
   }
 }
 

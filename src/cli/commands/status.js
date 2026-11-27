@@ -12,28 +12,28 @@ const registerStatus = (program) => {
       ['--pending', 'Show only pending migrations'],
       ['--limit <n>', 'Show only the last N rows'],
     ],
-    preflight: (opts) => {
-      if (opts.limit !== undefined) {
-        const limit = Number(opts.limit);
+    preflight: (flags) => {
+      if (flags.limit !== undefined) {
+        const limit = Number(flags.limit);
         if (!Number.isInteger(limit) || limit < 1) {
           throw new ConfigInvalidError('--limit must be a positive integer', {
-            context: { limit: opts.limit },
+            context: { limit: flags.limit },
           });
         }
         // --check answers "is ANY migration pending?" — a limited window could
         // hide pending rows and report a clean gate that is not.
-        if (opts.check) {
+        if (flags.check) {
           throw new ConfigInvalidError('--check cannot be combined with --limit');
         }
       }
     },
-    run: async (migrator, opts) => {
-      const rows = opts.pending ? await migrator.list('pending') : await migrator.status();
-      return opts.limit !== undefined ? rows.slice(-Number(opts.limit)) : rows;
+    run: async (migrator, flags) => {
+      const rows = flags.pending ? await migrator.list('pending') : await migrator.status();
+      return flags.limit !== undefined ? rows.slice(-Number(flags.limit)) : rows;
     },
     render: renderRowsOrEmpty,
-    after: (rows, { logger, opts }) => {
-      if (!opts.check) return;
+    after: (rows, { logger, flags }) => {
+      if (!flags.check) return;
       let pending = 0;
       for (const row of rows) {
         if (row.status === 'pending') pending += 1;

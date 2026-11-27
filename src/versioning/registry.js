@@ -1,7 +1,7 @@
 const { ConfigInvalidError, ShapeVersionError } = require('../errors/index.js');
 const { resolveVersioning } = require('./config.js');
-const { refuseTouch, stampDocument, versionOf } = require('./document.js');
-const { isPlainObject, touchedFields, unwrapDefinition } = require('./internal.js');
+const { refuseTouch, stampDocument, readVersion } = require('./document.js');
+const { isPlainObject, collectTouchedFields, unwrapDefinition } = require('./internal.js');
 const { applyVersioningPlugin } = require('./mongoose.js');
 const {
   bumpRevision,
@@ -23,7 +23,7 @@ const { createUpcaster } = require('./upcaster.js');
  */
 
 /** `[name, definition]` pairs from a `{ name: definition }` map or a definition list */
-const entriesOf = (definitions) => {
+const toEntries = (definitions) => {
   if (Array.isArray(definitions)) {
     const entries = [];
     for (let position = 0; position < definitions.length; position++) {
@@ -72,10 +72,10 @@ const assertBoundName = (collection, options, key, value) => {
  * and infers the definitions from the second. Nothing changes at run time.
  */
 const defineShapes = (...args) => {
-  if (args.length === 0) return (defs) => defineShapes(defs);
+  if (args.length === 0) return (definitions) => defineShapes(definitions);
   const definitions = args[0];
   const registry = new Map();
-  const entries = entriesOf(definitions);
+  const entries = toEntries(definitions);
   for (let i = 0; i < entries.length; i++) {
     const name = entries[i][0];
     const definition = entries[i][1];
@@ -99,7 +99,7 @@ const defineShapes = (...args) => {
 
   const docVersion = (name, doc) => {
     const versioning = get(name);
-    const version = versionOf(doc, versioning.field);
+    const version = readVersion(doc, versioning.field);
     if (version === null) {
       throw new ShapeVersionError(
         `${name}: the document's ${versioning.field} is not a non-negative integer`,
@@ -187,7 +187,7 @@ const defineShapes = (...args) => {
       if (Array.isArray(update) || !isPlainObject(update)) {
         throw new ConfigInvalidError('stampUpsert takes an operator update, not a pipeline');
       }
-      const { fields, whole } = touchedFields(update);
+      const { fields, whole } = collectTouchedFields(update);
       if (whole) {
         throw new ConfigInvalidError('stampUpsert takes an operator update, not a replacement');
       }

@@ -1,7 +1,7 @@
 const OPTION_PATTERN = /^(?:-([A-Za-z]), )?--([a-z][a-z0-9-]*)(?: <([^>]+)>)?$/;
 
 /** Convert a kebab-case option name to its camelCase opts key */
-const camelize = (name) => name.replace(/-([a-z0-9])/g, (_, char) => char.toUpperCase());
+const camelize = (name) => name.replace(/-([a-z0-9])/g, (_, character) => character.toUpperCase());
 
 /** Pad `label` so descriptions in a help block line up */
 const padLabel = (label, width) => label + ' '.repeat(width - label.length);
@@ -27,8 +27,8 @@ const appendSection = (lines, title, rows) => {
  */
 const isMissingValue = (next) => {
   if (next === undefined) return true;
-  const negativeNumber = /^-\d/.test(next);
-  return next.startsWith('-') && next !== '-' && !negativeNumber;
+  const isNegativeNumber = /^-\d/.test(next);
+  return next.startsWith('-') && next !== '-' && !isNegativeNumber;
 };
 
 /**
@@ -51,7 +51,7 @@ class Command {
   #options = [];
   #arguments = [];
   #commands = [];
-  #actionFn = null;
+  #handler = null;
   #parent = null;
   #values = {};
   /** Lazily-built `--long`/`-s` → option lookup; reset whenever options change */
@@ -79,14 +79,14 @@ class Command {
     if (!match) throw new TypeError(`Unsupported option flags: '${flags}'`);
     const short = match[1] ?? null;
     const rawName = match[2];
-    const negated = rawName.startsWith('no-');
+    const isNegated = rawName.startsWith('no-');
     this.#options.push({
       flags,
       description,
       short,
       long: `--${rawName}`,
-      key: camelize(negated ? rawName.slice(3) : rawName),
-      negated,
+      key: camelize(isNegated ? rawName.slice(3) : rawName),
+      negated: isNegated,
       takesValue: Boolean(match[3]),
     });
     this.#optionIndex = null;
@@ -110,8 +110,8 @@ class Command {
     return sub;
   }
 
-  action(fn) {
-    this.#actionFn = fn;
+  action(handler) {
+    this.#handler = handler;
     return this;
   }
 
@@ -145,16 +145,16 @@ class Command {
     const positionals = [];
     // After a bare `--`, everything is a positional — the standard
     // end-of-options terminator.
-    let optionsEnded = false;
+    let hasOptionsEnded = false;
 
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i];
-      if (optionsEnded) {
+      if (hasOptionsEnded) {
         positionals.push(token);
         continue;
       }
       if (token === '--') {
-        optionsEnded = true;
+        hasOptionsEnded = true;
         continue;
       }
       if (token === '-h' || token === '--help') {
@@ -175,16 +175,16 @@ class Command {
         if (!found) return this.#fail(`unknown option '${name}'`);
         const { owner, option } = found;
         if (option.takesValue) {
-          const fromNext = inlineValue === undefined;
+          const isFromNext = inlineValue === undefined;
           const next = tokens[i + 1];
-          if (fromNext && isMissingValue(next)) {
+          if (isFromNext && isMissingValue(next)) {
             return this.#fail(
               `option '${option.flags}' argument missing ` +
                 `(use ${option.long}=<value> for values starting with '-')`,
             );
           }
-          if (fromNext) i++;
-          owner.#values[option.key] = fromNext ? next : inlineValue;
+          if (isFromNext) i++;
+          owner.#values[option.key] = isFromNext ? next : inlineValue;
         } else {
           // `--yes=false` is not "no": the value would be dropped and the flag
           // set — consent to a destructive action, or `--no-lock=false`
@@ -231,8 +231,8 @@ class Command {
       return this.#fail(`too many arguments — unexpected: ${extra.join(', ')}`);
     }
 
-    if (command.#actionFn) {
-      await command.#actionFn(...args, command.#values, command);
+    if (command.#handler) {
+      await command.#handler(...args, command.#values, command);
     }
   }
 
@@ -245,11 +245,11 @@ class Command {
   #seedNegatableDefaults() {
     for (const option of this.#options) {
       if (!option.negated) continue;
-      let twin = false;
+      let hasTwin = false;
       for (const other of this.#options) {
-        if (!other.negated && other.key === option.key) twin = true;
+        if (!other.negated && other.key === option.key) hasTwin = true;
       }
-      if (!twin) this.#values[option.key] = true;
+      if (!hasTwin) this.#values[option.key] = true;
     }
   }
 

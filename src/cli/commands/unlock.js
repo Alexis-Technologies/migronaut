@@ -1,6 +1,6 @@
 const { ConfigInvalidError } = require('../../errors/index.js');
 const { confirm, defineCommand, emitJson } = require('../shared.js');
-const { lockedAtText } = require('./lock.js');
+const { formatLockedAt } = require('./lock.js');
 
 /** Register the `unlock` command (force-release a stuck migration lock) */
 const registerUnlock = (program) => {
@@ -11,7 +11,7 @@ const registerUnlock = (program) => {
     mutating: true,
     // Owns its output: the confirmation flow branches mid-way, so the shared
     // "emit what run() returned" envelope does not fit.
-    run: async (migrator, opts, _positionals, { logger, json }) => {
+    run: async (migrator, flags, _positionals, { logger, json }) => {
       const holder = await migrator.lockInfo();
 
       if (!holder) {
@@ -25,13 +25,13 @@ const registerUnlock = (program) => {
       // run's lock enables exactly the concurrent-migration scenario the lock
       // exists to prevent, and the CLI's one destructive-confirmation policy
       // (see `up --force`) is: non-interactive modes never assume consent.
-      if (!opts.yes) {
+      if (!flags.yes) {
         if (json) {
           throw new ConfigInvalidError(
             'unlock needs confirmation — pass --yes to confirm in --json mode',
           );
         }
-        const since = lockedAtText(holder.lockedAt);
+        const since = formatLockedAt(holder.lockedAt);
         logger.warn(
           `⚠ Lock held by pid ${holder.pid} on ${holder.host} (${holder.executedBy}) since ${since}`,
         );

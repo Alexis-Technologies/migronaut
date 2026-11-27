@@ -5,9 +5,9 @@ const { assertLockWaitOptions, withLockWait } = require('../core/lock-wait.js');
 const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
 const { pickActor } = require('../utils/actor.js');
 const { isPlainObject } = require('../utils/canonical.js');
-const { settledWithin, waitAtMost } = require('../utils/concurrency.js');
-const { codeOf, errorText } = require('../utils/error.js');
-const { jobRefIssue } = require('../utils/job-ref.js');
+const { settleWithin, waitAtMost } = require('../utils/concurrency.js');
+const { readCode, formatError } = require('../utils/error.js');
+const { checkJobRef } = require('../utils/job-ref.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
 const { sanitize } = require('../utils/sanitize.js');
 const {
@@ -75,7 +75,7 @@ const DEFAULT_USERLAND_LOG_ROWS = 1000;
 /** Line breaks: a row is one line of the job's log, so they are shown, never acted on */
 const ROW_BREAKS = /\r\n|[\r\n\u2028\u2029]/g;
 
-/** Stops {@link boundedJson} once the row has what it can show */
+/** Stops {@link stringifyBounded} once the row has what it can show */
 const ROW_FULL = Symbol('row full');
 
 /**
@@ -88,7 +88,7 @@ const ROW_FULL = Symbol('row full');
  * real, and that job fails at once, as before.
  */
 const isTransientForJob = (error) => {
-  const code = codeOf(error);
+  const code = readCode(error);
   if (code === 'ALX_ERR_LOCK_ALREADY_HELD') return true;
   const failed = error?.context?.failed;
   return code === 'ALX_ERR_MIGRATION_BLOCKED' && Array.isArray(failed) && failed.length === 0;
@@ -96,12 +96,12 @@ const isTransientForJob = (error) => {
 
 /** Not one of ours (unknown origin), or one of ours a retry can get past */
 const isRetryableError = (error) => {
-  const code = codeOf(error);
+  const code = readCode(error);
   return code === undefined || RETRYABLE_CODE_SET.has(code);
 };
 
 /** The correlation ids of a job, for its error context and log lines */
-const jobIds = (ctx) => {
+const collectJobIds = (ctx) => {
   return {
     ...(ctx.job?.id !== undefined ? { jobId: `${ctx.job.id}` } : {}),
     ...(ctx.data?.groupId !== undefined ? { groupId: ctx.data.groupId } : {}),
@@ -115,26 +115,26 @@ const jobIds = (ctx) => {
  * take (it then logs nothing of the job; the run itself is unaffected). A
  * group the kit would refuse is left out rather than the whole reference.
  */
-const jobRefOf = (job, groupId) => {
+const toJobRef = (job, groupId) => {
   if (job?.id === undefined || job.id === null) return null;
   const id = `${job.id}`;
-  const ref = groupId !== undefined ? { id, groupId } : { id };
-  if (jobRefIssue(ref) === null) return ref;
-  return jobRefIssue({ id }) === null ? { id } : null;
+  const jobRef = groupId !== undefined ? { id, groupId } : { id };
+  if (checkJobRef(jobRef) === null) return jobRef;
+  return checkJobRef({ id }) === null ? { id } : null;
 };
 
 /** Text as part of one row: line breaks shown as ⏎, control characters dropped */
-const oneLine = (text) => sanitize(text.replace(ROW_BREAKS, '⏎'));
+const toOneLine = (text) => sanitize(text.replace(ROW_BREAKS, '⏎'));
 
 /** BigInts have no JSON form of their own; a log row shows their digits */
-const jsonValue = (_key, value) => (typeof value === 'bigint' ? `${value}` : value);
+const replaceBigInt = (_key, value) => (typeof value === 'bigint' ? `${value}` : value);
 
 /**
  * `data` as JSON, written only until `max` characters — never the whole of
  * it: an event's data may hold a thousand entries of 4 KB each, and the row
  * shows a kilobyte. The JSON of what `JSON.stringify` would write, cut short.
  */
-const boundedJson = (data, max) => {
+const stringifyBounded = (data, max) => {
   let out = '';
   const push = (text) => {
     if (out.length + text.length > max) {
@@ -147,7 +147,7 @@ const boundedJson = (data, max) => {
     if (typeof value === 'bigint') return push(`"${value}"`);
     // Arrays and plain objects are walked here; anything else is a leaf.
     if (!Array.isArray(value) && !isPlainObject(value)) {
-      return push(JSON.stringify(value, jsonValue) ?? 'null');
+      return push(JSON.stringify(value, replaceBigInt) ?? 'null');
     }
     if (Array.isArray(value)) {
       push('[');
@@ -158,12 +158,12 @@ const boundedJson = (data, max) => {
       return push(']');
     }
     push('{');
-    let first = true;
+    let isFirst = true;
     for (const key of Object.keys(value)) {
       const item = value[key];
       if (item === undefined || typeof item === 'function' || typeof item === 'symbol') continue;
-      push(`${first ? '' : ','}${JSON.stringify(key)}:`);
-      first = false;
+      push(`${isFirst ? '' : ','}${JSON.stringify(key)}:`);
+      isFirst = false;
       write(item);
     }
     return push('}');
@@ -190,7 +190,7 @@ const hasEntries = (data) => {
  * a line break in the message cannot forge a row of its own — cut at
  * {@link USERLAND_ROW_MAX}; redacted on its way out like every row.
  */
-const userlandRow = (event) => {
+const formatUserlandRow = (event) => {
   const level = event.level === 'info' ? '' : `${event.level}: `;
   const attempt = event.attempt > 1 ? ` (attempt ${event.attempt})` : '';
   const partition =
@@ -199,17 +199,17 @@ const userlandRow = (event) => {
   let data = '';
   if (hasEntries(event.data) && head.length < USERLAND_ROW_MAX) {
     try {
-      data = ` ${boundedJson(event.data, USERLAND_ROW_MAX - head.length)}`;
+      data = ` ${stringifyBounded(event.data, USERLAND_ROW_MAX - head.length)}`;
     } catch {
       data = ' [data not serializable]';
     }
   }
-  const row = oneLine(`${head}${data}${attempt}${partition}`);
+  const row = toOneLine(`${head}${data}${attempt}${partition}`);
   return row.length > USERLAND_ROW_MAX ? `${row.slice(0, USERLAND_ROW_MAX - 1)}…` : row;
 };
 
 /** The closing row of a job whose userland lines went past the limit */
-const userlandOverflowRow = (dropped, limit) => {
+const formatOverflowRow = (dropped, limit) => {
   return `✎ … ${dropped} more line(s) past the limit of ${limit} not mirrored here — see migration:log`;
 };
 
@@ -231,14 +231,16 @@ const assertUserlandLogRows = (value) => {
  * ids), named by the job and its group: a background queue's lanes have no
  * group, and their ids may well repeat a migration job's.
  */
-const ownLine = (ctx, event) => {
-  const ref = ctx.jobRef;
+const isOwnLine = (ctx, event) => {
+  const jobRef = ctx.jobRef;
   if (event.kind === 'background') {
-    return ref?.groupId !== undefined && event.jobId === ref.id && event.groupId === ref.groupId;
+    return (
+      jobRef?.groupId !== undefined && event.jobId === jobRef.id && event.groupId === jobRef.groupId
+    );
   }
   if (event.kind !== 'migration') return false;
   if (ctx.runId === undefined || event.runId !== ctx.runId) return false;
-  return ref === null || event.jobId === ref.id;
+  return jobRef === null || event.jobId === jobRef.id;
 };
 
 /** A job in a few words, for log lines: `up 20260101-x.js (1/3)`, `converge`, `sync` */
@@ -248,7 +250,7 @@ const describeJob = (data) => {
 };
 
 /** The structured fields of a job's log lines: what the job is about */
-const jobSummary = (data) => {
+const summarizeJob = (data) => {
   if (data.kind !== 'migration') return { kind: data.kind };
   return {
     migration: data.migration,
@@ -264,8 +266,8 @@ const jobSummary = (data) => {
  * value. Copy-on-write: the error may be a shared abort reason.
  */
 const attachJobIds = (error, ctx) => {
-  if (codeOf(error) === undefined) return;
-  const ids = jobIds(ctx);
+  if (readCode(error) === undefined) return;
+  const ids = collectJobIds(ctx);
   if (Object.keys(ids).length > 0) error.context = { ...error.context, ...ids };
 };
 
@@ -279,7 +281,7 @@ const attachJobIds = (error, ctx) => {
  */
 const prepareErrorForQueue = (error) => {
   if (!(error instanceof Error)) return;
-  const cause = codeOf(error) === undefined ? undefined : error.context?.cause;
+  const cause = readCode(error) === undefined ? undefined : error.context?.cause;
   try {
     const message = redactOutbound(error.message);
     const isCauseNew = typeof cause === 'string' && cause.length > 0 && !message.includes(cause);
@@ -370,7 +372,7 @@ const writeToJob = (ctx, action) => {
 const log = (ctx, row) => writeToJob(ctx, (job) => job.log?.(redactOutbound(row)));
 
 /** The job's progress: the phase, what the job is about, and `extra` */
-const progress = (ctx, phase, extra) => {
+const buildProgress = (ctx, phase, extra) => {
   return writeToJob(ctx, (job) => {
     return job.updateProgress?.({
       phase,
@@ -389,14 +391,14 @@ const progress = (ctx, phase, extra) => {
 };
 
 /** What a converge action works on, in a log row */
-const convergeTarget = (event) => {
+const describeConvergeTarget = (event) => {
   if (event.target === 'index') return `index ${event.name}`;
   if (event.target === 'searchIndex') return `search index ${event.name}`;
   return event.target;
 };
 
 /** A migration job's result, from the kit's rows for it */
-const resultOf = (ctx, rows, waitedMs) => {
+const buildResult = (ctx, rows, waitedMs) => {
   const { data } = ctx;
   const row = rows[0];
   return {
@@ -412,7 +414,7 @@ const resultOf = (ctx, rows, waitedMs) => {
 };
 
 /** The row of `file` among the kit's status rows, or `null` */
-const rowOf = (rows, file) => {
+const findRow = (rows, file) => {
   for (let i = 0; i < rows.length; i++) if (rows[i].file === file) return rows[i];
   return null;
 };
@@ -433,7 +435,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
   const writeWaitMs = internals.writeWaitMs ?? JOB_WRITE_WAIT_MS;
   const { kit: injectedKit, config, kitOptions, queue, jobOptions, background } = options;
 
-  const ownsKit = injectedKit === undefined;
+  const isKitOwned = injectedKit === undefined;
   const kit = injectedKit ?? new MigratorKit(config ?? {}, kitOptions);
   warnUnknownOptions(kit, 'createMigrationProcessor', options, KNOWN_OPTIONS.processor);
   const shutdownController = new AbortController();
@@ -449,12 +451,12 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
    */
   const flush = async (ctx) => {
     if (ctx.writes.size === 0) return;
-    const drained = await settledWithin(Promise.allSettled(ctx.writes), writeWaitMs);
+    const drained = await settleWithin(Promise.allSettled(ctx.writes), writeWaitMs);
     if (!drained) {
       kit.logger.debug(
         `Job ${ctx.job?.id}: its log and progress writes did not settle in ${writeWaitMs}ms — ` +
           'not waited for',
-        { ...jobIds(ctx), pendingWrites: ctx.writes.size },
+        { ...collectJobIds(ctx), pendingWrites: ctx.writes.size },
       );
     }
   };
@@ -463,7 +465,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
   const mirror = (ctx, event) => {
     if (ctx.userlandRows < userlandLogRows) {
       ctx.userlandRows += 1;
-      log(ctx, userlandRow(event));
+      log(ctx, formatUserlandRow(event));
     } else {
       ctx.userlandDropped += 1;
     }
@@ -477,7 +479,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
   const seal = (ctx) => {
     if (ctx.sealed) return;
     if (ctx.userlandDropped > 0) {
-      log(ctx, userlandOverflowRow(ctx.userlandDropped, userlandLogRows));
+      log(ctx, formatOverflowRow(ctx.userlandDropped, userlandLogRows));
     }
     ctx.sealed = true;
   };
@@ -499,7 +501,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       // From here on the job is doing its work: a shutdown lets it finish
       // rather than putting it back in the queue.
       current.started = true;
-      progress(current, 'running');
+      buildProgress(current, 'running');
       log(current, `▶ ${event.direction} ${event.migration}`);
     },
     'migration:success': (event) => {
@@ -516,11 +518,11 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     'converge:start': () => {
       if (!current) return;
       current.started = true;
-      progress(current, 'running');
+      buildProgress(current, 'running');
     },
     'converge:action': (event) => {
       if (!current) return;
-      const what = `${event.action} ${convergeTarget(event)} on ${event.collection}`;
+      const what = `${event.action} ${describeConvergeTarget(event)} on ${event.collection}`;
       if (event.status === 'started') log(current, `… ${what}`);
       else if (event.status === 'applied') log(current, `✔ ${what} [${event.durationMs ?? 0}ms]`);
       else log(current, `✖ ${what}: ${event.error ?? 'failed'}`);
@@ -536,7 +538,10 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
                 (event.lockReleased ? ' — the migration lock is released meanwhile' : '')
             : `… Still waiting for search indexes [${Math.round(waited / 1000)}s]`,
         );
-        progress(current, 'search-wait', { searchIndexes: event.searchIndexes, waitedMs: waited });
+        buildProgress(current, 'search-wait', {
+          searchIndexes: event.searchIndexes,
+          waitedMs: waited,
+        });
       } else if (event.status === 'ready') {
         log(current, `✔ Search index(es) queryable [${event.waitedMs}ms]`);
       } else {
@@ -546,9 +551,9 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     'converge:end': (event) => {
       if (current && event.success) log(current, `✔ Converged ${event.changed} change(s)`);
     },
-    // What the migration itself logged for its users — see ownLine.
+    // What the migration itself logged for its users — see isOwnLine.
     'migration:log': (event) => {
-      if (current && !current.sealed && ownLine(current, event)) mirror(current, event);
+      if (current && !current.sealed && isOwnLine(current, event)) mirror(current, event);
     },
   };
   const events = Object.keys(listeners);
@@ -579,9 +584,9 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
         for (const job of jobs) started.push({ migration, jobId: job.id });
       } catch (error) {
         kit.logger.warn(
-          `⚠ Could not enqueue background migration ${migration}: ${errorText(error)} — ` +
+          `⚠ Could not enqueue background migration ${migration}: ${formatError(error)} — ` +
             'the next heal will',
-          { ...jobIds(ctx), migration, error: errorText(error) },
+          { ...collectJobIds(ctx), migration, error: formatError(error) },
         );
       }
     }
@@ -596,8 +601,8 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       const { jobs } = await enqueueBackground(background.queue, kit, backgroundOptions());
       return jobs.length;
     } catch (error) {
-      kit.logger.warn(`⚠ Background heal failed: ${errorText(error)}`, {
-        error: errorText(error),
+      kit.logger.warn(`⚠ Background heal failed: ${formatError(error)}`, {
+        error: formatError(error),
       });
       return 0;
     }
@@ -608,10 +613,10 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     const ordered = data.ordered ?? defaultOrdered;
     // The run's correlation names this job, so what the migration logs can be
     // joined to it (and its userland lines routed into its log).
-    ctx.jobRef = jobRefOf(ctx.job, data.groupId);
+    ctx.jobRef = toJobRef(ctx.job, data.groupId);
     if (ctx.jobRef === null) {
       kit.logger.debug(`Job ${ctx.job?.id} has no id the run can carry — its lines name no job`, {
-        ...jobIds(ctx),
+        ...collectJobIds(ctx),
       });
     }
     const jobField = ctx.jobRef ? { job: ctx.jobRef } : {};
@@ -635,11 +640,11 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     try {
       const { result, waitedMs } = await waitForLock(ctx, attempt, signal);
       const started = await startBackground(ctx);
-      return { ...resultOf(ctx, result, waitedMs), ...(started ? { background: started } : {}) };
+      return { ...buildResult(ctx, result, waitedMs), ...(started ? { background: started } : {}) };
     } catch (error) {
       // A duplicate rollback job: the first one already reverted it. Same
       // outcome as a duplicate `up` job, which the kit reports as skipped.
-      if (data.direction === JOB_NAMES.DOWN && codeOf(error) === 'ALX_ERR_NOT_APPLIED') {
+      if (data.direction === JOB_NAMES.DOWN && readCode(error) === 'ALX_ERR_NOT_APPLIED') {
         return {
           migration: data.migration,
           direction: data.direction,
@@ -677,7 +682,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
               : 'Migration lock held by another process — waiting…',
           );
         }
-        progress(ctx, 'lock-wait', { attempts, waitedMs: soFar });
+        buildProgress(ctx, 'lock-wait', { attempts, waitedMs: soFar });
       },
     });
   };
@@ -718,7 +723,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
   const heldFailure = async (first, to) => {
     if (!first || (to !== undefined && first.file > to)) return null;
     if (typeof kit.list !== 'function' || typeof kit.dryRun !== 'function') return null;
-    const row = rowOf(await kit.list('all', { checksums: false }), first.file);
+    const row = findRow(await kit.list('all', { checksums: false }), first.file);
     if (row?.status !== 'failed' || typeof row.failedChecksum !== 'string') return null;
     const planned = (await kit.dryRun('up', first.file))[0];
     if (planned?.checksum !== row.failedChecksum) return null;
@@ -894,12 +899,12 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
    * never put back — it ran, and its outcome is what it is.
    */
   const requeueOnShutdown = async (ctx, error, token) => {
-    const isStop = codeOf(error) === 'ALX_ERR_RUN_ABORTED';
+    const isStop = readCode(error) === 'ALX_ERR_RUN_ABORTED';
     if (!isStop || !shutdownController.signal.aborted) return null;
     if (ctx.started || typeof ctx.job?.moveToWait !== 'function' || typeof token !== 'string') {
       return null;
     }
-    const reason = errorText(shutdownController.signal.reason ?? 'shutting down');
+    const reason = formatError(shutdownController.signal.reason ?? 'shutting down');
     log(ctx, `↩ Returned to the queue: ${reason}`);
     await flush(ctx);
     try {
@@ -909,11 +914,11 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       return null;
     }
     kit.logger.debug(`↩ Returned job ${ctx.job.id} to the queue: ${reason}`, {
-      ...jobIds(ctx),
+      ...collectJobIds(ctx),
       reason,
     });
     const requeued = new RunAbortedError(`Returned to the queue: ${reason}`, {
-      context: { reason, requeued: true, ...jobIds(ctx) },
+      context: { reason, requeued: true, ...collectJobIds(ctx) },
     });
     requeued.name = WAITING_ERROR_NAME;
     return requeued;
@@ -946,7 +951,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     // executing a migration body finishes it — interrupting a body mid-write
     // is what leaves a database half-migrated.
     const onAbort = () => {
-      return kit.stop(errorText(abort.reason ?? 'Queue job cancelled'), { cause: abort.reason });
+      return kit.stop(formatError(abort.reason ?? 'Queue job cancelled'), { cause: abort.reason });
     };
     let listening = null;
     try {
@@ -961,17 +966,17 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       if (shutdownController.signal.aborted) throw shutdownController.signal.reason;
       listening = addAbortListener(abort, onAbort);
       kit.logger.debug(`▶ Job ${job?.id} (${describeJob(ctx.data)})`, {
-        ...jobIds(ctx),
-        ...jobSummary(ctx.data),
+        ...collectJobIds(ctx),
+        ...summarizeJob(ctx.data),
       });
       await kit.connect();
       const result = await runJob(ctx, abort);
       seal(ctx);
-      progress(ctx, 'completed', ctx.runId ? { runId: ctx.runId } : {});
+      buildProgress(ctx, 'completed', ctx.runId ? { runId: ctx.runId } : {});
       await flush(ctx);
       kit.logger.debug(`✔ Job ${job?.id} done`, {
-        ...jobIds(ctx),
-        ...jobSummary(ctx.data),
+        ...collectJobIds(ctx),
+        ...summarizeJob(ctx.data),
         durationMs: Date.now() - startedAt,
       });
       return result;
@@ -989,14 +994,14 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       attachJobIds(error, ctx);
       prepareErrorForQueue(error);
       if (ctx.data) {
-        progress(ctx, 'failed', {
-          code: codeOf(error) ?? 'ALX_ERR_UNKNOWN',
+        buildProgress(ctx, 'failed', {
+          code: readCode(error) ?? 'ALX_ERR_UNKNOWN',
           ...(ctx.runId ? { runId: ctx.runId } : {}),
         });
       }
       writeToJob(ctx, (target) => {
         return target.log?.(
-          redactOutbound(`✖ ${errorText(error)}${ctx.runId ? ` [run ${ctx.runId}]` : ''}`),
+          redactOutbound(`✖ ${formatError(error)}${ctx.runId ? ` [run ${ctx.runId}]` : ''}`),
         );
       });
       await flush(ctx);
@@ -1035,7 +1040,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     const settled = await waitAtMost(chain, closeOptions.timeoutMs);
     const finish = async () => {
       for (let i = 0; i < events.length; i++) kit.off(events[i], listeners[events[i]]);
-      if (ownsKit) await kit.disconnect();
+      if (isKitOwned) await kit.disconnect();
     };
     if (settled) return finish();
     kit.logger.warn(
@@ -1045,7 +1050,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       },
     );
     chain.then(finish).catch((error) => {
-      kit.logger.debug(`Migration processor: could not disconnect — ${errorText(error)}`);
+      kit.logger.debug(`Migration processor: could not disconnect — ${formatError(error)}`);
     });
     return undefined;
   };
@@ -1061,11 +1066,11 @@ module.exports = {
   DEFAULT_USERLAND_LOG_ROWS,
   isTransientForJob,
   isRetryableError,
-  jobRefOf,
-  userlandRow,
-  userlandOverflowRow,
+  toJobRef,
+  formatUserlandRow,
+  formatOverflowRow,
   assertUserlandLogRows,
-  ownLine,
+  isOwnLine,
   prepareErrorForQueue,
   resolveProcessorOptions,
   createMigrationProcessor,

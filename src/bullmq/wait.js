@@ -2,7 +2,7 @@ const { addAbortListener } = require('node:events');
 
 const { ConfigInvalidError, QueueJobFailedError, RunAbortedError } = require('../errors/index.js');
 const { MAX_TIMER_MS } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
+const { formatError } = require('../utils/error.js');
 const { redactOutbound } = require('../utils/redact.js');
 
 /** Rejects a budgeted await that outlived the deadline — told apart from every other failure */
@@ -28,7 +28,7 @@ const LISTENER_GRACE_MS = 1000;
  * rejects with DEADLINE or ABORTED, whichever comes first.
  */
 const createBudget = (timeoutMs, signal) => {
-  const deadline = timeoutMs !== undefined ? Date.now() + timeoutMs : undefined;
+  const deadlineMs = timeoutMs !== undefined ? Date.now() + timeoutMs : undefined;
   let stopping = null;
   const aborted =
     signal === undefined
@@ -40,22 +40,22 @@ const createBudget = (timeoutMs, signal) => {
   // not surface as an unhandled rejection.
   aborted?.catch(() => undefined);
   const race = (promise) => {
-    if (deadline === undefined && aborted === null) return promise;
+    if (deadlineMs === undefined && aborted === null) return promise;
     let timer = null;
     const racers = [promise];
     if (aborted !== null) racers.push(aborted);
-    if (deadline !== undefined) {
+    if (deadlineMs !== undefined) {
       const expired = new Promise((_resolve, reject) => {
-        timer = setTimeout(() => reject(DEADLINE), Math.max(0, deadline - Date.now()));
+        timer = setTimeout(() => reject(DEADLINE), Math.max(0, deadlineMs - Date.now()));
       });
       racers.push(expired);
     }
     return Promise.race(racers).finally(() => clearTimeout(timer));
   };
   return {
-    deadline,
+    deadline: deadlineMs,
     race,
-    isPastDeadline: () => deadline !== undefined && Date.now() >= deadline,
+    isPastDeadline: () => deadlineMs !== undefined && Date.now() >= deadlineMs,
     dispose: () => stopping?.[Symbol.dispose](),
   };
 };
@@ -82,10 +82,10 @@ const waitForGroup = async (options) => {
       context: { signal: typeof signal },
     });
   }
-  const badTimeout =
+  const isBadTimeout =
     timeoutMs !== undefined &&
     (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMER_MS);
-  if (badTimeout) {
+  if (isBadTimeout) {
     throw new ConfigInvalidError(`timeoutMs must be a positive number, at most ${MAX_TIMER_MS}`, {
       context: { timeoutMs },
     });
@@ -108,7 +108,7 @@ const waitForGroup = async (options) => {
   const stopped = () => {
     return new RunAbortedError('Group wait aborted', {
       ...(signal.reason !== undefined ? { cause: signal.reason } : {}),
-      context: { reason: errorText(signal.reason ?? 'aborted'), groupId, finished: [...results] },
+      context: { reason: formatError(signal.reason ?? 'aborted'), groupId, finished: [...results] },
     });
   };
 
@@ -160,7 +160,7 @@ const waitForGroup = async (options) => {
       if (error === ABORTED) throw stopped();
       // Decided by the clock, not by how BullMQ happens to word its timeout.
       if (error === DEADLINE || isPastDeadline()) throw outOfTime();
-      throw fail(redactOutbound(errorText(error)), false, await failureCode(id), error);
+      throw fail(redactOutbound(formatError(error)), false, await failureCode(id), error);
     }
   };
 

@@ -1,14 +1,14 @@
 const { ChecksumMismatchError, TransactionsUnsupportedError } = require('../../errors/index.js');
-const { versionIndexKey } = require('../../versioning/document.js');
+const { buildVersionIndexKey } = require('../../versioning/document.js');
 const { excludeBadIds, matchOf } = require('./engine.js');
 const { idRangePartitioner } = require('./partition.js');
 const { createShardPartitioner, withShardKey } = require('./shard.js');
 const { NAMESPACE_NOT_FOUND, READ_OPTIONS } = require('../server-info.js');
 const { isUnauthorized } = require('../../utils/error.js');
-const { shardedVersionIndexKey } = require('../converge/versioning-spec.js');
+const { buildShardedVersionIndexKey } = require('../converge/versioning-spec.js');
 
 /**
- * What one background migration runs as: its job (`jobFor` — the spec, the
+ * What one background migration runs as: its job (`loadJob` — the spec, the
  * functions, the match, the partitioner the live indexes and the shard key
  * call for) and whether a plan still fits it (`planMismatch`).
  *
@@ -70,7 +70,7 @@ const retrySoon = (deps, reason) => {
  * list could not be read" must not pass for "there is no index", or one blip
  * would have a lane give up the version index — and its partitioner with it.
  */
-const indexKeys = async (deps, collection) => {
+const readIndexKeys = async (deps, collection) => {
   const cache = deps.indexCache;
   const hit = cache?.get(collection);
   const now = Date.now();
@@ -94,7 +94,7 @@ const indexKeys = async (deps, collection) => {
  * every watcher job asks, and each answer is a read of `config.collections`
  * through the mongos. A reshard is noticed within the same half minute.
  */
-const shardKeyOf = async (deps, collection) => {
+const loadShardKey = async (deps, collection) => {
   const cache = deps.shardKeyCache;
   const hit = cache?.get(collection);
   const now = Date.now();
@@ -105,7 +105,7 @@ const shardKeyOf = async (deps, collection) => {
 };
 
 /** Whether a live index key is `wanted` — same fields, same order, same directions or `hashed` */
-const sameIndexKey = (live, wanted) => {
+const isSameIndexKey = (live, wanted) => {
   const a = Object.keys(live);
   const b = Object.keys(wanted);
   if (a.length !== b.length) return false;
@@ -119,7 +119,7 @@ const sameIndexKey = (live, wanted) => {
 };
 
 const hasIndex = (keys, wanted) => {
-  for (let i = 0; i < keys.length; i++) if (sameIndexKey(keys[i], wanted)) return true;
+  for (let i = 0; i < keys.length; i++) if (isSameIndexKey(keys[i], wanted)) return true;
   return false;
 };
 
@@ -129,14 +129,14 @@ const hasIndex = (keys, wanted) => {
  * field ascending serves an equality probe on it).
  */
 const probeHint = async (deps, spec) => {
-  const keys = await indexKeys(deps, spec.collection);
-  const exact = versionIndexKey(spec);
+  const keys = await readIndexKeys(deps, spec.collection);
+  const exact = buildVersionIndexKey(spec);
   if (hasIndex(keys, exact)) return exact;
   for (const key of keys) {
     const first = Object.keys(key)[0];
     if (first !== undefined && first === spec.field && Number(key[first]) === 1) return key;
   }
-  return versionHint(deps, spec, keys);
+  return findVersionHint(deps, spec, keys);
 };
 
 /** Say something once per process — `deps.warned` remembers */
@@ -147,10 +147,10 @@ const warnOnce = (deps, id, message, fields) => {
 };
 
 /** The version index of a collection, when it has one — every scan hints it */
-const versionHint = async (deps, spec, keys) => {
+const findVersionHint = async (deps, spec, keys) => {
   if (spec.mode === 'step') return undefined;
-  const key = versionIndexKey(spec);
-  if (hasIndex(keys ?? (await indexKeys(deps, spec.collection)), key)) return key;
+  const key = buildVersionIndexKey(spec);
+  if (hasIndex(keys ?? (await readIndexKeys(deps, spec.collection)), key)) return key;
   warnOnce(
     deps,
     `index:${spec.collection}`,
@@ -179,7 +179,7 @@ const assertTransactions = async (deps, name, spec) => {
 };
 
 /** The job a lane or a coordinator works with: the spec, the functions, and what they scan */
-const jobFor = async (deps, name, state, { direction } = {}) => {
+const loadJob = async (deps, name, state, { direction } = {}) => {
   // The state's spec wins below: a definition file broken since the
   // registration must not stop its lanes (`tolerant`).
   const loaded = await deps.load(name, { tolerant: true });
@@ -198,12 +198,15 @@ const jobFor = async (deps, name, state, { direction } = {}) => {
     );
   }
   const spec = { ...loaded.spec, ...state.spec };
-  const dir = direction ?? state.direction ?? 'forward';
-  const match = spec.mode === 'step' ? undefined : excludeBadIds(matchOf(spec, dir), state.badIds);
-  const { partitioner, hint, sharding } = await partitionerFor(
+  const resolvedDirection = direction ?? state.direction ?? 'forward';
+  const match =
+    spec.mode === 'step'
+      ? undefined
+      : excludeBadIds(matchOf(spec, resolvedDirection), state.badIds);
+  const { partitioner, hint, sharding } = await choosePartitioner(
     deps,
     spec,
-    dir,
+    resolvedDirection,
     state.plan?.partitioner,
   );
   // One shape for every job, its every field set here: the engine reads it
@@ -214,7 +217,7 @@ const jobFor = async (deps, name, state, { direction } = {}) => {
     name,
     spec,
     fns: loaded.fns,
-    direction: dir === 'revert' ? 'revert' : 'forward',
+    direction: resolvedDirection === 'revert' ? 'revert' : 'forward',
     match,
     partitioner,
     hint,
@@ -246,12 +249,12 @@ const jobFor = async (deps, name, state, { direction } = {}) => {
  * taking "unknown" for "not sharded" would hand its key ranges to the `_id`
  * partitioner, which reads a key range as "everything".
  */
-const partitionerFor = async (deps, spec, direction, planned) => {
-  const keys = spec.mode === 'step' ? [] : await indexKeys(deps, spec.collection);
+const choosePartitioner = async (deps, spec, direction, planned) => {
+  const keys = spec.mode === 'step' ? [] : await readIndexKeys(deps, spec.collection);
   const byId = async (mode) => {
     return {
       partitioner: idRangePartitioner,
-      hint: await versionHint(deps, spec, keys),
+      hint: await findVersionHint(deps, spec, keys),
       sharding: { mode },
     };
   };
@@ -259,9 +262,9 @@ const partitionerFor = async (deps, spec, direction, planned) => {
     return byId('off');
   }
   const topology = await deps.topology?.();
-  const sharded = topology === 'sharded' || (topology === undefined && planned === 'shard');
-  if (!sharded) return byId('off');
-  const sharding = await shardKeyOf(deps, spec.collection);
+  const isSharded = topology === 'sharded' || (topology === undefined && planned === 'shard');
+  if (!isSharded) return byId('off');
+  const sharding = await loadShardKey(deps, spec.collection);
   if (sharding === null) return byId('off');
   const where = { background: spec.collection, collection: spec.collection };
   if (sharding === undefined) {
@@ -274,7 +277,7 @@ const partitionerFor = async (deps, spec, direction, planned) => {
     );
     return byId('untargeted');
   }
-  const indexKey = shardedVersionIndexKey(spec, sharding.key);
+  const indexKey = buildShardedVersionIndexKey(spec, sharding.key);
   if (!hasIndex(keys, indexKey)) {
     // The key is known: writes are still targeted, and the guard holds.
     const untargeted = await byId('untargeted');
@@ -306,7 +309,7 @@ const partitionerFor = async (deps, spec, direction, planned) => {
 };
 
 /** The partitioner a job would plan with now, as a plan records it */
-const partitionerOf = (job) => (job.spec.mode === 'step' ? 'step' : job.partitioner.id);
+const resolvePartitionerId = (job) => (job.spec.mode === 'step' ? 'step' : job.partitioner.id);
 
 /**
  * Why a plan cannot be worked by this job any more, or `undefined`:
@@ -322,14 +325,14 @@ const partitionerOf = (job) => (job.spec.mode === 'step' ? 'step' : job.partitio
  */
 const planMismatch = (job, plan) => {
   if (plan === undefined) return undefined;
-  if (plan.partitioner !== undefined && plan.partitioner !== partitionerOf(job)) {
+  if (plan.partitioner !== undefined && plan.partitioner !== resolvePartitionerId(job)) {
     return 'partitioner';
   }
   return job.partitioner.stale?.(plan.epoch) ? 'epoch' : undefined;
 };
 
 /** The shard-aware facts a plan records, for status: how it split, by which key, into how many groups */
-const shardingOf = (job, plan) => {
+const describeSharding = (job, plan) => {
   if (job.sharding === undefined || job.sharding.mode === 'off') return null;
   if (job.sharding.mode === 'untargeted') {
     return { mode: 'untargeted', ...(job.sharding.key ? { key: job.sharding.key } : {}) };
@@ -350,10 +353,10 @@ module.exports = {
   retrySoon,
   probeHint,
   warnOnce,
-  versionHint,
+  findVersionHint,
   assertTransactions,
-  jobFor,
-  partitionerFor,
+  loadJob,
+  choosePartitioner,
   planMismatch,
-  shardingOf,
+  describeSharding,
 };

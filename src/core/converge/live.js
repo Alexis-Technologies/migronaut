@@ -1,7 +1,7 @@
 const { mapLimit } = require('../../utils/concurrency.js');
-const { errorText } = require('../../utils/error.js');
-const { belowVersionFilter } = require('../../versioning/document.js');
-const { isVersioningIndexKey, versionFloorToCheck } = require('./versioning-spec.js');
+const { formatError } = require('../../utils/error.js');
+const { buildBelowVersionFilter } = require('../../versioning/document.js');
+const { isVersioningIndexKey, resolveFloorToCheck } = require('./versioning-spec.js');
 const { NAMESPACE_NOT_FOUND, READ_CONCURRENCY, READ_OPTIONS } = require('../server-info.js');
 
 /**
@@ -25,7 +25,7 @@ const FLOOR_PROBE_TIMEOUT_MS = 60_000;
  * `findOne` with only `_id` projected — nothing about the document is kept.
  */
 const probeVersionFloor = async (db, definition, live) => {
-  const min = versionFloorToCheck(definition, live);
+  const min = resolveFloorToCheck(definition, live);
   if (min === null) return;
   const { versioning } = definition;
   let hint = '';
@@ -38,7 +38,7 @@ const probeVersionFloor = async (db, definition, live) => {
   try {
     const found = await db
       .collection(definition.name)
-      .findOne(belowVersionFilter(versioning, min), {
+      .findOne(buildBelowVersionFilter(versioning, min), {
         projection: { _id: 1 },
         maxTimeMS: FLOOR_PROBE_TIMEOUT_MS,
         ...(hint !== '' ? { hint } : {}),
@@ -46,7 +46,7 @@ const probeVersionFloor = async (db, definition, live) => {
       });
     live.versionFloor = { min, below: found !== null };
   } catch (error) {
-    live.versionFloor = { min, below: 'unknown', error: errorText(error) };
+    live.versionFloor = { min, below: 'unknown', error: formatError(error) };
   }
 };
 
@@ -79,7 +79,7 @@ const readShardKeys = async (deps, names) => {
 };
 
 /** The server's refusal to drop the index that backs a shard key */
-const isShardKeyRefusal = (error) => /shard key/i.test(errorText(error));
+const isShardKeyRefusal = (error) => /shard key/i.test(formatError(error));
 
 /**
  * Every named collection's live state, in order: one `listCollections` for
@@ -93,7 +93,9 @@ const readLiveStates = async (db, names) => {
     .toArray();
   const byName = new Map();
   for (const info of infos) byName.set(info.name, info);
-  return mapLimit(names, READ_CONCURRENCY, (name) => liveStateOf(db, name, byName.get(name)));
+  return mapLimit(names, READ_CONCURRENCY, (name) =>
+    readCollectionState(db, name, byName.get(name)),
+  );
 };
 
 /**
@@ -106,7 +108,7 @@ const readLiveState = async (db, name) => {
   return states[0];
 };
 
-const liveStateOf = async (db, name, info) => {
+const readCollectionState = async (db, name, info) => {
   if (!info) return { exists: false, indexes: [] };
   const options = info.options ?? {};
   if (info.type !== undefined && info.type !== 'collection') {

@@ -5,7 +5,7 @@ const {
   TransactionsUnsupportedError,
 } = require('../../errors/index.js');
 const { isPlainObject } = require('../../utils/canonical.js');
-const { errorText, isTransientTransaction } = require('../../utils/error.js');
+const { formatError, isTransientTransaction } = require('../../utils/error.js');
 const { toRelaxedEjson } = require('./bson-peer.js');
 
 /**
@@ -134,7 +134,7 @@ const snapshot = (value, bytes) => {
  *
  * @throws {TransactionsUnsupportedError} on a standalone server
  */
-const runSandbox = async (options, fn) => {
+const runSandbox = async (options, work) => {
   if (options.topology === 'standalone') {
     throw new TransactionsUnsupportedError(
       'A dry run executes in a transaction that is always aborted — it needs a replica set or ' +
@@ -143,13 +143,13 @@ const runSandbox = async (options, fn) => {
     );
   }
   for (let attempt = 1; ; attempt++) {
-    const { report, retry } = await runOnce(options, fn, attempt);
+    const { report, retry } = await runOnce(options, work, attempt);
     if (!retry || attempt >= ATTEMPTS) return report;
   }
 };
 
 /** One sandbox run: `{ report, retry }` — `retry` when a transient error ended it */
-const runOnce = async (options, fn, attempt) => {
+const runOnce = async (options, task, attempt) => {
   const { client } = options;
   const deadlineMs = options.deadlineMs ?? DEFAULTS.deadlineMs;
   const maxDocuments = options.maxDocuments ?? DEFAULTS.maxDocuments;
@@ -183,7 +183,7 @@ const runOnce = async (options, fn, attempt) => {
     // The session handed to the step — made below, compared on the way out.
     sessionProxy: null,
   };
-  let retry = false;
+  let shouldRetry = false;
   let timer = null;
   try {
     session.startTransaction({ readConcern: { level: 'snapshot' } });
@@ -192,17 +192,17 @@ const runOnce = async (options, fn, attempt) => {
       db: proxyDb(state, options.db),
       client: proxyClient(state),
       session: state.sessionProxy,
-      mongoose: refusedMongoose(state),
+      mongoose: refuseMongoose(state),
       /** For a caller that runs several steps: number the operations by step */
       nextStep: () => {
         state.step += 1;
       },
     };
-    const work = Promise.resolve().then(() => fn(handles));
-    const deadline = new Promise((resolve) => {
+    const work = Promise.resolve().then(() => task(handles));
+    const expiry = new Promise((resolve) => {
       timer = setTimeout(() => resolve(DEADLINE), Math.max(0, state.deadline - Date.now()));
     });
-    const value = await Promise.race([work, deadline]);
+    const value = await Promise.race([work, expiry]);
     if (value === DEADLINE) {
       report.stoppedBy = 'deadline';
       work.catch(() => undefined);
@@ -211,12 +211,12 @@ const runOnce = async (options, fn, attempt) => {
     }
   } catch (error) {
     if (state.failed !== null) {
-      report.abortedBy = errorText(state.failed);
+      report.abortedBy = formatError(state.failed);
     } else if (isTransientTransaction(error)) {
-      retry = true;
+      shouldRetry = true;
     }
     report.ok = false;
-    report.error = errorText(error);
+    report.error = formatError(error);
   } finally {
     clearTimeout(timer);
     // Any refusal makes the run not ok — even one the code swallowed.
@@ -230,7 +230,7 @@ const runOnce = async (options, fn, attempt) => {
     await session.abortTransaction().catch(() => undefined);
     await session.endSession().catch(() => undefined);
   }
-  return { report, retry };
+  return { report, retry: shouldRetry };
 };
 
 /** Refuse `method`: recorded, then thrown */
@@ -241,7 +241,7 @@ const refuse = (state, method, reason, collection) => {
 };
 
 /** Run `work` after every earlier operation — one at a time in one transaction */
-const serialized = (state, work) => {
+const runSerially = (state, work) => {
   const run = state.queue.then(() => {
     if (Date.now() > state.deadline) {
       throw new RunAbortedError('the dry run reached its deadline', {
@@ -249,9 +249,12 @@ const serialized = (state, work) => {
       });
     }
     if (state.failed !== null) {
-      throw new BackgroundFailedError(`the transaction was aborted by ${errorText(state.failed)}`, {
-        context: { reason: 'aborted' },
-      });
+      throw new BackgroundFailedError(
+        `the transaction was aborted by ${formatError(state.failed)}`,
+        {
+          context: { reason: 'aborted' },
+        },
+      );
     }
     return work();
   });
@@ -260,14 +263,14 @@ const serialized = (state, work) => {
 };
 
 /** The caller's options, checked and given the sandbox session */
-const sandboxOptions = (state, method, collection, options) => {
+const prepareSandboxOptions = (state, method, collection, options) => {
   if (options !== undefined && !isPlainObject(options)) return { session: state.session };
   const out = { ...options };
-  const foreignSession =
+  const isForeignSession =
     out.session !== undefined &&
     out.session !== state.session &&
     out.session !== state.sessionProxy;
-  if (foreignSession) {
+  if (isForeignSession) {
     throw refuse(state, method, 'it passes another session', collection);
   }
   for (const key of REFUSED_OPTIONS) {
@@ -353,7 +356,7 @@ const summarize = (result) => {
 
 // ─── Document images ──────────────────────────────────────────────────────────
 
-const imageKey = (collection, id) => `${collection}\u0000${JSON.stringify(snapshot(id, 1024))}`;
+const toImageKey = (collection, id) => `${collection}\u0000${JSON.stringify(snapshot(id, 1024))}`;
 
 /** Before a write: read (in the transaction) what it may change, while there is room */
 const captureBefore = async (state, raw, method, args) => {
@@ -386,7 +389,7 @@ const captureBefore = async (state, raw, method, args) => {
       .toArray()
       .catch(() => []);
     for (const doc of docs) {
-      const key = imageKey(raw.collectionName, doc._id);
+      const key = toImageKey(raw.collectionName, doc._id);
       if (!state.images.has(key)) {
         state.images.set(key, { collection: raw.collectionName, id: doc._id, before: doc, raw });
       }
@@ -413,7 +416,7 @@ const noteCreated = (state, raw, method, result) => {
       state.report.truncated = true;
       return;
     }
-    const key = imageKey(raw.collectionName, id);
+    const key = toImageKey(raw.collectionName, id);
     if (!state.images.has(key)) {
       // Created by the step: no image before it.
       state.images.set(key, { collection: raw.collectionName, id, before: null, raw });
@@ -425,7 +428,7 @@ const noteCreated = (state, raw, method, result) => {
  * What happened to a document, by its images: no `before` — created; no
  * `after` — deleted, unless it could not be read at all (`isAfterRead`).
  */
-const imageOp = (before, after, isAfterRead) => {
+const classifyImage = (before, after, isAfterRead) => {
   if (before === null) return 'insert';
   if (!isAfterRead) return 'unknown';
   if (after === null) return 'delete';
@@ -445,11 +448,11 @@ const finishImages = async (state) => {
     }
     const before = image.before;
     if (before !== null && after !== null) {
-      const unchanged =
+      const isUnchanged =
         JSON.stringify(snapshot(before, Infinity)) === JSON.stringify(snapshot(after, Infinity));
-      if (unchanged) continue;
+      if (isUnchanged) continue;
     }
-    const op = imageOp(before, after, isAfterRead);
+    const op = classifyImage(before, after, isAfterRead);
     state.report.documents.push({
       collection: image.collection,
       _id: snapshot(image.id, MAX_FILTER_BYTES),
@@ -503,9 +506,9 @@ const proxyCollection = (state, raw) => {
 };
 
 /** `fn()` as a promise — a synchronous throw becomes a rejection */
-const settle = (fn) => {
+const settle = (work) => {
   try {
-    return Promise.resolve(fn());
+    return Promise.resolve(work());
   } catch (error) {
     return Promise.reject(error);
   }
@@ -516,7 +519,7 @@ const readOp = (state, raw, method, args) => {
   if (method === 'aggregate') checkPipeline(state, method, name, args[0]);
   if (method === 'find' || method === 'aggregate') {
     const optionsIndex = 1;
-    const options = sandboxOptions(state, method, name, args[optionsIndex]);
+    const options = prepareSandboxOptions(state, method, name, args[optionsIndex]);
     const cursor = raw[method](args[0] ?? (method === 'find' ? {} : []), options);
     record(state, {
       collection: name,
@@ -528,9 +531,9 @@ const readOp = (state, raw, method, args) => {
   }
   const optionsIndex = method === 'distinct' ? 2 : 1;
   const call = [...args];
-  call[optionsIndex] = sandboxOptions(state, method, name, args[optionsIndex]);
+  call[optionsIndex] = prepareSandboxOptions(state, method, name, args[optionsIndex]);
   if (method === 'distinct' && call[1] === undefined) call[1] = {};
-  return serialized(state, async () => {
+  return runSerially(state, async () => {
     const started = Date.now();
     try {
       const result = await raw[method](...call);
@@ -543,7 +546,7 @@ const readOp = (state, raw, method, args) => {
       });
       return result;
     } catch (error) {
-      record(state, { collection: name, method, error: errorText(error) });
+      record(state, { collection: name, method, error: formatError(error) });
       throw error;
     }
   });
@@ -554,11 +557,11 @@ const writeOp = (state, raw, method, args) => {
   if (isForbidden(state, name)) throw refuse(state, method, `${name} is migronaut's own`, name);
   const call = [...args];
   const at = OPTIONS_AT[method];
-  call[at] = sandboxOptions(state, method, name, args[at]);
+  call[at] = prepareSandboxOptions(state, method, name, args[at]);
   if (method === 'updateOne' || method === 'updateMany' || method === 'findOneAndUpdate') {
     if (Array.isArray(args[1])) checkPipeline(state, method, name, args[1]);
   }
-  return serialized(state, async () => {
+  return runSerially(state, async () => {
     await captureBefore(state, raw, method, args);
     const started = Date.now();
     try {
@@ -576,7 +579,7 @@ const writeOp = (state, raw, method, args) => {
       // A write error aborts the transaction on the server: nothing after it
       // can run. A transient one (a write conflict) runs the whole sandbox again.
       if (!isTransientTransaction(error)) state.failed = error ?? null;
-      record(state, { collection: name, method, error: errorText(error) });
+      record(state, { collection: name, method, error: formatError(error) });
       throw error;
     }
   });
@@ -584,15 +587,15 @@ const writeOp = (state, raw, method, args) => {
 
 const proxyCursor = (state, cursor) => {
   state.cursors.add(cursor);
-  let closed = false;
+  let isClosed = false;
   const finish = () => {
-    closed = true;
+    isClosed = true;
     state.cursors.delete(cursor);
   };
   const terminal = (method) => {
     return (...args) => {
-      if (closed) throw refuse(state, `cursor.${method}`, 'the cursor is closed');
-      return serialized(state, async () => {
+      if (isClosed) throw refuse(state, `cursor.${method}`, 'the cursor is closed');
+      return runSerially(state, async () => {
         const result = await cursor[method](...args);
         if (method === 'toArray' || method === 'close') finish();
         if ((method === 'next' || method === 'tryNext') && result === null) finish();
@@ -661,7 +664,7 @@ const proxyDb = (state, db) => {
           checkPipeline(state, 'db.aggregate', undefined, pipeline);
           const cursor = db.aggregate(
             pipeline,
-            sandboxOptions(state, 'db.aggregate', undefined, options),
+            prepareSandboxOptions(state, 'db.aggregate', undefined, options),
           );
           record(state, { method: 'db.aggregate', filter: snapshot(pipeline, MAX_FILTER_BYTES) });
           return proxyCursor(state, cursor);
@@ -708,7 +711,7 @@ const proxySession = (state) => {
 };
 
 /** What a dry run's `ctx.mongoose` is: nothing usable — models bypass the session */
-const refusedMongoose = (state) => {
+const refuseMongoose = (state) => {
   return new Proxy(Object.create(null), {
     get(_target, property) {
       if (typeof property === 'symbol' || INERT.has(property)) return undefined;

@@ -1,6 +1,6 @@
 const { isPlainObject } = require('../utils/canonical.js');
-const { errorText } = require('../utils/error.js');
-const { jobFields } = require('../utils/job-ref.js');
+const { formatError } = require('../utils/error.js');
+const { toJobFields } = require('../utils/job-ref.js');
 const { BOUNDS, redactBounded, redactWithin } = require('../utils/redact.js');
 
 /**
@@ -28,7 +28,7 @@ const MAX_MESSAGE_LENGTH = 2048;
 const EVENT_ONLY = new Set(['requestedBy', 'reason']);
 
 /** A counter, one per run (or lane slice): orders a run's events within one millisecond */
-const sequence = () => {
+const createSequence = () => {
   let next = 0;
   return () => {
     next += 1;
@@ -42,10 +42,10 @@ const sequence = () => {
  * `base` holds the run id and, when the caller gave them, the job and the
  * actor: `{ id, jobId?, groupId?, requestedBy?, reason? }`.
  */
-const runInfo = (base, direction) => Object.freeze({ id: base.id, direction, ...withoutId(base) });
+const runInfo = (base, direction) => Object.freeze({ id: base.id, direction, ...omitId(base) });
 
 /** `ctx.run` of one attempt of one migration — a new frozen object per attempt */
-const migrationRunInfo = (run, { migration, batch, attempt }) => {
+const buildRunInfo = (run, { migration, batch, attempt }) => {
   return Object.freeze({
     ...run,
     migration,
@@ -54,7 +54,7 @@ const migrationRunInfo = (run, { migration, batch, attempt }) => {
   });
 };
 
-const withoutId = (base) => {
+const omitId = (base) => {
   const rest = {};
   for (const key of Object.keys(base)) {
     if (key !== 'id' && base[key] !== undefined) rest[key] = base[key];
@@ -68,7 +68,7 @@ const withoutId = (base) => {
  * carries — so the three can never disagree. `id` becomes `runId`, a
  * background `name` becomes `migration`; undefined values are left out.
  */
-const correlationOf = (kind, info, direction) => {
+const resolveCorrelation = (kind, info, direction) => {
   const event = { kind };
   const line = {};
   const put = (key, value) => {
@@ -93,10 +93,10 @@ const correlationOf = (kind, info, direction) => {
 };
 
 /** A log message as text: an Error by its (redacted) message, anything else stringified */
-const messageText = (msg) => {
-  if (typeof msg === 'string') return msg;
-  if (msg instanceof Error) return errorText(msg);
-  return msg === undefined ? '' : String(msg);
+const formatMessage = (message) => {
+  if (typeof message === 'string') return message;
+  if (message instanceof Error) return formatError(message);
+  return message === undefined ? '' : String(message);
 };
 
 /**
@@ -104,7 +104,7 @@ const messageText = (msg) => {
  * each for a call dropped and a call cut to the event's bounds, per run (or
  * lane slice), not per call: `{ dropped, truncated }`.
  */
-const notices = () => ({ dropped: false, truncated: false });
+const createNotices = () => ({ dropped: false, truncated: false });
 
 /**
  * A logger bound to one context's correlation.
@@ -122,10 +122,10 @@ const notices = () => ({ dropped: false, truncated: false });
  */
 const createMigrationLogger = (options) => {
   const { sink, kind, info, direction, emitter, nextSeq } = options;
-  const noticed = options.noticed ?? notices();
+  const noticed = options.noticed ?? createNotices();
   const dryRun = options.dryRun ?? false;
 
-  const { event, line } = correlationOf(kind, info, direction);
+  const { event, line } = resolveCorrelation(kind, info, direction);
   if (dryRun) line.dryRun = true;
   /** The one debug line for `what` (a key of `noticed`) — the call that caused it goes on */
   const notice = (what, text) => {
@@ -138,18 +138,20 @@ const createMigrationLogger = (options) => {
       // Logging must never break a migration: a getter that throws, a message
       // that cannot be stringified — the call is dropped, the run goes on.
       try {
-        let msg = first;
+        let rawMessage = first;
         let fields = second;
         if (isPlainObject(first) && (second === undefined || typeof second === 'string')) {
-          msg = second;
+          rawMessage = second;
           fields = first;
         }
-        const text = messageText(msg);
-        const plain = isPlainObject(fields);
-        if (plain) sink[level](text, { ...fields, ...line });
+        const text = formatMessage(rawMessage);
+        const isPlain = isPlainObject(fields);
+        if (isPlain) sink[level](text, { ...fields, ...line });
         else if (fields === undefined) sink[level](text, { ...line });
         else sink[level](text, { ...line, value: fields });
-        if (!plain || fields[USERLAND] !== true || !emitter || dryRun || !emitter.wanted()) return;
+        if (!isPlain || fields[USERLAND] !== true || !emitter || dryRun || !emitter.wanted()) {
+          return;
+        }
         const data = redactBounded(fields, { omit: USERLAND });
         // The event leaves the process: the values a server error quotes (an
         // E11000's duplicate key) are masked too, as everywhere text leaves it.
@@ -177,7 +179,7 @@ const createMigrationLogger = (options) => {
       } catch (error) {
         // See above: dropped — but said once, at debug level.
         try {
-          notice('dropped', `A ctx.logger call was dropped: ${errorText(error)}`);
+          notice('dropped', `A ctx.logger call was dropped: ${formatError(error)}`);
         } catch {
           // Not even that: the thrown value cannot be described.
         }
@@ -205,14 +207,14 @@ const createMigrationLogger = (options) => {
  * after the run ended (a timed-out body's late call is still numbered).
  */
 const createRunLog = ({ id, job, actor = {}, sink, emitter }) => {
-  const ref =
+  const jobRef =
     job === undefined
       ? undefined
       : { id: job.id, ...(job.groupId !== undefined ? { groupId: job.groupId } : {}) };
-  const fields = jobFields(ref);
+  const fields = toJobFields(jobRef);
   const base = { id, ...fields, ...actor };
-  const nextSeq = sequence();
-  const noticed = notices();
+  const nextSeq = createSequence();
+  const noticed = createNotices();
   const infos = new Map();
   const info = (direction) => {
     let run = infos.get(direction);
@@ -233,12 +235,12 @@ const createRunLog = ({ id, job, actor = {}, sink, emitter }) => {
     });
   };
   return {
-    job: ref,
+    job: jobRef,
     fields,
     info,
     logger,
     attempt(direction, { migration, batch, attempt }) {
-      const run = migrationRunInfo(info(direction), { migration, batch, attempt });
+      const run = buildRunInfo(info(direction), { migration, batch, attempt });
       return { run, logger: logger(run) };
     },
   };
@@ -249,9 +251,9 @@ const createRunLog = ({ id, job, actor = {}, sink, emitter }) => {
  * run: a `ctx.logger` per `ctx.background`, all sharing one counter and one
  * set of notices. A dry run's mark every line and emit nothing.
  */
-const backgroundLogs = ({ sink, emitter, dryRun = false }) => {
-  const nextSeq = sequence();
-  const noticed = notices();
+const createBackgroundLogs = ({ sink, emitter, dryRun = false }) => {
+  const nextSeq = createSequence();
+  const noticed = createNotices();
   return (info, direction) => {
     return createMigrationLogger({
       sink,
@@ -270,12 +272,12 @@ module.exports = {
   MIGRATION_LOG_EVENT,
   USERLAND,
   MAX_MESSAGE_LENGTH,
-  sequence,
+  createSequence,
   runInfo,
-  migrationRunInfo,
-  correlationOf,
-  notices,
+  buildRunInfo,
+  resolveCorrelation,
+  createNotices,
   createMigrationLogger,
   createRunLog,
-  backgroundLogs,
+  createBackgroundLogs,
 };

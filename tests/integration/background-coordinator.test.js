@@ -1,9 +1,9 @@
 const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it } = require('node:test');
 const { ObjectId } = require('mongodb');
-const { control, repin, waitForLanes } = require('../../src/core/background/controls.js');
+const { applyControl, repin, waitForLanes } = require('../../src/core/background/controls.js');
 const { coordinate, finalize } = require('../../src/core/background/coordinator.js');
-const { jobFor } = require('../../src/core/background/job.js');
+const { loadJob } = require('../../src/core/background/job.js');
 const { runSlice } = require('../../src/core/background/lane.js');
 const { matchHash, resolveBackgroundSpec } = require('../../src/core/background/spec.js');
 const { BackgroundStore } = require('../../src/core/background/store.js');
@@ -250,17 +250,17 @@ describe('background coordinator (integration)', () => {
     const deps = makeDeps(files);
     await register(deps, NAME);
     assert.strictEqual((await coordinate(deps, NAME)).next, 'process');
-    assert.deepStrictEqual(await control(deps, NAME, 'pause', { requestedBy: 'ops' }), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'pause', { requestedBy: 'ops' }), {
       applied: 'changed',
       status: 'paused',
     });
     assert.strictEqual((await runSlice(deps, NAME)).outcome, 'paused');
     assert.strictEqual((await coordinate(deps, NAME)).next, 'done');
-    assert.deepStrictEqual(await control(deps, NAME, 'pause'), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'pause'), {
       applied: 'unchanged',
       status: 'paused',
     });
-    assert.deepStrictEqual(await control(deps, NAME, 'resume'), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'resume'), {
       applied: 'changed',
       status: 'running',
     });
@@ -269,14 +269,14 @@ describe('background coordinator (integration)', () => {
     // A lane gets halfway, then the migration is cancelled and retried.
     const slice = await runSlice(deps, NAME, { sliceMs: 1 });
     assert.ok(['yielded', 'exhausted'].includes(slice.outcome));
-    assert.deepStrictEqual(await control(deps, NAME, 'cancel'), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'cancel'), {
       applied: 'changed',
       status: 'cancelled',
     });
     assert.strictEqual((await runSlice(deps, NAME)).outcome, 'cancelled');
-    await assert.rejects(control(deps, NAME, 'pause'), BackgroundConflictError);
+    await assert.rejects(applyControl(deps, NAME, 'pause'), BackgroundConflictError);
     const paused = await deps.store.get(NAME);
-    assert.deepStrictEqual(await control(deps, NAME, 'retry'), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'retry'), {
       applied: 'changed',
       status: 'pending',
     });
@@ -287,13 +287,13 @@ describe('background coordinator (integration)', () => {
 
     // A completed one retried is reopened, over whatever is left.
     await mongo.db.collection('orders').updateMany({}, { $set: { __v: 1 } });
-    assert.deepStrictEqual(await control(deps, NAME, 'retry', { fromStart: true }), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'retry', { fromStart: true }), {
       applied: 'changed',
       status: 'running',
     });
     assert.strictEqual((await drive(deps, NAME)).status, 'completed');
     assert.strictEqual((await deps.store.get(NAME)).reopened, 1);
-    await assert.rejects(control(deps, 'nope.js', 'pause'), /not registered/);
+    await assert.rejects(applyControl(deps, 'nope.js', 'pause'), /not registered/);
   });
 
   it('should retry from the start with a fresh plan and no bad ids', async () => {
@@ -318,9 +318,9 @@ describe('background coordinator (integration)', () => {
     files[NAME].background.maxDocumentErrors = 5;
     files[NAME].checksum = 'c2';
     assert.strictEqual((await runSlice(deps, NAME)).outcome, 'failed');
-    await assert.rejects(jobFor(deps, NAME, await deps.store.get(NAME)), ChecksumMismatchError);
+    await assert.rejects(loadJob(deps, NAME, await deps.store.get(NAME)), ChecksumMismatchError);
     await repin(deps, NAME);
-    assert.deepStrictEqual(await control(deps, NAME, 'retry', { fromStart: true }), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'retry', { fromStart: true }), {
       applied: 'changed',
       status: 'pending',
     });
@@ -557,7 +557,7 @@ describe('background coordinator (integration)', () => {
     await coordinate(deps, NAME);
     while ((await runSlice(deps, NAME)).outcome === 'yielded');
     const state = await deps.store.get(NAME);
-    const job = await jobFor(deps, NAME, state);
+    const job = await loadJob(deps, NAME, state);
     // Finalize twice — as after a crash between the roll-up and the cleanup.
     await finalize(deps, job, state);
     await deps.store.set(NAME, { status: 'running' });
@@ -646,7 +646,7 @@ describe('background coordinator (integration)', () => {
     await register(deps, NAME);
     assert.strictEqual((await drive(deps, NAME, { tolerate: true })).status, 'failed');
     broken = false;
-    assert.deepStrictEqual(await control(deps, NAME, 'retry'), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'retry'), {
       applied: 'changed',
       status: 'pending',
     });

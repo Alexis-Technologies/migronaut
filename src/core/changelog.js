@@ -1,4 +1,4 @@
-const { ACTOR_FIELDS, actorFields } = require('../utils/actor.js');
+const { ACTOR_FIELDS, toActorFields } = require('../utils/actor.js');
 const { BOOKKEEPING_OPTIONS } = require('./server-info.js');
 
 /**
@@ -13,7 +13,7 @@ const { BOOKKEEPING_OPTIONS } = require('./server-info.js');
  * client-clock `$setOnInsert` fallback is acceptable ($setOnInsert cannot
  * express server time).
  */
-const appliedUpdate = (record) => {
+const buildAppliedUpdate = (record) => {
   // `name` comes from the filter on insert, so it must not also appear in an
   // update operator (MongoDB rejects the conflicting path).
   const { name, appliedAt, ...fields } = record;
@@ -199,11 +199,11 @@ class Changelog {
    * sort+limit on the `status_appliedAt_name` index: never the whole applied
    * history transferred and re-sorted client-side just to slice N.
    */
-  async getLastAppliedN(db, n) {
+  async getLastAppliedN(db, count) {
     return this.#coll(db)
       .find({ status: 'applied' })
       .sort({ appliedAt: -1, name: -1 })
-      .limit(n)
+      .limit(count)
       .toArray();
   }
 
@@ -279,13 +279,13 @@ class Changelog {
    * index. Uses `$set` rather than a whole-document replace so audit fields
    * survive a re-apply: `firstAppliedAt` is stamped once, and the stale
    * `revertedAt` from an earlier rollback is cleared. `appliedAt` is stamped
-   * server-side unless the record carries one — see {@link #appliedUpdate}.
+   * server-side unless the record carries one — see {@link buildAppliedUpdate}.
    *
    * Pass `session` to make this write part of the migration's transaction, so
    * the migration and its changelog record commit together.
    */
   async markApplied(db, record, session) {
-    await this.#coll(db).updateOne({ name: record.name }, appliedUpdate(record), {
+    await this.#coll(db).updateOne({ name: record.name }, buildAppliedUpdate(record), {
       upsert: true,
       ...(session ? { session } : {}),
     });
@@ -305,7 +305,7 @@ class Changelog {
       ops.push({
         updateOne: {
           filter: { name: records[i].name },
-          update: appliedUpdate(records[i]),
+          update: buildAppliedUpdate(records[i]),
           upsert: true,
         },
       });
@@ -339,7 +339,7 @@ class Changelog {
     const update = {
       $set: {
         status: 'reverted',
-        ...actorFields(actor, 'revert'),
+        ...toActorFields(actor, 'revert'),
       },
       // Server time, like markApplied's appliedAt — one clock for the whole trail.
       $currentDate: { revertedAt: true },

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { errorText } = require('../src/utils/error.js');
+const { formatError } = require('../src/utils/error.js');
 const { sanitizeTerminal } = require('../src/utils/sanitize.js');
 
 /** How long a run stopped by an uncaught throw gets to release its lock before the exit */
@@ -9,7 +9,7 @@ const UNCAUGHT_DRAIN_MS = 10_000;
 // paths that write to the TTY directly, and an escaped error message can embed
 // DB-derived text — sanitized by construction, like every other output path.
 const writeError = (error) => {
-  process.stderr.write(`✖ ${sanitizeTerminal(errorText(error))}\n`);
+  process.stderr.write(`✖ ${sanitizeTerminal(formatError(error))}\n`);
 };
 
 /**
@@ -49,7 +49,7 @@ process.on('unhandledRejection', (error) => {
 
 // A synchronous throw (signal handler, timer callback) bypasses the promise
 // chain — without this, Node prints a raw stack, the one output path that
-// skips errorText's URI redaction. The process state is not trustworthy
+// skips formatError's URI redaction. The process state is not trustworthy
 // enough to keep going: with no run in flight it exits at once; a run is
 // stopped and gets a short drain to release its lock (an exit leaves the lock
 // to its TTL). The timer is unref'd, so a drain that ends sooner exits sooner.

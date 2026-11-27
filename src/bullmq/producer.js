@@ -4,9 +4,9 @@ const {
   MigrationBlockedError,
   NotAppliedError,
 } = require('../errors/index.js');
-const { ACTOR_FIELDS, actorIssue, pickActor } = require('../utils/actor.js');
+const { ACTOR_FIELDS, checkActor, pickActor } = require('../utils/actor.js');
 const { mapLimit } = require('../utils/concurrency.js');
-const { assertId, randomId } = require('../utils/id.js');
+const { assertId, createRandomId } = require('../utils/id.js');
 const { assertMigrationName } = require('../utils/migration-name.js');
 const {
   BACKGROUND_FORBIDDEN_JOB_OPTIONS,
@@ -17,7 +17,7 @@ const {
   buildConvergeJob,
   buildMigrationJob,
   isObjectLike,
-  migrationJobOptions,
+  buildMigrationJobOptions,
   warnUnknownOptions,
 } = require('./jobs.js');
 const { waitForGroup } = require('./wait.js');
@@ -83,9 +83,9 @@ const assertBackgroundJobOptions = (jobOptions) => {
 };
 
 /** Validate the `requestedBy` / `reason` of an enqueue call, and return them */
-const actorOf = (options) => {
+const resolveActor = (options) => {
   for (const key of ACTOR_FIELDS) {
-    const issue = actorIssue(key, options[key]);
+    const issue = checkActor(key, options[key]);
     if (issue) throw new ConfigInvalidError(issue, { context: { [key]: typeof options[key] } });
   }
   return pickActor(options);
@@ -104,12 +104,12 @@ const assertBoolean = (value, name) => {
  * either way: a worker refuses a job whose group id is not a short string, and
  * that has to be this call's error, not a job failing later in the queue.
  */
-const newGroupId = async (kit) => {
-  return assertId(typeof kit.generateId === 'function' ? await kit.generateId() : randomId());
+const generateGroupId = async (kit) => {
+  return assertId(typeof kit.generateId === 'function' ? await kit.generateId() : createRandomId());
 };
 
 /** Newest applied first — `appliedAt`, name-desc tiebreak: the order rollbacks must follow */
-const newestFirst = (a, b) => {
+const byNewest = (a, b) => {
   const delta = (b.appliedAt?.getTime?.() ?? 0) - (a.appliedAt?.getTime?.() ?? 0);
   if (delta !== 0) return delta;
   if (a.file === b.file) return 0;
@@ -156,7 +156,7 @@ const planUpJobs = async (kit, options = {}) => {
   if (to !== undefined) assertMigrationName(to);
   assertBoolean(force, 'force');
   assertBoolean(ordered, 'ordered');
-  const actor = actorOf(options);
+  const actor = resolveActor(options);
   if (force && filename === undefined) {
     // A bulk plan only ever holds pending files — there is no applied target
     // for `force` to re-run.
@@ -196,7 +196,7 @@ const planUpJobs = async (kit, options = {}) => {
       { context: { migration: waiting.migration, waitsFor } },
     );
   }
-  const groupId = await newGroupId(kit);
+  const groupId = await generateGroupId(kit);
   const tail = waiting !== null ? { waiting } : {};
   if (migrations.length === 0) {
     const plan = { groupId, direction: JOB_NAMES.UP, batch: null, migrations, jobs: [], ...tail };
@@ -224,7 +224,7 @@ const planUpJobs = async (kit, options = {}) => {
         checksum: checksums.get(migration),
         ...actor,
       }),
-      opts: migrationJobOptions(jobOptions, JOB_NAMES.UP, migration, { force }),
+      opts: buildMigrationJobOptions(jobOptions, JOB_NAMES.UP, migration, { force }),
     });
   }
   const plan = { groupId, direction: JOB_NAMES.UP, batch, migrations, jobs, ...tail };
@@ -249,7 +249,7 @@ const planUpJobs = async (kit, options = {}) => {
 const assertTopOfStack = async (kit, migrations) => {
   // Names and dates are all this needs — not a re-hash of every applied file.
   const applied = await kit.list('applied', { checksums: false });
-  applied.sort(newestFirst);
+  applied.sort(byNewest);
   const planned = new Set(migrations);
   let deepest = -1;
   for (let index = 0; index < applied.length; index++) {
@@ -279,18 +279,18 @@ const planDownJobs = async (kit, options = {}) => {
   if (to !== undefined) assertMigrationName(to);
   assertBoolean(ordered, 'ordered');
   assertJobOptions(jobOptions);
-  const actor = actorOf(options);
+  const actor = resolveActor(options);
 
   const selection = {};
   if (steps !== undefined) selection.steps = steps;
   if (batch !== undefined) selection.batch = batch;
   if (to !== undefined) selection.to = to;
   const rows = await kit.dryRun('down', filename, selection);
-  if (ordered) rows.sort(newestFirst);
+  if (ordered) rows.sort(byNewest);
 
   const migrations = [];
   for (const row of rows) migrations.push(row.file);
-  const groupId = await newGroupId(kit);
+  const groupId = await generateGroupId(kit);
   if (migrations.length === 0) {
     return { groupId, direction: JOB_NAMES.DOWN, batch: null, migrations, jobs: [] };
   }
@@ -310,7 +310,7 @@ const planDownJobs = async (kit, options = {}) => {
         ordered,
         ...actor,
       }),
-      opts: migrationJobOptions(jobOptions, JOB_NAMES.DOWN, row.file),
+      opts: buildMigrationJobOptions(jobOptions, JOB_NAMES.DOWN, row.file),
     });
   }
   return { groupId, direction: JOB_NAMES.DOWN, batch: null, migrations, jobs };
@@ -322,7 +322,7 @@ const planDownJobs = async (kit, options = {}) => {
  * job's group differs from ours — and waiting on that id simply joins the job
  * that will do the work. All false on a queue that cannot read jobs back.
  */
-const foreignJobs = async (queue, ids, groupId) => {
+const findForeignJobs = async (queue, ids, groupId) => {
   if (typeof queue.getJob !== 'function') {
     const none = [];
     for (let i = 0; i < ids.length; i++) none.push(false);
@@ -342,7 +342,7 @@ const foreignJobs = async (queue, ids, groupId) => {
  * opened for a group that has nothing to wait for.
  */
 const makeWait = (queue, group, { queueEvents, getQueueEvents } = {}) => {
-  const waitsForSomething = group.jobs.length > 0 || group.converge !== undefined;
+  const hasSomethingToWait = group.jobs.length > 0 || group.converge !== undefined;
   // Async on purpose: whatever goes wrong before the wait starts — the facade
   // is closed and lends no QueueEvents any more, the options are not an
   // object — is a rejection, as the returned promise says, never a throw that
@@ -356,7 +356,7 @@ const makeWait = (queue, group, { queueEvents, getQueueEvents } = {}) => {
       queueEvents:
         waitOptions.queueEvents ??
         queueEvents ??
-        (waitsForSomething ? getQueueEvents?.() : undefined),
+        (hasSomethingToWait ? getQueueEvents?.() : undefined),
       ...group,
       timeoutMs: waitOptions.timeoutMs,
       signal: waitOptions.signal,
@@ -396,7 +396,7 @@ const enqueueGroup = async (queue, kit, plan, { queueEvents, getQueueEvents } = 
         jobs.push({ id, migration: plan.migrations[index], index });
       }
     }
-    const foreign = await foreignJobs(queue, ids, groupId);
+    const foreign = await findForeignJobs(queue, ids, groupId);
     for (const job of jobs) {
       if (foreign[job.index]) deduplicated.push(job.migration);
     }
@@ -462,15 +462,15 @@ const enqueueConverge = async (queue, kit, options = {}, internals = {}) => {
   if (ordered !== undefined) assertBoolean(ordered, 'ordered');
   assertJobOptions(jobOptions);
   assertQueue(queue);
-  const actor = actorOf(options);
-  const groupId = await newGroupId(kit);
+  const actor = resolveActor(options);
+  const groupId = await generateGroupId(kit);
   const addedJobs = await queue.addBulk([
     buildConvergeJob({ groupId, ordered, jobOptions, ...actor }),
   ]);
   const added = addedJobs[0];
   if (!added) throw new ConfigInvalidError('queue.addBulk did not return the converge job');
   const jobId = `${added.id}`;
-  const deduplicated = (await foreignJobs(queue, [jobId], groupId))[0];
+  const deduplicated = (await findForeignJobs(queue, [jobId], groupId))[0];
   const wait = makeWait(
     queue,
     { groupId, direction: 'converge', batch: null, jobs: [], converge: { id: jobId } },
@@ -506,7 +506,7 @@ const enqueueUp = async (queue, kit, options = {}, internals = {}) => {
 };
 
 /** The latest sign of life of a background migration: a checkpoint, a coordinator step, its start */
-const lastActivity = (status) => {
+const findLastActivity = (status) => {
   let latest = 0;
   for (const at of [
     status.lastProgressAt,
@@ -548,7 +548,7 @@ const enqueueBackground = async (queue, kit, options = {}) => {
       context: { stallMs },
     });
   }
-  const actor = actorOf(options);
+  const actor = resolveActor(options);
   const targets = [];
   if (migration !== undefined) {
     assertMigrationName(migration);
@@ -569,19 +569,19 @@ const enqueueBackground = async (queue, kit, options = {}) => {
   const now = Date.now();
   for (const status of targets) {
     specs.push(buildBackgroundJob({ migration: status.migration, jobOptions, ...actor }));
-    const stalled =
+    const isStalled =
       status.status === 'running' &&
       status.liveLeases === 0 &&
-      now - lastActivity(status) > stallMs;
-    if (stalled) {
+      now - findLastActivity(status) > stallMs;
+    if (isStalled) {
       // An operational event: nothing has moved it for stallMs.
       kit.logger.warn(
         `⚠ Background migration ${status.migration} looks stalled (nothing moved it for ` +
-          `${Math.round((now - lastActivity(status)) / 1000)}s) — a takeover coordinator is queued`,
+          `${Math.round((now - findLastActivity(status)) / 1000)}s) — a takeover coordinator is queued`,
         {
           background: status.migration,
           round: status.coordinator?.round ?? 0,
-          idleMs: now - lastActivity(status),
+          idleMs: now - findLastActivity(status),
         },
       );
       specs.push(

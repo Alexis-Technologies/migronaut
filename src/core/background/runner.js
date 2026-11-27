@@ -2,7 +2,7 @@ const { addAbortListener } = require('node:events');
 
 const { ConfigInvalidError, RunAbortedError } = require('../../errors/index.js');
 const { MAX_TIMER_MS, jitter } = require('../../utils/concurrency.js');
-const { FATAL_SLICE_CODES, errorText } = require('../../utils/error.js');
+const { FATAL_SLICE_CODES, formatError } = require('../../utils/error.js');
 const { sleep } = require('./throttle.js');
 const { assertSliceMs } = require('./spec.js');
 const { watchOptions } = require('./watch.js');
@@ -32,7 +32,7 @@ const DEFAULTS = Object.freeze({
 const MAX_BACKOFF_MS = 60_000;
 
 /** What `stopOnSignal` does until the runner exists */
-const nothing = () => undefined;
+const doNothing = () => undefined;
 
 const readOptions = (options) => {
   const concurrency = options.concurrency ?? DEFAULTS.concurrency;
@@ -42,20 +42,20 @@ const readOptions = (options) => {
     });
   }
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULTS.pollIntervalMs;
-  const badPoll =
+  const isBadPoll =
     !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10 || pollIntervalMs > MAX_TIMER_MS;
-  if (badPoll) {
+  if (isBadPoll) {
     throw new ConfigInvalidError(`pollIntervalMs must be an integer from 10 to ${MAX_TIMER_MS}`, {
       context: { pollIntervalMs },
     });
   }
   const verifyIntervalMs = options.verifyIntervalMs ?? DEFAULTS.verifyIntervalMs;
-  const badVerify =
+  const isBadVerify =
     verifyIntervalMs !== false &&
     (!Number.isSafeInteger(verifyIntervalMs) ||
       verifyIntervalMs < 100 ||
       verifyIntervalMs > MAX_TIMER_MS);
-  if (badVerify) {
+  if (isBadVerify) {
     const message = `verifyIntervalMs must be false or an integer from 100 to ${MAX_TIMER_MS}`;
     throw new ConfigInvalidError(message, {
       context: { verifyIntervalMs },
@@ -91,11 +91,11 @@ const readOptions = (options) => {
 const startBackgroundRunner = (options = {}) => {
   const { concurrency, pollIntervalMs, verifyIntervalMs } = readOptions(options);
   const kit = options.kit ?? new MigratorKit(options.config ?? {}, options.kitOptions ?? {});
-  const ownsKit = options.kit === undefined;
+  const isKitOwned = options.kit === undefined;
   const controller = new AbortController();
   const signal = controller.signal;
   // Set once the runner exists: what its `signal` ends like — see stop().
-  let stopOnSignal = nothing;
+  let stopOnSignal = doNothing;
   const onOuterAbort = () => {
     controller.abort(options.signal.reason);
     stopOnSignal();
@@ -110,8 +110,8 @@ const startBackgroundRunner = (options = {}) => {
       // A throwing onError is its own problem.
     }
     kit.logger.warn(
-      `⚠ Background runner${migration ? ` (${migration})` : ''}: ${errorText(error)}`,
-      { ...(migration ? { background: migration } : {}), error: errorText(error) },
+      `⚠ Background runner${migration ? ` (${migration})` : ''}: ${formatError(error)}`,
+      { ...(migration ? { background: migration } : {}), error: formatError(error) },
     );
   };
 
@@ -159,7 +159,8 @@ const startBackgroundRunner = (options = {}) => {
     return null;
   };
 
-  const backOff = (migration, ms) => shared.backoff.set(migration, Date.now() + jitter(ms));
+  const backOff = (migration, delayMs) =>
+    shared.backoff.set(migration, Date.now() + jitter(delayMs));
 
   const lane = async () => {
     while (!signal.aborted) {
@@ -285,10 +286,10 @@ const startBackgroundRunner = (options = {}) => {
      * checkpoint) — so a shutdown is never held for good.
      */
     stop({ timeoutMs } = {}) {
-      const badTimeout =
+      const isBadTimeout =
         timeoutMs !== undefined &&
         (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_TIMER_MS);
-      if (badTimeout) {
+      if (isBadTimeout) {
         const message = `timeoutMs must be an integer from 0 to ${MAX_TIMER_MS}`;
         return Promise.reject(new ConfigInvalidError(message, { context: { timeoutMs } }));
       }
@@ -324,10 +325,10 @@ const startBackgroundRunner = (options = {}) => {
           }
         }
         outer?.[Symbol.dispose]();
-        if (ownsKit) {
+        if (isKitOwned) {
           await kit.disconnect().catch((error) => {
             // The stop is done either way; a failed close is said at debug.
-            kit.logger.debug(`Background runner: could not disconnect — ${errorText(error)}`);
+            kit.logger.debug(`Background runner: could not disconnect — ${formatError(error)}`);
           });
         }
       })();

@@ -14,7 +14,7 @@ const ACTOR_LIMITS = Object.freeze({ requestedBy: 128, reason: 512 });
 const ACTOR_FIELDS = Object.freeze(Object.keys(ACTOR_LIMITS));
 
 /** The problem with an actor field, or null when it is absent or valid */
-const actorIssue = (key, value) => {
+const checkActor = (key, value) => {
   if (value === undefined) return null;
   const max = ACTOR_LIMITS[key];
   if (typeof value !== 'string' || value.length === 0 || value.length > max) {
@@ -37,7 +37,7 @@ const pickActor = (source) => {
  * for what a run applies, `<prefix>RequestedBy` / `<prefix>Reason` for what
  * it reverts (`prefix: 'revert'`), so a revert never overwrites who applied.
  */
-const actorFields = (options, prefix) => {
+const toActorFields = (options, prefix) => {
   const fields = {};
   if (options?.requestedBy !== undefined) {
     fields[prefix ? `${prefix}RequestedBy` : 'requestedBy'] = options.requestedBy;
@@ -48,4 +48,4 @@ const actorFields = (options, prefix) => {
   return fields;
 };
 
-module.exports = { ACTOR_LIMITS, ACTOR_FIELDS, actorIssue, pickActor, actorFields };
+module.exports = { ACTOR_LIMITS, ACTOR_FIELDS, checkActor, pickActor, toActorFields };

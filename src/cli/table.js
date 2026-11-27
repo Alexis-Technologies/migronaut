@@ -65,10 +65,10 @@ const BUILD_DETAILS = {
  * Resolved per render rather than once at import: color depends on NO_COLOR /
  * FORCE_COLOR / TTY, and `--no-color` is applied after this module is loaded.
  */
-const palette = () => createColors(process.stdout);
+const resolvePalette = () => createColors(process.stdout);
 
 /** Terminal columns a single codepoint occupies (0 for combining marks) */
-const charWidth = (codepoint) => {
+const measureChar = (codepoint) => {
   // Combining marks attach to the previous glyph and take no width of their own.
   if (codepoint >= 0x0300 && codepoint <= 0x036f) return 0;
   // Variation selectors (VS15/VS16 among them) modify the preceding glyph.
@@ -81,16 +81,16 @@ const charWidth = (codepoint) => {
 };
 
 /** Terminal columns of already-ANSI-free text — the shared codepoint walk */
-const widthOfPlain = (plain) => {
+const measurePlain = (plain) => {
   let width = 0;
-  for (const char of plain) {
-    width += charWidth(char.codePointAt(0));
+  for (const character of plain) {
+    width += measureChar(character.codePointAt(0));
   }
   return width;
 };
 
 /** Number of terminal columns a cell occupies, ignoring ANSI color codes */
-const visibleWidth = (text) => widthOfPlain(stripAnsi(text));
+const measureVisible = (text) => measurePlain(stripAnsi(text));
 
 /**
  * Shorten `text` to at most `max` visible columns, ending with an ellipsis.
@@ -100,20 +100,20 @@ const visibleWidth = (text) => widthOfPlain(stripAnsi(text));
  */
 const truncate = (text, max) => {
   const plain = stripAnsi(text);
-  if (widthOfPlain(plain) <= max) return text;
+  if (measurePlain(plain) <= max) return text;
   let out = '';
   let width = 0;
-  for (const char of plain) {
-    const next = width + charWidth(char.codePointAt(0));
+  for (const character of plain) {
+    const next = width + measureChar(character.codePointAt(0));
     if (next > max - 1) break;
-    out += char;
+    out += character;
     width = next;
   }
   return `${out}…`;
 };
 
 /** Build a horizontal border line for the given column widths */
-const borderLine = (widths, left, mid, right) => {
+const drawBorder = (widths, left, mid, right) => {
   const segments = [];
   for (const width of widths) segments.push('─'.repeat(width + 2));
   return left + segments.join(mid) + right;
@@ -132,7 +132,7 @@ const renderTable = (head, rows) => {
   const headWidths = [];
   const widths = [];
   for (let index = 0; index < head.length; index++) {
-    const width = visibleWidth(head[index]);
+    const width = measureVisible(head[index]);
     headWidths.push(width);
     widths.push(width);
   }
@@ -141,7 +141,7 @@ const renderTable = (head, rows) => {
     const row = rows[rowIndex];
     const measured = [];
     for (let index = 0; index < row.length; index++) {
-      const width = visibleWidth(row[index]);
+      const width = measureVisible(row[index]);
       measured.push(width);
       if (width > widths[index]) widths[index] = width;
     }
@@ -154,31 +154,31 @@ const renderTable = (head, rows) => {
     }
     return `│ ${padded.join(' │ ')} │`;
   };
-  const colors = palette();
+  const colors = resolvePalette();
   const coloredHead = [];
   for (const title of head) {
     coloredHead.push(colors.cyan(title));
   }
   const lines = [
-    borderLine(widths, '┌', '┬', '┐'),
+    drawBorder(widths, '┌', '┬', '┐'),
     renderRow(coloredHead, headWidths),
-    borderLine(widths, '├', '┼', '┤'),
+    drawBorder(widths, '├', '┼', '┤'),
   ];
   for (let index = 0; index < rows.length; index++) {
     lines.push(renderRow(rows[index], cellWidths[index]));
   }
-  lines.push(borderLine(widths, '└', '┴', '┘'));
+  lines.push(drawBorder(widths, '└', '┴', '┘'));
   return lines.join('\n');
 };
 
 /** Render a checksum indicator cell */
-const checksumCell = (colors, value) => {
+const renderChecksumCell = (colors, value) => {
   if (value === null) return colors.dim('—');
   return value ? colors.green('ok') : colors.red('MISMATCH');
 };
 
 /** Render a status cell */
-const statusCell = (colors, status) => {
+const renderStatusCell = (colors, status) => {
   return status === 'applied' ? colors.green('applied') : colors.yellow('pending');
 };
 
@@ -191,7 +191,7 @@ const statusCell = (colors, status) => {
  * TTY the truncatable columns give way instead of every row wrapping into
  * box-drawing noise — the common case over SSH at 80 columns.
  */
-const truncationBudgets = (hasDescription, fixedWidth) => {
+const computeBudgets = (hasDescription, fixedWidth) => {
   const columns = process.stdout.isTTY ? process.stdout.columns : undefined;
   if (!columns) {
     return { migration: MAX_MIGRATION_WIDTH, description: MAX_DESCRIPTION_WIDTH };
@@ -213,7 +213,7 @@ const truncationBudgets = (hasDescription, fixedWidth) => {
  * appears only when at least one row has one, so the common case stays narrow.
  */
 const renderStatusTable = (rows) => {
-  const colors = palette();
+  const colors = resolvePalette();
   let hasDescription = false;
   for (const row of rows) {
     if (row.description) {
@@ -223,18 +223,18 @@ const renderStatusTable = (rows) => {
   }
   // Status(7) + Batch(5) + Applied At(19) + Duration(8) + Checksum(8) plus
   // `│ … │ ` framing: 3 columns of overhead per column and one closing bar.
-  const budgets = truncationBudgets(hasDescription, 47 + (hasDescription ? 7 : 6) * 3 + 1);
+  const budgets = computeBudgets(hasDescription, 47 + (hasDescription ? 7 : 6) * 3 + 1);
   const head = ['Migration', 'Status', 'Batch', 'Applied At', 'Duration', 'Checksum'];
   if (hasDescription) head.push('Description');
   const cells = [];
   for (const row of rows) {
     const cell = [
       truncate(sanitize(row.file), budgets.migration),
-      statusCell(colors, row.status),
+      renderStatusCell(colors, row.status),
       row.batch === null ? '' : `${row.batch}`,
       row.appliedAt ? formatDateTime(row.appliedAt) : '',
       row.duration === null ? '' : `${row.duration}ms`,
-      checksumCell(colors, row.checksumOk),
+      renderChecksumCell(colors, row.checksumOk),
     ];
     if (hasDescription) {
       cell.push(truncate(sanitize(row.description ?? ''), budgets.description));
@@ -251,7 +251,7 @@ const renderRowsOrEmpty = (rows, { logger }) => {
 };
 
 /** Render the checksum-source cell for an import row */
-const checksumSourceCell = (colors, source) => {
+const renderChecksumSourceCell = (colors, source) => {
   if (source === 'recomputed') return colors.green('recomputed');
   if (source === 'reused') return colors.cyan('reused');
   return colors.red('missing');
@@ -259,9 +259,9 @@ const checksumSourceCell = (colors, source) => {
 
 /** Render mapped import rows as a human-readable table string */
 const renderImportTable = (rows) => {
-  const colors = palette();
+  const colors = resolvePalette();
   // Batch(5) + Applied At(19) + Checksum(10) plus the 4-column frame.
-  const budgets = truncationBudgets(false, 34 + 4 * 3 + 1);
+  const budgets = computeBudgets(false, 34 + 4 * 3 + 1);
   const head = ['Migration', 'Batch', 'Applied At', 'Checksum'];
   const cells = [];
   for (const row of rows) {
@@ -269,14 +269,14 @@ const renderImportTable = (rows) => {
       truncate(sanitize(row.file), budgets.migration),
       `${row.batch}`,
       formatDateTime(row.appliedAt),
-      checksumSourceCell(colors, row.checksumSource),
+      renderChecksumSourceCell(colors, row.checksumSource),
     ]);
   }
   return renderTable(head, cells);
 };
 
 /** Render a converge action cell */
-const convergeActionCell = (colors, action) => colors[ACTION_COLORS[action] ?? 'dim'](action);
+const renderConvergeActionCell = (colors, action) => colors[ACTION_COLORS[action] ?? 'dim'](action);
 
 /** Where the server is with a search index, when it is not simply serving it */
 const searchBuildDetail = (build) => {
@@ -292,7 +292,7 @@ const searchNotServing = (action) => {
 };
 
 /** The detail column: what differs, or why the row is what it is — and a search index's build */
-const convergeDetail = (action) => {
+const renderConvergeDetail = (action) => {
   if (action.reason === 'name' && action.liveName !== undefined) {
     return `renamed from "${action.liveName}"`;
   }
@@ -309,7 +309,7 @@ const convergeDetail = (action) => {
 };
 
 /** The lead of a converge summary: everything matched, or how much changed where */
-const convergeSummary = (counts, collections, dryRun) => {
+const renderConvergeSummary = (counts, collections, dryRun) => {
   if (counts.change === 0 && counts.conflict === 0) {
     return `✔ ${collections} collection(s) match their declarations`;
   }
@@ -324,7 +324,7 @@ const convergeSummary = (counts, collections, dryRun) => {
  * schema would otherwise bury its two changes under fifty "unchanged" lines.
  */
 const renderConvergeTable = (result, { all = false } = {}) => {
-  const colors = palette();
+  const colors = resolvePalette();
   const cells = [];
   const counts = {
     change: 0,
@@ -347,20 +347,20 @@ const renderConvergeTable = (result, { all = false } = {}) => {
       else changes += 1;
       if (isDestructive(action)) counts.destructive += 1;
       if (action.action === 'unchanged' && !all && !searchNotServing(action)) continue;
-      const named = action.target === 'index' || action.target === 'searchIndex';
+      const isNamed = action.target === 'index' || action.target === 'searchIndex';
       cells.push([
         truncate(sanitize(collection.name), MAX_NAME_WIDTH),
         TARGET_LABELS[action.target] ?? action.target,
-        named ? truncate(sanitize(action.name), MAX_NAME_WIDTH) : '',
-        convergeActionCell(colors, action.action),
-        truncate(sanitize(convergeDetail(action)), MAX_DETAIL_WIDTH),
+        isNamed ? truncate(sanitize(action.name), MAX_NAME_WIDTH) : '',
+        renderConvergeActionCell(colors, action.action),
+        truncate(sanitize(renderConvergeDetail(action)), MAX_DETAIL_WIDTH),
       ]);
     }
     counts.change += changes;
     if (changes > 0) counts.touched += 1;
   }
   const collections = result.collections.length;
-  const parts = [convergeSummary(counts, collections, result.dryRun)];
+  const parts = [renderConvergeSummary(counts, collections, result.dryRun)];
   if (counts.destructive > 0) parts.push(`${counts.destructive} drop/rebuild`);
   if (counts.conflict > 0) parts.push(colors.red(`${counts.conflict} conflict(s)`));
   if (counts.keep > 0) parts.push(`${counts.keep} undeclared index(es) kept`);
@@ -392,7 +392,7 @@ const renderConvergeTable = (result, { all = false } = {}) => {
  */
 const renderConvergeHistory = (entries) => {
   if (entries.length === 0) return 'No converge has changed anything yet';
-  const colors = palette();
+  const colors = resolvePalette();
   const cells = [];
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
@@ -413,8 +413,8 @@ const renderConvergeHistory = (entries) => {
 
 module.exports = {
   sanitize,
-  charWidth,
-  visibleWidth,
+  measureChar,
+  measureVisible,
   truncate,
   renderTable,
   renderStatusTable,

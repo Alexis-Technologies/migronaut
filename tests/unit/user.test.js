@@ -1,7 +1,7 @@
 const os = require('node:os');
 const assert = require('node:assert/strict');
 const { afterEach, describe, it } = require('node:test');
-const { safeUsername } = require('../../src/utils/user.js');
+const { resolveUsername } = require('../../src/utils/user.js');
 
 const original = process.env.MIGRONAUT_USER;
 
@@ -15,22 +15,22 @@ const setOverride = (value) => {
   else process.env.MIGRONAUT_USER = value;
 };
 
-describe('safeUsername', () => {
+describe('resolveUsername', () => {
   it('should report the OS username when no override is set', () => {
     setOverride(undefined);
-    assert.strictEqual(safeUsername(), os.userInfo().username);
+    assert.strictEqual(resolveUsername(), os.userInfo().username);
   });
 
   it('should let MIGRONAUT_USER override the OS username', () => {
     // In CI the OS user is a meaningless `runner`/`root`; the identity worth
     // stamping on the changelog is the deploy actor, and only the caller knows it.
     setOverride('deploy-bot');
-    assert.strictEqual(safeUsername(), 'deploy-bot');
+    assert.strictEqual(resolveUsername(), 'deploy-bot');
   });
 
   it('should ignore an empty MIGRONAUT_USER', () => {
     // `MIGRONAUT_USER=` in a CI template must not record an empty author.
     setOverride('');
-    assert.strictEqual(safeUsername(), os.userInfo().username);
+    assert.strictEqual(resolveUsername(), os.userInfo().username);
   });
 });

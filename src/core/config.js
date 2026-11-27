@@ -6,12 +6,12 @@ const { ConfigInvalidError } = require('../errors/index.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { MAX_TIMER_MS } = require('../utils/concurrency.js');
 const { applyEnvFile } = require('../utils/env.js');
-const { contextPath, errorText } = require('../utils/error.js');
+const { toContextPath, formatError } = require('../utils/error.js');
 const { readSmallFile } = require('../utils/file.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { redactDeep } = require('../utils/redact.js');
-const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
-const { collectionsIssues } = require('./converge/collections.js');
+const { TELEMETRY_KEYS, checkTelemetry } = require('../utils/telemetry.js');
+const { checkCollections } = require('./converge/collections.js');
 
 /** The keys a `telemetry` object may hold — a Set, read once per key */
 const TELEMETRY_KEY_SET = new Set(TELEMETRY_KEYS);
@@ -115,12 +115,12 @@ const isTimerMs = (value) => isPositiveInteger(value) && value <= MAX_TIMER_MS;
 /** A lock TTL the heartbeat and the deadline can arm */
 const isLockTtl = (value) => isPositiveInteger(value) && value <= MAX_LOCK_TTL_SECONDS;
 /** A check that `value` is one of `values` — a Set, read once per call */
-const oneOf = (values) => {
+const makeOneOfCheck = (values) => {
   const allowed = new Set(values);
   return (value) => allowed.has(value);
 };
 /** "'warn', 'error' or 'allow'": `values` in single quotes, the last after "or" */
-const choices = (values) => {
+const formatChoices = (values) => {
   let text = '';
   for (let i = 0; i < values.length; i++) {
     if (i > 0) text += i === values.length - 1 ? ' or ' : ', ';
@@ -130,7 +130,7 @@ const choices = (values) => {
 };
 
 /** `values` each in single quotes, joined by `separator` */
-const quoted = (values, separator = ', ') => {
+const quoteAll = (values, separator = ', ') => {
   let text = '';
   for (let i = 0; i < values.length; i++) {
     if (i > 0) text += separator;
@@ -140,11 +140,11 @@ const quoted = (values, separator = ', ') => {
 };
 
 /** A CONFIG_KEYS row for an enum key: its values, the check and the message from them */
-const enumKey = (key, values) => {
+const defineEnumKey = (key, values) => {
   return {
     path: key,
-    check: oneOf(values),
-    message: `must be ${choices(values)}`,
+    check: makeOneOfCheck(values),
+    message: `must be ${formatChoices(values)}`,
     optional: true,
     values,
   };
@@ -156,7 +156,7 @@ const enumKey = (key, values) => {
  * tokens — the last two named after the first, so one setting moves all
  * three (and a test of "must differ" covers them together).
  */
-const backgroundCollectionNames = (backgroundCollection) => {
+const listBackgroundCollections = (backgroundCollection) => {
   return {
     state: backgroundCollection,
     partitions: `${backgroundCollection}_partitions`,
@@ -215,7 +215,7 @@ const CONFIG_KEYS = [
     check: isStringList,
     message: 'must be a non-empty array of non-empty strings',
   },
-  { ...enumKey('createExtension', CREATE_EXTENSIONS), optional: false },
+  { ...defineEnumKey('createExtension', CREATE_EXTENSIONS), optional: false },
   { path: 'sequential', check: isBoolean, message: 'must be a boolean' },
   {
     path: 'templatePath',
@@ -229,8 +229,8 @@ const CONFIG_KEYS = [
     message: 'must be a non-empty string',
     optional: true,
   },
-  enumKey('onLockLost', ON_LOCK_LOST),
-  enumKey('onOutOfOrder', ON_OUT_OF_ORDER),
+  defineEnumKey('onLockLost', ON_LOCK_LOST),
+  defineEnumKey('onOutOfOrder', ON_OUT_OF_ORDER),
   {
     path: 'envFile',
     check: (value) => value === false || isNonEmptyString(value),
@@ -253,7 +253,7 @@ const CONFIG_KEYS = [
   },
   { path: 'reloadMigrations', check: isBoolean, message: 'must be a boolean', optional: true },
   // Only the outer shape here — each definition is checked by
-  // collectionsIssues (core/converge/collections.js), which reports nested paths
+  // checkCollections (core/converge/collections.js), which reports nested paths
   // (`collections[2].indexes[0].key`) instead of one opaque message.
   {
     path: 'collections',
@@ -268,7 +268,7 @@ const CONFIG_KEYS = [
     optional: true,
   },
   { path: 'convergeAfterUp', check: isBoolean, message: 'must be a boolean', optional: true },
-  enumKey('onSearchUnavailable', ON_SEARCH_UNAVAILABLE),
+  defineEnumKey('onSearchUnavailable', ON_SEARCH_UNAVAILABLE),
   { path: 'waitForSearchIndexes', check: isBoolean, message: 'must be a boolean', optional: true },
   {
     path: 'searchIndexWaitTimeoutMs',
@@ -284,9 +284,9 @@ const CONFIG_KEYS = [
     optional: true,
   },
   { path: 'backgroundInline', check: isBoolean, message: 'must be a boolean', optional: true },
-  enumKey('backgroundOnDrift', ON_DRIFT),
-  enumKey('backgroundDrift', DRIFT_MODES),
-  enumKey('backgroundShardAware', SHARD_AWARE),
+  defineEnumKey('backgroundOnDrift', ON_DRIFT),
+  defineEnumKey('backgroundDrift', DRIFT_MODES),
+  defineEnumKey('backgroundShardAware', SHARD_AWARE),
 ];
 
 for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
@@ -318,13 +318,13 @@ const validateConfig = (config, options = {}) => {
   if (config.generateId !== undefined && typeof config.generateId !== 'function') {
     issues.push({ path: 'generateId', message: 'must be a function' });
   }
-  for (const issue of telemetryIssues(config.telemetry)) issues.push(issue);
+  for (const issue of checkTelemetry(config.telemetry)) issues.push(issue);
   // Inline definitions are checked with the rest of the config — they are
   // pure data, so this costs nothing. Definition *files* are loaded only when
   // a converge runs: importing them here would make one broken file block
   // every command, an emergency `down` included.
   // Every bookkeeping collection has one job: sharing one would mix records.
-  const bookkeeping = bookkeepingCollections(config);
+  const bookkeeping = listBookkeepingCollections(config);
   for (let position = 1; position < bookkeeping.length; position++) {
     const entry = bookkeeping[position];
     const key = entry[0];
@@ -349,7 +349,7 @@ const validateConfig = (config, options = {}) => {
       const name = bookkeeping[i][1];
       if (name !== undefined) reserved.push(name);
     }
-    for (const issue of collectionsIssues(config.collections, { reserved })) issues.push(issue);
+    for (const issue of checkCollections(config.collections, { reserved })) issues.push(issue);
   }
   return issues;
 };
@@ -359,14 +359,14 @@ const validateConfig = (config, options = {}) => {
  * — `what` names a collection derived from the key (the background
  * partitions and watch collections).
  */
-const bookkeepingCollections = (config) => {
+const listBookkeepingCollections = (config) => {
   const entries = [
     ['migrationsCollection', config.migrationsCollection],
     ['lockCollection', config.lockCollection],
     ['convergeLogCollection', config.convergeLogCollection],
   ];
   if (typeof config.backgroundCollection === 'string') {
-    const names = backgroundCollectionNames(config.backgroundCollection);
+    const names = listBackgroundCollections(config.backgroundCollection);
     entries.push(
       ['backgroundCollection', names.state],
       ['backgroundCollection', names.partitions, 'partitions collection'],
@@ -418,11 +418,11 @@ const parsePositiveInteger = (value, name) => {
 /** Parse one of a fixed set of string values, failing closed on anything else */
 const parseEnum = (allowed) => {
   const values = new Set(allowed);
-  const list = quoted(allowed, ' or ');
+  const allowedText = quoteAll(allowed, ' or ');
   return (value, name) => {
     const normalized = value.trim();
     if (!values.has(normalized)) {
-      const issue = `must be ${list}`;
+      const issue = `must be ${allowedText}`;
       throw new ConfigInvalidError(`${name} ${issue}`, { context: { name, value, issue } });
     }
     return normalized;
@@ -451,14 +451,22 @@ const ENV_KEYS = [
   { env: 'MIGRONAUT_URI', path: 'uri', parse: parseString },
   { env: 'MIGRONAUT_DB', path: 'dbName', parse: parseString },
   { env: 'MIGRONAUT_MIGRATIONS_DIR', path: 'migrationsDir', parse: parseString },
-  { env: 'MIGRONAUT_COLLECTION', path: 'migrationsCollection', parse: parseString },
+  {
+    env: 'MIGRONAUT_MIGRATIONS_COLLECTION',
+    path: 'migrationsCollection',
+    parse: parseString,
+  },
   { env: 'MIGRONAUT_LOCK_COLLECTION', path: 'lockCollection', parse: parseString },
   {
     env: 'MIGRONAUT_CONVERGE_LOG_COLLECTION',
     path: 'convergeLogCollection',
     parse: parseString,
   },
-  { env: 'MIGRONAUT_LOCK_TTL', path: 'lockTTLSeconds', parse: parsePositiveInteger },
+  {
+    env: 'MIGRONAUT_LOCK_TTL_SECONDS',
+    path: 'lockTTLSeconds',
+    parse: parsePositiveInteger,
+  },
   { env: 'MIGRONAUT_STRICT', path: 'strict', parse: parseBoolean },
   { env: 'MIGRONAUT_USE_TRANSACTION', path: 'useTransaction', parse: parseBoolean },
   { env: 'MIGRONAUT_SEQUENTIAL', path: 'sequential', parse: parseBoolean },
@@ -502,9 +510,24 @@ const ENV_KEYS = [
   },
 ];
 
+/**
+ * The variables 3.0 renamed, by their old name. Still set, one is refused with
+ * the new name rather than ignored: a lock TTL that silently fell back to the
+ * default is what every parse of this layer fails closed against.
+ */
+const RENAMED_ENV_KEYS = {
+  __proto__: null,
+  MIGRONAUT_COLLECTION: 'MIGRONAUT_MIGRATIONS_COLLECTION',
+  MIGRONAUT_LOCK_TTL: 'MIGRONAUT_LOCK_TTL_SECONDS',
+};
+
 /** Build a partial config from the MIGRONAUT_* environment variables */
 const readEnvConfig = (env, issues) => {
   const result = {};
+  for (const name of Object.keys(RENAMED_ENV_KEYS)) {
+    if (env[name] === undefined) continue;
+    issues.push({ path: name, message: `was renamed to ${RENAMED_ENV_KEYS[name]} in 3.0` });
+  }
   for (const spec of ENV_KEYS) {
     const value = env[spec.env];
     if (value === undefined) continue;
@@ -521,7 +544,7 @@ const readEnvConfig = (env, issues) => {
 };
 
 /** "Invalid configuration — dbName is required; MIGRONAUT_STRICT must be …": what a person reads */
-const issuesMessage = (issues) => {
+const formatIssues = (issues) => {
   let text = '';
   for (let i = 0; i < issues.length; i++) {
     const { path: where, message } = issues[i];
@@ -533,7 +556,7 @@ const issuesMessage = (issues) => {
 };
 
 /** Returns true when `filepath` exists on disk */
-const pathExists = async (filepath) => {
+const isExistingPath = async (filepath) => {
   try {
     await fs.access(filepath);
     return true;
@@ -552,7 +575,7 @@ const discoverConfigFile = async (cwd) => {
   const candidates = [];
   for (const name of CONFIG_FILE_NAMES) candidates.push(path.join(cwd, name));
   const checks = [];
-  for (const candidate of candidates) checks.push(pathExists(candidate));
+  for (const candidate of candidates) checks.push(isExistingPath(candidate));
   const found = await Promise.all(checks);
   for (let i = 0; i < candidates.length; i++) {
     if (found[i]) return candidates[i];
@@ -561,7 +584,7 @@ const discoverConfigFile = async (cwd) => {
 };
 
 /** What a config file came to, in a word — `object` is the one shape that is a config */
-const shapeOf = (value) => {
+const describeShape = (value) => {
   if (value === null) return 'null';
   return Array.isArray(value) ? 'array' : typeof value;
 };
@@ -584,7 +607,7 @@ const loadConfigFile = async (filepath, lenient = false) => {
       // mapping and `--json` error shape.
       throw new ConfigInvalidError('Config file is not valid JSON', {
         cause: error,
-        context: { path: contextPath(filepath), cause: errorText(error) },
+        context: { path: toContextPath(filepath), cause: formatError(error) },
       });
     }
   }
@@ -598,7 +621,7 @@ const loadConfigFile = async (filepath, lenient = false) => {
     if (lenient) return null;
     throw new ConfigInvalidError('Config file failed to load', {
       cause: error,
-      context: { path: contextPath(filepath), cause: errorText(error) },
+      context: { path: toContextPath(filepath), cause: formatError(error) },
     });
   }
   const exported = mod.default ?? mod;
@@ -615,7 +638,7 @@ const loadConfigFile = async (filepath, lenient = false) => {
       }
       throw new ConfigInvalidError('Config factory function failed to resolve', {
         cause: error,
-        context: { path: contextPath(filepath), cause: errorText(error) },
+        context: { path: toContextPath(filepath), cause: formatError(error) },
       });
     }
   }
@@ -623,14 +646,14 @@ const loadConfigFile = async (filepath, lenient = false) => {
 };
 
 /** The names of declared collection definitions, in order */
-const definitionNames = (definitions) => {
+const listDefinitionNames = (definitions) => {
   const names = [];
   for (let i = 0; i < definitions.length; i++) names.push(definitions[i].name);
   return names;
 };
 
 /** The keys of `values` migronaut knows — what the resolved-config line may show */
-const knownOnly = (values) => {
+const pickKnown = (values) => {
   const known = {};
   const keys = Object.keys(values);
   for (let i = 0; i < keys.length; i++) {
@@ -687,9 +710,9 @@ const loadConfig = async (options = {}) => {
     // Only an explicit --config path needs the probe (a typo deserves a clear
     // "not found") — discovery already proved existence, and re-checking it
     // would pay a redundant fs.access on every invocation.
-    if (options.configPath && !(await pathExists(configFilePath))) {
+    if (options.configPath && !(await isExistingPath(configFilePath))) {
       throw new ConfigInvalidError('Config file not found', {
-        context: { path: contextPath(configFilePath) },
+        context: { path: toContextPath(configFilePath) },
       });
     }
     const lenient = options.lenient ?? false;
@@ -698,14 +721,14 @@ const loadConfig = async (options = {}) => {
     // factory with a forgotten `return` used to end in a TypeError from the
     // merge, a JSON `null` in "could not resolve", and a string or an array
     // in keys named '0', '1', … merged in.
-    const usable = fileConfig !== LENIENT_FAILURE && shapeOf(fileConfig) === 'object';
-    if (!usable && fileConfig !== LENIENT_FAILURE && !lenient) {
+    const isUsable = fileConfig !== LENIENT_FAILURE && describeShape(fileConfig) === 'object';
+    if (!isUsable && fileConfig !== LENIENT_FAILURE && !lenient) {
       throw new ConfigInvalidError(
         'Config file must export an object, or a function that returns one',
-        { context: { path: contextPath(configFilePath), exported: shapeOf(fileConfig) } },
+        { context: { path: toContextPath(configFilePath), exported: describeShape(fileConfig) } },
       );
     }
-    if (usable) {
+    if (isUsable) {
       mergeDefined(merged, fileConfig);
     } else {
       // A lenient run (the caller needs no connection): nothing usable from
@@ -731,7 +754,7 @@ const loadConfig = async (options = {}) => {
 
   const issues = envIssues.concat(validateConfig(merged, { requireDb }));
   if (issues.length > 0) {
-    throw new ConfigInvalidError(issuesMessage(issues), { context: { issues } });
+    throw new ConfigInvalidError(formatIssues(issues), { context: { issues } });
   }
 
   const config = merged;
@@ -791,9 +814,9 @@ const loadConfig = async (options = {}) => {
     effectiveLogger(config.logger).debug(
       `Resolved config (source: ${configFilePath ? path.basename(configFilePath) : 'env/flags/defaults'})`,
       redactDeep({
-        ...knownOnly(rest),
+        ...pickKnown(rest),
         ...(clientOptions ? { clientOptions: Object.keys(clientOptions) } : {}),
-        ...(collections ? { collections: definitionNames(collections) } : {}),
+        ...(collections ? { collections: listDefinitionNames(collections) } : {}),
         ...(client ? { client: '[injected]' } : {}),
         ...(mongoose ? { mongoose: '[injected]' } : {}),
         ...(hooks ? { hooks: Object.keys(hooks) } : {}),
@@ -814,8 +837,8 @@ module.exports = {
   CONFIG_KEYS,
   DEFAULT_CONFIG,
   ENV_KEYS,
-  backgroundCollectionNames,
-  bookkeepingCollections,
+  listBackgroundCollections,
+  listBookkeepingCollections,
   // Re-exported from utils/collection-name.js, where it moved so that
   // core/converge/collections.js can use it without a require cycle through here.
   isCollectionName,

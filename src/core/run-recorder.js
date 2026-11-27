@@ -1,5 +1,5 @@
 const { LockAlreadyHeldError, MigronautError } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
+const { formatError } = require('../utils/error.js');
 const { ATTRIBUTES } = require('../utils/telemetry.js');
 
 /**
@@ -91,13 +91,13 @@ class RunRecorder {
     // without reconstructing it from per-migration events. On the failure
     // path the partial rows live on the error's context — exactly the case
     // where "how far did it get?" is the question, so they count too.
-    const { summary, skipped } = countRows(rowsOf(result, failure));
+    const { summary, skipped } = countRows(pickRows(result, failure));
     const durationMs = Date.now() - this.#startedAt;
     const telemetry = this.#telemetry;
     // A run stopped on request — stop(), a signal, a shutdown that puts the
     // job back — ended as asked: no error status, or every rolling deploy is
     // an error-rate spike. `migronaut.run.stopped` says it instead.
-    const stopped = failure?.code === 'ALX_ERR_RUN_ABORTED';
+    const isStopped = failure?.code === 'ALX_ERR_RUN_ABORTED';
     if (this.#span) {
       this.#span.finish(
         {
@@ -105,12 +105,12 @@ class RunRecorder {
           [ATTRIBUTES.RUN_REVERTED]: summary.reverted,
           [ATTRIBUTES.RUN_SKIPPED]: skipped,
           [ATTRIBUTES.RUN_TOTAL]: summary.total,
-          [ATTRIBUTES.RUN_STOPPED]: stopped ? true : undefined,
+          [ATTRIBUTES.RUN_STOPPED]: isStopped ? true : undefined,
           [ATTRIBUTES.LOCK_LOST_REASON]: this.#lostReason,
         },
-        stopped ? undefined : failure,
+        isStopped ? undefined : failure,
       );
-      telemetry.runEnded({ ...this.#info, durationMs, error: failure, stopped });
+      telemetry.runEnded({ ...this.#info, durationMs, error: failure, stopped: isStopped });
     } else if (failure instanceof LockAlreadyHeldError) {
       // Never held the lock, so there is no run to time — only a refusal to
       // count. Any other failure this early (an unreachable database) is the
@@ -123,9 +123,9 @@ class RunRecorder {
       durationMs,
       ...summary,
       // A raw Error here would hand subscribers an unredacted driver message
-      // (which can echo the credentialed URI) — errorText is the same
+      // (which can echo the credentialed URI) — formatError is the same
       // chokepoint every log line and result row already goes through.
-      ...(failure ? { error: errorText(failure) } : {}),
+      ...(failure ? { error: formatError(failure) } : {}),
       // And its typed code: a caller waiting for the lock retries the whole
       // run, so every refusal ends one as ALX_ERR_LOCK_ALREADY_HELD — a subscriber
       // that alerts on failed runs needs to tell those from a migration that
@@ -149,7 +149,7 @@ class RunRecorder {
 }
 
 /** The run's rows: its result, or the partial rows a failure carries — `null` when neither has any */
-const rowsOf = (result, failure) => {
+const pickRows = (result, failure) => {
   if (Array.isArray(result)) return result;
   if (failure instanceof MigronautError && Array.isArray(failure.context?.results)) {
     return failure.context.results;

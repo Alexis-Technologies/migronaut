@@ -12,7 +12,7 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
  * `ms`, jittered down to half of it — so processes that start together, or
  * that one failover failed together, drift apart instead of retrying in step.
  */
-const jitter = (ms) => Math.round(ms * (0.5 + Math.random() / 2));
+const jitter = (baseMs) => Math.round(baseMs * (0.5 + Math.random() / 2));
 
 /**
  * Map `items` through `fn` with at most `limit` calls in flight, preserving
@@ -26,7 +26,7 @@ const jitter = (ms) => Math.round(ms * (0.5 + Math.random() / 2));
  * aborts: the calls in flight finish, the rest never start (a checksum
  * mismatch no longer hashed the other thousand files first).
  */
-const mapLimit = async (items, limit, fn, signal) => {
+const mapLimit = async (items, limit, task, signal) => {
   // Workers fill it out of order: every slot exists before the first one lands.
   const results = [];
   for (let i = 0; i < items.length; i++) results.push(undefined);
@@ -43,7 +43,7 @@ const mapLimit = async (items, limit, fn, signal) => {
       const index = next++;
       if (index >= items.length) return;
       try {
-        results[index] = await fn(items[index], index);
+        results[index] = await task(items[index], index);
       } catch (error) {
         hasFailed = true;
         throw error;
@@ -66,10 +66,10 @@ const mapLimit = async (items, limit, fn, signal) => {
  * limit) would otherwise hold whatever comes after it for as long as the
  * outage lasts. The promise itself goes on; only the wait ends.
  */
-const settledWithin = async (promise, ms) => {
+const settleWithin = async (promise, timeoutMs) => {
   let timer = null;
   const expired = new Promise((resolve) => {
-    timer = setTimeout(() => resolve(false), ms);
+    timer = setTimeout(() => resolve(false), timeoutMs);
   });
   const settled = Promise.resolve(promise).then(
     () => true,
@@ -83,7 +83,7 @@ const settledWithin = async (promise, ms) => {
 };
 
 /**
- * {@link settledWithin} for a bound the caller may leave out: no `timeoutMs`
+ * {@link settleWithin} for a bound the caller may leave out: no `timeoutMs`
  * waits for good. A `timeoutMs` that is not a duration a timer honours is a
  * caller's mistake, refused.
  */
@@ -98,7 +98,7 @@ const waitAtMost = async (promise, timeoutMs) => {
       context: { timeoutMs },
     });
   }
-  return settledWithin(promise, timeoutMs);
+  return settleWithin(promise, timeoutMs);
 };
 
-module.exports = { MAX_TIMER_MS, jitter, mapLimit, settledWithin, waitAtMost };
+module.exports = { MAX_TIMER_MS, jitter, mapLimit, settleWithin, waitAtMost };

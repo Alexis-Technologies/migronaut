@@ -129,7 +129,7 @@ synchronous; every returned id is checked (non-empty string, ≤ 128 chars).
 code-only like `logger`) takes the user's own `@opentelemetry/api` objects; migronaut asks them for
 spans and instruments and never looks at the SDK behind them. [src/utils/telemetry.js](src/utils/telemetry.js)
 is the only module that knows an OpenTelemetry name or calls the tracer/meter — every call goes
-through its one `safe()` guard (telemetry must never break a run), failures are reported as a
+through its one `callSafely()` guard (telemetry must never break a run), failures are reported as a
 redacted status message plus `error.type`, and there are exactly three wrap sites, all in
 `core/migrator.js`: the `migronaut.run` span (opened once the lock is held), the
 `migronaut.migration` span (the *active* span while a migration runs — the one thing lifecycle
@@ -283,12 +283,12 @@ section is what migronaut adds to it or does otherwise. **This file wins** where
 - Never `console.*` — always the injected `MigronautLogger` (`null` = silent, used in tests).
   `no-console` and the same unit test hold it; the CLI writes to `process.stdout` / `stderr`.
 - Logging, telemetry and event listeners never fail the run they observe: `resolveLogger` guards
-  every logger call, `telemetry.js` puts every tracer and meter call behind its one `safe()`, and
+  every logger call, `telemetry.js` puts every tracer and meter call behind its one `callSafely()`, and
   the kit's `captureRejections` turns a rejecting `async` listener into a debug line. A hook
   (`beforeEach`, `onError`, …) may fail the run, as `HookFailedError`.
-- A caught error becomes text only through `src/utils/error.js`: `errorText` (credentials in a
-  URI masked), `errorWithCause` ("what failed — why", both halves redacted) and
-  `documentErrorText` (the values a duplicate-key or validation error quotes masked). Never a raw
+- A caught error becomes text only through `src/utils/error.js`: `formatError` (credentials in a
+  URI masked), `formatErrorWithCause` ("what failed — why", both halves redacted) and
+  `formatDocumentError` (the values a duplicate-key or validation error quotes masked). Never a raw
   `error.message`, `error.stack` or driver `errorResponse` in a log line, an error context, an
   event payload or a span.
 - Public API changes touch two files together — the entry's runtime barrel and its hand-written
@@ -354,7 +354,7 @@ warning. Where it differs, and why:
 A rule of alexiskills that migronaut breaks by design, with the reason:
 
 - **`String(value)` where the value may be a symbol** (a template literal throws on one):
-  anything thrown — a non-`Error` throw wrapped as a cause (`core/runner.js`), `errorText`
+  anything thrown — a non-`Error` throw wrapped as a cause (`core/runner.js`), `formatError`
   (`utils/error.js`), an error's `name` (`utils/redact.js`), what BullMQ or Redis threw
   (`bullmq/wait.js`), a thrown driver error's message (`core/background/store.js`); a key of a
   user `Map` (`utils/redact.js`, `utils/canonical.js`); an event name (`core/migrator.js`); what a
@@ -407,7 +407,7 @@ ends in `Error`, and its code is `ALX_ERR_` and that name in `UPPER_SNAKE_CASE`
   set only when given; only `MigronautError` itself reads `options.code`, and each subclass sets
   its own after `super`. Every instance has `name`, `message`, `code` and `context` (`{}` when none
   was given — so `context.results` attaches to any of them), and `cause` when it wraps one. A
-  wrap site writes `{ cause: error, context: { …, cause: errorText(error) } }`, in that order.
+  wrap site writes `{ cause: error, context: { …, cause: formatError(error) } }`, in that order.
 - `code` is the contract: what the CLI prints (`✖ ALX_ERR_LOCK_ALREADY_HELD: …`), what `--json`
   emits as `error.code`, what `EXIT_CODES` maps and what the queue decides retries by. `context` is plain,
   JSON-safe data about the failure (it survives `--json` and the changelog's failure trace);
@@ -595,7 +595,7 @@ release that keeps writing exhausts `maxPasses` and fails visibly; the coordinat
 `forceUnlock`/`unlock`/audit never touch them; on the queue a lane *completes* for every outcome
 the kit recorded (its coordinator decides from MongoDB), lanes carry `ignoreDependencyOnFailure`
 (the other three failure policies strand or wake the coordinator wrongly) and get a new job id per
-spawn (BullMQ will not move a job to another parent); `stampedDiff` writes only the fields that
+spawn (BullMQ will not move a job to another parent); `buildStampedDiff` writes only the fields that
 changed, so untouched fields keep their BSON types; a lane stopped by its caller (a shutdown) is
 `stopped`, never a failed slice, and `maxSliceFailures` counts failed slices in a row (a checkpoint
 resets it); `down` of a one-way background migration pauses it and waits for its lanes before it
@@ -604,7 +604,7 @@ registration; coordinator rounds are handed out by the kit under the coordinator
 chain asks without one), and a sync tick that waits for a background migration reports `waiting`,
 never `held`; `maxDocumentErrors` is capped at the 1000 bad ids a state keeps; the scaffold's
 placeholder collection `'TODO'` is refused by `up`; a revision guard refuses an operator-valued
-`_id`; background document errors mask dup-key values (`documentErrorText`); a shard-aware read may reach two shards (a
+`_id`; background document errors mask dup-key values (`formatDocumentError`); a shard-aware read may reach two shards (a
 mongos takes a `$lt` bound as inclusive when it picks shards); the shard-key guard compares
 numbers by value; the live watcher opens its stream *before* it probes the past; a typed
 `current` past the highest shape, written inline, errors as "not assignable to type 'never'"
@@ -645,7 +645,7 @@ waiting; a background plan is worked by the partitioner that split it or re-spli
 and a lane waiting for a lagging secondary yields at its slice's deadline; a throttle hook's pause
 and a retry backoff are capped at an hour; driver 7 words any refused write of code 20 as "This
 MongoDB deployment does not support retryable writes…" with no code and the server's error under
-`originalError` — `serverErrorOf` reads through it (`errorText`, `isTransactionsUnsupported`), so
+`originalError` — `unwrapServerError` reads through it (`formatError`, `isTransactionsUnsupported`), so
 do not match on that message or on the outer `code`. Names
 already taken, so not to reuse for anything else: `sync` (the queue job), `ensureIndexes` and the
 audit check `indexes` (the changelog's own indexes), the audit check `search`, `schema`

@@ -23,18 +23,18 @@ const endsWithAny = (file, suffixes) => {
 };
 
 /** Whether a symlink in `dir` leads to a regular file — a broken one leads nowhere */
-const linksToFile = (dir, name) => {
-  return fs.stat(path.join(dir, name)).then(
+const linksToFile = (directory, name) => {
+  return fs.stat(path.join(directory, name)).then(
     (stat) => stat.isFile(),
     () => false,
   );
 };
 
 /** The migration files in `dir`, sorted ascending — empty when the directory does not exist */
-const listMigrationFiles = async (dir, extensions) => {
+const listMigrationFiles = async (directory, extensions) => {
   let entries = [];
   try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
+    entries = await fs.readdir(directory, { withFileTypes: true });
   } catch (error) {
     if (error.code === 'ENOENT') return [];
     throw error;
@@ -52,7 +52,8 @@ const listMigrationFiles = async (dir, extensions) => {
     // (the loader follows the link), so a bulk run and `status` must see it
     // too, not skip it without a word. What it leads to decides; that is
     // asked only of an entry named like a migration.
-    const isFile = entry.isFile() || (entry.isSymbolicLink() && (await linksToFile(dir, file)));
+    const isFile =
+      entry.isFile() || (entry.isSymbolicLink() && (await linksToFile(directory, file)));
     if (isFile) matches.push(file);
   }
   matches.sort();
@@ -65,7 +66,7 @@ const listMigrationFiles = async (dir, extensions) => {
  * trace counts, so a migration that failed stops the line exactly like one
  * that never ran.
  */
-const pendingIn = (sequence, appliedNames, before) => {
+const selectPending = (sequence, appliedNames, before) => {
   const pending = [];
   for (const file of sequence) {
     if (before !== undefined && file >= before) break;
@@ -95,7 +96,7 @@ const truncateAtTarget = (pending, allFiles, to) => {
 };
 
 /** The name that sorts last — '' for none */
-const newestOf = (names) => {
+const findNewest = (names) => {
   let newest = '';
   for (const name of names) {
     if (name > newest) newest = name;
@@ -108,9 +109,9 @@ const newestOf = (names) => {
  * newest applied name — migrations merged late from a parallel branch, which
  * will run after migrations authored later. `null` when there are none.
  */
-const lateArrivals = (targets, appliedNames) => {
+const findLateArrivals = (targets, appliedNames) => {
   if (targets.length === 0 || appliedNames.size === 0) return null;
-  const newestApplied = newestOf(appliedNames);
+  const newestApplied = findNewest(appliedNames);
   const late = [];
   for (const target of targets) {
     if (!appliedNames.has(target) && target < newestApplied) late.push(target);
@@ -134,7 +135,7 @@ const revertOrder = (records, preserveOrder) => {
  * `context` carries `blockedBy` (and `failed`, the blockers with a failed
  * trace — a stopped line rather than one still on its way).
  */
-const blockedError = (subject, what, context) => {
+const createBlockedError = (subject, what, context) => {
   const { blockedBy } = context;
   return new MigrationBlockedError(
     `${subject} is blocked: ${blockedBy.length} ${what}: ${blockedBy.join(', ')}`,
@@ -144,10 +145,10 @@ const blockedError = (subject, what, context) => {
 
 module.exports = {
   listMigrationFiles,
-  pendingIn,
+  selectPending,
   truncateAtTarget,
-  newestOf,
-  lateArrivals,
+  findNewest,
+  findLateArrivals,
   revertOrder,
-  blockedError,
+  createBlockedError,
 };

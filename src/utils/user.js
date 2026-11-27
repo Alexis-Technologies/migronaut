@@ -12,7 +12,7 @@ const os = require('node:os');
  * — routine in distroless/scratch containers started with an arbitrary
  * `--user`. Recording who ran a migration must never be the reason a run fails.
  */
-const safeUsername = () => {
+const resolveUsername = () => {
   const override = process.env.MIGRONAUT_USER;
   if (override !== undefined && override !== '') return override;
   try {
@@ -22,4 +22,4 @@ const safeUsername = () => {
   }
 };
 
-module.exports = { safeUsername };
+module.exports = { resolveUsername };

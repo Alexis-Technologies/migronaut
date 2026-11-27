@@ -32,7 +32,7 @@ const assertMigrationName = (name, context = {}) => {
  * backwards can never close a cycle — the whole "is it a DAG?" question,
  * answered by the name. Returns `{ path, message }` issues.
  */
-const requiresIssues = (requires, name) => {
+const checkRequires = (requires, name) => {
   if (requires === undefined) return [];
   if (!Array.isArray(requires)) {
     return [{ path: 'requires', message: 'must be an array of migration file names' }];
@@ -58,4 +58,4 @@ const requiresIssues = (requires, name) => {
   return issues;
 };
 
-module.exports = { isBareFilename, assertMigrationName, requiresIssues };
+module.exports = { isBareFilename, assertMigrationName, checkRequires };

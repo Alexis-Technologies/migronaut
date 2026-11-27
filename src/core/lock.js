@@ -5,9 +5,9 @@ const {
   LockLostError,
   LockReleaseFailedError,
 } = require('../errors/index.js');
-const { errorText, isDuplicateKey } = require('../utils/error.js');
-const { randomId } = require('../utils/id.js');
-const { safeUsername } = require('../utils/user.js');
+const { formatError, isDuplicateKey } = require('../utils/error.js');
+const { createRandomId } = require('../utils/id.js');
+const { resolveUsername } = require('../utils/user.js');
 const { BOOKKEEPING_OPTIONS } = require('./server-info.js');
 
 /** Fixed `_id` of the singleton migration lock document */
@@ -17,7 +17,7 @@ const LOCK_ID = 'migronaut_lock';
 const LOCK_LABEL = 'migration lock';
 
 /** `migration lock` → `Migration lock`, for the start of a sentence */
-const sentence = (label) => label.charAt(0).toUpperCase() + label.slice(1);
+const capitalize = (label) => label.charAt(0).toUpperCase() + label.slice(1);
 
 /**
  * Map a raw lock document to the public LockInfo shape. The `nonce` — what
@@ -122,8 +122,8 @@ class MigrationLock {
     const collection = this.#coll();
     // The caller may supply the run id so the lock document, the changelog
     // records and the log lines of one run all carry the same token.
-    const owner = token ?? randomId();
-    const nonce = randomId();
+    const owner = token ?? createRandomId();
+    const nonce = createRandomId();
     // The replacement document for the taken branch. $literal guards the
     // strings: a pipeline expression would otherwise interpret a leading `$`
     // in a value as a field path.
@@ -132,7 +132,7 @@ class MigrationLock {
       lockedAt: '$$NOW',
       pid: { $literal: process.pid },
       host: { $literal: os.hostname() },
-      executedBy: { $literal: safeUsername() },
+      executedBy: { $literal: resolveUsername() },
       owner: { $literal: owner },
       nonce: { $literal: nonce },
       ttlMs: { $literal: this.ttlMs },
@@ -173,7 +173,7 @@ class MigrationLock {
         const holder = await collection
           .findOne({ _id: this.#id }, this.#timeLimit)
           .catch(() => null);
-        throw new LockAlreadyHeldError(`${sentence(this.#label)} is already held`, {
+        throw new LockAlreadyHeldError(`${capitalize(this.#label)} is already held`, {
           context: { holder: toLockInfo(holder) ?? undefined, ttlMs: this.ttlMs },
         });
       }
@@ -208,7 +208,7 @@ class MigrationLock {
       throw error;
     }
     if (!current || current.owner !== owner || current.nonce !== nonce) {
-      throw new LockAlreadyHeldError(`${sentence(this.#label)} is already held`, {
+      throw new LockAlreadyHeldError(`${capitalize(this.#label)} is already held`, {
         context: { holder: toLockInfo(current) ?? undefined, ttlMs: this.ttlMs },
       });
     }
@@ -292,7 +292,7 @@ class MigrationLock {
     } catch (error) {
       throw new LockReleaseFailedError(`Failed to release ${this.#label}`, {
         cause: error,
-        context: { cause: errorText(error) },
+        context: { cause: formatError(error) },
       });
     }
   }
@@ -321,7 +321,7 @@ class MigrationLock {
  * When `noLock` is true, acquisition is skipped and a loud warning is emitted —
  * intended for local development only.
  */
-const runWithLock = async (lock, options, fn) => {
+const runWithLock = async (lock, options, work) => {
   const controller = new AbortController();
   // Any object with acquire/renew/release/ttlMs is a lock here — a partition
   // lease included; `label` names it in the messages.
@@ -335,7 +335,7 @@ const runWithLock = async (lock, options, fn) => {
     // `skipped: true` tells them apart from a real lock.
     options.onLockAcquired?.({ skipped: true });
     try {
-      return await fn(controller.signal, { release: async () => false });
+      return await work(controller.signal, { release: async () => false });
     } finally {
       options.onLockReleased?.({ skipped: true });
     }
@@ -347,29 +347,29 @@ const runWithLock = async (lock, options, fn) => {
   // ("acquire took 4s — the lock collection is contended") without a log parse.
   options.onLockAcquired?.({ ttlMs: lock.ttlMs, acquireMs: Date.now() - acquireStart });
 
-  const abortOnLoss = (options.onLockLost ?? 'abort') === 'abort';
+  const shouldAbortOnLoss = (options.onLockLost ?? 'abort') === 'abort';
   // One lock is lost once, however many timers notice: the heartbeat finds it
   // reclaimed on every tick from then on, and the deadline may fire on top.
   // A run of an hour would say so — and emit `lock:lost` — a hundred times.
-  let lost = false;
+  let isLost = false;
   // What the last failed renewal said: the cause of a lock lost to the deadline.
   let lastRenewError = null;
   const loseLock = (reason, cause) => {
-    if (lost) return;
-    lost = true;
+    if (isLost) return;
+    isLost = true;
     // The most alert-worthy line this module emits — at error level when the
     // run stops on it, a warning under `onLockLost: 'warn'` (what that option
     // asks for) — with structured fields so a JSON sink can trigger on it
     // without parsing the human string.
     const fields = { event: 'lock:lost', reason };
-    if (abortOnLoss) options.logger.error(`✖ Lost the ${label} mid-run (${reason})`, fields);
+    if (shouldAbortOnLoss) options.logger.error(`✖ Lost the ${label} mid-run (${reason})`, fields);
     else options.logger.warn(`⚠ Lost the ${label} mid-run (${reason})`, fields);
     options.onLockLostEvent?.(reason);
-    if (abortOnLoss && !controller.signal.aborted) {
+    if (shouldAbortOnLoss && !controller.signal.aborted) {
       const context =
         cause === null
           ? { reason, aborted: true }
-          : { reason, aborted: true, cause: errorText(cause) };
+          : { reason, aborted: true, cause: formatError(cause) };
       controller.abort(
         new LockLostError(`Lost the ${label} mid-run`, {
           ...(cause === null ? {} : { cause }),
@@ -384,7 +384,7 @@ const runWithLock = async (lock, options, fn) => {
   // open on its own.
   const intervalMs = Math.max(1, Math.floor(lock.ttlMs / 2));
   let consecutiveFailures = 0;
-  let stopped = false;
+  let isStopped = false;
 
   // The hard deadline is the single failure escalation: renewal errors are
   // tolerated (warned about below) exactly as long as the lock cannot be
@@ -393,16 +393,16 @@ const runWithLock = async (lock, options, fn) => {
   // re-arms it. (A consecutive-failure counter used to sit alongside this,
   // but firing at 1.5×TTL it could mathematically never beat the deadline.)
   const deadlineMarginMs = Math.min(Math.floor(intervalMs / 2), 5000);
-  let deadline = null;
+  let deadlineTimer = null;
   const armDeadline = () => {
-    clearTimeout(deadline);
-    deadline = setTimeout(
+    clearTimeout(deadlineTimer);
+    deadlineTimer = setTimeout(
       () => {
-        if (!stopped) loseLock('no successful renewal within the TTL', lastRenewError);
+        if (!isStopped) loseLock('no successful renewal within the TTL', lastRenewError);
       },
       Math.max(1, lock.ttlMs - deadlineMarginMs),
     );
-    deadline.unref?.();
+    deadlineTimer.unref?.();
   };
   armDeadline();
 
@@ -413,10 +413,10 @@ const runWithLock = async (lock, options, fn) => {
   // survive), overlapping ticks would otherwise overwrite `inFlight` and let
   // an earlier, still-unsettled renewal escape the final await.
   let inFlight = null;
-  let pending = false;
+  let isPending = false;
   const heartbeat = setInterval(() => {
-    if (pending) return;
-    pending = true;
+    if (isPending) return;
+    isPending = true;
     inFlight = lock
       .renew()
       .then((held) => {
@@ -427,22 +427,22 @@ const runWithLock = async (lock, options, fn) => {
         // to renew. (A deadline that fired on failing renewals is different —
         // the document may still be ours, and the heartbeat goes on trying.)
         lastRenewError = null;
-        if (!held && !stopped) {
+        if (!held && !isStopped) {
           loseLock('another run reclaimed it', null);
           clearInterval(heartbeat);
-          return void clearTimeout(deadline);
+          return void clearTimeout(deadlineTimer);
         }
         return void armDeadline();
       })
       .catch((error) => {
-        if (stopped) return;
+        if (isStopped) return;
         // A failing renewal may just be a blip and is only warned about here.
         // The TTL deadline (armDeadline above) is the sole escalation: it
         // fires strictly before the lock becomes stale-reclaimable, so
         // failures are tolerated exactly as long as they are harmless.
         consecutiveFailures += 1;
         lastRenewError = error;
-        const message = errorText(error);
+        const message = formatError(error);
         options.logger.warn(`⚠ Lock renewal failed (${consecutiveFailures} in a row): ${message}`, {
           event: 'lock:renew-failed',
           consecutiveFailures,
@@ -450,20 +450,20 @@ const runWithLock = async (lock, options, fn) => {
         });
       })
       .finally(() => {
-        pending = false;
+        isPending = false;
       });
   }, intervalMs);
   heartbeat.unref?.();
 
   const stopHeartbeat = async () => {
-    stopped = true;
+    isStopped = true;
     clearInterval(heartbeat);
-    clearTimeout(deadline);
+    clearTimeout(deadlineTimer);
     // Let any renewal already in flight settle, so no stray query outlives this
     // call and lands after the caller has closed the client.
     await inFlight;
   };
-  let released = false;
+  let isReleased = false;
   let releasing = null;
   const control = {
     release: () => {
@@ -471,36 +471,36 @@ const runWithLock = async (lock, options, fn) => {
         await stopHeartbeat();
         try {
           await lock.release();
-          released = true;
+          isReleased = true;
           options.onLockReleased?.({ early: true });
         } catch (releaseError) {
-          const message = errorText(releaseError);
+          const message = formatError(releaseError);
           options.logger.warn(
             `⚠ Failed to release the ${label} early: ${message} — it frees itself once ` +
               'its TTL runs out',
             { event: 'lock:release-failed', error: message, early: true },
           );
         }
-        return released;
+        return isReleased;
       })());
     },
   };
 
   let result = undefined;
   let runError = null;
-  let failed = false;
+  let hasFailed = false;
   try {
-    result = await fn(controller.signal, control);
+    result = await work(controller.signal, control);
   } catch (error) {
-    failed = true;
+    hasFailed = true;
     runError = error;
   } finally {
     await releasing;
     await stopHeartbeat();
   }
 
-  if (released) {
-    if (failed) throw runError;
+  if (isReleased) {
+    if (hasFailed) throw runError;
     return result;
   }
   try {
@@ -513,20 +513,20 @@ const runWithLock = async (lock, options, fn) => {
     // but the migrations DID apply, and that list must survive onto the error,
     // or "everything applied, only the lock cleanup failed" (the lock document
     // self-heals via its TTL) is indistinguishable from a failed run.
-    if (!failed) {
+    if (!hasFailed) {
       if (releaseError instanceof LockReleaseFailedError && Array.isArray(result)) {
         releaseError.context = { ...releaseError.context, results: [...result] };
       }
       throw releaseError;
     }
-    const message = errorText(releaseError);
+    const message = formatError(releaseError);
     options.logger.warn(`⚠ Failed to release the ${label}: ${message}`, {
       event: 'lock:release-failed',
       error: message,
     });
   }
 
-  if (failed) throw runError;
+  if (hasFailed) throw runError;
   return result;
 };
 

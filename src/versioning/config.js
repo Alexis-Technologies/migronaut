@@ -30,7 +30,7 @@ const MAX_FIELD_NAME = 64;
  * writes it with `$set`/`$inc`, so a dot would address a nested path and a
  * leading `$` an operator; `_id` is immutable.
  */
-const fieldNameIssue = (name) => {
+const checkFieldName = (name) => {
   if (typeof name !== 'string' || name.length === 0) return 'must be a non-empty string';
   if (name.length > MAX_FIELD_NAME) return `must be at most ${MAX_FIELD_NAME} characters`;
   if (name.startsWith('$')) return "must not start with '$'";
@@ -49,7 +49,7 @@ const isCount = (value, floor) => Number.isSafeInteger(value) && value >= floor;
  * when valid). `path` is where it sits — `collections[2].versioning`,
  * `orders.ts: versioning`.
  */
-const versioningIssues = (value, path = 'versioning') => {
+const checkVersioning = (value, path = 'versioning') => {
   if (!isPlainObject(value)) {
     return [
       {
@@ -66,25 +66,25 @@ const versioningIssues = (value, path = 'versioning') => {
     }
   }
   const { current, min, field, revision, revisionField, index } = value;
-  const currentValid = isCount(current, 1);
+  const isCurrentValid = isCount(current, 1);
   if (current === undefined) report('current', 'is required');
-  else if (!currentValid) report('current', 'must be an integer ≥ 1');
+  else if (!isCurrentValid) report('current', 'must be an integer ≥ 1');
   // The default min (1) never exceeds a valid current (≥ 1).
   if (min !== undefined) {
     if (!isCount(min, 0)) report('min', 'must be an integer ≥ 0');
-    else if (currentValid && min > current) {
+    else if (isCurrentValid && min > current) {
       report('min', `must not exceed current (${current})`);
     }
   }
   if (field !== undefined) {
-    const issue = fieldNameIssue(field);
+    const issue = checkFieldName(field);
     if (issue) report('field', issue);
   }
   if (revision !== undefined && typeof revision !== 'boolean') {
     report('revision', 'must be a boolean');
   }
   if (revisionField !== undefined) {
-    const issue = fieldNameIssue(revisionField);
+    const issue = checkFieldName(revisionField);
     if (issue) report('revisionField', issue);
     else if (revision === false) report('revisionField', 'has no effect with revision: false');
   }
@@ -106,7 +106,7 @@ const versioningIssues = (value, path = 'versioning') => {
  * @throws {ConfigInvalidError} with every issue in `context.issues`
  */
 const resolveVersioning = (value, { path = 'versioning' } = {}) => {
-  const issues = versioningIssues(value, path);
+  const issues = checkVersioning(value, path);
   if (issues.length > 0) {
     throw new ConfigInvalidError(`Invalid ${path}: ${issues[0].path} ${issues[0].message}`, {
       context: { issues },
@@ -128,7 +128,7 @@ const resolveVersioning = (value, { path = 'versioning' } = {}) => {
  * definitions (each with `name`) or a `{ name: definition }` map — or `null`
  * when it is not declared or not versioned.
  */
-const versioningOf = (definitions, collection) => {
+const findVersioning = (definitions, collection) => {
   let definition = null;
   if (Array.isArray(definitions)) {
     for (const candidate of definitions) {
@@ -148,8 +148,8 @@ module.exports = {
   VERSIONING_KEYS,
   VERSIONING_DEFAULTS,
   MAX_FIELD_NAME,
-  fieldNameIssue,
-  versioningIssues,
+  checkFieldName,
+  checkVersioning,
   resolveVersioning,
-  versioningOf,
+  findVersioning,
 };

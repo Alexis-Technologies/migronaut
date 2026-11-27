@@ -3,7 +3,7 @@ const { after, before, beforeEach, describe, it } = require('node:test');
 const { Decimal128, Double, Int32, Long, MongoClient, ObjectId } = require('mongodb');
 const {
   applyBatch,
-  controlOutcome,
+  resolveControlOutcome,
   matchOf,
   processPartition,
   readStepResult,
@@ -284,10 +284,13 @@ describe('background engine (integration)', () => {
     assert.strictEqual(yielded.counters.migrated, 10);
     const paused = await run(setup, { readControl: async () => ({ status: 'paused' }) });
     assert.strictEqual(paused.outcome, 'paused');
-    assert.strictEqual(controlOutcome(null, setup.job, setup.partition), 'cancelled');
-    assert.strictEqual(controlOutcome({ status: 'failed' }, setup.job, setup.partition), 'failed');
+    assert.strictEqual(resolveControlOutcome(null, setup.job, setup.partition), 'cancelled');
     assert.strictEqual(
-      controlOutcome({ status: 'running', generation: 9 }, setup.job, setup.partition),
+      resolveControlOutcome({ status: 'failed' }, setup.job, setup.partition),
+      'failed',
+    );
+    assert.strictEqual(
+      resolveControlOutcome({ status: 'running', generation: 9 }, setup.job, setup.partition),
       'stale',
     );
     const stopped = await run(setup, { signal: AbortSignal.abort() });

@@ -938,10 +938,10 @@ optional rather than merely discouraged:
 | `MIGRONAUT_URI` | `uri` | — *(required)* |
 | `MIGRONAUT_DB` | `dbName` | — *(required)* |
 | `MIGRONAUT_MIGRATIONS_DIR` | `migrationsDir` | `./migrations` |
-| `MIGRONAUT_COLLECTION` | `migrationsCollection` | `_migronaut_migrations` |
+| `MIGRONAUT_MIGRATIONS_COLLECTION` | `migrationsCollection` | `_migronaut_migrations` |
 | `MIGRONAUT_LOCK_COLLECTION` | `lockCollection` | `_migronaut_locks` |
 | `MIGRONAUT_CONVERGE_LOG_COLLECTION` | `convergeLogCollection` | `_migronaut_converge` |
-| `MIGRONAUT_LOCK_TTL` | `lockTTLSeconds` | `60` |
+| `MIGRONAUT_LOCK_TTL_SECONDS` | `lockTTLSeconds` | `60` |
 | `MIGRONAUT_STRICT` | `strict` | `false` |
 | `MIGRONAUT_USE_TRANSACTION` | `useTransaction` | `false` |
 | `MIGRONAUT_SEQUENTIAL` | `sequential` | `false` |
@@ -970,7 +970,7 @@ optional rather than merely discouraged:
 variable can express them.
 
 A value that doesn't parse is **rejected, never coerced**: `MIGRONAUT_STRICT=on` or
-`MIGRONAUT_LOCK_TTL=abc` fails with an error naming the variable, rather than quietly turning a
+`MIGRONAUT_LOCK_TTL_SECONDS=abc` fails with an error naming the variable, rather than quietly turning a
 safety setting off.
 
 Three more variables shape the CLI rather than the config:

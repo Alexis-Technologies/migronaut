@@ -2,9 +2,9 @@ const { defineCommand } = require('../shared.js');
 const { renderRowsOrEmpty } = require('../table.js');
 
 /** The status filter the flags ask for: `--pending` before `--applied`, else every row */
-const statusFilter = (opts) => {
-  if (opts.pending) return 'pending';
-  if (opts.applied) return 'applied';
+const resolveStatusFilter = (flags) => {
+  if (flags.pending) return 'pending';
+  if (flags.applied) return 'applied';
   return 'all';
 };
 
@@ -17,7 +17,7 @@ const registerList = (program) => {
       ['--pending', 'Show only pending migrations'],
       ['--applied', 'Show only applied migrations'],
     ],
-    run: (migrator, opts) => migrator.list(statusFilter(opts)),
+    run: (migrator, flags) => migrator.list(resolveStatusFilter(flags)),
     render: renderRowsOrEmpty,
   });
 };

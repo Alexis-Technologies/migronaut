@@ -1,4 +1,4 @@
-const { errorText } = require('../../utils/error.js');
+const { formatError } = require('../../utils/error.js');
 const { SEARCH_UNAVAILABLE_REASON } = require('./plan.js');
 const { SEARCH_STEPS, isSearchUnavailable, runSearchStep } = require('./search.js');
 const { INDEX_NOT_FOUND } = require('../server-info.js');
@@ -56,7 +56,7 @@ const runRebuild = async (db, collection, step, settle) => {
         try {
           await db.collection(collection).createIndexes([drop.restore]);
         } catch (restoreError) {
-          restoreErrors.push(`${drop.name}: ${errorText(restoreError)}`);
+          restoreErrors.push(`${drop.name}: ${formatError(restoreError)}`);
         }
       }
       return {
@@ -93,13 +93,13 @@ const convertToUnique = async (db, collection, step) => {
   try {
     await db.command({ collMod: collection, index: { name: step.name, unique: true } });
   } catch (error) {
-    let left = false;
+    let isLeft = false;
     await db
       .command({ collMod: collection, index: { name: step.name, prepareUnique: false } })
       .catch(() => {
-        left = true;
+        isLeft = true;
       });
-    return { error, left };
+    return { error, left: isLeft };
   }
   if (Object.keys(step.rest).length > 0) {
     await db.command({ collMod: collection, index: { name: step.name, ...step.rest } });
@@ -171,8 +171,8 @@ const runStep = async (db, collection, step, settle, search) => {
     return null;
   } catch (error) {
     // One command for several indexes fails (or succeeds) for all of them.
-    const together = step.op === 'createIndexes' || step.op === 'createSearchIndexes';
-    return { error, actions: together ? step.actions : [step.actions[0]], extra: {} };
+    const canBatch = step.op === 'createIndexes' || step.op === 'createSearchIndexes';
+    return { error, actions: canBatch ? step.actions : [step.actions[0]], extra: {} };
   }
 };
 

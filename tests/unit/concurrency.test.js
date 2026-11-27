@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { mapLimit, settledWithin } = require('../../src/utils/concurrency.js');
+const { mapLimit, settleWithin } = require('../../src/utils/concurrency.js');
 
 /** Resolve after a tick, so overlapping calls are actually observable */
 const tick = () => new Promise((resolve) => setTimeout(resolve, 1));
@@ -117,11 +117,11 @@ describe('mapLimit', () => {
   });
 });
 
-describe('settledWithin', () => {
+describe('settleWithin', () => {
   it('should say a promise settled — fulfilled or rejected alike — and never reject', async () => {
-    assert.strictEqual(await settledWithin(Promise.resolve('done'), 1000), true);
-    assert.strictEqual(await settledWithin(Promise.reject(new Error('no')), 1000), true);
-    assert.strictEqual(await settledWithin('not a promise', 1000), true);
+    assert.strictEqual(await settleWithin(Promise.resolve('done'), 1000), true);
+    assert.strictEqual(await settleWithin(Promise.reject(new Error('no')), 1000), true);
+    assert.strictEqual(await settleWithin('not a promise', 1000), true);
   });
 
   it('should stop waiting after the time it was given, leaving the promise alone', async () => {
@@ -130,7 +130,7 @@ describe('settledWithin', () => {
       finish = resolve;
     });
     const startedAt = Date.now();
-    assert.strictEqual(await settledWithin(slow, 20), false);
+    assert.strictEqual(await settleWithin(slow, 20), false);
     assert.ok(Date.now() - startedAt < 500);
     // The wait ended, not the work: it still settles later, for whoever asks.
     finish('late');
@@ -139,6 +139,6 @@ describe('settledWithin', () => {
 
   it('should leave no timer behind when the promise settles first', async () => {
     // A pending timer would keep this process alive for a minute.
-    assert.strictEqual(await settledWithin(Promise.resolve(), 60_000), true);
+    assert.strictEqual(await settleWithin(Promise.resolve(), 60_000), true);
   });
 });

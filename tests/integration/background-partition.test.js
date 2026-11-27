@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it } = require('node:test');
 const { Binary, Decimal128, Long, ObjectId } = require('mongodb');
 const { idRangePartitioner, sliceBracket } = require('../../src/core/background/partition.js');
-const { scopeFilter } = require('../../src/core/background/spec.js');
+const { buildScopeFilter } = require('../../src/core/background/spec.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
 let mongo = null;
@@ -53,7 +53,9 @@ const coverage = async (partitions) => {
   const counts = [];
   for (const { scope } of partitions) {
     counts.push(
-      await mongo.db.collection('things').countDocuments({ $and: [MATCH, scopeFilter(scope)] }),
+      await mongo.db
+        .collection('things')
+        .countDocuments({ $and: [MATCH, buildScopeFilter(scope)] }),
     );
   }
   return { counts, total: counts.reduce((sum, count) => sum + count, 0) };

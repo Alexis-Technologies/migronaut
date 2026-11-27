@@ -16,9 +16,9 @@ const registerBaseline = (program) => {
     // changelog claims is applied, which is exactly as consequential as a
     // forced re-run — and --json is non-interactive, so it needs an explicit
     // --yes rather than a prompt that can never be answered.
-    preflight: async (opts, _positionals, { logger }) => {
-      if (!opts.yes) {
-        if (opts.json) {
+    preflight: async (flags, _positionals, { logger }) => {
+      if (!flags.yes) {
+        if (flags.json) {
           throw new ConfigInvalidError(
             'baseline needs confirmation — pass --yes to confirm in --json mode',
           );
@@ -33,10 +33,10 @@ const registerBaseline = (program) => {
       }
       return undefined;
     },
-    run: (migrator, opts) => {
+    run: (migrator, flags) => {
       return migrator.baseline({
-        noLock: opts.noLock,
-        ...(opts.to ? { to: opts.to } : {}),
+        noLock: flags.noLock,
+        ...(flags.to ? { to: flags.to } : {}),
       });
     },
     // No render: core logs the ✔ Baselined summary itself.
