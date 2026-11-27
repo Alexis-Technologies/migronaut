@@ -190,8 +190,6 @@ class BackgroundStore {
     return on === 'state' ? this.#states : this.#partitions;
   }
 
-  // ─── State ──────────────────────────────────────────────────────────────────
-
   /** A state document, read from the primary — or `null`; `projection` to read less of it */
   get(name, { session, projection } = {}) {
     return this.#states.findOne(
@@ -381,8 +379,6 @@ class BackgroundStore {
     await this.#partitions.deleteMany({ background: name }, options);
     return result.deletedCount === 1;
   }
-
-  // ─── Plans ──────────────────────────────────────────────────────────────────
 
   /**
    * Commit a new plan: its partitions inserted under a fresh plan token, then
@@ -638,8 +634,6 @@ class BackgroundStore {
     );
     return result.modifiedCount;
   }
-
-  // ─── Leases ─────────────────────────────────────────────────────────────────
 
   /**
    * Free the leases nobody renewed within their own TTL — in server time.

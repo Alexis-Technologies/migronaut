@@ -163,8 +163,9 @@ const toDocumentError = (doc, error, reason) => {
 /**
  * Transform `docs` (each on a copy): `[{ doc, next, error }]`, aligned — one
  * shape for both outcomes, `error` null when the document transformed.
- * Every result is read once more, per document, by the write path. A batch transformation that throws, or returns the wrong number
- * of results, fails the slice — it cannot say which document was at fault.
+ * Every result is read once more, per document, by the write path. A batch transformation that
+ * throws, or returns the wrong number of results, fails the slice — it cannot say which document
+ * was at fault.
  */
 const transformAll = async (job, docs, ctx) => {
   const { one, many } = resolveDirection(job.spec, job.fns, job.direction);

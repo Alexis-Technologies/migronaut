@@ -2919,7 +2919,32 @@ export interface MigrationSummary {
  * Run all pending migrations and return a summary — the blessed one-call entry
  * point for application startup, deploy hooks, serverless cold starts, and test
  * setup. Always disconnects in a `finally`, so a failure never leaks a MongoDB
- * connection.
+ * connection. Migration errors propagate unchanged (with their typed `code`), so
+ * a broken migration aborts the boot sequence instead of starting the app
+ * against a half-migrated database.
+ *
+ * For multi-instance deploys, set `onLockHeld: 'wait'` so instances that lose
+ * the race to acquire the lock block until the migrating peer finishes, then
+ * confirm there is nothing left to apply. Pass a `signal` (wired to SIGTERM)
+ * so a pod being shut down stops waiting — and stops between migrations if it
+ * already holds the lock — instead of taking the lock just before SIGKILL.
+ *
+ * Several kits against several databases in one process: pass `envFile: false`
+ * and supply `uri`/`dbName` directly. Loading a `.env` writes the shared
+ * `process.env` (without overriding), so two kits with different env files
+ * would otherwise leak `MIGRONAUT_*` values into each other's config.
+ *
+ * @throws {MigronautError} ALX_ERR_* — whatever stopped the run, its code kept
+ * @example
+ * ```js
+ * const { runMigrations } = require('@alexify/migronaut');
+ *
+ * const { applied, upToDate } = await runMigrations(
+ *   { uri: process.env.MIGRONAUT_URI, dbName: 'my_app' },
+ *   { onLockHeld: 'wait' },
+ * );
+ * if (!upToDate) console.log(`Applied ${applied.length} migration(s)`);
+ * ```
  */
 export function runMigrations(
   config?: Partial<MigronautConfig>,
@@ -2929,6 +2954,18 @@ export function runMigrations(
 /**
  * Return the migrations that have not yet been applied — a connection-managed
  * readiness probe. Opens its own connection and always disconnects in a `finally`.
+ * Use it to fail a deploy or health check when the database is behind, without
+ * running anything.
+ *
+ * @example
+ * ```js
+ * const { pendingMigrations } = require('@alexify/migronaut');
+ *
+ * const pending = await pendingMigrations({ uri, dbName: 'my_app' });
+ * if (pending.length > 0) {
+ *   throw new Error(`Database is behind by ${pending.length} migration(s)`);
+ * }
+ * ```
  */
 export function pendingMigrations(
   config?: Partial<MigronautConfig>,

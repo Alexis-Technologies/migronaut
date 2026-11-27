@@ -113,7 +113,9 @@ const createUpcaster = (versioning, steps, { newer = 'throw', collection } = {})
     return version;
   };
 
-  /** `doc` lifted from `from` to `to` — every step on one private copy (`copy: false`: it is one) */
+  /**
+   * `doc` lifted from `from` to `to` — every step on one private copy (`copy: false`: it is one)
+   */
   const lift = (doc, from, to, { copy = true } = {}) => {
     let next = copy ? cloneDocument(doc) : doc;
     for (let version = from; version < to; version++) {

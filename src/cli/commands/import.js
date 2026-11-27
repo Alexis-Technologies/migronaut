@@ -1,7 +1,6 @@
 const { defineCommand } = require('../shared.js');
 const { renderImportTable } = require('../table.js');
 
-/** Register the `import` command (adopt a migrate-mongo changelog) */
 const registerImport = (program) => {
   defineCommand(program, {
     name: 'import',

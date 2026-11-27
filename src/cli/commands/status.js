@@ -2,7 +2,6 @@ const { ConfigInvalidError } = require('../../errors/index.js');
 const { defineCommand, EXIT_CODES } = require('../shared.js');
 const { renderRowsOrEmpty } = require('../table.js');
 
-/** Register the `status` command */
 const registerStatus = (program) => {
   defineCommand(program, {
     name: 'status',

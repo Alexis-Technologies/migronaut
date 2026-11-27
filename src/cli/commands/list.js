@@ -8,7 +8,6 @@ const resolveStatusFilter = (flags) => {
   return 'all';
 };
 
-/** Register the `list` command */
 const registerList = (program) => {
   defineCommand(program, {
     name: 'list',

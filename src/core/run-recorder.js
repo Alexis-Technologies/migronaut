@@ -148,7 +148,9 @@ class RunRecorder {
   }
 }
 
-/** The run's rows: its result, or the partial rows a failure carries — `null` when neither has any */
+/**
+ * The run's rows: its result, or the partial rows a failure carries — `null` when neither has any
+ */
 const pickRows = (result, failure) => {
   if (Array.isArray(result)) return result;
   if (failure instanceof MigronautError && Array.isArray(failure.context?.results)) {

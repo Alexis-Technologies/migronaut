@@ -354,8 +354,6 @@ const summarize = (result) => {
   return summary;
 };
 
-// ─── Document images ──────────────────────────────────────────────────────────
-
 const toImageKey = (collection, id) => `${collection}\u0000${JSON.stringify(snapshot(id, 1024))}`;
 
 /** Before a write: read (in the transaction) what it may change, while there is room */
@@ -462,8 +460,6 @@ const finishImages = async (state) => {
     });
   }
 };
-
-// ─── Proxies ──────────────────────────────────────────────────────────────────
 
 const proxyCollection = (state, raw) => {
   const name = raw.collectionName;

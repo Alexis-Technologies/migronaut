@@ -1,7 +1,6 @@
 const { ConfigInvalidError } = require('../../errors/index.js');
 const { confirm, defineCommand } = require('../shared.js');
 
-/** Register the `up` command */
 const registerUp = (program) => {
   defineCommand(program, {
     name: 'up',

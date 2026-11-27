@@ -194,7 +194,9 @@ class MigratorKit extends EventEmitter {
   #logEmitterInstance = null;
   /** Mints an id in the configured format (`generateId`, else a UUID); set with the config */
   #newId = null;
-  /** Spans and metrics through the injected `telemetry` (a no-op without one); set with the config */
+  /**
+   * Spans and metrics through the injected `telemetry` (a no-op without one); set with the config
+   */
   #telemetry = null;
   /** Whether changelog indexes have already been ensured on this instance */
   #hasEnsuredIndexes = false;
@@ -255,7 +257,8 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * What the hosts (background/host.js, converge/host.js) reach of this kit: its state through getters
+   * What the hosts (background/host.js, converge/host.js) reach of this kit: its state through
+   * getters
    * (read when used — the config loads, a run starts and ends), and the few
    * private methods it runs on.
    */
@@ -438,9 +441,8 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * The resolved logger — silent when config sets `logger: null`. Meaningful
-   * after `connect()` (before it, the config file's logger is not loaded yet);
-   * lets wrappers like `runMigrations` log with the run's own verbosity.
+   * Meaningful after `connect()` (before it, the config file's logger is not loaded yet); lets
+   * wrappers like `runMigrations` log with the run's own verbosity.
    */
   get logger() {
     return this.#logger;
@@ -569,8 +571,6 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * Disconnect from MongoDB.
-   *
    * An injected `config.client` is left open: the application handed it over to
    * be reused, and closing it here would take down its connection pool for
    * everything else using it.
@@ -788,21 +788,12 @@ class MigratorKit extends EventEmitter {
     throw new RunAbortedError('Run aborted', { context: results ? { results: [...results] } : {} });
   }
 
-  /**
-   * Inspect the current migration lock without modifying it. Returns the holder,
-   * or null when no lock is held.
-   */
   async lockInfo() {
     await this.#ensureConfig();
     await this.connect();
     return toLockInfo(await this.#buildLock().inspect());
   }
 
-  /**
-   * Force-release the migration lock regardless of who holds it — for clearing a
-   * lock left behind by a crashed run (`migronaut unlock`). Returns the holder that was
-   * removed, or null if no lock was held.
-   */
   async forceUnlock() {
     await this.#ensureConfig();
     await this.connect();
@@ -1282,7 +1273,6 @@ class MigratorKit extends EventEmitter {
     }
   }
 
-  /** Run all pending migrations, or a specific named file */
   async up(filename, options = {}) {
     assertUpOptions(filename, options);
     return this.#runWindow(async () => {
@@ -1759,8 +1749,6 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * Rollback then re-apply: the last applied migration, or a specific file.
-   *
    * Both directions run under a single lock. Releasing between them would let
    * another process slip in while the migration is reverted — and a crash in
    * that gap would leave the database in the rolled-back state with no lock to
@@ -1809,7 +1797,6 @@ class MigratorKit extends EventEmitter {
     });
   }
 
-  /** Preview what would run — never writes to the database */
   async dryRun(direction, filename, options = {}) {
     assertDryRunOptions(filename, options);
     await this.#ensureConfig();
@@ -1928,7 +1915,6 @@ class MigratorKit extends EventEmitter {
     if (waiting.length > 0) row.waitsFor = pluckMigrations(waiting);
   }
 
-  /** Full migration status for all known files and records */
   async status(options = {}) {
     await this.#ensureConfig();
     await this.connect();
@@ -1994,9 +1980,8 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * Filtered list of migrations. `checksums: false` skips hashing the applied
-   * files (`checksumOk` stays null) — for a caller that only needs names and
-   * dates, where a full re-hash of the history would be the whole cost.
+   * `checksums: false` skips hashing the applied files (`checksumOk` stays null) — for a caller
+   * that only needs names and dates, where a full re-hash of the history would be the whole cost.
    */
   async list(filter = 'all', options = {}) {
     assertListOptions(filter, options);
@@ -2133,8 +2118,6 @@ class MigratorKit extends EventEmitter {
   }
 
   /**
-   * Create a new migration file and return its absolute path.
-   *
    * Resolved leniently: writing a file needs no database, so a config whose
    * factory fetches a connection from a secret manager must not make `create`
    * fail (or reach the network at all) when that manager is unreachable.
@@ -2171,7 +2154,6 @@ class MigratorKit extends EventEmitter {
     return filepath;
   }
 
-  /** Create a migronaut config file in the working directory and return its path */
   async init(options = {}) {
     const values = {};
     if (this.#partialConfig.uri) values.uri = this.#partialConfig.uri;
@@ -2376,8 +2358,6 @@ class MigratorKit extends EventEmitter {
     }
     return names;
   }
-
-  // ─── Background migrations: the host (background/host.js) ──────────────────
 
   watchBackground(options) {
     return this.#background.watchBackground(options);

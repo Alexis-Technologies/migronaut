@@ -187,6 +187,12 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 
 ### Documentation
 
+- **The comments in `src/` say why; the `.d.ts` files document the API.** 69 JSDoc blocks of
+  `src/` that repeated the declarations or restated their own names are gone or cut to what the
+  `.d.ts` does not say (the error classes, `MigratorKit`, `MigrationQueue`, the CLI's command
+  registrations); the guidance and examples of `runMigrations` and `pendingMigrations` moved to
+  `index.d.ts`, where an editor shows them. 14 banners and 23 comment lines over 100 columns went
+  with them.
 - **The public methods say what they throw**: `@throws` with the code on the kit's run methods,
   `connect`, `import`, `baseline` and `converge`, and on the queue's `enqueueUp`, `enqueueDown`
   and `startWorker`.

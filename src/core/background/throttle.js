@@ -259,8 +259,6 @@ const createThrottle = (options) => {
   };
 };
 
-// ─── Adaptive batch sizing (AIMD) ─────────────────────────────────────────────
-
 /**
  * A latency-driven batch size, additive-increase / multiplicative-decrease —
  * TCP's answer to "how fast may I go without knowing the capacity": every

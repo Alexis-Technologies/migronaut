@@ -1,6 +1,5 @@
 const { defineCommand } = require('../shared.js');
 
-/** Register the `redo` command */
 const registerRedo = (program) => {
   defineCommand(program, {
     name: 'redo',

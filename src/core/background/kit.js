@@ -46,8 +46,6 @@ const createIrreversibleError = (name) => {
   );
 };
 
-// ─── Driving it from this process ─────────────────────────────────────────────
-
 /**
  * runBackground's loop: the coordinator and up to `concurrency` lanes until
  * it is done (`untilDone`) or for one round. `inline` (a run waiting for it
@@ -105,7 +103,9 @@ const drive = async (host, name, options) => {
   return host.status(name);
 };
 
-/** `count` lanes at once: the first that fails for good stops the others, and its error is thrown */
+/**
+ * `count` lanes at once: the first that fails for good stops the others, and its error is thrown
+ */
 const runLanes = async (host, name, count, { signal, sliceMs, untilDone, jobOption }) => {
   const stop = new AbortController();
   const laneSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
@@ -167,8 +167,6 @@ const runLane = async (host, name, { signal, sliceMs, untilDone, jobOption = {} 
     return;
   }
 };
-
-// ─── down, and requires ───────────────────────────────────────────────────────
 
 /**
  * Whether a background migration has written anything a `down` without a
@@ -247,8 +245,6 @@ const listUnsatisfied = async (host, requires, { reopen = true } = {}) => {
   }
   return waiting;
 };
-
-// ─── What it says ─────────────────────────────────────────────────────────────
 
 /** Who drove it last — and a queue chain's round */
 const buildCoordinatorView = (state) => {

@@ -15,7 +15,7 @@ const { createUpcaster } = require('./upcaster.js');
  * `defineShapes` — the application's view of its versioned collections, read
  * from the very definition files converge declares them with:
  *
- *   const shapes = defineShapes({ orders: require('./collections/orders') });
+ *   const shapes = defineShapes({ orders: require('./collections/orders.js') });
  *   await orders.insertOne(shapes.stamp('orders', doc)); // __v: current, __rev: 0
  *
  * so the version a repository writes and the version the validator demands

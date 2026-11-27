@@ -550,7 +550,6 @@ class MigrationQueue {
     return this.#queue;
   }
 
-  /** The worker started by {@link startWorker}, if any */
   get worker() {
     return this.#worker;
   }
@@ -569,7 +568,6 @@ class MigrationQueue {
     return this.#processor;
   }
 
-  /** The background queue (`background` option), if any */
   get backgroundQueue() {
     return this.#backgroundQueue;
   }
@@ -717,7 +715,6 @@ class MigrationQueue {
     return this.#kit.status();
   }
 
-  /** Migrations not applied yet */
   async pending() {
     this.#assertOpen();
     return this.#kit.list('pending');
@@ -735,12 +732,10 @@ class MigrationQueue {
   }
 
   /**
-   * Start the worker that applies the jobs. Needs `bullmq.Worker`. Connects to
-   * MongoDB first, so an unreachable database fails here. Concurrency is
-   * always 1, and where BullMQ supports it the queue's *global* concurrency
-   * is set to 1 too, so several pods running this take turns instead of each
-   * picking a job and queuing on the MongoDB lock. Calling it again returns
-   * the same worker.
+   * Start the worker that applies the jobs. Connects to MongoDB first, so an unreachable database
+   * fails here. Concurrency is always 1, and where BullMQ supports it the queue's *global*
+   * concurrency is set to 1 too, so several pods running this take turns instead of each picking a
+   * job and queuing on the MongoDB lock. Calling it again returns the same worker.
    */
   async startWorker(overrides = {}) {
     this.#assertOpen();
@@ -1047,11 +1042,6 @@ class MigrationQueue {
     );
   }
 
-  /**
-   * Remove a schedule — the sync one by default; pass
-   * `DEFAULT_CONVERGE_SCHEDULER_ID` (or your own id) for another. Resolves
-   * whether one existed.
-   */
   async unschedule(id = DEFAULT_SCHEDULER_ID) {
     this.#assertOpen();
     assertName(id, 'id');

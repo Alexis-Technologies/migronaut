@@ -34,7 +34,9 @@ const MAX_SAMPLE = 100_000;
  */
 const RANDOM_CURSOR_SHARE = 0.04;
 
-/** The number of partitions to aim for: one per lane with no parallelism, a few per lane otherwise */
+/**
+ * The number of partitions to aim for: one per lane with no parallelism, a few per lane otherwise
+ */
 const countTargetPartitions = (settings, maxParallel) => {
   if (maxParallel === 1) return 1;
   const { overPartition, maxPartitions } = settings;
@@ -60,7 +62,9 @@ const findPresentBrackets = async (collection, match, hint) => {
   return names;
 };
 
-/** How many documents a sample-first pass asks for: `size` matches' worth, within the random cursor */
+/**
+ * How many documents a sample-first pass asks for: `size` matches' worth, within the random cursor
+ */
 const sampleRequest = (size, ratio, total) => {
   const oversampled = Math.ceil(size / Math.max(ratio, 0.01));
   return Math.max(1, Math.min(MAX_SAMPLE, oversampled, Math.floor(total * RANDOM_CURSOR_SHARE)));

@@ -356,7 +356,9 @@ const normalizeLiveIndex = (raw) => {
   };
 };
 
-/** Number directions compare by sign — a shell of old stored `1.0`, and Int32/Double wrappers happen */
+/**
+ * Number directions compare by sign — a shell of old stored `1.0`, and Int32/Double wrappers happen
+ */
 const isSameDirection = (a, b) => {
   if (typeof a === 'string' || typeof b === 'string') return a === b;
   return Math.sign(Number(a)) === Math.sign(Number(b));

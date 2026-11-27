@@ -8,7 +8,6 @@ const readJsFlag = (flags) => {
   return undefined;
 };
 
-/** Register the `create` command */
 const registerCreate = (program) => {
   defineCommand(program, {
     name: 'create',

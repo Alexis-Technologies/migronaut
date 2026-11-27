@@ -3,7 +3,6 @@ const { defineCommand } = require('../shared.js');
 
 const FORMATS = new Set(['js', 'ts', 'json']);
 
-/** Register the `init` command */
 const registerInit = (program) => {
   defineCommand(program, {
     name: 'init',

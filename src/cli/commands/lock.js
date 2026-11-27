@@ -8,7 +8,6 @@ const { defineCommand } = require('../shared.js');
  */
 const formatLockedAt = (value) => (value instanceof Date ? value.toISOString() : `${value}`);
 
-/** Register the `lock` command (inspect the migration lock without touching it) */
 const registerLock = (program) => {
   defineCommand(program, {
     name: 'lock',

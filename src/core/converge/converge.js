@@ -410,7 +410,6 @@ const hasApplied = (actions, target) => {
   return false;
 };
 
-/** Whether a plan still changes a search index */
 const changesSearchIndex = (actions) => {
   for (let i = 0; i < actions.length; i++) {
     if (actions[i].target === 'searchIndex' && CHANGE_ACTIONS.has(actions[i].action)) return true;

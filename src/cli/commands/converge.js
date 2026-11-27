@@ -53,7 +53,6 @@ const assertNotStopped = (stopRequested) => {
   }
 };
 
-/** Register the `converge` command (declared indexes and validators → the database) */
 const registerConverge = (program) => {
   defineCommand(program, {
     name: 'converge',

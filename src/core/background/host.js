@@ -538,7 +538,9 @@ class BackgroundHost {
     return { spec, fns, checksum: await this.#kit.cachedChecksum(filepath) };
   }
 
-  /** After one completes: the blocked ones that required it, unblocked if nothing else holds them */
+  /**
+   * After one completes: the blocked ones that required it, unblocked if nothing else holds them
+   */
   async #unblockDependents(name) {
     const store = this.#backgroundStore();
     const deps = this.deps();
@@ -764,7 +766,10 @@ class BackgroundHost {
     return result;
   }
 
-  /** Pause a background migration; its lanes stop at the next batch. `wait` until they have. @experimental */
+  /**
+   * Pause a background migration; its lanes stop at the next batch. `wait` until they have.
+   * @experimental
+   */
   pauseBackground(name, options = {}) {
     return this.#controlBackground(name, 'pause', options);
   }
@@ -824,7 +829,8 @@ class BackgroundHost {
       logger: this.#kit.logger,
       forbidden: this.#kit.bookkeepingNames(),
       topology: () => this.#serverTopology(db),
-      // The sandbox refuses a sharded collection's distinct (a mongos cannot run it in a transaction).
+      // The sandbox refuses a sharded collection's distinct (a mongos cannot run it in a
+      // transaction).
       shardKeyOf: (collection) => readShardKey(this.#kit.client, db.databaseName, collection),
     };
     if (loaded.spec.mode === 'step' || options.steps !== undefined) {

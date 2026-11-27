@@ -46,7 +46,9 @@ const DEGRADED = {
     'shardConcurrency',
 };
 
-/** How long a coordinator waits before it looks at its lanes again, without a driver that wakes it */
+/**
+ * How long a coordinator waits before it looks at its lanes again, without a driver that wakes it
+ */
 const POLL_MS = 5_000;
 
 /** What a replan says, by what set the plan aside */
@@ -331,7 +333,10 @@ const planMismatch = (job, plan) => {
   return job.partitioner.stale?.(plan.epoch) ? 'epoch' : undefined;
 };
 
-/** The shard-aware facts a plan records, for status: how it split, by which key, into how many groups */
+/**
+ * The shard-aware facts a plan records, for status: how it split, by which key, into how many
+ * groups
+ */
 const describeSharding = (job, plan) => {
   if (job.sharding === undefined || job.sharding.mode === 'off') return null;
   if (job.sharding.mode === 'untargeted') {

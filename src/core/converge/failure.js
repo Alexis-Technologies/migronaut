@@ -52,7 +52,9 @@ const CONNECTION_ERROR_NAMES = new Set([
 
 const CONNECTION_ERROR_CODES = new Set([50, 89, 91, 189, 10107, 11600, 11602, 13435]);
 
-/** A failed conversion to unique: what became of the index (`prepareUnique` taken back off, or not) */
+/**
+ * A failed conversion to unique: what became of the index (`prepareUnique` taken back off, or not)
+ */
 const describeUniqueLeftover = (mongoCode, extra) => {
   if (extra.prepareUniqueLeft) {
     return (

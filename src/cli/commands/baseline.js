@@ -1,7 +1,6 @@
 const { ConfigInvalidError } = require('../../errors/index.js');
 const { confirm, defineCommand } = require('../shared.js');
 
-/** Register the `baseline` command (adopt an existing database, no prior tool) */
 const registerBaseline = (program) => {
   defineCommand(program, {
     name: 'baseline',

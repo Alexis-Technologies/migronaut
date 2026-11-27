@@ -1,9 +1,8 @@
 /**
- * Base error for all migronaut failures. Every class takes
- * `(message, options = {})`, as `Error` does: `options.cause` is the error it
- * wraps and `options.context` plain, JSON-safe data about the failure. Only
- * this base class reads `options.code` — each subclass sets its own. `options`
- * goes to `Error` whole, so `cause` is set only when given.
+ * Every class takes `(message, options = {})`, as `Error` does: `options.cause` is the error it
+ * wraps and `options.context` plain, JSON-safe data about the failure. Only this base class reads
+ * `options.code` — each subclass sets its own. `options` goes to `Error` whole, so `cause` is set
+ * only when given.
  *
  * Every instance has `code` and `context` (`{}` when nothing was given), so
  * code that reads an error never asks whether the field exists, and
@@ -24,7 +23,6 @@ class MigronautError extends Error {
   }
 }
 
-/** Thrown when a lock is already held by another process within its TTL */
 class LockAlreadyHeldError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -33,7 +31,6 @@ class LockAlreadyHeldError extends MigronautError {
   }
 }
 
-/** Thrown when releasing a lock fails */
 class LockReleaseFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -42,11 +39,7 @@ class LockReleaseFailedError extends MigronautError {
   }
 }
 
-/**
- * Thrown when the lock is lost while migrations are still running — another
- * process reclaimed it, or the heartbeat could not reach the database. The run
- * stops rather than risk two processes migrating the same database at once.
- */
+/** The run stops rather than risk two processes migrating the same database at once. */
 class LockLostError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -68,10 +61,9 @@ class RunAbortedError extends MigronautError {
 }
 
 /**
- * Thrown when a run is asked of a MigratorKit that already has one in flight,
- * or when it is disconnected under one: one instance runs one thing at a
- * time, and a second run would clobber the first one's state.
- * `context.runId` is the run in flight.
+ * Thrown when a run is asked of a MigratorKit that already has one in flight, or when it is
+ * disconnected under one: one instance runs one thing at a time, and a second run would clobber the
+ * first one's state.
  */
 class RunInFlightError extends MigronautError {
   constructor(message, options = {}) {
@@ -81,7 +73,6 @@ class RunInFlightError extends MigronautError {
   }
 }
 
-/** Thrown when a user-supplied lifecycle hook throws */
 class HookFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -99,7 +90,6 @@ class MigrationFileExistsError extends MigronautError {
   }
 }
 
-/** Thrown when a file's checksum differs from the one recorded at apply time */
 class ChecksumMismatchError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -108,7 +98,6 @@ class ChecksumMismatchError extends MigronautError {
   }
 }
 
-/** Thrown when a referenced migration file does not exist on disk */
 class MigrationFileNotFoundError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -117,11 +106,6 @@ class MigrationFileNotFoundError extends MigronautError {
   }
 }
 
-/**
- * Thrown when a migration name is not a plain filename — e.g. it contains a
- * path separator or `..`, which would let a target escape the migrations
- * directory (path traversal) when joined into a filesystem path.
- */
 class MigrationInvalidNameError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -130,7 +114,6 @@ class MigrationInvalidNameError extends MigronautError {
   }
 }
 
-/** Thrown when a migration file does not export valid up()/down() functions */
 class MigrationInvalidExportError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -139,11 +122,6 @@ class MigrationInvalidExportError extends MigronautError {
   }
 }
 
-/**
- * Thrown when a migration file cannot be loaded — a syntax error, a throw at
- * module scope, an import that does not resolve, a file that cannot be read.
- * `cause` is what the loader threw; nothing of the file ran.
- */
 class MigrationLoadFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -152,7 +130,6 @@ class MigrationLoadFailedError extends MigronautError {
   }
 }
 
-/** Thrown when a migration's up() or down() throws during execution */
 class MigrationExecutionFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -162,9 +139,8 @@ class MigrationExecutionFailedError extends MigronautError {
 }
 
 /**
- * Thrown when a migration exceeds its `timeoutMs`. Best-effort: the migration's
- * own work cannot be cancelled, but the run stops instead of hanging, letting
- * the lock's TTL expire so other instances are not blocked forever.
+ * Best-effort: the migration's own work cannot be cancelled, but the run stops instead of hanging,
+ * letting the lock's TTL expire so other instances are not blocked forever.
  */
 class MigrationTimeoutError extends MigronautError {
   constructor(message, options = {}) {
@@ -174,11 +150,7 @@ class MigrationTimeoutError extends MigronautError {
   }
 }
 
-/**
- * Thrown when `useTransaction` is on but the deployment cannot run
- * transactions (a standalone server — they need a replica set or mongos).
- * A dedicated code, because the driver's own error blames the migration.
- */
+/** A dedicated code, because the driver's own error blames the migration. */
 class TransactionsUnsupportedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -187,7 +159,6 @@ class TransactionsUnsupportedError extends MigronautError {
   }
 }
 
-/** Thrown when the merged configuration fails validation */
 class ConfigInvalidError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -196,7 +167,6 @@ class ConfigInvalidError extends MigronautError {
   }
 }
 
-/** Thrown when creating a config file that already exists without `--force` */
 class ConfigFileExistsError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -205,7 +175,6 @@ class ConfigFileExistsError extends MigronautError {
   }
 }
 
-/** Thrown when connecting to MongoDB fails */
 class ConnectionFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -214,12 +183,7 @@ class ConnectionFailedError extends MigronautError {
   }
 }
 
-/**
- * Thrown when the database refuses or drops an operation of migronaut's own —
- * reading or writing the changelog, taking a lock, creating the indexes a
- * background migration needs — after the connection was made. `cause` is the
- * driver's error, `context.serverCode` the server's code when it gave one.
- */
+/** `cause` is the driver's error, `context.serverCode` the server's code when it gave one. */
 class DatabaseOperationFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -228,7 +192,6 @@ class DatabaseOperationFailedError extends MigronautError {
   }
 }
 
-/** Thrown when attempting to revert a migration that was never applied */
 class NotAppliedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -237,7 +200,6 @@ class NotAppliedError extends MigronautError {
   }
 }
 
-/** Thrown when `migronaut import` targets a non-empty changelog without `--force` */
 class ImportTargetNotEmptyError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -246,7 +208,6 @@ class ImportTargetNotEmptyError extends MigronautError {
   }
 }
 
-/** Thrown when attempting to roll back a forward-only (imported or baselined) migration */
 class IrreversibleMigrationError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
@@ -295,10 +256,6 @@ class QueueJobInvalidError extends MigronautError {
   }
 }
 
-/**
- * Thrown by a migration queue that is closed, or closing, when it is asked to
- * enqueue or start something: the work has to go to an open one.
- */
 class QueueClosedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);

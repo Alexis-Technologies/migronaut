@@ -171,13 +171,11 @@ const renderTable = (head, rows) => {
   return lines.join('\n');
 };
 
-/** Render a checksum indicator cell */
 const renderChecksumCell = (colors, value) => {
   if (value === null) return colors.dim('—');
   return value ? colors.green('ok') : colors.red('MISMATCH');
 };
 
-/** Render a status cell */
 const renderStatusCell = (colors, status) => {
   return status === 'applied' ? colors.green('applied') : colors.yellow('pending');
 };
@@ -250,7 +248,6 @@ const renderRowsOrEmpty = (rows, { logger }) => {
   else logger.info(renderStatusTable(rows));
 };
 
-/** Render the checksum-source cell for an import row */
 const renderChecksumSourceCell = (colors, source) => {
   if (source === 'recomputed') return colors.green('recomputed');
   if (source === 'reused') return colors.cyan('reused');
@@ -275,7 +272,6 @@ const renderImportTable = (rows) => {
   return renderTable(head, cells);
 };
 
-/** Render a converge action cell */
 const renderConvergeActionCell = (colors, action) => colors[ACTION_COLORS[action] ?? 'dim'](action);
 
 /** Where the server is with a search index, when it is not simply serving it */

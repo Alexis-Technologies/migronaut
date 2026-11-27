@@ -111,7 +111,9 @@ const MAX_BUILD_MESSAGE_LENGTH = 500;
 /** How many differing paths a comparison names — enough to tell what differs */
 const MAX_DIFF_PATHS = 5;
 
-/** Validate one search index declaration, returning `{ path, message }` issues (empty when valid) */
+/**
+ * Validate one search index declaration, returning `{ path, message }` issues (empty when valid)
+ */
 const searchIndexIssues = (index, path) => {
   if (!isPlainObject(index)) {
     return [{ path, message: 'must be a search index object ({ name?, type?, definition })' }];

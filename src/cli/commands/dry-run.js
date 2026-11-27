@@ -2,7 +2,6 @@ const { ConfigInvalidError } = require('../../errors/index.js');
 const { defineCommand } = require('../shared.js');
 const { renderStatusTable } = require('../table.js');
 
-/** Register the `dry-run` command */
 const registerDryRun = (program) => {
   defineCommand(program, {
     name: 'dry-run',

@@ -7,7 +7,10 @@ const { probeOldShape } = require('./drift.js');
  * on disk, the changelog's background records and the live watchers.
  */
 
-/** How long a background migration may sit in `pending`, or `running` without progress, before audit warns */
+/**
+ * How long a background migration may sit in `pending`, or `running` without progress, before audit
+ * warns
+ */
 const STALL_MS = 15 * 60_000;
 
 /**

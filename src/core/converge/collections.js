@@ -71,7 +71,10 @@ const VALIDATION_OPTIONS = [
   },
 ];
 
-/** `collections[2]` + `indexes` → `collections[2].indexes`; `users.ts:` + `indexes` → `users.ts: indexes` */
+/**
+ * `collections[2]` + `indexes` → `collections[2].indexes`; `users.ts:` + `indexes` → `users.ts:
+ * indexes`
+ */
 const join = (base, key) => (base.endsWith(':') ? `${base} ${key}` : `${base}.${key}`);
 
 const isEmptyObject = (value) => isPlainObject(value) && Object.keys(value).length === 0;
@@ -362,7 +365,9 @@ const normalizeDefinition = (definition, { name, source } = {}) => {
   };
 };
 
-/** The extensions a definition file may have: `fileExtensions`, dotted, plus `.json` — longest first */
+/**
+ * The extensions a definition file may have: `fileExtensions`, dotted, plus `.json` — longest first
+ */
 const listDefinitionExtensions = (extensions) => {
   const dotted = new Set(['.json']);
   for (const extension of extensions) {

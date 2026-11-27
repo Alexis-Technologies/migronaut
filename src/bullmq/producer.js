@@ -505,7 +505,9 @@ const enqueueUp = async (queue, kit, options = {}, internals = {}) => {
   });
 };
 
-/** The latest sign of life of a background migration: a checkpoint, a coordinator step, its start */
+/**
+ * The latest sign of life of a background migration: a checkpoint, a coordinator step, its start
+ */
 const findLastActivity = (status) => {
   let latest = 0;
   for (const at of [

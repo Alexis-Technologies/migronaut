@@ -42,7 +42,10 @@ const NAMESPACE_NOT_FOUND = 26;
 
 const INDEX_NOT_FOUND = 27;
 
-/** Whether `version` (`{ major, minor, patch? }`, or undefined when unknown) is at least `major.minor.patch` */
+/**
+ * Whether `version` (`{ major, minor, patch? }`, or undefined when unknown) is at least
+ * `major.minor.patch`
+ */
 const isVersionAtLeast = (version, major, minor, patch = 0) => {
   if (version === undefined) return false;
   if (version.major !== major) return version.major > major;

@@ -318,7 +318,9 @@ const resolveAllow = (allow) => {
   return Object.freeze({ ...DEFAULT_ALLOW, ...allow });
 };
 
-/** The permissions a parsed job (or an enqueue request) needs: `'down'`, `'force'`, `'unordered'` */
+/**
+ * The permissions a parsed job (or an enqueue request) needs: `'down'`, `'force'`, `'unordered'`
+ */
 const listPermissions = (data) => {
   const needed = [];
   if (data.kind === 'migration' && data.direction === JOB_NAMES.DOWN) needed.push('down');
@@ -353,8 +355,6 @@ const createInvalidJobError = (job, issue) => {
 };
 
 /**
- * Validate a job read back from the queue and return a normalized copy.
- *
  * Everything here is untrusted: the payload sat in Redis, where anything with
  * write access could have put it. Nothing is passed on that was not checked —
  * above all the migration name, which becomes a filesystem path.

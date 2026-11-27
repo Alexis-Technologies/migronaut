@@ -22,8 +22,6 @@ const FIELD_NAME_KEYS = Object.freeze(['versionField', 'revisionField']);
  * no clock: every rule here is unit-tested as data.
  */
 
-// ─── Settings ─────────────────────────────────────────────────────────────────
-
 const DEFAULTS = Object.freeze({
   batchSize: 500,
   transactionBatchSize: 100,
@@ -535,8 +533,6 @@ const matchHash = (spec, direction = 'forward') => {
   return crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 32);
 };
 
-// ─── State transitions ────────────────────────────────────────────────────────
-
 /**
  * Every control action: the statuses it applies to, what it moves them to,
  * and the statuses in which it is already done (`unchanged`, not an error —
@@ -580,8 +576,6 @@ const resolveTransition = (status, action, { migration } = {}) => {
     { context: { action, status, ...(migration ? { migration } : {}) } },
   );
 };
-
-// ─── _id brackets and partition scopes ────────────────────────────────────────
 
 for (const bracket of ID_BRACKETS) {
   BRACKETS_BY_NAME.set(bracket.name, bracket);

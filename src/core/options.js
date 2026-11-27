@@ -227,7 +227,6 @@ const assertBackgroundPendingValid = (onBackgroundPending) => {
   }
 };
 
-/** `up(filename, options)` */
 const assertUpOptions = (filename, options) => {
   assertFilename(filename);
   assertFlags(options, UP_FLAGS);
@@ -249,7 +248,6 @@ const assertUpOptions = (filename, options) => {
   assertSignalValid(options.signal);
 };
 
-/** `down(filename, options)` */
 const assertDownOptions = (filename, options) => {
   assertFilename(filename);
   assertFlags(options, LOCK_FLAGS);
@@ -262,7 +260,6 @@ const assertDownOptions = (filename, options) => {
   assertSignalValid(options.signal);
 };
 
-/** `redo(filename, options)` */
 const assertRedoOptions = (filename, options) => {
   assertFilename(filename);
   assertFlags(options, LOCK_FLAGS);
@@ -271,7 +268,6 @@ const assertRedoOptions = (filename, options) => {
   assertSignalValid(options.signal);
 };
 
-/** `dryRun(direction, filename, options)` */
 const assertDryRunOptions = (filename, options) => {
   assertFilename(filename);
   // `batch`/`to` must be passed too, or a conflict that `down` rejects would
@@ -281,7 +277,6 @@ const assertDryRunOptions = (filename, options) => {
   assertToValid(options.to, filename, options);
 };
 
-/** `converge(options)` */
 const assertConvergeOptions = (options) => {
   assertFlags(options, CONVERGE_FLAGS);
   // A dry run builds nothing, so there is nothing to wait for — asking for
@@ -295,14 +290,12 @@ const assertConvergeOptions = (options) => {
   assertSignalValid(options.signal);
 };
 
-/** `convergeHistory({ limit })` */
 const assertHistoryLimit = (limit) => {
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
     throw new ConfigInvalidError('limit must be an integer from 1 to 1000', { context: { limit } });
   }
 };
 
-/** `list(filter, options)` */
 const assertListOptions = (filter, options) => {
   if (options.checksums !== undefined && typeof options.checksums !== 'boolean') {
     throw new ConfigInvalidError('checksums must be a boolean', {
@@ -318,7 +311,6 @@ const assertListOptions = (filter, options) => {
   }
 };
 
-/** `baseline(options)` */
 const assertBaselineOptions = (options) => {
   assertFilename(options.to);
   assertFlags(options, LOCK_FLAGS);

@@ -2,7 +2,6 @@ const { ConfigInvalidError } = require('../../errors/index.js');
 const { confirm, defineCommand, emitJson } = require('../shared.js');
 const { formatLockedAt } = require('./lock.js');
 
-/** Register the `unlock` command (force-release a stuck migration lock) */
 const registerUnlock = (program) => {
   defineCommand(program, {
     name: 'unlock',

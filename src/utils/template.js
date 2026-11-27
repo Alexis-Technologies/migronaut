@@ -327,8 +327,6 @@ const exportStatement = (esm, expression) => {
   return esm ? `export default ${expression};` : `module.exports = ${expression};`;
 };
 
-// ─── Config File Creation ───────────────────────────────────────────────────────
-
 /**
  * Mask the password in a connection URI (`user:secret@` → `user:****@`) so a
  * generated config file never carries plaintext credentials. Regex-based, not

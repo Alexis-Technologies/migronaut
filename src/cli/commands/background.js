@@ -358,7 +358,6 @@ const checkOutcome = (states) => {
   return outcome;
 };
 
-/** Register the `background` command */
 const registerBackground = (program) => {
   defineCommand(program, {
     name: 'background',

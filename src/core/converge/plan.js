@@ -628,7 +628,8 @@ const planSearchIndexes = (declaredList, live, { prune, search }, row, submit, d
  * Plan one collection. `definition` is a normalized definition (see
  * collections.js); `live` is `{ exists, type?, options?, indexes,
  * searchIndexes?, shardKey?, versionFloor? }` as converge.js reads it.
- * Returns `{ name, actions, steps }`: `actions` are the result rows (status `'planned'`), `steps` the operations
+ * Returns `{ name, actions, steps }`: `actions` are the result rows (status `'planned'`), `steps`
+ * the operations
  * that carry them out, in execution order, each pointing at the rows it
  * settles. `search` is `{ available, onUnavailable }` — whether the server has
  * Atlas Search, and what a declared search index becomes when it does not.

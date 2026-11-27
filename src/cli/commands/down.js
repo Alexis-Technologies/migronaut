@@ -1,6 +1,5 @@
 const { defineCommand } = require('../shared.js');
 
-/** Register the `down` command */
 const registerDown = (program) => {
   defineCommand(program, {
     name: 'down',

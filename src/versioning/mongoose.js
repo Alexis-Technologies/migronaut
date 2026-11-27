@@ -9,7 +9,7 @@ const SCHEMA_METHODS = Object.freeze(['set', 'get', 'add', 'path', 'pre']);
  * A Mongoose schema plugin for a versioned collection — it never requires
  * mongoose: the schema is the caller's, used only through its own methods.
  *
- *   ordersSchema.plugin(versioningPlugin, require('./collections/orders'));
+ *   ordersSchema.plugin(versioningPlugin, require('./collections/orders.js'));
  *
  * - The revision becomes Mongoose's `versionKey` with `optimisticConcurrency`,
  *   so a `save()` of a document someone changed since it was loaded throws

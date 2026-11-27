@@ -8,7 +8,6 @@ const renderStatus = (colors, status) => {
   return colors.red('✖');
 };
 
-/** Register the `audit` command (read-only diagnostics) */
 const registerAudit = (program) => {
   defineCommand(program, {
     name: 'audit',
