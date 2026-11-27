@@ -232,7 +232,7 @@ describe('lifecycle events (integration)', () => {
     kit.on('migration:error', (event) => seen.push(event));
     kit.on('run:end', (event) => seen.push(event));
 
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     await kit.disconnect();
 
     assert.strictEqual(seen[0].migration, '0001-bad.ts');
@@ -254,7 +254,7 @@ describe('lifecycle events (integration)', () => {
     let end = null;
     kit.on('run:end', (event) => (end = event));
 
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     await kit.disconnect();
 
     assert.strictEqual(end.success, false);
@@ -354,7 +354,7 @@ export async function down() {}
   it('should release the lock after a timeout', async () => {
     project.write('0001-slow.ts', slow);
     const kit = migrator({ timeoutMs: 100 });
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_TIMEOUT' });
     await kit.disconnect();
     // A wedged migration must not leave the lock behind for its full TTL.
     assert.strictEqual(await mongo.db.collection('_migronaut_locks').countDocuments(), 0);
@@ -634,7 +634,7 @@ describe('failed-attempt trace (integration)', () => {
     project.write('0001-boom.ts', failingMigration());
     const kit = migrator();
     try {
-      await assert.rejects(kit.up());
+      await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     } finally {
       await kit.disconnect();
     }
@@ -652,7 +652,7 @@ describe('failed-attempt trace (integration)', () => {
     project.write('0001-boom.ts', failingMigration());
     const kit = migrator();
     try {
-      await assert.rejects(kit.up());
+      await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
       const rows = await kit.status();
       assert.strictEqual(rows[0].status, 'failed');
       assert.match(rows[0].error, /intentional failure/);
@@ -670,7 +670,7 @@ describe('failed-attempt trace (integration)', () => {
     // rewrites the SAME filename mid-run — the documented cache gotcha.
     const kit = migrator({ reloadMigrations: true });
     try {
-      await assert.rejects(kit.up());
+      await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
       // The author fixes the file; the next up applies it cleanly.
       project.write('0001-flaky.ts', insertMigration('things', 'fixed'));
       const results = await kit.up();
@@ -695,7 +695,9 @@ describe('failed-attempt trace (integration)', () => {
       await kit.up();
       // Sabotage the file, then force a re-run that fails.
       project.write('0001-a.ts', failingMigration());
-      await assert.rejects(kit.up('0001-a.ts', { force: true }));
+      await assert.rejects(kit.up('0001-a.ts', { force: true }), {
+        code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED',
+      });
     } finally {
       await kit.disconnect();
     }

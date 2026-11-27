@@ -225,7 +225,7 @@ pnpm test                        # test:unit then test:integration (~2550 tests)
 pnpm run test:unit                 # unit only — fast, no MongoDB
 pnpm run test:integration            # integration only, serial (--test-concurrency=1)
 node --test tests/integration/up.test.js   # single file
-pnpm run test:coverage             # node --test under c8, gated at 90/90/90
+pnpm run test:coverage             # node --test under c8 over src/ and bin/, gated at 90 (lines, branches, functions, statements)
 pnpm run test:types                  # tsd — checks index.d.ts, bullmq.d.ts and versioning.d.ts against tests/types/*.test-d.ts
 pnpm run check:dts                     # tsc --noEmit --strict (--types node --lib esnext) over the three .d.ts files on their own
 node bin/migronaut.js --help           # run the CLI directly — no build, ever
@@ -242,7 +242,8 @@ pnpm run size                            # esbuild bundle-size report (library, 
 #     -v "$PWD/tests/fixtures/sharded:/s:ro" mongo:8.0 bash /s/start.sh
 #   MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admin" \
 #     node --test tests/integration/sharded.test.js
-pnpm run bench                           # ops/sec micro-benchmarks (bench/bench.js), manual only, not in CI
+pnpm run test:optin [redis] [atlas] [sharded]  # the opt-in suites, failing (not skipping) on a missing variable
+pnpm run bench                           # median ± spread per hot path (bench/bench.js; --json to diff), manual only
 pnpm run docs:dev                        # vitepress dev docs
 ```
 
@@ -319,7 +320,7 @@ section is what migronaut adds to it or does otherwise. **This file wins** where
   (`canonical.js`, the index and search-index diffs — on plan, replan, verify and every settle
   read) and a background migration's per-document loop: no closure or `RegExp` per call there,
   `try/catch` only around user code and I/O. Run the bench before and after touching one; a row
-  that moved is a finding.
+  that moved by more than its spread is a finding.
 - Single quotes, semicolons, 100-col lines, no unused vars/imports (oxlint/oxfmt-enforced).
 - Conventional Commits (`feat(scope):`, `fix(scope):`, `test:`, …).
 
@@ -331,8 +332,9 @@ and `suspicious` as errors; `eqeqeq` `always` with `null` included; no `no-void`
 `func-style: expression`, `max-depth` 4, `no-nested-ternary`, `no-console`, `no-undef` and
 `getter-return` everywhere. In `src/` the unicorn plugin, the array iteration methods and
 `Object.entries` / `Object.values` through `no-restricted-properties`, `init-declarations` (a
-`let` starts with a value), `id-denylist` for `err`, and `max-lines-per-function` 80 as a
-warning. Where it differs, and why:
+`let` starts with a value), `id-denylist` for `err`, `unicorn/no-useless-spread` (a spread that
+copies what is already a fresh array or object), and `max-lines-per-function` 80 as a warning.
+Where it differs, and why:
 
 - **`find` and `filter` are not in `no-restricted-properties`.** They are MongoDB words —
   `Collection#find`, a query's `filter` option and property, destructured as `{ filter }` — and
@@ -518,7 +520,15 @@ migronaut alone is in this file now ("Conventions", "Errors", "Release process")
 - Background migrations' integration tests use a child process for `kill -9`
   (`tests/helpers/background-child.js`) and the server's `failCommand` fail point (the memory server
   starts with `enableTestCommands`) — e.g. for a real change-stream error 286.
-- Coverage gate: 90% lines / 90% functions / 90% branches (`pnpm run test:coverage`, via `c8`).
+- Coverage gate: 90% lines / functions / branches / statements over `src/` and `bin/`
+  (`pnpm run test:coverage`, via `c8`).
+- Unit tests do not wait on the clock: a heartbeat, a deadline or a timeout is driven by
+  `t.mock.timers` and `settleWithTimers` (`tests/helpers/event-loop.js`), which ticks the mocked
+  time and flushes the loop between ticks. A `sleep` such a test mocks is read at call time
+  (`timersPromises.setTimeout`), never destructured at load. Integration tests poll through the one
+  `waitFor` of `tests/helpers/wait-for.js`, whose timeout names what it waited for.
+- An error is asserted by its code (`{ code: 'ALX_ERR_…' }`, with `message` where the text is the
+  contract); a bare regex only for an error of a test double or the driver, which has none.
 - The lock-heartbeat integration tests use real timers; running the *full* integration suite in
   parallel (13 concurrent `mongodb-memory-server` replica sets) can make timing-sensitive tests
   flaky under heavy CPU contention — they're stable in isolation. Not a correctness issue.
@@ -683,9 +693,10 @@ this section wins where the two differ. What migronaut adds to its steps:
 - **Gates (step 1).** `prepublishOnly` (lint, format:check, test:coverage, test:types,
   check:dts), then `pnpm run size` (a tripwire, not a budget: the adapter's or the versioning
   runtime's number jumping by an order of magnitude means something required the engine or
-  `bullmq`) and `pnpm run docs:build`. Then the opt-in suites the release touches ("Commands" has
-  the containers): the real BullMQ one whenever the queue adapter or the background queue changed,
-  Atlas Search after search-index changes, the sharded cluster after shard-aware changes.
+  `bullmq`) and `pnpm run docs:build`. Then `pnpm run test:optin` for the suites the release
+  touches ("Commands" has the containers): `redis` whenever the queue adapter or the background
+  queue changed, `atlas` after search-index changes, `sharded` after shard-aware changes. It fails
+  where a variable is missing, so a release never passes on a skip.
   `pnpm outdated` and `pnpm audit` are about devDependencies only; the peer floors
   (`mongodb >=5.0.0`, `mongoose >=7.0.0`) stay as they are.
 - **CHANGELOG (step 3).** Keep a Changelog: `## [Unreleased]` on top, `## [X.Y.Z] - YYYY-MM-DD`

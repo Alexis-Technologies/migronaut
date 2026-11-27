@@ -11,6 +11,7 @@ const { MigrationLock } = require('../../src/core/lock.js');
 const { BackgroundConflictError, ChecksumMismatchError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { startTestMongo } = require('../helpers/mongo.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 let mongo = null;
 const DB = 'migronaut_background_coordinator_test';
@@ -293,7 +294,10 @@ describe('background coordinator (integration)', () => {
     });
     assert.strictEqual((await drive(deps, NAME)).status, 'completed');
     assert.strictEqual((await deps.store.get(NAME)).reopened, 1);
-    await assert.rejects(applyControl(deps, 'nope.js', 'pause'), /not registered/);
+    await assert.rejects(applyControl(deps, 'nope.js', 'pause'), {
+      code: 'ALX_ERR_BACKGROUND_CONFLICT',
+      message: /not registered/,
+    });
   });
 
   it('should retry from the start with a fresh plan and no bad ids', async () => {
@@ -589,7 +593,7 @@ describe('background coordinator (integration)', () => {
       const batches = deps.events.length;
       const slice = runSlice(deps, NAME, { signal: controller.signal, sliceMs: 600_000 });
       while (!deps.events.slice(batches).some(([event]) => event === 'background:batch')) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await sleep(10);
       }
       controller.abort(new Error('deploy'));
       assert.strictEqual((await slice).outcome, 'stopped', `round ${round}`);

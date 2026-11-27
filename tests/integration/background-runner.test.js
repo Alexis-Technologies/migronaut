@@ -4,6 +4,8 @@ const { startBackgroundRunner } = require('../../index.js');
 const { ConfigInvalidError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
+const { waitFor } = require('../helpers/wait-for.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 let mongo = null;
 const DB = 'migronaut_background_runner_test';
@@ -70,14 +72,14 @@ const SPEC = `export const background = {
 `;
 
 /** Resolve once the background migration completed */
-const completed = async (kit, name = NAME, timeoutMs = 60_000) => {
-  const until = Date.now() + timeoutMs;
-  for (;;) {
-    const status = await kit.backgroundStatus(name);
-    if (status?.status === 'completed') return status;
-    if (Date.now() > until) throw new Error(`still ${status?.status}`);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+const completed = (kit, name = NAME, timeoutMs = 60_000) => {
+  let last = null;
+  const check = async () => {
+    last = await kit.backgroundStatus(name);
+    return last?.status === 'completed' ? last : null;
+  };
+  const explain = () => `still ${last?.status}`;
+  return waitFor(`${name} to complete`, check, { timeoutMs, intervalMs: 50, explain });
 };
 
 describe('in-process background runner (integration)', () => {
@@ -94,7 +96,7 @@ describe('in-process background runner (integration)', () => {
           .collection('_migronaut_background_partitions')
           .countDocuments({ lease: { $exists: true } });
         peak = Math.max(peak, leased);
-        await new Promise((resolve) => setTimeout(resolve, 2));
+        await sleep(2);
       }
     })();
     const slices = [];
@@ -175,7 +177,10 @@ describe('in-process background runner (integration)', () => {
     await runner.stop({ timeoutMs: 200 });
     assert.ok(Date.now() - started < 5_000, 'did not wait for the stuck lane');
     assert.strictEqual(runner.running, false);
-    await assert.rejects(runner.stop({ timeoutMs: -1 }), /timeoutMs/);
+    await assert.rejects(runner.stop({ timeoutMs: -1 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /timeoutMs/,
+    });
   });
 
   it('should catch drift with its periodic watch', async () => {
@@ -188,11 +193,9 @@ describe('in-process background runner (integration)', () => {
     const runner = runnerWith({ kit: kitWith(), verifyIntervalMs: 100 });
     runner.kit.on('background:drift', (event) => drift.push(event));
     await mongo.db.collection('orders').insertOne({ __v: 1, __rev: 0, late: true });
-    const until = Date.now() + 20_000;
-    while (await mongo.db.collection('orders').countDocuments({ __v: 1 })) {
-      if (Date.now() > until) throw new Error('drift was not caught');
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    const isCaught = async () =>
+      (await mongo.db.collection('orders').countDocuments({ __v: 1 })) === 0;
+    await waitFor('the drift to be caught', isCaught, { timeoutMs: 20_000, intervalMs: 50 });
     assert.strictEqual(drift[0].action, 'reopened');
     assert.strictEqual((await completed(kit)).status, 'completed');
   });
@@ -217,10 +220,7 @@ describe('in-process background runner (integration)', () => {
       kit: kitWith(),
       onError: (error, name) => errors.push([name, error.message]),
     });
-    const until = Date.now() + 10_000;
-    while (errors.length === 0 && Date.now() < until) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await waitFor('a failed slice reported', () => errors.length > 0);
     assert.deepStrictEqual(errors[0], [NAME, 'boom']);
     assert.strictEqual(runner.running, true);
     for (const bad of [
@@ -253,13 +253,13 @@ describe('in-process background runner (integration)', () => {
     const runner = runnerWith({ config: config(), signal: controller.signal });
     const disconnect = mock.method(runner.kit, 'disconnect');
     for (let i = 0; i < 100 && (await setup.backgroundStatus(NAME)).status !== 'completed'; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await sleep(50);
     }
     // No stop() here: the signal alone used to end the lanes and leave the
     // runner's own connection open — and the process alive with it.
     controller.abort();
     for (let i = 0; i < 100 && disconnect.mock.callCount() === 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await sleep(20);
     }
     assert.strictEqual(disconnect.mock.callCount(), 1);
     assert.strictEqual(runner.running, false);

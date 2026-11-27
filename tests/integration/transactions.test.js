@@ -9,6 +9,7 @@ const {
   TransactionsUnsupportedError,
 } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 let mongo = null;
 const COLLECTION = 'tx_items';
@@ -88,7 +89,7 @@ describe('runMigration transactions (integration)', () => {
   it('should record a non-negative duration', async () => {
     const migration = {
       up: async () => {
-        await new Promise((resolve) => setTimeout(resolve, 5));
+        await sleep(5);
       },
       down: async () => undefined,
     };

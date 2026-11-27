@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { after, before, describe, it } = require('node:test');
 const { ConvergeFailedError } = require('../../src/errors/index.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const ATLAS_URI = process.env.MIGRONAUT_TEST_ATLAS_URI;
 const DB = `migronaut_search_${process.pid}`;
@@ -354,7 +355,7 @@ describe(
       const observer = kitWith([]);
       let seenFree = false;
       const watching = (async () => {
-        while (events.length === 0) await new Promise((resolve) => setTimeout(resolve, 50));
+        while (events.length === 0) await sleep(50);
         seenFree = (await observer.lockInfo()) === null;
       })();
       const result = await kit.converge({ waitForSearchIndexes: true });

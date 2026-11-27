@@ -189,7 +189,9 @@ describe('sequenced single-file runs (integration)', () => {
         'export async function up() { throw new Error("nope"); }\nexport async function down() {}\n',
       );
       project.write('0002-b.js', insertMigration('things', 'b'));
-      await assert.rejects(migrator.up('0001-a.js'));
+      await assert.rejects(migrator.up('0001-a.js'), {
+        code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED',
+      });
       await assert.rejects(migrator.up('0002-b.js', { ordered: true }), (error) => {
         assert.ok(error instanceof MigrationBlockedError);
         assert.deepStrictEqual(error.context.blockedBy, ['0001-a.js']);
@@ -269,8 +271,14 @@ describe('sequenced single-file runs (integration)', () => {
       // Already applied: a duplicate job is skipped whatever it planned with.
       const [again] = await migrator.up('0001-a.js', { checksum: planned.checksum });
       assert.strictEqual(again.status, 'skipped');
-      await assert.rejects(migrator.up(undefined, { checksum: current.checksum }), /filename/);
-      await assert.rejects(migrator.up('0002-b.js', { checksum: 'nope' }), /SHA-256/);
+      await assert.rejects(migrator.up(undefined, { checksum: current.checksum }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /filename/,
+      });
+      await assert.rejects(migrator.up('0002-b.js', { checksum: 'nope' }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /SHA-256/,
+      });
     });
 
     it('should leave an unordered single-file run exactly as it was', async () => {
@@ -425,11 +433,14 @@ describe('sequenced single-file runs (integration)', () => {
       await migrator.redo('0001-a.js', { reason: 'replay' });
       [row] = (await migrator.status()).filter((r) => r.file === '0001-a.js');
       assert.strictEqual(row.reason, 'replay');
-      await assert.rejects(migrator.up('0002-b.js', { reason: '' }), /reason/);
-      await assert.rejects(
-        migrator.up('0002-b.js', { requestedBy: 'x'.repeat(129) }),
-        /requestedBy/,
-      );
+      await assert.rejects(migrator.up('0002-b.js', { reason: '' }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /reason/,
+      });
+      await assert.rejects(migrator.up('0002-b.js', { requestedBy: 'x'.repeat(129) }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /requestedBy/,
+      });
     });
 
     it('should keep the version of a failed file on its trace', async () => {
@@ -438,7 +449,9 @@ describe('sequenced single-file runs (integration)', () => {
         '0001-a.js',
         'export async function up() { throw new Error("nope"); }\nexport async function down() {}\n',
       );
-      await assert.rejects(migrator.up('0001-a.js', { requestedBy: 'ci' }));
+      await assert.rejects(migrator.up('0001-a.js', { requestedBy: 'ci' }), {
+        code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED',
+      });
       const [row] = await migrator.status();
       assert.strictEqual(row.status, 'failed');
       assert.match(row.failedChecksum, /^[0-9a-f]{64}$/);

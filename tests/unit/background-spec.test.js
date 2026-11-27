@@ -372,7 +372,9 @@ describe('state transitions', () => {
       to: 'pending',
       applied: 'changed',
     });
-    for (const status of TERMINAL) assert.throws(() => resolveTransition(status, 'pause'));
+    const conflict = { code: 'ALX_ERR_BACKGROUND_CONFLICT' };
+    const pause = (status) => () => resolveTransition(status, 'pause');
+    for (const status of TERMINAL) assert.throws(pause(status), conflict);
   });
 });
 

@@ -203,7 +203,10 @@ describe('runMigrations signal (integration)', () => {
       RunAbortedError,
     );
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
-    await assert.rejects(runMigrations(config(), { signal: 'stop' }), /AbortSignal/);
+    await assert.rejects(runMigrations(config(), { signal: 'stop' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /AbortSignal/,
+    });
   });
 
   it('should load collection definitions once while it waits for the lock', async () => {

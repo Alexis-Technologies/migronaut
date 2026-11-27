@@ -23,6 +23,7 @@ const {
   RunAbortedError,
 } = require('../../src/errors/index.js');
 const { stubKit } = require('../helpers/stub-kit.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const fakeJob = (name, data, { attempts } = {}) => {
   const job = {
@@ -368,7 +369,7 @@ describe('createMigrationProcessor', () => {
         up: mock.fn(async (name) => {
           active += 1;
           peak = Math.max(peak, active);
-          await new Promise((resolve) => setTimeout(resolve, 5));
+          await sleep(5);
           active -= 1;
           return [{ file: name, status: 'applied' }];
         }),
@@ -388,7 +389,7 @@ describe('createMigrationProcessor', () => {
       const seen = [];
       const kit = stubKit({
         up: mock.fn(async (name) => {
-          await new Promise((resolve) => setTimeout(resolve, 2));
+          await sleep(2);
           seen.push([name, store.getStore()]);
           return [{ file: name, status: 'applied' }];
         }),
@@ -703,7 +704,7 @@ describe('createMigrationProcessor', () => {
     it('should pass a thrown non-error through untouched', async () => {
       const kit = stubKit({
         up: mock.fn(async () => {
-          // eslint-disable-next-line no-throw-literal -- intentionally a thrown non-Error
+          // oxlint-disable-next-line no-throw-literal -- intentionally a thrown non-Error
           throw 'a bare string';
         }),
       });
@@ -816,7 +817,7 @@ describe('createMigrationProcessor', () => {
         lockWait: { lockPollIntervalMs: 5000, lockWaitTimeoutMs: 60_000 },
       });
       const pending = processor(upJob());
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
       processor.shutdown('deploying');
       await assert.rejects(pending, (error) => {
         assert.ok(error instanceof RunAbortedError);
@@ -840,7 +841,7 @@ describe('createMigrationProcessor', () => {
       const job = upJob();
       job.moveToWait = mock.fn(async () => 0);
       const pending = processor(job, 'token-11');
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
       processor.shutdown('deploying');
       await assert.rejects(pending, (error) => {
         // The name is what BullMQ checks: neither failed nor completed.
@@ -927,7 +928,7 @@ describe('createMigrationProcessor', () => {
       let finished = false;
       const kit = stubKit({
         up: mock.fn(async (name) => {
-          await new Promise((resolve) => setTimeout(resolve, 15));
+          await sleep(15);
           finished = true;
           return [{ file: name, status: 'applied' }];
         }),

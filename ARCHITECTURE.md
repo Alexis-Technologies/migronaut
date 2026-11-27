@@ -1970,10 +1970,12 @@ MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admi
   artifact. `bullmq` is deliberately *not* marked external there: the adapter never imports it, so
   an accidental `require('bullmq')` would show up as a jump in the adapter's number.
 - **Benchmarks (informational only, manual):** `pnpm run bench` runs `bench/bench.js`, a
-  zero-dependency `node:perf_hooks` harness measuring ops/sec for the hottest paths
-  (`checksum`, `loader`, `Changelog`, `MigrationLock`) — the DB-bound scenarios spin up a
-  throwaway in-memory MongoDB replica set for the run. Not run in CI; results are hand-copied
-  into the README's Benchmarks section before releases.
+  zero-dependency `node:perf_hooks` harness for the hottest paths (`checksum`, `loader` cached and
+  cold, `Changelog`, `MigrationLock`, `up()` and `status()`): seven windows per scenario after a
+  warmup, reported as the median ± half their range, with the environment (CPU, Node, `execArgv`,
+  MongoDB). The CPU-bound scenarios run in a process each; the DB-bound ones share a throwaway
+  in-memory replica set. `--json` prints a document to diff. Not run in CI; results are
+  hand-copied into the README's Benchmarks section before releases.
 - **Published artifact:** exactly what `files` in [package.json](package.json) lists —
   `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`, `versioning.js`, `versioning.d.ts`,
   `migronaut.schema.json`, `bin`, `src`, `README.md`, `CHANGELOG.md`, `LICENSE`, `SECURITY.md`. The `exports` map exposes

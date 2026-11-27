@@ -60,7 +60,10 @@ describe('MigratorKit.status (integration)', () => {
     assert.ok(row.appliedAt instanceof Date);
     assert.strictEqual(row.checksumOk, null, 'not hashed, so not judged');
     assert.strictEqual((await migrator.list('applied'))[0].checksumOk, false);
-    await assert.rejects(migrator.list('applied', { checksums: 'no' }), /boolean/);
+    await assert.rejects(migrator.list('applied', { checksums: 'no' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /boolean/,
+    });
   });
 
   it('should report checksumOk=null for pending files', async () => {

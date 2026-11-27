@@ -232,6 +232,7 @@ describe('withLockWait', () => {
         },
         { onLockHeld: 'wait', lockPollIntervalMs: 5, lockWaitTimeoutMs: 30, onSettle },
       ),
+      { code: 'ALX_ERR_LOCK_ALREADY_HELD' },
     );
     assert.strictEqual(settled[1].outcome, 'timeout');
 
@@ -248,7 +249,7 @@ describe('withLockWait', () => {
         onSettle,
       },
     );
-    setTimeout(() => controller.abort(), 10);
+    setImmediate(() => controller.abort());
     await assert.rejects(pending, RunAbortedError);
     assert.strictEqual(settled[2].outcome, 'aborted');
 
@@ -276,6 +277,7 @@ describe('withLockWait', () => {
         },
         { ...fast, onSettle },
       ),
+      /at once/,
     );
     assert.strictEqual(settled.length, 4);
 
@@ -343,7 +345,7 @@ describe('withLockWait', () => {
         },
         { onLockHeld: 'wait', lockPollIntervalMs: 5000, signal: controller.signal },
       );
-      setTimeout(() => controller.abort(), 10);
+      setImmediate(() => controller.abort());
       await assert.rejects(pending, (error) => {
         assert.ok(error instanceof RunAbortedError);
         assert.strictEqual(error.context.attempts, 1);
@@ -384,7 +386,10 @@ describe('assertLockWaitOptions', () => {
   });
 
   it('should reject a poll interval no timer can honour, and an unknown onLockHeld', () => {
-    assert.throws(() => assertLockWaitOptions({ lockPollIntervalMs: 2 ** 31 }), /at most/);
+    assert.throws(() => assertLockWaitOptions({ lockPollIntervalMs: 2 ** 31 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /at most/,
+    });
     assert.throws(
       () => assertLockWaitOptions({ onLockHeld: 'Wait' }),
       (error) => error instanceof ConfigInvalidError && error.context.onLockHeld === 'Wait',

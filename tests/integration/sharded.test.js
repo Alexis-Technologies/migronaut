@@ -3,6 +3,7 @@ const { after, before, describe, it } = require('node:test');
 const { createShardPartitioner } = require('../../src/core/background/shard.js');
 const { BackgroundFailedError } = require('../../src/errors/index.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const SHARDED_URI = process.env.MIGRONAUT_TEST_SHARDED_URI;
 const DB = `migronaut_sharded_${process.pid}`;
@@ -440,7 +441,7 @@ describe(
             sampling.peakPerShard = Math.max(sampling.peakPerShard, count);
           }
           sampling.peak = Math.max(sampling.peak, leased.length);
-          await new Promise((resolve) => setTimeout(resolve, 5));
+          await sleep(5);
         }
       })();
       try {
@@ -539,7 +540,7 @@ describe(
       const deadline = Date.now() + 30_000;
       while ((await db.collection('bg_moving').countDocuments({ __v: 2 })) === 0) {
         if (Date.now() > deadline) throw new Error('no progress');
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        await sleep(20);
       }
       const owner = await chunkOwner('bg_moving', { region: 'sa' });
       await admin.command({

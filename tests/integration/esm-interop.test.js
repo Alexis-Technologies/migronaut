@@ -75,6 +75,42 @@ console.log('esm-interop-ok');
     assert.match(stdout, /esm-interop-ok/);
   });
 
+  describe('the package root', () => {
+    const tsc = typescriptEntry();
+
+    before(() => {
+      writeFileSync(
+        path.join(dir, 'root-types.mts'),
+        `import type { MigrationSummary, MigronautConfig } from '@alexify/migronaut';
+import { MigratorKit, MigronautError, runMigrations } from '@alexify/migronaut';
+
+export const config: Partial<MigronautConfig> = { uri: 'mongodb://localhost', dbName: 'app' };
+export const kit: MigratorKit = new MigratorKit(config);
+export const run: (input?: Partial<MigronautConfig>) => Promise<MigrationSummary> = runMigrations;
+export const isOurs = (error: unknown): boolean => error instanceof MigronautError;
+`,
+      );
+    });
+
+    it('should resolve its types for a nodenext consumer through the exports map', async () => {
+      await run(
+        process.execPath,
+        [
+          tsc,
+          '--noEmit',
+          '--strict',
+          '--module',
+          'nodenext',
+          '--moduleResolution',
+          'nodenext',
+          '--skipLibCheck',
+          path.join(dir, 'root-types.mts'),
+        ],
+        { cwd: dir },
+      );
+    });
+  });
+
   describe('the ./bullmq subpath', () => {
     const tsc = typescriptEntry();
 

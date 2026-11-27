@@ -1159,9 +1159,9 @@ describe('background config', () => {
       backgroundDrift: 'stream',
       backgroundShardAware: 'off',
     });
-    assert.throws(
-      () => readEnvConfig({ MIGRONAUT_BACKGROUND_DRIFT: 'always' }),
-      /MIGRONAUT_BACKGROUND_DRIFT/,
-    );
+    assert.throws(() => readEnvConfig({ MIGRONAUT_BACKGROUND_DRIFT: 'always' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /MIGRONAUT_BACKGROUND_DRIFT/,
+    });
   });
 });

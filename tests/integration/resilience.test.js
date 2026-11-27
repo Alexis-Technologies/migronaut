@@ -16,6 +16,7 @@ const {
   makeMigrator,
   makeProject,
 } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 let mongo = null;
 const DB = 'migronaut_resilience_test';
@@ -93,7 +94,7 @@ describe('lost lock (integration)', () => {
       for (let i = 0; i < 10; i++) {
         if (signal.aborted) throw signal.reason;
         iterations += 1;
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await sleep(250);
       }
       return 'completed';
     });
@@ -116,7 +117,7 @@ describe('lost lock (integration)', () => {
       started.resolve();
       for (let i = 0; i < 6; i++) {
         if (signal.aborted) throw signal.reason;
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await sleep(250);
       }
       return 'completed';
     });
@@ -279,7 +280,7 @@ describe('hook guarantees (integration)', () => {
         },
       },
     });
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_INVALID_EXPORT' });
     await kit.disconnect();
     assert.deepStrictEqual(calls, ['beforeAll', 'afterAll:false']);
   });
@@ -430,7 +431,7 @@ describe('what a failed run says (integration)', () => {
     kit.on('migration:error', (event) => seen.push(['migration:error', event.code]));
     kit.on('run:end', (event) => seen.push(['run:end', event.code, event.success]));
     try {
-      await assert.rejects(kit.up());
+      await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     } finally {
       await kit.disconnect();
     }
@@ -702,7 +703,7 @@ describe('custom id format — generateId (integration)', () => {
     assert.strictEqual((await changelog.findOne({ name: '0002-b.ts' })).status, 'reverted');
 
     project.write('0003-c.ts', failingMigration());
-    await assert.rejects(kit.up('0003-c.ts'));
+    await assert.rejects(kit.up('0003-c.ts'), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     await kit.disconnect();
     const failed = await changelog.findOne({ name: '0003-c.ts' });
     assert.strictEqual(failed.status, 'failed');

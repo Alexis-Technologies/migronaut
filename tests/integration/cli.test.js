@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { failingMigration, insertMigration, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const repoRoot = path.join(__dirname, '..', '..');
 const binPath = path.join(repoRoot, 'bin', 'migronaut.js');
@@ -1449,7 +1450,7 @@ describe('converge CLI (integration)', () => {
     await prompted;
     child.kill('SIGTERM');
     // Give the handler a moment, then answer yes: the stop must still win.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sleep(200);
     child.stdin.end('y\n');
     assert.strictEqual(await exited, 11);
     assert.strictEqual((await mongo.db.collection('users').indexes())[1].unique, undefined);

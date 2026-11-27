@@ -253,7 +253,10 @@ describe('parseJobData', () => {
       (error) =>
         error instanceof QueueJobInvalidError && /unknown field "noLock"/.test(error.message),
     );
-    assert.throws(() => parseJobData(job('sync', { v: 1, kind: 'sync', force: true })), /force/);
+    assert.throws(() => parseJobData(job('sync', { v: 1, kind: 'sync', force: true })), {
+      code: 'ALX_ERR_QUEUE_JOB_INVALID',
+      message: /force/,
+    });
     for (const kind of ['migration', 'sync', 'converge']) assert.ok(JOB_FIELDS[kind].has('v'));
   });
 
@@ -261,7 +264,10 @@ describe('parseJobData', () => {
     const checksum = 'f'.repeat(64);
     assert.strictEqual(parseJobData(job('up', upData({ checksum }))).checksum, checksum);
     for (const bad of ['F'.repeat(64), 'f'.repeat(63), 64, '../x']) {
-      assert.throws(() => parseJobData(job('up', upData({ checksum: bad }))), /checksum/);
+      assert.throws(() => parseJobData(job('up', upData({ checksum: bad }))), {
+        code: 'ALX_ERR_QUEUE_JOB_INVALID',
+        message: /checksum/,
+      });
     }
   });
 
@@ -272,8 +278,14 @@ describe('parseJobData', () => {
       parseJobData(job('up', upData({ v: MIN_JOB_DATA_VERSION }))).kind,
       'migration',
     );
-    assert.throws(() => parseJobData(job('up', upData({ v: 0 }))), /unsupported/);
-    assert.throws(() => parseJobData(job('up', upData({ v: 1.5 }))), /unsupported/);
+    assert.throws(() => parseJobData(job('up', upData({ v: 0 }))), {
+      code: 'ALX_ERR_QUEUE_JOB_INVALID',
+      message: /unsupported/,
+    });
+    assert.throws(() => parseJobData(job('up', upData({ v: 1.5 }))), {
+      code: 'ALX_ERR_QUEUE_JOB_INVALID',
+      message: /unsupported/,
+    });
   });
 
   // Payloads exactly as a 2.1.0 producer writes them. Every later worker must
@@ -490,10 +502,10 @@ describe('converge jobs', () => {
       parseJobData(job('converge', { v: 1, kind: 'converge', groupId: 'g', ordered: false })),
       { kind: 'converge', groupId: 'g', ordered: false },
     );
-    assert.throws(
-      () => parseJobData(job('converge', { v: 1, kind: 'converge', prune: true })),
-      /prune is not accepted from a job/,
-    );
+    assert.throws(() => parseJobData(job('converge', { v: 1, kind: 'converge', prune: true })), {
+      code: 'ALX_ERR_QUEUE_JOB_INVALID',
+      message: /prune is not accepted from a job/,
+    });
   });
 
   it('should refuse a malformed converge job as untrusted input', () => {
@@ -618,7 +630,7 @@ describe('background job contract', () => {
   it('should refuse background names on the migration queue', () => {
     assert.throws(
       () => parseJobData(job('background', { v: 1, kind: 'background', migration: 'a.js' })),
-      /unknown job name/,
+      { code: 'ALX_ERR_QUEUE_JOB_INVALID', message: /unknown job name/ },
     );
   });
 

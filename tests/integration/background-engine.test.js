@@ -264,7 +264,10 @@ describe('background engine (integration)', () => {
     // A batch transformation that returns the wrong count fails the slice.
     await orders.updateMany({}, { $set: { __v: 1 } });
     const broken = await setUp({ migrateBatch: async () => [] });
-    await assert.rejects(run(broken), /must return one per document/);
+    await assert.rejects(run(broken), {
+      code: 'ALX_ERR_BACKGROUND_FAILED',
+      message: /must return one per document/,
+    });
   });
 
   it('should stop at the deadline, on a control, on a new plan, and on a lost lease', async () => {
@@ -329,11 +332,14 @@ describe('background engine (integration)', () => {
     assert.deepStrictEqual(seen, [null, { n: 1 }, { n: 2 }]);
     assert.strictEqual(result.counters.processed, 3);
     assert.strictEqual(await mongo.db.collection('log').countDocuments(), 3);
-    assert.throws(() => readStepResult({ done: 'yes' }), /done a boolean/);
-    assert.throws(
-      () => readStepResult({ done: false, checkpoint: { blob: 'x'.repeat(70_000) } }),
-      /larger than 64 KiB/,
-    );
+    assert.throws(() => readStepResult({ done: 'yes' }), {
+      code: 'ALX_ERR_BACKGROUND_FAILED',
+      message: /done a boolean/,
+    });
+    assert.throws(() => readStepResult({ done: false, checkpoint: { blob: 'x'.repeat(70_000) } }), {
+      code: 'ALX_ERR_BACKGROUND_FAILED',
+      message: /larger than 64 KiB/,
+    });
   });
 
   it('should write through one shared path that a session can join', async () => {

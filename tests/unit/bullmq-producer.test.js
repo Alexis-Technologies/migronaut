@@ -269,7 +269,10 @@ describe('planUpJobs', () => {
     const kit = stubKit();
     await assert.rejects(planUpJobs(kit, { filename: '../x.js' }), MigrationInvalidNameError);
     await assert.rejects(planUpJobs(kit, { to: 'a/b.js' }), MigrationInvalidNameError);
-    await assert.rejects(planUpJobs(kit, { force: true }), /force requires a filename/);
+    await assert.rejects(planUpJobs(kit, { force: true }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /force requires a filename/,
+    });
     await assert.rejects(planUpJobs(kit, { force: 'yes' }), ConfigInvalidError);
     await assert.rejects(planUpJobs(kit, { ordered: 1 }), ConfigInvalidError);
     await assert.rejects(planUpJobs(kit, { jobOptions: { attempts: 2 } }), ConfigInvalidError);
@@ -518,10 +521,10 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
   });
 
   it('should refuse a queue whose bulk add returns the wrong shape', async () => {
-    await assert.rejects(
-      enqueueUp({ addBulk: async () => [{ id: '1' }] }, pendingKit()),
-      /did not return one job per migration/,
-    );
+    await assert.rejects(enqueueUp({ addBulk: async () => [{ id: '1' }] }, pendingKit()), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /did not return one job per migration/,
+    });
     await assert.rejects(
       enqueueUp({ addBulk: async () => undefined }, pendingKit()),
       ConfigInvalidError,
@@ -844,7 +847,7 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
       const queue = {
         getJob: async () => ({
           waitUntilFinished: async () => {
-            // eslint-disable-next-line no-throw-literal -- intentionally a non-Error rejection
+            // oxlint-disable-next-line no-throw-literal -- intentionally a non-Error rejection
             throw 'plain string';
           },
         }),
@@ -986,10 +989,10 @@ describe('converge jobs from the producer', () => {
       ConfigInvalidError,
     );
     await assert.rejects(enqueueConverge({}, kit), ConfigInvalidError);
-    await assert.rejects(
-      enqueueConverge({ addBulk: async () => [] }, kit),
-      /did not return the converge job/,
-    );
+    await assert.rejects(enqueueConverge({ addBulk: async () => [] }, kit), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /did not return the converge job/,
+    });
     const blind = await enqueueConverge({ addBulk: async () => [{ id: 7 }] }, kit, {
       ordered: false,
     });
@@ -1042,7 +1045,10 @@ describe('background on the producer side', () => {
   it('should refuse background job options a coordinator or a lane owns', () => {
     assertBackgroundJobOptions(undefined);
     assertBackgroundJobOptions({ keepLogs: 5 });
-    assert.throws(() => assertBackgroundJobOptions('x'), /must be an object/);
+    assert.throws(() => assertBackgroundJobOptions('x'), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /must be an object/,
+    });
     for (const key of ['attempts', 'parent', 'failParentOnFailure', 'removeDependencyOnFailure']) {
       assert.throws(() => assertBackgroundJobOptions({ [key]: 1 }), new RegExp(key));
     }
@@ -1112,12 +1118,30 @@ describe('background on the producer side', () => {
       runnableBackground: mock.fn(async () => []),
       backgroundStatus: mock.fn(async () => null),
     });
-    await assert.rejects(enqueueBackground(queue(), kit, 1), /must be an object/);
-    await assert.rejects(enqueueBackground({}, kit), /addBulk/);
-    await assert.rejects(enqueueBackground(queue(), kit, { stallMs: 5 }), /stallMs/);
-    await assert.rejects(enqueueBackground(queue(), kit, { stalMs: 60_000 }), /"stalMs"/);
-    await assert.rejects(enqueueBackground(queue(), kit, { migration: '../x.js' }), /./);
-    await assert.rejects(enqueueBackground(queue(), kit, { migration: NAME }), /not registered/);
+    await assert.rejects(enqueueBackground(queue(), kit, 1), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /must be an object/,
+    });
+    await assert.rejects(enqueueBackground({}, kit), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /addBulk/,
+    });
+    await assert.rejects(enqueueBackground(queue(), kit, { stallMs: 5 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /stallMs/,
+    });
+    await assert.rejects(enqueueBackground(queue(), kit, { stalMs: 60_000 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /"stalMs"/,
+    });
+    await assert.rejects(enqueueBackground(queue(), kit, { migration: '../x.js' }), {
+      code: 'ALX_ERR_MIGRATION_INVALID_NAME',
+      message: /./,
+    });
+    await assert.rejects(enqueueBackground(queue(), kit, { migration: NAME }), {
+      code: 'ALX_ERR_NOT_APPLIED',
+      message: /not registered/,
+    });
     await assert.rejects(enqueueBackground(queue(), kit, { requestedBy: 5 }), ConfigInvalidError);
     assert.deepStrictEqual(await enqueueBackground(queue(), kit), { jobs: [] });
   });

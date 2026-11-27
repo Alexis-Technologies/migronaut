@@ -8,6 +8,8 @@ const {
   QueueJobFailedError,
 } = require('../../src/errors/index.js');
 const { failingMigration, insertMigration, makeProject } = require('./project.js');
+const { waitFor } = require('./wait-for.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const LOCK_COLLECTION = '_migronaut_locks';
 const CHANGELOG = '_migronaut_migrations';
@@ -114,29 +116,21 @@ const defineBullMQScenarios = (harness) => {
    * Poll the changelog until `name` has `status` — for a migration job a sync
    * tick enqueued, which runs after the tick has already completed.
    */
-  const untilRecord = async (name, status, timeoutMs = 10_000) => {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const record = await harness.mongo().db.collection(CHANGELOG).findOne({ name, status });
-      if (record) return record;
-      if (Date.now() > deadline) throw new Error(`${name} did not become ${status}`);
-      await new Promise((resolve) => setTimeout(resolve, 15));
-    }
+  const untilRecord = (name, status, timeoutMs = 10_000) => {
+    const check = () => harness.mongo().db.collection(CHANGELOG).findOne({ name, status });
+    return waitFor(`${name} to become ${status}`, check, { timeoutMs, intervalMs: 15 });
   };
 
   /** Poll until every job has finished, then return their views */
-  const settled = async (mq, ids, timeoutMs = 10_000) => {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const views = await Promise.all(ids.map((id) => mq.getJob(id)));
-      if (views.every((view) => view && (view.state === 'completed' || view.state === 'failed'))) {
-        return views;
-      }
-      if (Date.now() > deadline) {
-        throw new Error(`jobs did not settle: ${views.map((view) => view?.state).join(', ')}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 15));
-    }
+  const settled = (mq, ids, timeoutMs = 10_000) => {
+    let views = [];
+    const isDone = (view) => view && (view.state === 'completed' || view.state === 'failed');
+    const check = async () => {
+      views = await Promise.all(ids.map((id) => mq.getJob(id)));
+      return views.every(isDone) ? views : null;
+    };
+    const explain = () => views.map((view) => view?.state).join(', ');
+    return waitFor('the jobs to settle', check, { timeoutMs, intervalMs: 15, explain });
   };
 
   /** A queue whose jobs give up on a block quickly — for scenarios that expect one */
@@ -344,12 +338,12 @@ const defineBullMQScenarios = (harness) => {
     const deadline = Date.now() + 10_000;
     while ((await slow.getJob(first))?.state !== 'active') {
       if (Date.now() > deadline) throw new Error('the first job never started');
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await sleep(15);
     }
     await fast.startWorker();
     while ((await fast.getJob(second))?.progress?.phase !== 'lock-wait') {
       if (Date.now() > deadline) throw new Error('the second job never waited');
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await sleep(15);
     }
     await releaseLock();
 
@@ -494,12 +488,8 @@ const defineBullMQScenarios = (harness) => {
     assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
   });
 
-  const eventually = async (check, timeoutMs = 10_000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (!(await check())) {
-      if (Date.now() > deadline) throw new Error('condition not reached');
-      await new Promise((resolve) => setTimeout(resolve, 15));
-    }
+  const eventually = (check, timeoutMs = 10_000) => {
+    return waitFor('the condition', check, { timeoutMs, intervalMs: 15 });
   };
 
   // ─── The MongoDB lock ──────────────────────────────────────────────────────
@@ -674,7 +664,10 @@ const defineBullMQScenarios = (harness) => {
     assert.deepStrictEqual([record.requestedBy, record.reason], ['deploy-bot', 'release 42']);
     // The worker's OS user ran it; the requester is a separate field.
     assert.strictEqual(typeof record.executedBy, 'string');
-    await assert.rejects(mq.enqueueUp(undefined, { reason: '' }), /reason/);
+    await assert.rejects(mq.enqueueUp(undefined, { reason: '' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /reason/,
+    });
   });
 
   it('should name the job in what a migration logs, and keep its userland lines in the job log', async () => {
@@ -873,7 +866,7 @@ export async function down() {}
     // The migration jobs the sync job added run after it, in the same queue.
     const deadline = Date.now() + 10_000;
     while ((await markers()).length < 3 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await sleep(15);
     }
     assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
     const batches = new Set((await records()).map((record) => record.batch));
@@ -901,7 +894,7 @@ export async function down() {}
     const deadline = Date.now() + 10_000;
     let written = await records();
     while (written.length < 1 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await sleep(15);
       written = await records();
     }
     assert.deepStrictEqual(
@@ -934,7 +927,7 @@ export async function down() {}
         (await records()).filter((record) => record.status === 'applied').length;
       const deadline = Date.now() + 10_000;
       while ((await applied()) < 2 && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 15));
+        await sleep(15);
       }
       assert.deepStrictEqual(await markers(), ['a', 'b']);
       assert.strictEqual(await applied(), 2);
@@ -1303,7 +1296,7 @@ export async function down() {}
     await mq.close();
 
     assert.deepStrictEqual(await markers(), ['a', 'b'], 'the second migration was not cut short');
-    await assert.rejects(mq.enqueueUp(), /closed/);
+    await assert.rejects(mq.enqueueUp(), { code: 'ALX_ERR_QUEUE_CLOSED', message: /closed/ });
 
     const next = createQueue();
     assert.deepStrictEqual(
@@ -1328,7 +1321,7 @@ export async function down() {}
     const deadline = Date.now() + 10_000;
     while ((await mq.getJob(first))?.progress?.phase !== 'lock-wait') {
       if (Date.now() > deadline) throw new Error('the first job never waited for the lock');
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await sleep(15);
     }
     await mq.close();
 

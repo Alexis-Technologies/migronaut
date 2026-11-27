@@ -60,7 +60,10 @@ describe('upcaster', () => {
     class Hydrated {
       __v = 1;
     }
-    assert.throws(() => upcaster(orders, steps).needsUpcast(new Hydrated()), /lean/);
+    assert.throws(() => upcaster(orders, steps).needsUpcast(new Hydrated()), {
+      code: 'ALX_ERR_SHAPE_VERSION_UNSUPPORTED',
+      message: /lean/,
+    });
   });
 
   it('should stamp a step that returns a frozen document', () => {
@@ -113,8 +116,14 @@ describe('upcaster', () => {
     refuse(orders, { ...steps, 2: 'nope' }, /must be a function/);
     refuse(orders, { ...steps, 2: async (doc) => doc }, /async/);
     refuse(orders, null, /steps must be an object/);
-    assert.throws(() => upcaster(null, steps), /collection definition/);
-    assert.throws(() => upcaster(orders, steps, { newer: 'drop' }), /newer must be/);
+    assert.throws(() => upcaster(null, steps), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /collection definition/,
+    });
+    assert.throws(() => upcaster(orders, steps, { newer: 'drop' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /newer must be/,
+    });
   });
 
   it('should take a bare versioning block, and min 0', () => {
@@ -133,19 +142,31 @@ describe('upcaster', () => {
       shipping: { address: 'x' },
     });
     assert.strictEqual(shapes.step(1, 3)({ address: 'x', __v: 1 }).currency, 'EUR');
-    assert.throws(() => shapes.step(2, 2), /not a forward range/);
-    assert.throws(() => shapes.step(-1), /not a forward range/);
-    assert.throws(() => shapes.step(2, 4), /goes past 3/);
-    assert.throws(() => shapes.step(0), /no step from version 0/);
+    assert.throws(() => shapes.step(2, 2), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /not a forward range/,
+    });
+    assert.throws(() => shapes.step(-1), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /not a forward range/,
+    });
+    assert.throws(() => shapes.step(2, 4), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /goes past 3/,
+    });
+    assert.throws(() => shapes.step(0), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /no step from version 0/,
+    });
   });
 
   it('should be reachable through defineShapes, named in its errors', () => {
     const registry = defineShapes({ orders });
     const lifted = registry.upcaster('orders', steps);
     assert.strictEqual(lifted.upcast({ address: 'x', __v: 1 }).__v, 3);
-    assert.throws(
-      () => registry.upcaster('orders', { 1: steps[1] }),
-      /upcaster\(orders\): no step from version 2/,
-    );
+    assert.throws(() => registry.upcaster('orders', { 1: steps[1] }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /upcaster\(orders\): no step from version 2/,
+    });
   });
 });

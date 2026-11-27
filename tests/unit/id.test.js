@@ -120,7 +120,7 @@ describe('createIdGenerator', () => {
     assert.strictEqual(newId(), 'ok');
     assert.throws(() => newId(), ConfigInvalidError);
     assert.strictEqual(newId(), 'ok-again');
-    assert.throws(() => newId(), /non-empty string/);
+    assert.throws(() => newId(), { code: 'ALX_ERR_CONFIG_INVALID', message: /non-empty string/ });
   });
 
   it('should wrap a throwing generator, keeping the original error as the cause', () => {
@@ -171,7 +171,10 @@ describe('createIdGenerator', () => {
     process.on('unhandledRejection', onRejection);
     try {
       const newId = createIdGenerator(() => Promise.reject(new Error('never observed')));
-      assert.throws(() => newId(), /must be synchronous/);
+      assert.throws(() => newId(), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /must be synchronous/,
+      });
       // Unhandled rejections are reported after the microtask queue drains.
       await new Promise((resolve) => setImmediate(resolve));
       assert.deepStrictEqual(rejections, []);
@@ -182,6 +185,9 @@ describe('createIdGenerator', () => {
 
   it('should treat any thenable as a promise', () => {
     const newId = createIdGenerator(() => ({ then: () => {} }));
-    assert.throws(() => newId(), /must be synchronous/);
+    assert.throws(() => newId(), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /must be synchronous/,
+    });
   });
 });

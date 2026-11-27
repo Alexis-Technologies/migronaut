@@ -522,7 +522,7 @@ describe('telemetry — metrics (integration)', () => {
     project.write('0001-a.ts', probedMigration('a'));
     project.write('0002-b.ts', leakyFailure());
     const kit = migrator();
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     await kit.disconnect();
 
     const data = await metrics.collect();
@@ -549,7 +549,7 @@ describe('telemetry — metrics (integration)', () => {
         },
       },
     });
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_HOOK_FAILED' });
     await kit.disconnect();
     const [point] = (await metrics.collect())['migronaut.migration.duration'];
     assert.strictEqual(point.attributes['error.type'], 'ALX_ERR_HOOK_FAILED');

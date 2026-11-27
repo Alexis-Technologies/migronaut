@@ -116,12 +116,18 @@ describe('createMigrationQueue background option', () => {
     const { mq } = make({ background: undefined });
     assert.strictEqual(mq.backgroundQueue, undefined);
     assert.strictEqual(mq.backgroundProcessor, undefined);
-    await assert.rejects(mq.enqueueBackground(), /needs the background queue/);
-    await assert.rejects(mq.startBackgroundWorker(), /needs the background queue/);
-    await assert.rejects(
-      mq.schedule({ job: 'background-verify', every: 60_000 }),
-      /needs the background queue/,
-    );
+    await assert.rejects(mq.enqueueBackground(), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /needs the background queue/,
+    });
+    await assert.rejects(mq.startBackgroundWorker(), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /needs the background queue/,
+    });
+    await assert.rejects(mq.schedule({ job: 'background-verify', every: 60_000 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /needs the background queue/,
+    });
     assert.deepStrictEqual(await mq.verifyBackground(), { checked: 0, skipped: 0, drift: [] });
     await mq.close();
   });
@@ -195,10 +201,22 @@ describe('createMigrationQueue background option', () => {
 
   it('should refuse a background worker it cannot build', async () => {
     const { mq } = make({ bullmq: { Queue: fakeBullmq().Queue } });
-    await assert.rejects(mq.startBackgroundWorker(), /needs the Worker class/);
-    await assert.rejects(mq.startBackgroundWorker(1), /must be an object/);
-    await assert.rejects(mq.startBackgroundWorker({ concurrency: 0 }), /positive integer/);
-    await assert.rejects(mq.enqueueBackground(NAME, 1), /must be an object/);
+    await assert.rejects(mq.startBackgroundWorker(), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /needs the Worker class/,
+    });
+    await assert.rejects(mq.startBackgroundWorker(1), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /must be an object/,
+    });
+    await assert.rejects(mq.startBackgroundWorker({ concurrency: 0 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /positive integer/,
+    });
+    await assert.rejects(mq.enqueueBackground(NAME, 1), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /must be an object/,
+    });
     await mq.close();
   });
 
@@ -223,10 +241,10 @@ describe('createMigrationQueue background option', () => {
     const [scheduler] = await mq.backgroundQueue.getJobSchedulers();
     assert.strictEqual(scheduler.id, 'migronaut-background-verify');
     assert.strictEqual(scheduler.template.name, 'background-verify');
-    await assert.rejects(
-      mq.schedule({ job: 'background-verify', every: 60_000, to: 'a.js' }),
-      /to only applies to a sync schedule/,
-    );
+    await assert.rejects(mq.schedule({ job: 'background-verify', every: 60_000, to: 'a.js' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /to only applies to a sync schedule/,
+    });
     assert.strictEqual(await mq.unschedule('migronaut-background-verify'), true);
     assert.deepStrictEqual(await mq.backgroundQueue.getJobSchedulers(), []);
     assert.strictEqual(await mq.unschedule('migronaut-background-verify'), false);
@@ -252,7 +270,10 @@ describe('createMigrationQueue background option', () => {
     assert.strictEqual(one.jobs[0].migration, NAME);
     const stored = await mq.backgroundQueue.getJob(one.jobs[0].id);
     assert.strictEqual(stored.data.requestedBy, 'ops');
-    await assert.rejects(mq.enqueueBackground('0009-none.js'), /not registered/);
+    await assert.rejects(mq.enqueueBackground('0009-none.js'), {
+      code: 'ALX_ERR_NOT_APPLIED',
+      message: /not registered/,
+    });
     // The coordinator alive absorbs both of these.
     assert.strictEqual((await mq.enqueueBackground()).jobs[0].id, one.jobs[0].id);
     await mq.verifyBackground();
@@ -272,7 +293,10 @@ describe('createMigrationQueue background watcher', () => {
           kit: backgroundKit(),
           background: { watch: 'yes' },
         }),
-      /background\.watch must be a boolean or the watcher options/,
+      {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /background\.watch must be a boolean or the watcher options/,
+      },
     );
   });
 

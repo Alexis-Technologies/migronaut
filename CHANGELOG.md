@@ -259,6 +259,23 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
   `docs/reference/error-codes.md` and of the exit codes in `docs/reference/cli.md`, the four
   places that name the version (`package.json`, the CHANGELOG, ARCHITECTURE.md and the docs nav),
   and a link for every CHANGELOG release.
+- **Unit tests drive the clock instead of waiting on it.** The lock's heartbeat and deadline, a
+  duck-typed lease and the runner's timeout run under `t.mock.timers` (`settleWithTimers` ticks
+  and flushes; `lock.test.js` went from ~400 ms to ~60 ms), short settle waits are one turn of
+  the loop, 45 hand-written sleeps are `node:timers/promises`, and the seven polling helpers of
+  the suites are one `waitFor` (`tests/helpers/wait-for.js`) whose timeout says what it waited
+  for. 137 assertions that took any error, or matched only its message, check its code.
+- **The engines floor runs the tests it exists for**: CI's 22.18.0 unit job also runs the type
+  stripping and ESM interop integration files, and the interop test type-checks the package root
+  under `nodenext` too, as it did the subpaths.
+- **`pnpm run test:optin`** runs the Redis, Atlas Search and sharded suites, and fails, rather than
+  skips, when a variable is missing — the release gate names it.
+- **Coverage gates statements too, over `bin/` as well as `src/`.** The lint's disable
+  directives in the tests are `oxlint-disable`, and its ignore list is the four patterns it can
+  meet.
+- **`pnpm run bench` reports a median and its spread**: seven windows per scenario after a warmup,
+  the CPU-bound scenarios in a process each, the loader cold and cached, `up()` first and cached,
+  and the environment with the numbers; `--json` prints a document to diff.
 - **CI's `ci-success` fails on a skipped job** too, not only on a failed or cancelled one.
 - **No `release` script.** The maintainer runs `pnpm publish` itself (`prepublishOnly` still
   gates it), as the `npm-publish` skill of alexiskills 1.2 asks: its steps are the release.

@@ -3,6 +3,7 @@ const { after, before, beforeEach, describe, it } = require('node:test');
 const { runSandbox } = require('../../src/core/background/sandbox.js');
 const { SandboxRefusedError, TransactionsUnsupportedError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 let mongo = null;
 const DB = 'migronaut_background_sandbox_test';
@@ -209,7 +210,7 @@ describe('dry-run sandbox (integration)', () => {
     });
     assert.strictEqual(report.ok, false);
     assert.match(report.abortedBy, /duplicate key/);
-    const slow = await sandbox(() => new Promise((resolve) => setTimeout(resolve, 2000)), {
+    const slow = await sandbox(() => sleep(2000), {
       deadlineMs: 100,
     });
     assert.strictEqual(slow.stoppedBy, 'deadline');

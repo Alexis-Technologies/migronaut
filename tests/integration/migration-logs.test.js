@@ -4,6 +4,7 @@ const { MongoClient } = require('mongodb');
 const { MigrationTimeoutError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 let mongo = null;
 const DB = 'migronaut_migration_logs_test';
@@ -131,7 +132,7 @@ export async function down() {}
     );
     const kit = migrator();
     const { events } = listen(kit);
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     assert.strictEqual(events.length, 1);
     assert.strictEqual(events[0].level, 'error');
     assert.deepStrictEqual(events[0].data, { step: 'insert' });
@@ -183,7 +184,7 @@ export async function down() {}
     const kit = migrator();
     const { events, runs } = listen(kit);
     await assert.rejects(kit.up(), MigrationTimeoutError);
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await sleep(400);
     assert.strictEqual(events.length, 1);
     assert.strictEqual(events[0].msg, 'late');
     assert.strictEqual(events[0].runId, runs[0]);

@@ -168,11 +168,14 @@ describe('versioningPlugin', () => {
   });
 
   it('should refuse what is not a schema or a definition', () => {
-    assert.throws(() => versioningPlugin({}, orders), /takes a Mongoose schema/);
-    assert.throws(
-      () => versioningPlugin(fakeSchema(), undefined),
-      /needs the collection definition/,
-    );
+    assert.throws(() => versioningPlugin({}, orders), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /takes a Mongoose schema/,
+    });
+    assert.throws(() => versioningPlugin(fakeSchema(), undefined), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /needs the collection definition/,
+    });
     assert.throws(
       () => versioningPlugin(fakeSchema(), { versioning: { current: 0 } }),
       ConfigInvalidError,

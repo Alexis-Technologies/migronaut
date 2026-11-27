@@ -6,6 +6,7 @@ const { runWithLock } = require('../../src/core/lock.js');
 const { LockLostError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { startTestMongo } = require('../helpers/mongo.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 let mongo = null;
 let store = null;
@@ -211,7 +212,7 @@ describe('BackgroundStore — leases and slots (integration)', () => {
     const state = await planned(1);
     const claimed = await store.claim(NAME, claimArgs(state, { ttlMs: 400 }));
     await runWithLock(claimed.lease, { logger: silentLogger }, async () => {
-      await new Promise((resolve) => setTimeout(resolve, 700));
+      await sleep(700);
     });
     const [stored] = await store.partitions(NAME);
     assert.strictEqual(stored.lease, undefined);

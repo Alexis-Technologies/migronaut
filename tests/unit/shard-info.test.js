@@ -93,6 +93,9 @@ describe('readChunks', () => {
       await readChunks(fakeClient({ error: unauthorized() }), 'a', 'b', sharding),
       undefined,
     );
-    await assert.rejects(readChunks(fakeClient({ error: new Error('down') }), 'a', 'b', sharding));
+    await assert.rejects(
+      readChunks(fakeClient({ error: new Error('down') }), 'a', 'b', sharding),
+      /down/,
+    );
   });
 });

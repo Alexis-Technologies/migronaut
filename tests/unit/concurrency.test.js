@@ -1,16 +1,17 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { mapLimit, settleWithin } = require('../../src/utils/concurrency.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 /** Resolve after a tick, so overlapping calls are actually observable */
-const tick = () => new Promise((resolve) => setTimeout(resolve, 1));
+const tick = () => sleep(1);
 
 describe('mapLimit', () => {
   it('should preserve input order in the results', async () => {
     const items = [5, 1, 4, 2, 3];
     const out = await mapLimit(items, 2, async (n) => {
       // Later items finish first, so ordering cannot come from completion order.
-      await new Promise((resolve) => setTimeout(resolve, n));
+      await sleep(n);
       return n * 10;
     });
     assert.deepStrictEqual(out, [50, 10, 40, 20, 30]);

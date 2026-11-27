@@ -82,7 +82,10 @@ describe('versioningPlugin with mongoose (integration)', () => {
     const created = await Order.create({ name: 'a' });
     const partial = await Order.findById(created._id).select('name');
     partial.name = 'b';
-    await assert.rejects(partial.save(), /loaded without "__rev"/);
+    await assert.rejects(partial.save(), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /loaded without "__rev"/,
+    });
     assert.strictEqual((await raw({ _id: created._id })).name, 'a', 'nothing written');
     // Selected (or everything), it saves — guarded and bumped.
     const whole = await Order.findById(created._id).select('name __rev');

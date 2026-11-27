@@ -4,6 +4,7 @@ const { LOCK_ID, MigrationLock, runWithLock } = require('../../src/core/lock.js'
 const { LockAlreadyHeldError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { startTestMongo } = require('../helpers/mongo.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 let mongo = null;
 const COLLECTION = '_migronaut_locks';
@@ -104,7 +105,7 @@ describe('MigrationLock (integration)', () => {
     });
 
     // Wait well past the 1s TTL while the migration is still "running".
-    await new Promise((resolve) => setTimeout(resolve, 1400));
+    await sleep(1400);
 
     const competitor = new MigrationLock(mongo.db, COLLECTION, 1);
     await assert.rejects(competitor.acquire(), LockAlreadyHeldError);
@@ -122,7 +123,7 @@ describe('MigrationLock (integration)', () => {
     await first.acquire();
 
     // Let the lock go stale, then a second holder reclaims it.
-    await new Promise((resolve) => setTimeout(resolve, 1100));
+    await sleep(1100);
     const second = new MigrationLock(mongo.db, COLLECTION, 1);
     await second.acquire();
 

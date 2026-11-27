@@ -313,7 +313,10 @@ describe('document versions and revisions', () => {
       revisionField: 'r',
     });
     assert.throws(() => resolveFieldNames({ field: 'a.b' }), ConfigInvalidError);
-    assert.throws(() => resolveFieldNames({ field: 'x', revisionField: 'x' }), /must differ/);
+    assert.throws(() => resolveFieldNames({ field: 'x', revisionField: 'x' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /must differ/,
+    });
   });
 
   it('should match version 0 as missing, null or 0', () => {
@@ -472,16 +475,22 @@ describe('stampUpdate', () => {
   });
 
   it('should refuse replacements and updates that write a system field', () => {
-    assert.throws(() => stampUpdate(names, { update: { a: 1 } }), /replaceWithRevision/);
-    assert.throws(
-      () => stampUpdate(names, { update: [{ $replaceWith: '$x' }] }),
-      /cannot keep its revision/,
-    );
-    assert.throws(() => stampUpdate(names, { update: { $inc: { __rev: 1 } } }), /revision field/);
-    assert.throws(
-      () => stampUpdate(names, { to: 2, update: { $set: { __v: 1 } } }),
-      /version field/,
-    );
+    assert.throws(() => stampUpdate(names, { update: { a: 1 } }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /replaceWithRevision/,
+    });
+    assert.throws(() => stampUpdate(names, { update: [{ $replaceWith: '$x' }] }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /cannot keep its revision/,
+    });
+    assert.throws(() => stampUpdate(names, { update: { $inc: { __rev: 1 } } }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /revision field/,
+    });
+    assert.throws(() => stampUpdate(names, { to: 2, update: { $set: { __v: 1 } } }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /version field/,
+    });
     assert.doesNotThrow(() => stampUpdate(names, { update: { $set: { __v: 1 } } }));
     assert.throws(() => stampUpdate(names, { update: 'x' }), ConfigInvalidError);
     assert.throws(() => stampUpdate(names, { to: 1.5, update: {} }), ConfigInvalidError);

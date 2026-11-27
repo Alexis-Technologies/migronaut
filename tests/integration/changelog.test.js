@@ -102,6 +102,7 @@ describe('Changelog (integration)', () => {
       await mongo.db.collection(COLLECTION).insertOne(makeRecord({ name: 'dup.ts' }));
       await assert.rejects(
         mongo.db.collection(COLLECTION).insertOne(makeRecord({ name: 'dup.ts' })),
+        { code: 11000 },
       );
     });
   });

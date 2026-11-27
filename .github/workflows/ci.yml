@@ -73,8 +73,21 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
+      - name: Cache the MongoDB binary
+        if: matrix.node-version == '22.18.0' && matrix.os == 'ubuntu-latest'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MONGOMS_DOWNLOAD_DIR }}
+          key: mongodb-${{ runner.os }}-${{ env.MONGOMS_VERSION }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test:unit
+      # What the floor is for: type stripping of `.ts` migrations and the ESM
+      # interop. The rest of the integration tier runs on the newest 22.x.
+      - name: Integration on the engines floor
+        if: matrix.node-version == '22.18.0' && matrix.os == 'ubuntu-latest'
+        run: >-
+          node scripts/node-test.js --test-concurrency=1
+          tests/integration/runtime-ts.test.js tests/integration/esm-interop.test.js
 
   test:
     runs-on: ubuntu-latest

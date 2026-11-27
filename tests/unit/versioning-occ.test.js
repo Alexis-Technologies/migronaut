@@ -348,6 +348,7 @@ describe('retryOnConflict', () => {
           },
           { attempts: 2, backoff: () => answer },
         ),
+        { code: 'ALX_ERR_REVISION_CONFLICT' },
       );
       assert.strictEqual(calls, 2);
     }
@@ -405,22 +406,34 @@ describe('defineShapes', () => {
 
   it('should refuse what it cannot read', () => {
     assert.throws(() => defineShapes('x'), ConfigInvalidError);
-    assert.throws(() => defineShapes({ logs: { indexes: [] } }), /declares no versioning/);
-    assert.throws(() => defineShapes([{ versioning: { current: 1 } }]), /needs a name/);
+    assert.throws(() => defineShapes({ logs: { indexes: [] } }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /declares no versioning/,
+    });
+    assert.throws(() => defineShapes([{ versioning: { current: 1 } }]), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /needs a name/,
+    });
     assert.throws(
       () =>
         defineShapes([
           { name: 'a', ...orders },
           { name: 'a', ...orders },
         ]),
-      /declared twice/,
+      { code: 'ALX_ERR_CONFIG_INVALID', message: /declared twice/ },
     );
-    assert.throws(
-      () => defineShapes({ orders: { versioning: { current: 0 } } }),
-      /orders\.versioning/,
-    );
-    assert.throws(() => defineShapes({ orders }).current('users'), /not a versioned collection/);
-    assert.throws(() => defineShapes([]).get('x'), /known: none/);
+    assert.throws(() => defineShapes({ orders: { versioning: { current: 0 } } }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /orders\.versioning/,
+    });
+    assert.throws(() => defineShapes({ orders }).current('users'), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /not a versioned collection/,
+    });
+    assert.throws(() => defineShapes([]).get('x'), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /known: none/,
+    });
   });
 
   it('should read, compare and stamp versions', () => {
@@ -467,9 +480,18 @@ describe('defineShapes', () => {
     });
     const noRevision = defineShapes({ orders: { versioning: { current: 1, revision: false } } });
     assert.deepStrictEqual(noRevision.stampUpsert('orders', {}), { $setOnInsert: { __v: 1 } });
-    assert.throws(() => shapes.stampUpsert('orders', [{ $set: {} }]), /not a pipeline/);
-    assert.throws(() => shapes.stampUpsert('orders', { a: 1 }), /not a replacement/);
-    assert.throws(() => shapes.stampUpsert('orders', { $inc: { __rev: 1 } }), /revision field/);
+    assert.throws(() => shapes.stampUpsert('orders', [{ $set: {} }]), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /not a pipeline/,
+    });
+    assert.throws(() => shapes.stampUpsert('orders', { a: 1 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /not a replacement/,
+    });
+    assert.throws(() => shapes.stampUpsert('orders', { $inc: { __rev: 1 } }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /revision field/,
+    });
   });
 });
 
@@ -517,7 +539,7 @@ describe('revision guards — hardening', () => {
     // Setting the version too needs two different fields.
     await assert.rejects(
       updateWithRevision(orders, { _id: 1 }, 3, {}, { revisionField: '__v', version: 2 }),
-      /must differ/,
+      { code: 'ALX_ERR_CONFIG_INVALID', message: /must differ/ },
     );
   });
 
@@ -529,16 +551,19 @@ describe('revision guards — hardening', () => {
       assert.strictEqual(result.revision, 6);
       assert.deepStrictEqual(orders.calls.at(-1)[1], { _id: 1, __rev: 5 });
     }
-    await assert.rejects(updateWithRevision(orders, { _id: 1 }, -1n, {}), /expectedRevision/);
+    await assert.rejects(updateWithRevision(orders, { _id: 1 }, -1n, {}), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /expectedRevision/,
+    });
   });
 
   it('should refuse a write the server did not acknowledge', async () => {
     const orders = fakeCollection();
     orders.updateOne = async () => ({ acknowledged: false });
-    await assert.rejects(
-      updateWithRevision(orders, { _id: 1 }, 0, { $set: { a: 1 } }),
-      /acknowledged/,
-    );
+    await assert.rejects(updateWithRevision(orders, { _id: 1 }, 0, { $set: { a: 1 } }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /acknowledged/,
+    });
   });
 
   it('should re-read a miss the way the write matched', async () => {
@@ -559,7 +584,7 @@ describe('revision guards — hardening', () => {
   it('should name the version when it is the version that is wrong', async () => {
     await assert.rejects(
       replaceWithRevision(fakeCollection(), { _id: 1 }, 0, { a: 1 }, { version: -1 }),
-      /^ConfigInvalidError: version must be/,
+      { name: 'ConfigInvalidError', code: 'ALX_ERR_CONFIG_INVALID', message: /^version must be/ },
     );
   });
 });
@@ -585,8 +610,11 @@ describe('shapes.occ — guards bound to a collection', () => {
     });
     await assert.rejects(
       occ.updateWithRevision(orders, { _id: 1 }, 0, {}, { revisionField: '__rev' }),
-      /take no other/,
+      { code: 'ALX_ERR_CONFIG_INVALID', message: /take no other/ },
     );
-    assert.throws(() => shapes.occ('flat'), /revision: false/);
+    assert.throws(() => shapes.occ('flat'), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /revision: false/,
+    });
   });
 });

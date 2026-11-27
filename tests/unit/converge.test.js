@@ -1097,6 +1097,7 @@ describe('runConverge — history', () => {
         { definitions: definitions({ name: 'c', indexes: [{ key: { a: 1 } }] }) },
         undefined,
       ),
+      { code: 'ALX_ERR_CONVERGE_FAILED' },
     );
     assert.strictEqual(entries[0].success, false);
     assert.match(entries[0].error, /denied/);

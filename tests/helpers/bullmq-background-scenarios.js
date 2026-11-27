@@ -3,6 +3,7 @@ const { afterEach, beforeEach, describe, it } = require('node:test');
 const { createMigrationQueue } = require('../../bullmq.js');
 const { BackgroundPendingError } = require('../../src/errors/index.js');
 const { insertMigration, makeProject } = require('./project.js');
+const { sleep, waitFor } = require('./wait-for.js');
 
 const NAME = '0001-orders.js';
 const PARTITIONS = '_migronaut_background_partitions';
@@ -90,17 +91,7 @@ const defineBullMQBackgroundScenarios = (harness) => {
       .insertMany(Array.from({ length: count }, (_, i) => ({ __v: 1, __rev: 0, i })));
   };
 
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-  const until = async (what, check, timeoutMs = 30_000) => {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const value = await check();
-      if (value) return value;
-      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-      await sleep(20);
-    }
-  };
+  const until = (what, check, timeoutMs = 30_000) => waitFor(what, check, { timeoutMs });
 
   /** The background migration reached `status` */
   const reached = (mq, status, name = NAME, timeoutMs) =>

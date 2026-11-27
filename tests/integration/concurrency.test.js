@@ -5,6 +5,7 @@ const { after, afterEach, before, beforeEach, describe, it } = require('node:tes
 const { LOCK_ID } = require('../../src/core/lock.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 let mongo = null;
 const DB = 'migronaut_concurrency_test';
@@ -122,7 +123,7 @@ const waitForDoc = async (collection, query, label, timeoutMs = 20_000) => {
   while (Date.now() < deadline) {
     const doc = await mongo.db.collection(collection).findOne(query);
     if (doc) return doc;
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await sleep(25);
   }
   throw new Error(`timed out waiting for ${label}`);
 };
@@ -277,7 +278,7 @@ describe('crash and signal handling (integration)', () => {
     // First signal: graceful stop begins, the blocking migration keeps running
     // (we never release it). Second signal: the operator cannot wait.
     first.child.kill('SIGINT');
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sleep(200);
     first.child.kill('SIGINT');
     const exit = await first.exited;
     // 130 = 128 + SIGINT: the immediate-abort escape hatch.

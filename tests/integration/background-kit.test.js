@@ -11,6 +11,7 @@ const {
 const { retryOnConflict, updateWithRevision } = require('../../versioning.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 let mongo = null;
 const DB = 'migronaut_background_kit_test';
@@ -95,7 +96,7 @@ describe('background migrations through the kit (integration)', () => {
       while (sampling.on) {
         const leased = await partitions().countDocuments({ lease: { $exists: true } });
         sampled = Math.max(sampled, leased);
-        await new Promise((resolve) => setTimeout(resolve, 2));
+        await sleep(2);
       }
     })();
     const [a, b] = await Promise.all([
@@ -413,8 +414,14 @@ export async function down() {}
   it('should refuse a slice length that would never make progress', async () => {
     const kit = kitWith();
     for (const sliceMs of [0, -1, Number.NaN, '1000', 3_600_001]) {
-      await assert.rejects(kit.runBackground(NAME, { sliceMs }), /sliceMs/);
-      await assert.rejects(kit.runBackgroundSlice(NAME, { sliceMs }), /sliceMs/);
+      await assert.rejects(kit.runBackground(NAME, { sliceMs }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /sliceMs/,
+      });
+      await assert.rejects(kit.runBackgroundSlice(NAME, { sliceMs }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /sliceMs/,
+      });
     }
   });
 

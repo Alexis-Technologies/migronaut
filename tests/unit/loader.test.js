@@ -266,7 +266,7 @@ describe('loadMigrationFile — background migrations and requires', () => {
   it('should refuse a background file that also exports up or down', async () => {
     await assert.rejects(
       loadMigrationFile(path.join(fixtures, '0101-background-with-up.cjs'), {}),
-      /exports no up\(\) or down\(\)/,
+      { code: 'ALX_ERR_MIGRATION_INVALID_EXPORT', message: /exports no up\(\) or down\(\)/ },
     );
   });
 

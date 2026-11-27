@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { afterEach, beforeEach, describe, it } = require('node:test');
+const { sleep, waitFor } = require('./wait-for.js');
 
 /**
  * The BullMQ semantics the background queue builds on — delayed jobs, parents
@@ -54,17 +55,15 @@ const defineBullMQFidelityScenarios = (harness) => {
     return job ? job.getState() : 'missing';
   };
 
-  const until = async (target, id, wanted, timeoutMs = 10_000) => {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const state = await stateOf(target, id);
-      if (state === wanted) return target.getJob(id);
-      if (Date.now() > deadline) throw new Error(`job ${id} is ${state}, not ${wanted}`);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+  const until = (target, id, wanted, timeoutMs = 10_000) => {
+    let state = null;
+    const check = async () => {
+      state = await stateOf(target, id);
+      return state === wanted ? target.getJob(id) : null;
+    };
+    const explain = () => `it is ${state}`;
+    return waitFor(`job ${id} to be ${wanted}`, check, { timeoutMs, intervalMs: 10, explain });
   };
-
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   describe('[fidelity]', () => {
     it('should hold a delayed job, and rerun one moved to delayed with its updated data', async () => {

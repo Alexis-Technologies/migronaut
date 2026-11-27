@@ -14,6 +14,7 @@ const {
   formatFailure,
 } = require('../../src/utils/telemetry.js');
 const { parentIdOf, startMetrics, startTracing } = require('../helpers/otel.js');
+const { flush } = require('../helpers/event-loop.js');
 
 /** A tracer double that records what it was asked for and runs the callback inline */
 const fakeTracer = () => {
@@ -399,7 +400,7 @@ describe('wrap', () => {
         }),
         /migration failed/,
       );
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await flush();
     } finally {
       process.off('unhandledRejection', onUnhandled);
     }
@@ -686,7 +687,7 @@ describe('metrics', () => {
       });
       telemetry.runEnded({ command: 'up', durationMs: 5 });
       telemetry.lockRefused();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await flush();
     } finally {
       process.off('unhandledRejection', onUnhandled);
     }
@@ -764,6 +765,7 @@ describe('createTelemetry — against the real OpenTelemetry SDK', () => {
           context: { cause: 'mongodb://app:hunter2@db/app refused' },
         });
       }),
+      { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' },
     );
     const [span] = tracing.named('migronaut.migration');
     assert.strictEqual(span.status.code, 2);

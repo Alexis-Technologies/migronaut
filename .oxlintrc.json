@@ -10,27 +10,7 @@
     "es2026": true,
     "node": true
   },
-  "ignorePatterns": [
-    "node_modules",
-    "coverage",
-    "dist",
-    ".nx",
-    ".idea",
-    "**/*.d.ts",
-    "**/*.test-d.ts",
-    "*.log",
-    "npm-debug.log*",
-    "yarn-debug.log*",
-    "yarn-error.log*",
-    "*.pid",
-    "*.seed",
-    "*.tgz",
-    ".yarn-integrity",
-    ".env*",
-    "!.env.example",
-    "!.env.test",
-    ".DS_Store"
-  ],
+  "ignorePatterns": ["node_modules", "coverage", "**/*.d.ts", "**/*.test-d.ts"],
   "rules": {
     "no-var": "warn",
     "object-shorthand": ["warn", "properties"],
