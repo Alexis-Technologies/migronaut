@@ -391,16 +391,15 @@ A rule of alexiskills that migronaut breaks by design, with the reason:
   characters is the point) and `no-restricted-properties` once in `bullmq/service.js` (the public
   `schedule({ every })` option destructured, not `Array#every`).
 - **`max-lines-per-function` warns on 40 functions** — the orchestrators of `core/migrator.js`,
-  the queue processors and the group wait, the converge planners, the CLI command registrations. They are long
-  because they are sequential protocols; a piece is split out where it reads better named, not to
-  reach 80 lines.
-- **Error codes without `ALX_ERR_`**: see "Errors".
+  the queue processors and the group wait, the converge planners, the CLI command registrations.
+  They are long because they are sequential protocols; a piece is split out where it reads better
+  named, not to reach 80 lines.
 
 ### Errors
 
 `src/errors/index.js` holds `MigronautError` and exactly one subclass per code. The class name
-ends in `Error` and its code is that name in `UPPER_SNAKE_CASE` (`LockAlreadyHeldError` /
-`LOCK_ALREADY_HELD`).
+ends in `Error`, and its code is `ALX_ERR_` and that name in `UPPER_SNAKE_CASE`
+(`LockAlreadyHeldError` / `ALX_ERR_LOCK_ALREADY_HELD`), as alexiskills asks of every string code.
 
 - Every class takes `(message, options = {})`, as `Error` does (alexiskills 1.2):
   `new LockLostError(message, { cause, context })`. `options` goes to `super` whole, so `cause` is
@@ -408,8 +407,8 @@ ends in `Error` and its code is that name in `UPPER_SNAKE_CASE` (`LockAlreadyHel
   its own after `super`. Every instance has `name`, `message`, `code` and `context` (`{}` when none
   was given — so `context.results` attaches to any of them), and `cause` when it wraps one. A
   wrap site writes `{ cause: error, context: { …, cause: errorText(error) } }`, in that order.
-- `code` is the contract: what the CLI prints (`✖ LOCK_ALREADY_HELD: …`), what `--json` emits as
-  `error.code`, what `EXIT_CODES` maps and what the queue decides retries by. `context` is plain,
+- `code` is the contract: what the CLI prints (`✖ ALX_ERR_LOCK_ALREADY_HELD: …`), what `--json`
+  emits as `error.code`, what `EXIT_CODES` maps and what the queue decides retries by. `context` is plain,
   JSON-safe data about the failure (it survives `--json` and the changelog's failure trace);
   `context.results` is reserved for the migration rows a stopped run already applied. `cause` is
   the original error, so `error.cause.stack` still points into the user's code.
@@ -445,27 +444,16 @@ literal, `constructor(message: string, options?: MigronautErrorOptions)`); the e
 number, never renumber one); a row in the table of `docs/reference/error-codes.md` and in the
 exit-code table of `docs/reference/cli.md`; the queue's verdict (`RETRYABLE_CODES` lists the codes
 a retry can fix — an unknown code stays retryable). `tests/unit/package-surface.test.js` holds the
-classes, the union, `EXIT_CODES` and both docs tables to each other. A new member of the public
-union shipped in minors (2.1 – 2.4); 2.0.0 called one breaking — ask which the release is.
+classes, the union, `EXIT_CODES` and both docs tables to each other, and every code to the
+`ALX_ERR_` prefix. A new member of the public union shipped in minors (2.1 – 2.4); 2.0.0 called
+one breaking — ask which the release is. Renaming or removing one is breaking.
 
-**The `ALX_ERR_` prefix is a temporary exception.** alexiskills 1.1 starts every string code with
-`ALX_ERR_`; migronaut's codes are public — printed, emitted in `--json`, mapped to exit codes,
-matched by the queue and by users — so renaming one breaks every consumer that matches on it. They
-keep their names until **3.0**, which renames all of them (`LOCK_ALREADY_HELD` →
-`ALX_ERR_LOCK_ALREADY_HELD`, the class names unchanged):
-
-`LOCK_ALREADY_HELD`, `LOCK_RELEASE_FAILED`, `LOCK_LOST`, `RUN_ABORTED`, `HOOK_FAILED`,
-`CHECKSUM_MISMATCH`, `MIGRATION_FILE_NOT_FOUND`, `MIGRATION_FILE_EXISTS`,
-`MIGRATION_INVALID_NAME`, `MIGRATION_INVALID_EXPORT`, `MIGRATION_EXECUTION_FAILED`,
-`MIGRATION_TIMEOUT`, `TRANSACTIONS_UNSUPPORTED`, `CONFIG_INVALID`, `CONFIG_FILE_EXISTS`,
-`CONNECTION_FAILED`, `NOT_APPLIED`, `IMPORT_TARGET_NOT_EMPTY`, `MIGRATION_IRREVERSIBLE`,
-`MIGRATION_OUT_OF_ORDER`, `MIGRATION_BLOCKED`, `QUEUE_JOB_INVALID`, `QUEUE_JOB_FAILED`,
-`CONVERGE_FAILED`, `REVISION_CONFLICT`, `SHAPE_VERSION_UNSUPPORTED`, `BACKGROUND_PENDING`,
-`BACKGROUND_FAILED`, `BACKGROUND_CONFLICT`, `SANDBOX_REFUSED` — and the three CLI conditions
-`EXIT_CODES` also names, `PENDING_MIGRATIONS`, `AUDIT_FAILED` and `COLLECTIONS_DRIFT`.
-
-Until then a new code follows the existing format, so the set stays one naming scheme; 3.0 moves
-them together, with `Upgrading from 2.x` in the CHANGELOG listing each old and new name.
+**Every code starts with `ALX_ERR_`** since 3.0, the three CLI conditions `EXIT_CODES` also names
+included (`ALX_ERR_PENDING_MIGRATIONS`, `ALX_ERR_AUDIT_FAILED`, `ALX_ERR_COLLECTIONS_DRIFT`). 2.x
+named them without it (`LOCK_ALREADY_HELD`); the CHANGELOG's `Upgrading from 2.x` lists each old
+and new name, and the exit numbers did not change. Codes of Node, MongoDB and the other packages
+stay as they are (`ENOENT`, `11000`). The metric key `METRICS.LOCK_LOST` of `utils/telemetry.js` is
+not an error code and has no prefix.
 
 ## Skills
 
@@ -554,7 +542,7 @@ forward-only and rejected by `down`/`redo`; `init` has no JSON output — `init 
 generates `migronaut.config.json`, and a stray `init --json` is rejected with a pointer to
 `--format`. In the queue adapter: migration jobs are forced to `attempts: 1` (a BullMQ retry
 re-queues behind the waiting jobs and would break the order); a job behind a failed migration
-fails as `MIGRATION_BLOCKED` instead of waiting; an already-applied migration's job *completes*
+fails as `ALX_ERR_MIGRATION_BLOCKED` instead of waiting; an already-applied migration's job *completes*
 as `skipped`; and non-retryable errors are renamed `UnrecoverableError` only when a job has
 `attempts > 1` (BullMQ matches that name — the adapter cannot import the class). For ids:
 `generateId` is called with **no** arguments on purpose (a "purpose" argument would be read by
@@ -642,7 +630,7 @@ changelog's `failed` trace — the owner's decision (SECURITY.md says which chan
 reverted); a file that does not load gets a migration span and a duration point, not a
 `migration:error` or a `failed` trace (it never did); a run the lock refused still emits
 `run:start`/`run:end` — the queue processor reads its run id there — and is told apart by
-`code: 'LOCK_ALREADY_HELD'`; a lost lock is said once, and its heartbeat goes on only after a
+`code: 'ALX_ERR_LOCK_ALREADY_HELD'`; a lost lock is said once, and its heartbeat goes on only after a
 *deadline* loss (the document may still be ours); `reloadMigrations` drops the file's
 `require.cache` entry as well as adding the query string (the query alone reloads ES modules
 only); the CLI exits 6 on a command line that does not parse and refuses `--flag=value` on a flag

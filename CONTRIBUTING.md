@@ -172,5 +172,5 @@ Before "fixing" one of these, read [ARCHITECTURE.md §8](ARCHITECTURE.md):
 migrate-mongo imports are forward-only and refused by `down`/`redo`; `init` has
 no JSON output — `--json` on it is refused with a pointer to `--format json`,
 which selects the config file's format; queue jobs get a
-single attempt, and a job behind a failed migration fails as `MIGRATION_BLOCKED`
+single attempt, and a job behind a failed migration fails as `ALX_ERR_MIGRATION_BLOCKED`
 instead of waiting.

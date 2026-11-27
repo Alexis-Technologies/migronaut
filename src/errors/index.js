@@ -29,7 +29,7 @@ class LockAlreadyHeldError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'LockAlreadyHeldError';
-    this.code = 'LOCK_ALREADY_HELD';
+    this.code = 'ALX_ERR_LOCK_ALREADY_HELD';
   }
 }
 
@@ -38,7 +38,7 @@ class LockReleaseFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'LockReleaseFailedError';
-    this.code = 'LOCK_RELEASE_FAILED';
+    this.code = 'ALX_ERR_LOCK_RELEASE_FAILED';
   }
 }
 
@@ -51,7 +51,7 @@ class LockLostError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'LockLostError';
-    this.code = 'LOCK_LOST';
+    this.code = 'ALX_ERR_LOCK_LOST';
   }
 }
 
@@ -63,7 +63,7 @@ class RunAbortedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'RunAbortedError';
-    this.code = 'RUN_ABORTED';
+    this.code = 'ALX_ERR_RUN_ABORTED';
   }
 }
 
@@ -72,7 +72,7 @@ class HookFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'HookFailedError';
-    this.code = 'HOOK_FAILED';
+    this.code = 'ALX_ERR_HOOK_FAILED';
   }
 }
 
@@ -81,7 +81,7 @@ class MigrationFileExistsError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'MigrationFileExistsError';
-    this.code = 'MIGRATION_FILE_EXISTS';
+    this.code = 'ALX_ERR_MIGRATION_FILE_EXISTS';
   }
 }
 
@@ -90,7 +90,7 @@ class ChecksumMismatchError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'ChecksumMismatchError';
-    this.code = 'CHECKSUM_MISMATCH';
+    this.code = 'ALX_ERR_CHECKSUM_MISMATCH';
   }
 }
 
@@ -99,7 +99,7 @@ class MigrationFileNotFoundError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'MigrationFileNotFoundError';
-    this.code = 'MIGRATION_FILE_NOT_FOUND';
+    this.code = 'ALX_ERR_MIGRATION_FILE_NOT_FOUND';
   }
 }
 
@@ -112,7 +112,7 @@ class MigrationInvalidNameError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'MigrationInvalidNameError';
-    this.code = 'MIGRATION_INVALID_NAME';
+    this.code = 'ALX_ERR_MIGRATION_INVALID_NAME';
   }
 }
 
@@ -121,7 +121,7 @@ class MigrationInvalidExportError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'MigrationInvalidExportError';
-    this.code = 'MIGRATION_INVALID_EXPORT';
+    this.code = 'ALX_ERR_MIGRATION_INVALID_EXPORT';
   }
 }
 
@@ -130,7 +130,7 @@ class MigrationExecutionFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'MigrationExecutionFailedError';
-    this.code = 'MIGRATION_EXECUTION_FAILED';
+    this.code = 'ALX_ERR_MIGRATION_EXECUTION_FAILED';
   }
 }
 
@@ -143,7 +143,7 @@ class MigrationTimeoutError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'MigrationTimeoutError';
-    this.code = 'MIGRATION_TIMEOUT';
+    this.code = 'ALX_ERR_MIGRATION_TIMEOUT';
   }
 }
 
@@ -156,7 +156,7 @@ class TransactionsUnsupportedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'TransactionsUnsupportedError';
-    this.code = 'TRANSACTIONS_UNSUPPORTED';
+    this.code = 'ALX_ERR_TRANSACTIONS_UNSUPPORTED';
   }
 }
 
@@ -165,7 +165,7 @@ class ConfigInvalidError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'ConfigInvalidError';
-    this.code = 'CONFIG_INVALID';
+    this.code = 'ALX_ERR_CONFIG_INVALID';
   }
 }
 
@@ -174,7 +174,7 @@ class ConfigFileExistsError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'ConfigFileExistsError';
-    this.code = 'CONFIG_FILE_EXISTS';
+    this.code = 'ALX_ERR_CONFIG_FILE_EXISTS';
   }
 }
 
@@ -183,7 +183,7 @@ class ConnectionFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'ConnectionFailedError';
-    this.code = 'CONNECTION_FAILED';
+    this.code = 'ALX_ERR_CONNECTION_FAILED';
   }
 }
 
@@ -192,7 +192,7 @@ class NotAppliedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'NotAppliedError';
-    this.code = 'NOT_APPLIED';
+    this.code = 'ALX_ERR_NOT_APPLIED';
   }
 }
 
@@ -201,7 +201,7 @@ class ImportTargetNotEmptyError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'ImportTargetNotEmptyError';
-    this.code = 'IMPORT_TARGET_NOT_EMPTY';
+    this.code = 'ALX_ERR_IMPORT_TARGET_NOT_EMPTY';
   }
 }
 
@@ -210,7 +210,7 @@ class IrreversibleMigrationError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'IrreversibleMigrationError';
-    this.code = 'MIGRATION_IRREVERSIBLE';
+    this.code = 'ALX_ERR_MIGRATION_IRREVERSIBLE';
   }
 }
 
@@ -224,7 +224,7 @@ class OutOfOrderMigrationError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'OutOfOrderMigrationError';
-    this.code = 'MIGRATION_OUT_OF_ORDER';
+    this.code = 'ALX_ERR_MIGRATION_OUT_OF_ORDER';
   }
 }
 
@@ -237,7 +237,7 @@ class MigrationBlockedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'MigrationBlockedError';
-    this.code = 'MIGRATION_BLOCKED';
+    this.code = 'ALX_ERR_MIGRATION_BLOCKED';
   }
 }
 
@@ -250,7 +250,7 @@ class QueueJobInvalidError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'QueueJobInvalidError';
-    this.code = 'QUEUE_JOB_INVALID';
+    this.code = 'ALX_ERR_QUEUE_JOB_INVALID';
   }
 }
 
@@ -264,7 +264,7 @@ class QueueJobFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'QueueJobFailedError';
-    this.code = 'QUEUE_JOB_FAILED';
+    this.code = 'ALX_ERR_QUEUE_JOB_FAILED';
   }
 }
 
@@ -284,7 +284,7 @@ class ConvergeFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'ConvergeFailedError';
-    this.code = 'CONVERGE_FAILED';
+    this.code = 'ALX_ERR_CONVERGE_FAILED';
   }
 }
 
@@ -300,7 +300,7 @@ class RevisionConflictError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'RevisionConflictError';
-    this.code = 'REVISION_CONFLICT';
+    this.code = 'ALX_ERR_REVISION_CONFLICT';
   }
 }
 
@@ -315,7 +315,7 @@ class ShapeVersionError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'ShapeVersionError';
-    this.code = 'SHAPE_VERSION_UNSUPPORTED';
+    this.code = 'ALX_ERR_SHAPE_VERSION_UNSUPPORTED';
   }
 }
 
@@ -329,7 +329,7 @@ class BackgroundPendingError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'BackgroundPendingError';
-    this.code = 'BACKGROUND_PENDING';
+    this.code = 'ALX_ERR_BACKGROUND_PENDING';
   }
 }
 
@@ -343,7 +343,7 @@ class BackgroundFailedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'BackgroundFailedError';
-    this.code = 'BACKGROUND_FAILED';
+    this.code = 'ALX_ERR_BACKGROUND_FAILED';
   }
 }
 
@@ -357,7 +357,7 @@ class BackgroundConflictError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'BackgroundConflictError';
-    this.code = 'BACKGROUND_CONFLICT';
+    this.code = 'ALX_ERR_BACKGROUND_CONFLICT';
   }
 }
 
@@ -372,7 +372,7 @@ class SandboxRefusedError extends MigronautError {
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'SandboxRefusedError';
-    this.code = 'SANDBOX_REFUSED';
+    this.code = 'ALX_ERR_SANDBOX_REFUSED';
   }
 }
 

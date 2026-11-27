@@ -193,7 +193,7 @@ describe('runMigration on a standalone server (integration)', () => {
     await standalone?.stop();
   });
 
-  it('should refuse a transaction as TRANSACTIONS_UNSUPPORTED, in the server’s words', async () => {
+  it('should refuse a transaction as ALX_ERR_TRANSACTIONS_UNSUPPORTED, in the server’s words', async () => {
     const db = client.db('migronaut_tx_standalone');
     const migration = {
       up: async (ctx) => {

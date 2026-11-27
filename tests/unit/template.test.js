@@ -426,7 +426,7 @@ describe('isEsmProject', () => {
     // detection exists to prevent. The broken file is the user's to fix.
     writeFileSync(path.join(tmp, 'package.json'), 'not json at all');
     await assert.rejects(isEsmProject(tmp), (error) => {
-      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
       assert.match(error.message, /package\.json/);
       return true;
     });

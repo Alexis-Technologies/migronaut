@@ -21,7 +21,7 @@ const registerUp = (program) => {
     mutating: true,
     // Runs before any connection: validation and the confirmation prompt must
     // not cost a round trip, and their errors use the same typed envelope as
-    // everything else (CONFIG_INVALID, exit 6).
+    // everything else (ALX_ERR_CONFIG_INVALID, exit 6).
     preflight: async (opts, positionals, { logger }) => {
       const file = positionals[0];
       if (opts.force && !file) {

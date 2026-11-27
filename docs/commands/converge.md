@@ -57,11 +57,11 @@ Rows that need nothing are folded into the summary; `--verbose` lists them too.
 | Option | Description |
 |---|---|
 | `--dry-run` | Plan and print, change nothing. Takes no lock. |
-| `--check` | Like `--dry-run`, then exit `28` (`COLLECTIONS_DRIFT`) if anything would change or conflict — or a declared search index failed to build. An undeclared index kept with prune off is not drift, nor is a search index build under way. |
+| `--check` | Like `--dry-run`, then exit `28` (`ALX_ERR_COLLECTIONS_DRIFT`) if anything would change or conflict — or a declared search index failed to build. An undeclared index kept with prune off is not drift, nor is a search index build under way. |
 | `--prune` | Drop indexes a definition does not declare — in collections whose definition does not set `prune` itself. With `indexes: []` that is every index but `_id`, and converge warns. Search indexes too, where the definition declares `searchIndexes`. |
-| `--wait-search` | Hold the run until every declared search index is queryable with its declared definition — `CONVERGE_FAILED` with `phase: 'wait'` on a FAILED build of an index the run created or changed, or after `searchIndexWaitTimeoutMs`. The migration lock is released when the wait starts — it only reads. Overrides `waitForSearchIndexes`. Not with `--dry-run`, `--check` or `--history`. |
+| `--wait-search` | Hold the run until every declared search index is queryable with its declared definition — `ALX_ERR_CONVERGE_FAILED` with `phase: 'wait'` on a FAILED build of an index the run created or changed, or after `searchIndexWaitTimeoutMs`. The migration lock is released when the wait starts — it only reads. Overrides `waitForSearchIndexes`. Not with `--dry-run`, `--check` or `--history`. |
 | `--no-wait-search` | Do not wait, whatever `waitForSearchIndexes` says. |
-| `--ordered` | Refuse (`MIGRATION_BLOCKED`, exit `24`) while any migration is still pending — checked under the lock. |
+| `--ordered` | Refuse (`ALX_ERR_MIGRATION_BLOCKED`, exit `24`) while any migration is still pending — checked under the lock. |
 | `--reason <text>` | Why — recorded in the [converge history](/guide/collections#history) with the run. |
 | `--history` | Show the converge history instead of converging: when, triggered how, who asked and why, how many changes. `--json` prints the full entries, with every row's `from` / `to`. |
 | `--limit <n>` | With `--history`: how many entries (default 20, at most 1000). |
@@ -84,7 +84,7 @@ converge with `--prune`. A converge after `up` and a queue job never pass the fl
 
 `--json` without `--yes` applies a plan that only creates or modifies indexes; a plan that would
 drop or rebuild an index, or change an existing collection's validator, is refused with
-`CONFIG_INVALID` (exit `6`), listing those actions in
+`ALX_ERR_CONFIG_INVALID` (exit `6`), listing those actions in
 `error.context.destructive` — so a pipeline can apply "only if safe". A closed stdin at the prompt
 is refused the same way.
 
@@ -137,11 +137,11 @@ is refused the same way.
 | Code | When |
 |---|---|
 | `0` | Converged, already in sync, or the confirmation was declined |
-| `3` | `LOCK_ALREADY_HELD` — another run holds the lock (a dry run still works) |
-| `6` | `CONFIG_INVALID` — a bad definition, or a destructive plan without `--yes` in `--json` mode |
-| `11` | `RUN_ABORTED` — stopped by a signal, between steps or at the prompt |
-| `27` | `CONVERGE_FAILED` — a conflict refused the plan, a step failed, or `--wait-search` gave up |
-| `28` | `COLLECTIONS_DRIFT` — `--check` found work to do, or a search index that failed to build |
+| `3` | `ALX_ERR_LOCK_ALREADY_HELD` — another run holds the lock (a dry run still works) |
+| `6` | `ALX_ERR_CONFIG_INVALID` — a bad definition, or a destructive plan without `--yes` in `--json` mode |
+| `11` | `ALX_ERR_RUN_ABORTED` — stopped by a signal, between steps or at the prompt |
+| `27` | `ALX_ERR_CONVERGE_FAILED` — a conflict refused the plan, a step failed, or `--wait-search` gave up |
+| `28` | `ALX_ERR_COLLECTIONS_DRIFT` — `--check` found work to do, or a search index that failed to build |
 
 On `27`, `--json` prints the usual error document; `error.context.converge` holds the result so
 far, and `error.context.hint` what usually fixes the server error behind it.

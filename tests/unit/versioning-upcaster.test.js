@@ -12,7 +12,7 @@ const steps = {
 
 const shapeError = (reason) => (error) => {
   assert.ok(error instanceof ShapeVersionError);
-  assert.strictEqual(error.code, 'SHAPE_VERSION_UNSUPPORTED');
+  assert.strictEqual(error.code, 'ALX_ERR_SHAPE_VERSION_UNSUPPORTED');
   assert.strictEqual(error.context.reason, reason);
   return true;
 };

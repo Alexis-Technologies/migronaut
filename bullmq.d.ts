@@ -826,7 +826,7 @@ export interface MigrationJobView {
  * What a worker accepts from a job's payload beyond "apply what is pending, in
  * order". Anything that can write to Redis can enqueue, so the requests that
  * go further are opt-in; a job asking for one that is off fails as
- * `QUEUE_JOB_INVALID` (`context.permission`) before anything runs.
+ * `ALX_ERR_QUEUE_JOB_INVALID` (`context.permission`) before anything runs.
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
 export interface MigrationJobPermissions {

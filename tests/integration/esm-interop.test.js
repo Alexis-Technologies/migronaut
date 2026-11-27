@@ -56,7 +56,7 @@ if (typeof MigratorKit !== 'function') throw new Error('MigratorKit is not a fun
 if (typeof runMigrations !== 'function') throw new Error('runMigrations is not a function');
 if (typeof pendingMigrations !== 'function') throw new Error('pendingMigrations missing');
 if (typeof createLogger !== 'function') throw new Error('createLogger missing');
-if (typeof EXIT_CODES.LOCK_ALREADY_HELD !== 'number') throw new Error('EXIT_CODES missing');
+if (typeof EXIT_CODES.ALX_ERR_LOCK_ALREADY_HELD !== 'number') throw new Error('EXIT_CODES missing');
 if (!(new OutOfOrderMigrationError('x') instanceof MigronautError)) {
   throw new Error('error hierarchy broken through ESM interop');
 }

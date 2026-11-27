@@ -155,7 +155,7 @@ describe('sequenced single-file runs (integration)', () => {
       three();
       await assert.rejects(migrator.up('0003-c.js', { ordered: true }), (error) => {
         assert.ok(error instanceof MigrationBlockedError);
-        assert.strictEqual(error.code, 'MIGRATION_BLOCKED');
+        assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_BLOCKED');
         assert.deepStrictEqual(error.context, {
           name: '0003-c.js',
           direction: 'up',

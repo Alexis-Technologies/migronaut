@@ -66,7 +66,7 @@ your own "application startup" span shows up as part of it.
 | `migronaut.background.coordinate` | Once per coordinator step that held the coordinator lock — planning (its `$sample` scans) and finalizing nest under it | `migronaut.background.name`; at the end `migronaut.background.outcome` (`process`, `wait`, `done`, …) |
 
 A failure sets the span's status to `ERROR` with the failure message, and `error.type` to the
-[error code](/reference/error-codes) (`MIGRATION_EXECUTION_FAILED`, `LOCK_LOST`, …) — or, for an
+[error code](/reference/error-codes) (`ALX_ERR_MIGRATION_EXECUTION_FAILED`, `ALX_ERR_LOCK_LOST`, …) — or, for an
 error that is not migronaut's (a `TypeError` thrown by a migration), to its class name, and
 `_OTHER` when it has none. A success leaves the status unset, as OpenTelemetry asks of libraries.
 A converge run is an ordinary `migronaut.run` with `migronaut.run.command = converge`; the
@@ -285,4 +285,4 @@ wires all of this up, with a Jaeger in its `docker-compose.yml`.
 - It does not propagate context itself; across a queue that is BullMQ's job (above).
 - A migration that [times out](/guide/configuration) keeps running in the background — JavaScript
   cannot cancel it — so its driver spans may end after the migration's span did. They stay attached
-  to it, with `error.type = MIGRATION_TIMEOUT` explaining why.
+  to it, with `error.type = ALX_ERR_MIGRATION_TIMEOUT` explaining why.

@@ -439,7 +439,10 @@ const coordinatePass = async (deps, name, initial, { signal }) => {
   try {
     job = await jobFor(deps, name, state);
   } catch (error) {
-    if (error instanceof ChecksumMismatchError || error?.code === 'MIGRATION_FILE_NOT_FOUND') {
+    if (
+      error instanceof ChecksumMismatchError ||
+      error?.code === 'ALX_ERR_MIGRATION_FILE_NOT_FOUND'
+    ) {
       // Mid-deploy: an older or newer pod holds the other version of the file.
       deps.logger.warn(`⚠ ${errorText(error)}`, deps.fields({ background: name }));
       return retrySoon(deps, 'checksum');

@@ -303,7 +303,7 @@ export async function down() {}
     const kit = migrator({ timeoutMs: 100 });
     await assert.rejects(kit.up(), (error) => {
       assert.ok(error instanceof MigrationTimeoutError);
-      assert.strictEqual(error.code, 'MIGRATION_TIMEOUT');
+      assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_TIMEOUT');
       assert.strictEqual(error.context.timeoutMs, 100);
       return true;
     });
@@ -454,7 +454,7 @@ describe('out-of-order detection (integration)', () => {
     const kit = await applyNewerThenMergeOlder({ onOutOfOrder: 'error' });
     await assert.rejects(kit.up(), (error) => {
       assert.ok(error instanceof OutOfOrderMigrationError);
-      assert.strictEqual(error.code, 'MIGRATION_OUT_OF_ORDER');
+      assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_OUT_OF_ORDER');
       assert.deepStrictEqual(error.context.names, ['0001-a.ts']);
       return true;
     });

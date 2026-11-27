@@ -90,7 +90,7 @@ describe('migronaut background (CLI)', () => {
     project.write(NAME, spec());
     assert.strictEqual((await runCli(args('up'))).code, 0);
     const pending = await runCli(args('background', 'status', '--check'));
-    assert.strictEqual(pending.code, EXIT_CODES.BACKGROUND_PENDING);
+    assert.strictEqual(pending.code, EXIT_CODES.ALX_ERR_BACKGROUND_PENDING);
     assert.match(pending.stdout, /0001-orders\.js/);
     const run = await runCli(args('background', 'run', NAME, '--concurrency', '2'));
     assert.strictEqual(run.code, 0, run.stderr);
@@ -106,7 +106,7 @@ describe('migronaut background (CLI)', () => {
     assert.strictEqual(verify.code, 0);
     await mongo.db.collection('orders').insertOne({ __v: 1, __rev: 0 });
     const drift = await runCli(args('background', 'verify', '--report'));
-    assert.strictEqual(drift.code, EXIT_CODES.BACKGROUND_PENDING);
+    assert.strictEqual(drift.code, EXIT_CODES.ALX_ERR_BACKGROUND_PENDING);
   });
 
   it('should run --all until nothing is left, even one listed before what it waits for', async () => {
@@ -147,18 +147,18 @@ export const background = {
     );
     assert.strictEqual(
       (await runCli(args('background', 'retry', NAME))).code,
-      EXIT_CODES.BACKGROUND_CONFLICT,
+      EXIT_CODES.ALX_ERR_BACKGROUND_CONFLICT,
     );
     assert.strictEqual((await runCli(args('background', 'resume', NAME))).code, 0);
     const cancel = await runCli(args('--json', 'background', 'cancel', NAME));
-    assert.strictEqual(cancel.code, EXIT_CODES.CONFIG_INVALID, 'needs --yes with --json');
+    assert.strictEqual(cancel.code, EXIT_CODES.ALX_ERR_CONFIG_INVALID, 'needs --yes with --json');
     assert.strictEqual(
       (await runCli(args('background', 'cancel', NAME), { input: 'y\n' })).code,
       0,
     );
     assert.strictEqual(
       (await runCli(args('background', 'pause', 'nope.js'))).code,
-      EXIT_CODES.NOT_APPLIED,
+      EXIT_CODES.ALX_ERR_NOT_APPLIED,
     );
     assert.strictEqual(
       (await runCli(args('background', 'retry', NAME, '--from-start', '--yes'))).code,
@@ -178,9 +178,9 @@ export const background = {
     );
     await runCli(args('up'));
     const run = await runCli(args('background', 'run', NAME));
-    assert.strictEqual(run.code, EXIT_CODES.BACKGROUND_FAILED, run.stderr);
+    assert.strictEqual(run.code, EXIT_CODES.ALX_ERR_BACKGROUND_FAILED, run.stderr);
     const check = await runCli(args('background', 'status', '--check'));
-    assert.strictEqual(check.code, EXIT_CODES.BACKGROUND_FAILED);
+    assert.strictEqual(check.code, EXIT_CODES.ALX_ERR_BACKGROUND_FAILED);
   });
 
   it('should stop its lanes on SIGINT with exit 11, and go on from there next time', async () => {
@@ -201,7 +201,7 @@ export const background = {
         }
       },
     });
-    assert.strictEqual(run.code, EXIT_CODES.RUN_ABORTED, run.stderr);
+    assert.strictEqual(run.code, EXIT_CODES.ALX_ERR_RUN_ABORTED, run.stderr);
     const left = await mongo.db.collection('orders').countDocuments({ __v: 1 });
     assert.ok(left > 0 && left < 300, `stopped midway: ${left}`);
     assert.strictEqual((await runCli(args('background', 'run', NAME))).code, 0);
@@ -231,11 +231,11 @@ export const background = {
 `,
     );
     const refused = await runCli(args('background', 'dry-run', '0003-step.js', '--steps', '2'));
-    assert.strictEqual(refused.code, EXIT_CODES.SANDBOX_REFUSED);
+    assert.strictEqual(refused.code, EXIT_CODES.ALX_ERR_SANDBOX_REFUSED);
     assert.match(refused.stderr + refused.stdout, /Refused collection\.createIndex/);
     assert.strictEqual(
       (await runCli(args('background', 'dry-run', NAME, '--steps', '2'))).code,
-      EXIT_CODES.CONFIG_INVALID,
+      EXIT_CODES.ALX_ERR_CONFIG_INVALID,
     );
   });
 
@@ -279,7 +279,7 @@ export const background = {
     ]) {
       assert.strictEqual(
         (await runCli(args(...bad))).code,
-        EXIT_CODES.CONFIG_INVALID,
+        EXIT_CODES.ALX_ERR_CONFIG_INVALID,
         bad.join(' '),
       );
     }
@@ -296,11 +296,11 @@ export const background = {
     assert.match(content, /\/\/ revert:/);
     assert.strictEqual(
       (await runCli(args('create', 'x', '--background', '--template', 'a.js'))).code,
-      EXIT_CODES.CONFIG_INVALID,
+      EXIT_CODES.ALX_ERR_CONFIG_INVALID,
     );
     // As it is, the scaffold is refused by up — its placeholder collection would "complete" at once.
     const up = await runCli(args('up'));
-    assert.strictEqual(up.code, EXIT_CODES.MIGRATION_INVALID_EXPORT, up.stderr);
+    assert.strictEqual(up.code, EXIT_CODES.ALX_ERR_MIGRATION_INVALID_EXPORT, up.stderr);
     assert.match(up.stderr + up.stdout, /placeholder/);
   });
 });
@@ -332,6 +332,6 @@ describe('migronaut background on a standalone server (CLI)', () => {
       'dry-run',
       NAME,
     ]);
-    assert.strictEqual(result.code, EXIT_CODES.TRANSACTIONS_UNSUPPORTED);
+    assert.strictEqual(result.code, EXIT_CODES.ALX_ERR_TRANSACTIONS_UNSUPPORTED);
   });
 });

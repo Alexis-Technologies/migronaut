@@ -63,7 +63,7 @@ const registerConverge = (program) => {
       ['--dry-run', 'Show what would change without changing anything'],
       [
         '--check',
-        `Exit with code ${EXIT_CODES.COLLECTIONS_DRIFT} if anything would change (CI gate; implies --dry-run)`,
+        `Exit with code ${EXIT_CODES.ALX_ERR_COLLECTIONS_DRIFT} if anything would change (CI gate; implies --dry-run)`,
       ],
       [
         '--prune',
@@ -195,7 +195,7 @@ const registerConverge = (program) => {
       if (!result.inSync) logger.error('✖ The database differs from the declared collections');
       // A dedicated code: a CI gate must tell "out of step" (act: converge)
       // from "the check itself crashed" (act: page).
-      process.exitCode = EXIT_CODES.COLLECTIONS_DRIFT;
+      process.exitCode = EXIT_CODES.ALX_ERR_COLLECTIONS_DRIFT;
     },
   });
 };

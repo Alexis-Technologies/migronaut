@@ -284,7 +284,7 @@ describe('a standalone server refusing a transaction', () => {
     ['as the driver threw it up to 6.x', plain],
     ['wrapped, as driver 7 throws it', wrapped],
   ]) {
-    it(`should be TRANSACTIONS_UNSUPPORTED, in the server’s words — ${label}`, async () => {
+    it(`should be ALX_ERR_TRANSACTIONS_UNSUPPORTED, in the server’s words — ${label}`, async () => {
       const { context } = makeContext();
       const refusal = make();
       const migration = { up: () => Promise.reject(refusal), down: async () => undefined };

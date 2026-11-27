@@ -43,7 +43,7 @@ const registerStatus = (program) => {
         logger.error(`✖ ${pending} pending migration(s)`);
         // A dedicated code: a CI gate must be able to tell "database is
         // behind" (act: migrate) from "the check itself crashed" (act: page).
-        process.exitCode = EXIT_CODES.PENDING_MIGRATIONS;
+        process.exitCode = EXIT_CODES.ALX_ERR_PENDING_MIGRATIONS;
       }
     },
   });

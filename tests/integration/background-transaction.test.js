@@ -276,7 +276,7 @@ describe('transactional background migrations on a standalone server (integratio
     await standalone.stop();
   });
 
-  it('should fail with TRANSACTIONS_UNSUPPORTED, writing nothing', async () => {
+  it('should fail with ALX_ERR_TRANSACTIONS_UNSUPPORTED, writing nothing', async () => {
     const db = client.db('standalone_bg');
     await db.collection('orders').insertMany([{ __v: 1, address: 'x' }]);
     const kit = kitWith(standalone.getUri(), 'standalone_bg');

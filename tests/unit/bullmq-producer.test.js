@@ -623,7 +623,7 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
       );
       await assert.rejects(group.wait(), (error) => {
         assert.ok(error instanceof QueueJobFailedError);
-        assert.strictEqual(error.code, 'QUEUE_JOB_FAILED');
+        assert.strictEqual(error.code, 'ALX_ERR_QUEUE_JOB_FAILED');
         assert.match(error.message, /0002-b\.js/);
         assert.deepStrictEqual(error.context, {
           groupId: group.groupId,
@@ -778,7 +778,7 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
     it("should carry a failed job's typed code, so callers need not parse the reason", async () => {
       const queue = {
         getJob: async () => ({
-          progress: { phase: 'failed', code: 'MIGRATION_BLOCKED' },
+          progress: { phase: 'failed', code: 'ALX_ERR_MIGRATION_BLOCKED' },
           waitUntilFinished: async () => {
             throw new Error('0002-b.js is blocked');
           },
@@ -793,7 +793,8 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
           batch: 1,
           jobs: [{ id: '2', migration: '0002-b.js' }],
         }),
-        (error) => error.context.code === 'MIGRATION_BLOCKED' && error.context.timedOut === false,
+        (error) =>
+          error.context.code === 'ALX_ERR_MIGRATION_BLOCKED' && error.context.timedOut === false,
       );
     });
 

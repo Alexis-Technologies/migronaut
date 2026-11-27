@@ -69,7 +69,7 @@ const waitForGroup = async ({
 
   /**
    * The typed code a failed job reported in its progress — what a caller
-   * branches on (MIGRATION_BLOCKED, CHECKSUM_MISMATCH, …) instead of parsing
+   * branches on (ALX_ERR_MIGRATION_BLOCKED, ALX_ERR_CHECKSUM_MISMATCH, …) instead of parsing
    * `failedReason`. Best-effort: the job may be gone, or Redis unreachable.
    */
   const failureCode = async (id) => {

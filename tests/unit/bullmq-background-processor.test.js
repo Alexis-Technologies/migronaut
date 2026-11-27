@@ -396,7 +396,7 @@ describe('background lane jobs', () => {
       kind: 'background-lane',
       migration: NAME,
       outcome: 'gave-up',
-      code: 'LOCK_LOST',
+      code: 'ALX_ERR_LOCK_LOST',
     });
     assert.match(last.logs.at(-1), /gave up after 2 retries/);
   });

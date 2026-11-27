@@ -168,14 +168,14 @@ const reportError = (error, { json, verbose, logger }) => {
 /**
  * A command line that could not be parsed — an unknown flag, a value given to
  * a flag that takes none, no command at all. It is bad input like any other:
- * CONFIG_INVALID (exit 6), and under `--json` one document on stdout, so a
+ * ALX_ERR_CONFIG_INVALID (exit 6), and under `--json` one document on stdout, so a
  * wrapper reads a mistyped flag the way it reads every other failure. For
  * people the message goes to stderr — or `help`, when no command was given.
  */
 const reportUsageError = (message, { json = false, help } = {}) => {
-  if (json) emitJson({ error: { code: 'CONFIG_INVALID', message } });
+  if (json) emitJson({ error: { code: 'ALX_ERR_CONFIG_INVALID', message } });
   else process.stderr.write(help !== undefined ? `${help}\n` : `error: ${message}\n`);
-  process.exitCode = EXIT_CODES.CONFIG_INVALID;
+  process.exitCode = EXIT_CODES.ALX_ERR_CONFIG_INVALID;
 };
 
 /**

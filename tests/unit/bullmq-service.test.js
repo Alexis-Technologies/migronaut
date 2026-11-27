@@ -508,7 +508,7 @@ describe('createMigrationQueue', () => {
         migration: '0002-b.js',
         direction: 'up',
         runId: 'run-2',
-        code: 'MIGRATION_BLOCKED',
+        code: 'ALX_ERR_MIGRATION_BLOCKED',
         error: 'blocked',
       });
       assert.deepStrictEqual(lines[2].fields, { queue: 'migronaut', error: 'job vanished' });

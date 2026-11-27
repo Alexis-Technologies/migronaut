@@ -77,7 +77,7 @@ describe('requires — a migration waits for background migrations (integration)
     project.write('0002-contract.js', CONTRACT);
     await assert.rejects(kit.up(), (error) => {
       assert.ok(error instanceof BackgroundPendingError);
-      assert.strictEqual(error.code, 'BACKGROUND_PENDING');
+      assert.strictEqual(error.code, 'ALX_ERR_BACKGROUND_PENDING');
       assert.deepStrictEqual(error.context.waitsFor, [
         { migration: '0001-orders-v2.js', status: 'pending' },
       ]);

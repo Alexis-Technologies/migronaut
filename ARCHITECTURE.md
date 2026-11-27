@@ -359,7 +359,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
   while `code` and `context` (`{}` by default) exist on every instance — `#attachResults` and the
   import runner add `context.results` / `imported` to any of them without asking whether it is there.
 - **Nuances:** never `throw new Error(...)` anywhere in `src/`. Always a domain error. The `code` is
-  what the CLI prints (`✖ LOCK_ALREADY_HELD: …`) and what `--json` emits as `error.code`. Adding an
+  what the CLI prints (`✖ ALX_ERR_LOCK_ALREADY_HELD: …`) and what `--json` emits as `error.code`. Adding an
   error = add the literal to `MigronautErrorCode` in [index.d.ts](index.d.ts), add the subclass here,
   export from [src/index.js](src/index.js) if it's part of the public surface.
 
@@ -817,7 +817,7 @@ the design.
   required `<x>` / optional `[x]` positionals, `optsWithGlobals()`, generated `--help`/`--version`.
   Global options are recognized both before and after the command name. A parse error goes to
   stderr with `process.exitCode = 1` — unless the program set `onUsageError(handler)`, which the
-  CLI does (`index.js`): there a command line that does not parse is `CONFIG_INVALID` — exit 6, and
+  CLI does (`index.js`): there a command line that does not parse is `ALX_ERR_CONFIG_INVALID` — exit 6, and
   one JSON document on stdout under `--json` (`reportUsageError` in shared.js). A value on a flag
   that takes none (`--yes=false`) is a parse error, not the flag. It never calls
   `process.exit()`. Deliberately unsupported (unused): combined short flags (`-fy`), variadic
@@ -1028,7 +1028,7 @@ Every design choice below follows from refusing to trust the queue's memory:
   majors, they cannot be combined with deduplication, and they would move the ordering truth into
   Redis.
 - **A failed migration stops the line by itself.** The jobs behind it find it still pending and
-  fail as `MIGRATION_BLOCKED` without running. No queue pause, no cross-job state. What tells a
+  fail as `ALX_ERR_MIGRATION_BLOCKED` without running. No queue pause, no cross-job state. What tells a
   stopped line from a busy one is the changelog's `'failed'` trace: `MigrationBlockedError`
   carries `context.failed`, and a job blocked only by migrations that never failed (the earlier
   job still in flight on another worker) waits for them within its lock-wait budget
@@ -1109,7 +1109,7 @@ to its own `enqueue*` calls, so a request its worker would refuse fails at the c
 
 **A job names a file and its version.** An `up` job carries the checksum its plan saw (from
 `dryRun('up')` rows); the kit refuses another version under the same name
-(`up(name, { checksum })` → `CHECKSUM_MISMATCH`, `context.planned`). A worker from another deploy
+(`up(name, { checksum })` → `ALX_ERR_CHECKSUM_MISMATCH`, `context.planned`). A worker from another deploy
 therefore never applies a different file than the one that was planned.
 
 **The contract evolves by rule.** A producer writes `JOB_DATA_VERSION`; a worker accepts every
@@ -1121,7 +1121,7 @@ in a major. A job always writes `ordered`, so it never inherits a worker's defau
 Golden v1 payloads in `tests/unit/bullmq-jobs.test.js` pin what a worker must keep accepting.
 
 **Shutdown puts unstarted work back.** Failing a job is for good (one attempt) and cascades through
-its group as `MIGRATION_BLOCKED` — exactly what a rolling deploy would do to every enqueue it
+its group as `ALX_ERR_MIGRATION_BLOCKED` — exactly what a rolling deploy would do to every enqueue it
 interrupts. So a job the processor's shutdown stops before `migration:start` / `converge:start`
 (waiting for the lock, or fetched after the shutdown) is moved back to the head of the wait list
 with `job.moveToWait(token)`, and rejects with an error *named* `WaitingError`, which BullMQ
@@ -1600,7 +1600,7 @@ The high-impact ones for code changes:
 - **`--json` is non-interactive, and destructive confirmation needs an explicit `--yes` there.**
   `up <file> --force`, `unlock`, `baseline` and `converge` (for a plan that drops or rebuilds an
   index) all follow the same rule: in `--json` mode without `--yes` they refuse with a typed
-  `CONFIG_INVALID` instead of assuming consent or hanging on a prompt no one can answer. New
+  `ALX_ERR_CONFIG_INVALID` instead of assuming consent or hanging on a prompt no one can answer. New
   confirmation-bearing commands must copy this policy.
 - **Path traversal is blocked centrally in `#filepath()`** — every user-supplied migration name (even
   one read back from a tampered changelog) is validated there.
@@ -1615,7 +1615,7 @@ The high-impact ones for code changes:
   callers can get the same answer from.
 - **Queue jobs get exactly one attempt**, forced over whatever the caller configured — see
   [§6.6](#66-the-queue-adapter-bullmq). Do not "add retries": they reorder the queue.
-- **A queue job behind a failed migration fails (`MIGRATION_BLOCKED`) rather than waiting**, and a
+- **A queue job behind a failed migration fails (`ALX_ERR_MIGRATION_BLOCKED`) rather than waiting**, and a
   job for an already-applied migration *completes* as `skipped`. Both are the queue doing its job.
   A job behind migrations that are merely not applied yet (no `'failed'` trace) does wait, within
   its lock-wait budget — they may be in flight on another worker.
@@ -1626,7 +1626,7 @@ The high-impact ones for code changes:
 - **A job stopped by a shutdown before its migration starts is put back, not failed.** It rejects
   with an error named `WaitingError` after `job.moveToWait(token)` — see
   [§6.6](#66-the-queue-adapter-bullmq). Without a token (a processor driven outside a Worker) it
-  fails as `RUN_ABORTED`, as before.
+  fails as `ALX_ERR_RUN_ABORTED`, as before.
 - **A queue job refuses a field it does not know**, even an "optional" one — never ignores it.
   New fields bump `JOB_DATA_VERSION`; workers roll out first.
 - **Scheduler ticks get a retention unless `jobOptions` sets one** (100 completed, 500 failed):
@@ -1786,7 +1786,7 @@ The high-impact ones for code changes:
   `originalError` (6.x did so only on a retried write). `serverErrorOf` (utils/error.js) reads
   through it: `errorText` prints the server's message, and `isTransactionsUnsupported` judges by
   the server's error — told by the driver's alone, a standalone server refusing a transaction was
-  `MIGRATION_EXECUTION_FAILED` with advice that does not apply. The sharded suite's probe for a
+  `ALX_ERR_MIGRATION_EXECUTION_FAILED` with advice that does not apply. The sharded suite's probe for a
   refused shard-key change reads the same way.
 - **A plan is worked by the partitioner that made it, or re-split.** A change of
   `backgroundShardAware` (or of the indexes) in the middle of a rolling deploy therefore re-splits

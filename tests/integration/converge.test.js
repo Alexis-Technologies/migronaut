@@ -597,7 +597,7 @@ describe('converge (integration) — the run', () => {
     });
     kit.once('converge:action', () => kit.stop('enough'));
     await assert.rejects(kit.converge(), (error) => {
-      assert.strictEqual(error.code, 'RUN_ABORTED');
+      assert.strictEqual(error.code, 'ALX_ERR_RUN_ABORTED');
       const statuses = error.context.converge.collections[0].actions.map((action) => action.status);
       assert.deepStrictEqual(statuses, ['applied', 'skipped', 'skipped', 'skipped']);
       return true;

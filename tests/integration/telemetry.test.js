@@ -244,11 +244,11 @@ export async function down() {}
       second.status.message,
       'Migration up failed: 0002-b.ts — cannot reach mongodb://app:****@db.internal/app',
     );
-    assert.strictEqual(second.attributes['error.type'], 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(second.attributes['error.type'], 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
 
     const [run] = runSpans();
     assert.strictEqual(run.status.code, 2);
-    assert.strictEqual(run.attributes['error.type'], 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(run.attributes['error.type'], 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
     // How far it got is exactly what a failed run's span is read for.
     assert.strictEqual(run.attributes['migronaut.run.applied'], 1);
     assert.strictEqual(run.attributes['migronaut.run.total'], 2);
@@ -393,7 +393,7 @@ export async function down() {}
 
     const [run] = runSpans();
     assert.strictEqual(run.attributes['migronaut.lock.lost_reason'], 'another run reclaimed it');
-    assert.strictEqual(run.attributes['error.type'], 'LOCK_LOST');
+    assert.strictEqual(run.attributes['error.type'], 'ALX_ERR_LOCK_LOST');
     assert.strictEqual(run.status.code, 2);
     assert.strictEqual(migrationSpans().length, 1, 'the second migration never started');
     assert.strictEqual((await metrics.collect())['migronaut.lock.lost'][0].value, 1);
@@ -515,10 +515,10 @@ describe('telemetry — metrics (integration)', () => {
       );
     assert.deepStrictEqual(byType(data['migronaut.migration.duration']), {
       ok: 1,
-      MIGRATION_EXECUTION_FAILED: 1,
+      ALX_ERR_MIGRATION_EXECUTION_FAILED: 1,
     });
     assert.deepStrictEqual(byType(data['migronaut.run.duration']), {
-      MIGRATION_EXECUTION_FAILED: 1,
+      ALX_ERR_MIGRATION_EXECUTION_FAILED: 1,
     });
   });
 
@@ -535,10 +535,10 @@ describe('telemetry — metrics (integration)', () => {
     await assert.rejects(kit.up());
     await kit.disconnect();
     const [point] = (await metrics.collect())['migronaut.migration.duration'];
-    assert.strictEqual(point.attributes['error.type'], 'HOOK_FAILED');
+    assert.strictEqual(point.attributes['error.type'], 'ALX_ERR_HOOK_FAILED');
     assert.strictEqual(point.value.count, 1);
     assert.ok(point.value.sum >= 0);
-    assert.strictEqual(migrationSpans()[0].attributes['error.type'], 'HOOK_FAILED');
+    assert.strictEqual(migrationSpans()[0].attributes['error.type'], 'ALX_ERR_HOOK_FAILED');
   });
 
   it('should time a migration whose file does not load, inside its own span', async () => {
@@ -552,7 +552,7 @@ describe('telemetry — metrics (integration)', () => {
     const kit = migrator({ hooks: { beforeEach: (name) => hooked.push(name) } });
     try {
       await assert.rejects(kit.up(), (error) => {
-        assert.strictEqual(error.code, 'MIGRATION_INVALID_EXPORT');
+        assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_INVALID_EXPORT');
         // What landed before it is still reported.
         assert.deepStrictEqual(
           error.context.results.map((row) => [row.file, row.status]),
@@ -567,10 +567,10 @@ describe('telemetry — metrics (integration)', () => {
     const spans = migrationSpans();
     assert.strictEqual(spans.length, 2);
     assert.strictEqual(spans[1].attributes['migronaut.migration.name'], '0002-broken.ts');
-    assert.strictEqual(spans[1].attributes['error.type'], 'MIGRATION_INVALID_EXPORT');
+    assert.strictEqual(spans[1].attributes['error.type'], 'ALX_ERR_MIGRATION_INVALID_EXPORT');
     const points = (await metrics.collect())['migronaut.migration.duration'];
     assert.deepStrictEqual(points.map((point) => point.attributes['error.type'] ?? 'ok').sort(), [
-      'MIGRATION_INVALID_EXPORT',
+      'ALX_ERR_MIGRATION_INVALID_EXPORT',
       'ok',
     ]);
   });

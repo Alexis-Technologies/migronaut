@@ -593,7 +593,7 @@ describe('createMigrationProcessor', () => {
         createMigrationProcessor({ kit: failingWith(original) })(job),
         (error) => {
           assert.strictEqual(error, original);
-          assert.strictEqual(error.code, 'MIGRATION_BLOCKED');
+          assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_BLOCKED');
           // The adapter's own jobs have a single attempt — nothing to prevent,
           // so the class name is left exactly as it was.
           assert.strictEqual(error.name, 'MigrationBlockedError');
@@ -607,7 +607,7 @@ describe('createMigrationProcessor', () => {
         groupId: 'g',
         index: 0,
         total: 1,
-        code: 'MIGRATION_BLOCKED',
+        code: 'ALX_ERR_MIGRATION_BLOCKED',
       });
       assert.ok(job.logs.some((row) => /✖ 0002-b\.js is blocked/.test(row)));
     });
@@ -749,7 +749,7 @@ describe('createMigrationProcessor', () => {
         return true;
       });
       assert.deepStrictEqual(job.progressUpdates.at(-1).runId, 'run-3');
-      assert.strictEqual(job.progressUpdates.at(-1).code, 'MIGRATION_BLOCKED');
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'ALX_ERR_MIGRATION_BLOCKED');
       assert.match(job.logs.at(-1), /\[run run-3\]$/);
     });
 
@@ -1063,7 +1063,7 @@ describe('createMigrationProcessor', () => {
       });
       const job = convergeJob();
       await assert.rejects(createMigrationProcessor({ kit })(job), MigrationBlockedError);
-      assert.strictEqual(job.progressUpdates.at(-1).code, 'MIGRATION_BLOCKED');
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'ALX_ERR_MIGRATION_BLOCKED');
     });
 
     it('should wait out a held lock', async () => {

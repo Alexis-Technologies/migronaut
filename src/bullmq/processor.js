@@ -43,11 +43,11 @@ const {
  * recognising a failure is no reason to rule a retry out.
  */
 const RETRYABLE_CODES = Object.freeze([
-  'LOCK_ALREADY_HELD',
-  'LOCK_LOST',
-  'LOCK_RELEASE_FAILED',
-  'RUN_ABORTED',
-  'CONNECTION_FAILED',
+  'ALX_ERR_LOCK_ALREADY_HELD',
+  'ALX_ERR_LOCK_LOST',
+  'ALX_ERR_LOCK_RELEASE_FAILED',
+  'ALX_ERR_RUN_ABORTED',
+  'ALX_ERR_CONNECTION_FAILED',
 ]);
 
 /**
@@ -668,7 +668,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
         if (attempts === 1) {
           log(
             ctx,
-            code === 'MIGRATION_BLOCKED'
+            code === 'ALX_ERR_MIGRATION_BLOCKED'
               ? 'Earlier migration(s) not applied yet — waiting for them…'
               : 'Migration lock held by another process — waiting…',
           );

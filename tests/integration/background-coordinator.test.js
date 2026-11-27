@@ -57,7 +57,7 @@ const makeDeps = (files) => {
     load: async (name) => {
       const file = files[name];
       if (file === undefined) {
-        throw Object.assign(new Error('gone'), { code: 'MIGRATION_FILE_NOT_FOUND' });
+        throw Object.assign(new Error('gone'), { code: 'ALX_ERR_MIGRATION_FILE_NOT_FOUND' });
       }
       const { spec, fns } = resolveBackgroundSpec(file.background, { name });
       return { spec, fns, checksum: file.checksum ?? 'c1' };

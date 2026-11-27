@@ -261,7 +261,7 @@ describe('offline create (integration)', () => {
       { configPath: path.join(cwd, 'migronaut.config.js') },
     );
     await assert.rejects(kit.status(), (error) => {
-      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
       return true;
     });
   });

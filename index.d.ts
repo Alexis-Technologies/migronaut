@@ -1500,36 +1500,36 @@ export interface LockInfo {
 // ─── Error Codes ──────────────────────────────────────────────────────────────
 
 export type MigronautErrorCode =
-  | 'LOCK_ALREADY_HELD'
-  | 'LOCK_RELEASE_FAILED'
-  | 'LOCK_LOST'
-  | 'RUN_ABORTED'
-  | 'HOOK_FAILED'
-  | 'CHECKSUM_MISMATCH'
-  | 'MIGRATION_FILE_NOT_FOUND'
-  | 'MIGRATION_FILE_EXISTS'
-  | 'MIGRATION_INVALID_NAME'
-  | 'MIGRATION_INVALID_EXPORT'
-  | 'MIGRATION_EXECUTION_FAILED'
-  | 'MIGRATION_TIMEOUT'
-  | 'TRANSACTIONS_UNSUPPORTED'
-  | 'CONFIG_INVALID'
-  | 'CONFIG_FILE_EXISTS'
-  | 'CONNECTION_FAILED'
-  | 'NOT_APPLIED'
-  | 'IMPORT_TARGET_NOT_EMPTY'
-  | 'MIGRATION_IRREVERSIBLE'
-  | 'MIGRATION_OUT_OF_ORDER'
-  | 'MIGRATION_BLOCKED'
-  | 'QUEUE_JOB_INVALID'
-  | 'QUEUE_JOB_FAILED'
-  | 'CONVERGE_FAILED'
-  | 'REVISION_CONFLICT'
-  | 'SHAPE_VERSION_UNSUPPORTED'
-  | 'BACKGROUND_PENDING'
-  | 'BACKGROUND_FAILED'
-  | 'BACKGROUND_CONFLICT'
-  | 'SANDBOX_REFUSED';
+  | 'ALX_ERR_LOCK_ALREADY_HELD'
+  | 'ALX_ERR_LOCK_RELEASE_FAILED'
+  | 'ALX_ERR_LOCK_LOST'
+  | 'ALX_ERR_RUN_ABORTED'
+  | 'ALX_ERR_HOOK_FAILED'
+  | 'ALX_ERR_CHECKSUM_MISMATCH'
+  | 'ALX_ERR_MIGRATION_FILE_NOT_FOUND'
+  | 'ALX_ERR_MIGRATION_FILE_EXISTS'
+  | 'ALX_ERR_MIGRATION_INVALID_NAME'
+  | 'ALX_ERR_MIGRATION_INVALID_EXPORT'
+  | 'ALX_ERR_MIGRATION_EXECUTION_FAILED'
+  | 'ALX_ERR_MIGRATION_TIMEOUT'
+  | 'ALX_ERR_TRANSACTIONS_UNSUPPORTED'
+  | 'ALX_ERR_CONFIG_INVALID'
+  | 'ALX_ERR_CONFIG_FILE_EXISTS'
+  | 'ALX_ERR_CONNECTION_FAILED'
+  | 'ALX_ERR_NOT_APPLIED'
+  | 'ALX_ERR_IMPORT_TARGET_NOT_EMPTY'
+  | 'ALX_ERR_MIGRATION_IRREVERSIBLE'
+  | 'ALX_ERR_MIGRATION_OUT_OF_ORDER'
+  | 'ALX_ERR_MIGRATION_BLOCKED'
+  | 'ALX_ERR_QUEUE_JOB_INVALID'
+  | 'ALX_ERR_QUEUE_JOB_FAILED'
+  | 'ALX_ERR_CONVERGE_FAILED'
+  | 'ALX_ERR_REVISION_CONFLICT'
+  | 'ALX_ERR_SHAPE_VERSION_UNSUPPORTED'
+  | 'ALX_ERR_BACKGROUND_PENDING'
+  | 'ALX_ERR_BACKGROUND_FAILED'
+  | 'ALX_ERR_BACKGROUND_CONFLICT'
+  | 'ALX_ERR_SANDBOX_REFUSED';
 
 // ─── Config file format ─────────────────────────────────────────────────────────
 
@@ -1691,8 +1691,8 @@ export interface MigrationEvent extends MigronautEventBase {
   error?: string;
   /**
    * The typed code of that failure (on `migration:error` only) — to tell a
-   * timeout (`MIGRATION_TIMEOUT`) from a body that threw
-   * (`MIGRATION_EXECUTION_FAILED`) without reading `error`. Absent for an
+   * timeout (`ALX_ERR_MIGRATION_TIMEOUT`) from a body that threw
+   * (`ALX_ERR_MIGRATION_EXECUTION_FAILED`) without reading `error`. Absent for an
    * error that is not a {@link MigronautError}.
    * New in 2.5
    */
@@ -1726,7 +1726,7 @@ export interface RunEndEvent extends MigronautEventBase {
   /**
    * The typed code of the failure. A caller that waits for the lock
    * (`runMigrations` with `onLockHeld: 'wait'`, a queue job) retries the whole
-   * run, so every refusal ends one as `LOCK_ALREADY_HELD`: filter on it to
+   * run, so every refusal ends one as `ALX_ERR_LOCK_ALREADY_HELD`: filter on it to
    * tell those from a run that failed. Absent for an error that is not a
    * {@link MigronautError}.
    * New in 2.5
@@ -2839,14 +2839,17 @@ export function pendingMigrations(
 
 /**
  * The CLI's exit-code map: one entry per {@link MigronautErrorCode}, plus three
- * CLI-condition codes with no error class — `PENDING_MIGRATIONS` (from
- * `status --check`), `AUDIT_FAILED` and `COLLECTIONS_DRIFT` (from
+ * CLI-condition codes with no error class — `ALX_ERR_PENDING_MIGRATIONS` (from
+ * `status --check`), `ALX_ERR_AUDIT_FAILED` and `ALX_ERR_COLLECTIONS_DRIFT` (from
  * `converge --check`). Lets a wrapper script mirror the CLI's exit semantics
  * without hardcoding numbers. Anything unmapped exits 1; success is 0.
  */
 export const EXIT_CODES: Readonly<
   Record<
-    MigronautErrorCode | 'PENDING_MIGRATIONS' | 'AUDIT_FAILED' | 'COLLECTIONS_DRIFT',
+    | MigronautErrorCode
+    | 'ALX_ERR_PENDING_MIGRATIONS'
+    | 'ALX_ERR_AUDIT_FAILED'
+    | 'ALX_ERR_COLLECTIONS_DRIFT',
     number
   >
 >;
@@ -2943,25 +2946,25 @@ export class MigronautError extends Error {
 
 /** Thrown when a lock is already held by another process within its TTL */
 export class LockAlreadyHeldError extends MigronautError {
-  readonly code: 'LOCK_ALREADY_HELD';
+  readonly code: 'ALX_ERR_LOCK_ALREADY_HELD';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when releasing a lock fails */
 export class LockReleaseFailedError extends MigronautError {
-  readonly code: 'LOCK_RELEASE_FAILED';
+  readonly code: 'ALX_ERR_LOCK_RELEASE_FAILED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a file's checksum differs from the one recorded at apply time */
 export class ChecksumMismatchError extends MigronautError {
-  readonly code: 'CHECKSUM_MISMATCH';
+  readonly code: 'ALX_ERR_CHECKSUM_MISMATCH';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a referenced migration file does not exist on disk */
 export class MigrationFileNotFoundError extends MigronautError {
-  readonly code: 'MIGRATION_FILE_NOT_FOUND';
+  readonly code: 'ALX_ERR_MIGRATION_FILE_NOT_FOUND';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -2971,37 +2974,37 @@ export class MigrationFileNotFoundError extends MigronautError {
  * directory (path traversal) when joined into a filesystem path.
  */
 export class MigrationInvalidNameError extends MigronautError {
-  readonly code: 'MIGRATION_INVALID_NAME';
+  readonly code: 'ALX_ERR_MIGRATION_INVALID_NAME';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a migration file does not export valid up()/down() functions */
 export class MigrationInvalidExportError extends MigronautError {
-  readonly code: 'MIGRATION_INVALID_EXPORT';
+  readonly code: 'ALX_ERR_MIGRATION_INVALID_EXPORT';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a migration's up() or down() throws during execution */
 export class MigrationExecutionFailedError extends MigronautError {
-  readonly code: 'MIGRATION_EXECUTION_FAILED';
+  readonly code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when the merged configuration fails validation */
 export class ConfigInvalidError extends MigronautError {
-  readonly code: 'CONFIG_INVALID';
+  readonly code: 'ALX_ERR_CONFIG_INVALID';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when creating a config file that already exists without `--force` */
 export class ConfigFileExistsError extends MigronautError {
-  readonly code: 'CONFIG_FILE_EXISTS';
+  readonly code: 'ALX_ERR_CONFIG_FILE_EXISTS';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when connecting to MongoDB fails */
 export class ConnectionFailedError extends MigronautError {
-  readonly code: 'CONNECTION_FAILED';
+  readonly code: 'ALX_ERR_CONNECTION_FAILED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3011,7 +3014,7 @@ export class ConnectionFailedError extends MigronautError {
  * `onLockLost: 'warn'` to downgrade this to a warning.
  */
 export class LockLostError extends MigronautError {
-  readonly code: 'LOCK_LOST';
+  readonly code: 'ALX_ERR_LOCK_LOST';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3020,7 +3023,7 @@ export class LockLostError extends MigronautError {
  * or a SIGINT/SIGTERM. `context.results` lists what was applied first.
  */
 export class RunAbortedError extends MigronautError {
-  readonly code: 'RUN_ABORTED';
+  readonly code: 'ALX_ERR_RUN_ABORTED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3029,7 +3032,7 @@ export class RunAbortedError extends MigronautError {
  * own work keeps running, but the run stops rather than hanging.
  */
 export class MigrationTimeoutError extends MigronautError {
-  readonly code: 'MIGRATION_TIMEOUT';
+  readonly code: 'ALX_ERR_MIGRATION_TIMEOUT';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3038,37 +3041,37 @@ export class MigrationTimeoutError extends MigronautError {
  * transactions (a standalone server — they need a replica set or mongos).
  */
 export class TransactionsUnsupportedError extends MigronautError {
-  readonly code: 'TRANSACTIONS_UNSUPPORTED';
+  readonly code: 'ALX_ERR_TRANSACTIONS_UNSUPPORTED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a user-supplied lifecycle hook throws */
 export class HookFailedError extends MigronautError {
-  readonly code: 'HOOK_FAILED';
+  readonly code: 'ALX_ERR_HOOK_FAILED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when `create` would overwrite an existing migration file */
 export class MigrationFileExistsError extends MigronautError {
-  readonly code: 'MIGRATION_FILE_EXISTS';
+  readonly code: 'ALX_ERR_MIGRATION_FILE_EXISTS';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when attempting to revert a migration that was never applied */
 export class NotAppliedError extends MigronautError {
-  readonly code: 'NOT_APPLIED';
+  readonly code: 'ALX_ERR_NOT_APPLIED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when `migronaut import` targets a non-empty changelog without `--force` */
 export class ImportTargetNotEmptyError extends MigronautError {
-  readonly code: 'IMPORT_TARGET_NOT_EMPTY';
+  readonly code: 'ALX_ERR_IMPORT_TARGET_NOT_EMPTY';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when attempting to roll back a forward-only (imported or baselined) migration */
 export class IrreversibleMigrationError extends MigronautError {
-  readonly code: 'MIGRATION_IRREVERSIBLE';
+  readonly code: 'ALX_ERR_MIGRATION_IRREVERSIBLE';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3078,7 +3081,7 @@ export class IrreversibleMigrationError extends MigronautError {
  * branch. `context.names` lists the late arrivals.
  */
 export class OutOfOrderMigrationError extends MigronautError {
-  readonly code: 'MIGRATION_OUT_OF_ORDER';
+  readonly code: 'ALX_ERR_MIGRATION_OUT_OF_ORDER';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3089,7 +3092,7 @@ export class OutOfOrderMigrationError extends MigronautError {
  * `context.blockedBy` (the migrations that must go first).
  */
 export class MigrationBlockedError extends MigronautError {
-  readonly code: 'MIGRATION_BLOCKED';
+  readonly code: 'ALX_ERR_MIGRATION_BLOCKED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3100,7 +3103,7 @@ export class MigrationBlockedError extends MigronautError {
  * is untrusted input. `context.jobId`, `context.issue`.
  */
 export class QueueJobInvalidError extends MigronautError {
-  readonly code: 'QUEUE_JOB_INVALID';
+  readonly code: 'ALX_ERR_QUEUE_JOB_INVALID';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3108,12 +3111,12 @@ export class QueueJobInvalidError extends MigronautError {
  * Thrown by a queue group's `wait()` when one of its jobs failed or the wait
  * timed out (one budget for the whole call). `context.failedReason` is the
  * worker's (redacted) message, `context.code` the job's own typed error code
- * when it reported one (`MIGRATION_BLOCKED`, `CHECKSUM_MISMATCH`, …),
+ * when it reported one (`ALX_ERR_MIGRATION_BLOCKED`, `ALX_ERR_CHECKSUM_MISMATCH`, …),
  * `context.results` the jobs that finished before it, plus `groupId`, `jobId`,
  * `migration`, `direction` and `timedOut`.
  */
 export class QueueJobFailedError extends MigronautError {
-  readonly code: 'QUEUE_JOB_FAILED';
+  readonly code: 'ALX_ERR_QUEUE_JOB_FAILED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3142,7 +3145,7 @@ export class QueueJobFailedError extends MigronautError {
  * `context.converge` is the {@link ConvergeResult} so far.
  */
 export class ConvergeFailedError extends MigronautError {
-  readonly code: 'CONVERGE_FAILED';
+  readonly code: 'ALX_ERR_CONVERGE_FAILED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3155,7 +3158,7 @@ export class ConvergeFailedError extends MigronautError {
  * caller held. The filter is never copied into the error. Experimental.
  */
 export class RevisionConflictError extends MigronautError {
-  readonly code: 'REVISION_CONFLICT';
+  readonly code: 'ALX_ERR_REVISION_CONFLICT';
   readonly context: RevisionConflictContext;
   constructor(message: string, options?: MigronautErrorOptions);
 }
@@ -3178,7 +3181,7 @@ export interface RevisionConflictContext {
  * `context.version` and `context.current`. Experimental.
  */
 export class ShapeVersionError extends MigronautError {
-  readonly code: 'SHAPE_VERSION_UNSUPPORTED';
+  readonly code: 'ALX_ERR_SHAPE_VERSION_UNSUPPORTED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3188,7 +3191,7 @@ export class ShapeVersionError extends MigronautError {
  * run; `context.waitsFor` lists what it waits for. Experimental.
  */
 export class BackgroundPendingError extends MigronautError {
-  readonly code: 'BACKGROUND_PENDING';
+  readonly code: 'ALX_ERR_BACKGROUND_PENDING';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3197,7 +3200,7 @@ export class BackgroundPendingError extends MigronautError {
  * it and `context.lastError` says what happened last. Experimental.
  */
 export class BackgroundFailedError extends MigronautError {
-  readonly code: 'BACKGROUND_FAILED';
+  readonly code: 'ALX_ERR_BACKGROUND_FAILED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3207,7 +3210,7 @@ export class BackgroundFailedError extends MigronautError {
  * Experimental.
  */
 export class BackgroundConflictError extends MigronautError {
-  readonly code: 'BACKGROUND_CONFLICT';
+  readonly code: 'ALX_ERR_BACKGROUND_CONFLICT';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 
@@ -3217,6 +3220,6 @@ export class BackgroundConflictError extends MigronautError {
  * and `context.reason` the rule. Experimental.
  */
 export class SandboxRefusedError extends MigronautError {
-  readonly code: 'SANDBOX_REFUSED';
+  readonly code: 'ALX_ERR_SANDBOX_REFUSED';
   constructor(message: string, options?: MigronautErrorOptions);
 }

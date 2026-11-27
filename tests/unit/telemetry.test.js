@@ -179,7 +179,7 @@ describe('open', () => {
       message: 'Invalid configuration',
     });
     assert.strictEqual(SPAN_STATUS_ERROR, 2);
-    assert.strictEqual(tracer.spans[0].attributes['error.type'], 'CONFIG_INVALID');
+    assert.strictEqual(tracer.spans[0].attributes['error.type'], 'ALX_ERR_CONFIG_INVALID');
   });
 
   it('should set attributes on a span that is still open', () => {
@@ -377,7 +377,10 @@ describe('wrap', () => {
       code: 2,
       message: 'Migration up failed: 0001-a.js — E11000 duplicate key',
     });
-    assert.strictEqual(tracer.spans[0].attributes['error.type'], 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(
+      tracer.spans[0].attributes['error.type'],
+      'ALX_ERR_MIGRATION_EXECUTION_FAILED',
+    );
   });
 
   it('should not leave an unhandled rejection behind a tracer that wraps the work', async () => {
@@ -418,7 +421,7 @@ describe('wrap', () => {
 
 describe('errorType', () => {
   it('should be the typed code of a migronaut error', () => {
-    assert.strictEqual(errorType(new ConfigInvalidError('x')), 'CONFIG_INVALID');
+    assert.strictEqual(errorType(new ConfigInvalidError('x')), 'ALX_ERR_CONFIG_INVALID');
   });
 
   it('should be the class name of any other error', () => {
@@ -617,7 +620,7 @@ describe('metrics', () => {
       // redo has no single direction — the attribute is absent, not undefined.
       {
         value: 0.02,
-        attributes: { 'migronaut.run.command': 'redo', 'error.type': 'CONFIG_INVALID' },
+        attributes: { 'migronaut.run.command': 'redo', 'error.type': 'ALX_ERR_CONFIG_INVALID' },
       },
     ]);
   });
@@ -768,7 +771,7 @@ describe('createTelemetry — against the real OpenTelemetry SDK', () => {
       span.status.message,
       'Migration up failed: 0002-b.js — mongodb://app:****@db/app refused',
     );
-    assert.strictEqual(span.attributes['error.type'], 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(span.attributes['error.type'], 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
     // No exception event: the redacted status message is the whole record.
     assert.deepStrictEqual(span.events, []);
   });

@@ -171,7 +171,7 @@ describe('two-process lock contention (integration)', () => {
 
     const second = startChild();
     const refusal = await second.waitFor('failed');
-    assert.strictEqual(refusal.code, 'LOCK_ALREADY_HELD');
+    assert.strictEqual(refusal.code, 'ALX_ERR_LOCK_ALREADY_HELD');
 
     await release();
     const firstExit = await first.exited;
@@ -236,8 +236,8 @@ describe('crash and signal handling (integration)', () => {
     // The in-flight migration is allowed to finish, so let it.
     await release();
     const exit = await first.exited;
-    // 11 = RUN_ABORTED: stopped on request, not crashed.
-    assert.strictEqual(exit.code, 11, 'a stopped run reports RUN_ABORTED');
+    // 11 = ALX_ERR_RUN_ABORTED: stopped on request, not crashed.
+    assert.strictEqual(exit.code, 11, 'a stopped run reports ALX_ERR_RUN_ABORTED');
 
     // The graceful path releases the lock immediately — no TTL wait, no
     // `migronaut unlock` needed.
@@ -259,8 +259,8 @@ describe('crash and signal handling (integration)', () => {
     first.child.kill('SIGINT');
     await release();
     const exit = await first.exited;
-    // Ctrl-C follows the same graceful path as SIGTERM: 11 = RUN_ABORTED.
-    assert.strictEqual(exit.code, 11, 'a stopped run reports RUN_ABORTED');
+    // Ctrl-C follows the same graceful path as SIGTERM: 11 = ALX_ERR_RUN_ABORTED.
+    assert.strictEqual(exit.code, 11, 'a stopped run reports ALX_ERR_RUN_ABORTED');
     assert.strictEqual(await mongo.db.collection(LOCK_COLLECTION).countDocuments(), 0);
     const applied = await mongo.db.collection('_migronaut_migrations').find().toArray();
     assert.deepStrictEqual(

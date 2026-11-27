@@ -185,7 +185,7 @@ sequenceDiagram
 an operator (`{ $ne: null }` from a request body, say) is refused — a plain `$eq` aside — and a
 filter on other fields must be unique (`{ tenantId, slug }` with its unique index). Every legacy
 document is at revision 0, so a filter that matches several would update whichever comes first. If the write matches nothing, someone wrote in
-between or the document is gone, and it throws `RevisionConflictError` (`REVISION_CONFLICT`). To
+between or the document is gone, and it throws `RevisionConflictError` (`ALX_ERR_REVISION_CONFLICT`). To
 say which, it reads the document once more and sets `context.reason`:
 
 | `reason` | Meaning |
@@ -342,7 +342,7 @@ explicit `upcast` keeps the cost where you can see it.
   copied, BSON values shared), may change it freely, and returns the document at the next version.
   The helper sets `__v`: a step only reshapes.
 - **`upcast`** returns a current document as is — the same object — and lifts an older one on a copy.
-  It throws `ShapeVersionError` (`SHAPE_VERSION_UNSUPPORTED`) with `context.reason`:
+  It throws `ShapeVersionError` (`ALX_ERR_SHAPE_VERSION_UNSUPPORTED`) with `context.reason`:
   - `'newer'` — the document is newer than `current`: a newer release wrote it (an old pod meeting a
     new document during a rolling deploy). With `{ newer: 'keep' }` it is returned as is instead;
   - `'below-min'` — it is older than the oldest step;
@@ -574,7 +574,7 @@ export async function down({ db }) {
 Two gates keep this release from landing early:
 
 - **`up` will not apply a migration whose `requires` has not completed.** It throws
-  `BackgroundPendingError` (`BACKGROUND_PENDING`) with nothing run — or, with
+  `BackgroundPendingError` (`ALX_ERR_BACKGROUND_PENDING`) with nothing run — or, with
   `onBackgroundPending: 'stop'`, ends the run there cleanly. It checks the data, not only the
   status: a completed background migration whose collection holds v1 documents again is reopened,
   and the migration waits for it.
@@ -612,5 +612,5 @@ version 1 in the shape map) — steps below `min` are allowed.
   the `min` guard in detail
 - [Using Mongoose → Document versioning](/guide/mongoose#document-versioning) — the plugin and the
   runbook for an existing Mongoose app
-- [Error Codes](/reference/error-codes) — `REVISION_CONFLICT`, `SHAPE_VERSION_UNSUPPORTED`,
-  `BACKGROUND_PENDING`
+- [Error Codes](/reference/error-codes) — `ALX_ERR_REVISION_CONFLICT`, `ALX_ERR_SHAPE_VERSION_UNSUPPORTED`,
+  `ALX_ERR_BACKGROUND_PENDING`

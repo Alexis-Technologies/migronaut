@@ -128,7 +128,7 @@ expectAssignable<Partial<MigronautConfig>>({ onLockLost: 'warn', environment: 's
 expectAssignable<Partial<MigronautConfig>>({ onOutOfOrder: 'error' });
 expectError<Partial<MigronautConfig>>({ onOutOfOrder: 'ignore' });
 expectAssignable<MigronautError>(new OutOfOrderMigrationError('late arrival'));
-expectAssignable<MigronautErrorCode>('MIGRATION_OUT_OF_ORDER');
+expectAssignable<MigronautErrorCode>('ALX_ERR_MIGRATION_OUT_OF_ORDER');
 
 // .env control: a path, or false to load nothing
 expectAssignable<Partial<MigronautConfig>>({ envFile: '.env.ci' });
@@ -193,7 +193,7 @@ kit.on('run:end', (event) => {
   expectType<number | undefined>(event.durationMs);
   // Redacted string, never a raw Error — subscribers may ship it as-is.
   expectType<string | undefined>(event.error);
-  // The typed code: a refused run (LOCK_ALREADY_HELD) told from a failed one.
+  // The typed code: a refused run (ALX_ERR_LOCK_ALREADY_HELD) told from a failed one.
   expectType<MigronautErrorCode | undefined>(event.code);
 });
 kit.on('migration:success', (event) => {
@@ -352,25 +352,25 @@ expectError(createLogger(process.stdout, 'chatty'));
 
 // ─── Error codes and construction options ────────────────────────────────────
 
-expectAssignable<MigronautErrorCode>('TRANSACTIONS_UNSUPPORTED');
+expectAssignable<MigronautErrorCode>('ALX_ERR_TRANSACTIONS_UNSUPPORTED');
 expectAssignable<MigronautError>(new TransactionsUnsupportedError('standalone'));
 // Every class takes (message, options): the wrapped cause and the context travel in the
 // options; only the base class takes a code there, each subclass carries its own.
 new MigronautError('bad', {
-  code: 'CONFIG_INVALID',
+  code: 'ALX_ERR_CONFIG_INVALID',
   cause: new Error('inner'),
   context: { issues: [] },
 });
 new ChecksumMismatchError('mismatch', { cause: new Error('inner'), context: { name: 'x' } });
 const errorOptions: MigronautErrorOptions = { cause: new Error('inner'), context: { name: 'x' } };
-expectType<'LOCK_LOST'>(new LockLostError('lost', errorOptions).code);
+expectType<'ALX_ERR_LOCK_LOST'>(new LockLostError('lost', errorOptions).code);
 expectError(new MigronautError('bad'));
-expectError(new MigronautError('CONFIG_INVALID', 'bad'));
+expectError(new MigronautError('ALX_ERR_CONFIG_INVALID', 'bad'));
 expectError(new ChecksumMismatchError('mismatch', { name: 'x' }));
 expectError(new ChecksumMismatchError('mismatch', {}, { cause: new Error('inner') }));
-expectError(new ChecksumMismatchError('mismatch', { code: 'CONFIG_INVALID' }));
-expectType<'CHECKSUM_MISMATCH'>(new ChecksumMismatchError('mismatch').code);
-expectType<MigronautErrorCode>(new MigronautError('bad', { code: 'CONFIG_INVALID' }).code);
+expectError(new ChecksumMismatchError('mismatch', { code: 'ALX_ERR_CONFIG_INVALID' }));
+expectType<'ALX_ERR_CHECKSUM_MISMATCH'>(new ChecksumMismatchError('mismatch').code);
+expectType<MigronautErrorCode>(new MigronautError('bad', { code: 'ALX_ERR_CONFIG_INVALID' }).code);
 expectType<Record<string, unknown>>(new TransactionsUnsupportedError('standalone').context);
 expectType<unknown>(new TransactionsUnsupportedError('standalone').cause);
 
@@ -387,9 +387,9 @@ expectType<Date | undefined>(row.failedAt);
 
 // ─── EXIT_CODES map and CLI logger fallback ──────────────────────────────────
 
-expectType<number>(EXIT_CODES.LOCK_ALREADY_HELD);
-expectType<number>(EXIT_CODES.PENDING_MIGRATIONS);
-expectType<number>(EXIT_CODES.AUDIT_FAILED);
+expectType<number>(EXIT_CODES.ALX_ERR_LOCK_ALREADY_HELD);
+expectType<number>(EXIT_CODES.ALX_ERR_PENDING_MIGRATIONS);
+expectType<number>(EXIT_CODES.ALX_ERR_AUDIT_FAILED);
 // Only real error codes (plus the two CLI conditions) are keys.
 expectError(EXIT_CODES.NOT_A_CODE);
 new MigratorKit({}, { fallbackLogger: null });
@@ -416,12 +416,12 @@ expectAssignable<MigronautError>(
 );
 expectAssignable<MigronautError>(new QueueJobInvalidError('bad payload'));
 expectAssignable<MigronautError>(new QueueJobFailedError('job failed'));
-expectAssignable<MigronautErrorCode>('MIGRATION_BLOCKED');
-expectAssignable<MigronautErrorCode>('QUEUE_JOB_INVALID');
-expectAssignable<MigronautErrorCode>('QUEUE_JOB_FAILED');
-expectType<number>(EXIT_CODES.MIGRATION_BLOCKED);
-expectType<number>(EXIT_CODES.QUEUE_JOB_INVALID);
-expectType<number>(EXIT_CODES.QUEUE_JOB_FAILED);
+expectAssignable<MigronautErrorCode>('ALX_ERR_MIGRATION_BLOCKED');
+expectAssignable<MigronautErrorCode>('ALX_ERR_QUEUE_JOB_INVALID');
+expectAssignable<MigronautErrorCode>('ALX_ERR_QUEUE_JOB_FAILED');
+expectType<number>(EXIT_CODES.ALX_ERR_MIGRATION_BLOCKED);
+expectType<number>(EXIT_CODES.ALX_ERR_QUEUE_JOB_INVALID);
+expectType<number>(EXIT_CODES.ALX_ERR_QUEUE_JOB_FAILED);
 
 // ─── Custom id format ────────────────────────────────────────────────────────
 
@@ -648,22 +648,22 @@ kit.on('converge:wait', (event) => {
   expectType<number | undefined>(event.waitedMs);
 });
 
-expectAssignable<MigronautErrorCode>('CONVERGE_FAILED');
+expectAssignable<MigronautErrorCode>('ALX_ERR_CONVERGE_FAILED');
 expectAssignable<MigronautError>(
   new ConvergeFailedError('refused', { context: { phase: 'plan' } }),
 );
-expectType<'CONVERGE_FAILED'>(new ConvergeFailedError('refused').code);
-expectType<number>(EXIT_CODES.CONVERGE_FAILED);
-expectType<number>(EXIT_CODES.COLLECTIONS_DRIFT);
+expectType<'ALX_ERR_CONVERGE_FAILED'>(new ConvergeFailedError('refused').code);
+expectType<number>(EXIT_CODES.ALX_ERR_CONVERGE_FAILED);
+expectType<number>(EXIT_CODES.ALX_ERR_COLLECTIONS_DRIFT);
 
 // ─── Document versioning and background migration errors ─────────────────────
 for (const code of [
-  'REVISION_CONFLICT',
-  'SHAPE_VERSION_UNSUPPORTED',
-  'BACKGROUND_PENDING',
-  'BACKGROUND_FAILED',
-  'BACKGROUND_CONFLICT',
-  'SANDBOX_REFUSED',
+  'ALX_ERR_REVISION_CONFLICT',
+  'ALX_ERR_SHAPE_VERSION_UNSUPPORTED',
+  'ALX_ERR_BACKGROUND_PENDING',
+  'ALX_ERR_BACKGROUND_FAILED',
+  'ALX_ERR_BACKGROUND_CONFLICT',
+  'ALX_ERR_SANDBOX_REFUSED',
 ] as const) {
   expectAssignable<MigronautErrorCode>(code);
   expectType<number>(EXIT_CODES[code]);
@@ -685,12 +685,12 @@ expectAssignable<MigronautError>(
 expectAssignable<MigronautError>(
   new SandboxRefusedError('refused', { context: { method: 'createIndex' } }),
 );
-expectType<'REVISION_CONFLICT'>(new RevisionConflictError('conflict').code);
-expectType<'SHAPE_VERSION_UNSUPPORTED'>(new ShapeVersionError('newer').code);
-expectType<'BACKGROUND_PENDING'>(new BackgroundPendingError('pending').code);
-expectType<'BACKGROUND_FAILED'>(new BackgroundFailedError('failed').code);
-expectType<'BACKGROUND_CONFLICT'>(new BackgroundConflictError('conflict').code);
-expectType<'SANDBOX_REFUSED'>(new SandboxRefusedError('refused').code);
+expectType<'ALX_ERR_REVISION_CONFLICT'>(new RevisionConflictError('conflict').code);
+expectType<'ALX_ERR_SHAPE_VERSION_UNSUPPORTED'>(new ShapeVersionError('newer').code);
+expectType<'ALX_ERR_BACKGROUND_PENDING'>(new BackgroundPendingError('pending').code);
+expectType<'ALX_ERR_BACKGROUND_FAILED'>(new BackgroundFailedError('failed').code);
+expectType<'ALX_ERR_BACKGROUND_CONFLICT'>(new BackgroundConflictError('conflict').code);
+expectType<'ALX_ERR_SANDBOX_REFUSED'>(new SandboxRefusedError('refused').code);
 
 // ─── Collection versioning ───────────────────────────────────────────────────
 expectAssignable<CollectionDefinition>({ name: 'orders', versioning: { current: 2 } });

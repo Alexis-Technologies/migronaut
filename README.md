@@ -648,8 +648,8 @@ const rows = await migrator.status();   // StatusRow[]
 await migrator.disconnect();
 ```
 
-All errors extend `MigronautError` and carry a typed `code` (`LOCK_ALREADY_HELD`, `CHECKSUM_MISMATCH`,
-`NOT_APPLIED`, …), so `catch` blocks stay type-safe.
+All errors extend `MigronautError` and carry a typed `code` (`ALX_ERR_LOCK_ALREADY_HELD`, `ALX_ERR_CHECKSUM_MISMATCH`,
+`ALX_ERR_NOT_APPLIED`, …), so `catch` blocks stay type-safe.
 
 > [!NOTE]
 > Running several kits against several databases in **one process**? Pass `envFile: false` and
@@ -754,7 +754,7 @@ await mq.enqueueConverge();              // declared indexes and validators, as 
 
 - **Order comes from MongoDB, not from Redis.** Every job is a normal single-file run under the
   usual lock, and refuses while an earlier migration is still pending — so a failed migration
-  stops the line (`MIGRATION_BLOCKED`), and a CLI `migronaut up` at the same moment is safe.
+  stops the line (`ALX_ERR_MIGRATION_BLOCKED`), and a CLI `migronaut up` at the same moment is safe.
 - **One attempt per job, on purpose** — a queue retry would let later migrations overtake the
   failed one. Duplicate enqueues are deduplicated; an already-applied migration completes as
   `skipped`.
@@ -851,7 +851,7 @@ await runMigrations({
 ```
 
 It is called with no arguments and must synchronously return a non-empty string of at most 128
-characters; anything else fails the run with `CONFIG_INVALID` before a migration starts. Ids are
+characters; anything else fails the run with `ALX_ERR_CONFIG_INVALID` before a migration starts. Ids are
 for correlation only — the lock carries a token of its own, so a generator that repeats a value
 can never let two runs hold the lock at once.
 

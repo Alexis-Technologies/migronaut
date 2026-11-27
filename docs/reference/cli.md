@@ -155,37 +155,37 @@ working unchanged. The full map is also exported from the package root as
 |---|---|
 | `0` | Success (or nothing to do) |
 | `1` | An unclassified error |
-| `2` | `PENDING_MIGRATIONS` — `status --check` found pending migrations |
-| `3` | `LOCK_ALREADY_HELD` — another run holds the lock |
-| `4` | `CHECKSUM_MISMATCH` — an applied file was edited (with `--strict`) |
-| `5` | `CONNECTION_FAILED` — could not reach MongoDB |
-| `6` | `CONFIG_INVALID` — bad configuration or flags, a command line that does not parse included |
-| `7` | `MIGRATION_EXECUTION_FAILED` — a migration threw |
-| `8` | `MIGRATION_FILE_NOT_FOUND` |
-| `9` | `NOT_APPLIED` — nothing to revert under that name |
-| `10` | `LOCK_LOST` — the lock was lost mid-run |
-| `11` | `RUN_ABORTED` — stopped by SIGINT/SIGTERM |
-| `12` | `HOOK_FAILED` — a lifecycle hook threw |
-| `13` | `MIGRATION_IRREVERSIBLE` — an imported migrate-mongo record |
-| `14` | `MIGRATION_TIMEOUT` — a migration exceeded `timeoutMs` |
-| `15` | `TRANSACTIONS_UNSUPPORTED` — transactions need a replica set / mongos |
-| `16` | `CONFIG_FILE_EXISTS` — `init` found an existing config (idempotent no-op) |
-| `17` | `IMPORT_TARGET_NOT_EMPTY` — `import` found records (re-run with `--force`) |
-| `18` | `MIGRATION_FILE_EXISTS` — `create` name collision |
-| `19` | `MIGRATION_INVALID_NAME` — a rejected (e.g. path-traversing) name |
-| `20` | `MIGRATION_INVALID_EXPORT` — a migration file without valid `up`/`down` |
-| `21` | `LOCK_RELEASE_FAILED` — the lock could not be released |
-| `22` | `AUDIT_FAILED` — an `audit` check failed (warnings stay `0`) |
-| `23` | `MIGRATION_OUT_OF_ORDER` — a late-merged file, under `onOutOfOrder: 'error'` |
-| `24` | `MIGRATION_BLOCKED` — an ordered single-file run would go out of sequence |
-| `25` | `QUEUE_JOB_INVALID` — a [queue job](/guide/bullmq) payload failed validation |
-| `26` | `QUEUE_JOB_FAILED` — a queue group's `wait()` saw a job fail or time out |
-| `27` | `CONVERGE_FAILED` — [`converge`](/commands/converge) refused a conflicting plan, a step failed, or `--wait-search` gave up |
-| `28` | `COLLECTIONS_DRIFT` — `converge --check` found the database out of step with the declarations, or a search index that failed to build |
-| `29` | `REVISION_CONFLICT` — a revision-guarded write lost a race (library only) |
-| `30` | `SHAPE_VERSION_UNSUPPORTED` — an upcaster met a document it cannot read (library only) |
-| `31` | `BACKGROUND_PENDING` — a migration waits for a [background migration](/commands/background), or `background status --check` / `background verify` found work |
-| `32` | `BACKGROUND_FAILED` — a background migration failed |
-| `33` | `BACKGROUND_CONFLICT` — a background control action did not fit its state |
-| `34` | `SANDBOX_REFUSED` — a background dry run reached for something the sandbox refuses |
+| `2` | `ALX_ERR_PENDING_MIGRATIONS` — `status --check` found pending migrations |
+| `3` | `ALX_ERR_LOCK_ALREADY_HELD` — another run holds the lock |
+| `4` | `ALX_ERR_CHECKSUM_MISMATCH` — an applied file was edited (with `--strict`) |
+| `5` | `ALX_ERR_CONNECTION_FAILED` — could not reach MongoDB |
+| `6` | `ALX_ERR_CONFIG_INVALID` — bad configuration or flags, a command line that does not parse included |
+| `7` | `ALX_ERR_MIGRATION_EXECUTION_FAILED` — a migration threw |
+| `8` | `ALX_ERR_MIGRATION_FILE_NOT_FOUND` |
+| `9` | `ALX_ERR_NOT_APPLIED` — nothing to revert under that name |
+| `10` | `ALX_ERR_LOCK_LOST` — the lock was lost mid-run |
+| `11` | `ALX_ERR_RUN_ABORTED` — stopped by SIGINT/SIGTERM |
+| `12` | `ALX_ERR_HOOK_FAILED` — a lifecycle hook threw |
+| `13` | `ALX_ERR_MIGRATION_IRREVERSIBLE` — an imported migrate-mongo record |
+| `14` | `ALX_ERR_MIGRATION_TIMEOUT` — a migration exceeded `timeoutMs` |
+| `15` | `ALX_ERR_TRANSACTIONS_UNSUPPORTED` — transactions need a replica set / mongos |
+| `16` | `ALX_ERR_CONFIG_FILE_EXISTS` — `init` found an existing config (idempotent no-op) |
+| `17` | `ALX_ERR_IMPORT_TARGET_NOT_EMPTY` — `import` found records (re-run with `--force`) |
+| `18` | `ALX_ERR_MIGRATION_FILE_EXISTS` — `create` name collision |
+| `19` | `ALX_ERR_MIGRATION_INVALID_NAME` — a rejected (e.g. path-traversing) name |
+| `20` | `ALX_ERR_MIGRATION_INVALID_EXPORT` — a migration file without valid `up`/`down` |
+| `21` | `ALX_ERR_LOCK_RELEASE_FAILED` — the lock could not be released |
+| `22` | `ALX_ERR_AUDIT_FAILED` — an `audit` check failed (warnings stay `0`) |
+| `23` | `ALX_ERR_MIGRATION_OUT_OF_ORDER` — a late-merged file, under `onOutOfOrder: 'error'` |
+| `24` | `ALX_ERR_MIGRATION_BLOCKED` — an ordered single-file run would go out of sequence |
+| `25` | `ALX_ERR_QUEUE_JOB_INVALID` — a [queue job](/guide/bullmq) payload failed validation |
+| `26` | `ALX_ERR_QUEUE_JOB_FAILED` — a queue group's `wait()` saw a job fail or time out |
+| `27` | `ALX_ERR_CONVERGE_FAILED` — [`converge`](/commands/converge) refused a conflicting plan, a step failed, or `--wait-search` gave up |
+| `28` | `ALX_ERR_COLLECTIONS_DRIFT` — `converge --check` found the database out of step with the declarations, or a search index that failed to build |
+| `29` | `ALX_ERR_REVISION_CONFLICT` — a revision-guarded write lost a race (library only) |
+| `30` | `ALX_ERR_SHAPE_VERSION_UNSUPPORTED` — an upcaster met a document it cannot read (library only) |
+| `31` | `ALX_ERR_BACKGROUND_PENDING` — a migration waits for a [background migration](/commands/background), or `background status --check` / `background verify` found work |
+| `32` | `ALX_ERR_BACKGROUND_FAILED` — a background migration failed |
+| `33` | `ALX_ERR_BACKGROUND_CONFLICT` — a background control action did not fit its state |
+| `34` | `ALX_ERR_SANDBOX_REFUSED` — a background dry run reached for something the sandbox refuses |
 | `130` / `143` | Killed by a second SIGINT / SIGTERM |

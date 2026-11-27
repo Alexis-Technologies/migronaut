@@ -35,12 +35,12 @@ const { sleep } = require('./background-throttle.js');
  * configuration or the deployment cannot run it. A lane ends on them.
  */
 const FATAL_SLICE_CODES = new Set([
-  'CHECKSUM_MISMATCH',
-  'MIGRATION_FILE_NOT_FOUND',
-  'MIGRATION_INVALID_EXPORT',
-  'MIGRATION_INVALID_NAME',
-  'CONFIG_INVALID',
-  'TRANSACTIONS_UNSUPPORTED',
+  'ALX_ERR_CHECKSUM_MISMATCH',
+  'ALX_ERR_MIGRATION_FILE_NOT_FOUND',
+  'ALX_ERR_MIGRATION_INVALID_EXPORT',
+  'ALX_ERR_MIGRATION_INVALID_NAME',
+  'ALX_ERR_CONFIG_INVALID',
+  'ALX_ERR_TRANSACTIONS_UNSUPPORTED',
 ]);
 
 /** Failed slices in a row after which a lane of runBackground gives up */

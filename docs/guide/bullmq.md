@@ -132,7 +132,7 @@ outright.)
 `wait()` resolves when every job has finished, or rejects with a `QueueJobFailedError` at the first
 one that fails or outlives `timeoutMs` (one budget for the whole call, connecting included) —
 `error.context` carries `migration`, `jobId`, `failedReason`, `timedOut`, the job's own typed
-`code` (`MIGRATION_BLOCKED`, `CHECKSUM_MISMATCH`, …) and the `results` that finished before it.
+`code` (`ALX_ERR_MIGRATION_BLOCKED`, `ALX_ERR_CHECKSUM_MISMATCH`, …) and the `results` that finished before it.
 
 ## Ordering and failure
 
@@ -145,8 +145,8 @@ transient condition worth retrying — the MongoDB lock being held — is waited
 | Job | Outcome |
 |---|---|
 | `0001` | completed — applied |
-| `0002` | failed — `MIGRATION_EXECUTION_FAILED`, with the cause in `failedReason` |
-| `0003` | failed — `MIGRATION_BLOCKED`: it never ran, because `0002` is still pending |
+| `0002` | failed — `ALX_ERR_MIGRATION_EXECUTION_FAILED`, with the cause in `failedReason` |
+| `0003` | failed — `ALX_ERR_MIGRATION_BLOCKED`: it never ran, because `0002` is still pending |
 
 A job blocked by an earlier migration that has **not** failed — no `'failed'` trace in the
 changelog — waits for it instead, within its `lockWait` budget: with several workers taking jobs,
@@ -173,7 +173,7 @@ sequenceDiagram
   Q->>W: job 0003
   W->>DB: up 0003, ordered
   DB-->>W: 0002 is still pending, and it failed
-  Note over W: 0003 fails as MIGRATION_BLOCKED,<br/>without running
+  Note over W: 0003 fails as ALX_ERR_MIGRATION_BLOCKED,<br/>without running
 ```
 
 **Duplicates are harmless.** Two instances enqueuing at boot produce one set of jobs: the second
@@ -183,8 +183,8 @@ call's jobs, so both can `wait()`). A job that finds its migration already appli
 
 **Which failures could be retried.** If you enqueue jobs yourself with `attempts > 1`, the processor
 tells BullMQ not to retry what cannot succeed without a fix (a blocked, failed, invalid or drifted
-migration), and leaves the transient ones retryable: `LOCK_ALREADY_HELD`, `LOCK_LOST`,
-`LOCK_RELEASE_FAILED`, `RUN_ABORTED`, `CONNECTION_FAILED` (`RETRYABLE_CODES`).
+migration), and leaves the transient ones retryable: `ALX_ERR_LOCK_ALREADY_HELD`, `ALX_ERR_LOCK_LOST`,
+`ALX_ERR_LOCK_RELEASE_FAILED`, `ALX_ERR_RUN_ABORTED`, `ALX_ERR_CONNECTION_FAILED` (`RETRYABLE_CODES`).
 
 **Opting out.** `enqueueUp(file, { ordered: false })` gives the CLI's plain single-file `up`, with
 no order guard — for the rare deliberate out-of-sequence apply.
@@ -258,7 +258,7 @@ ends every group that reaches the newest migration with a converge job — the k
 hook never fires in a queue, since each job is a single-file run. `enqueueUp(undefined, {
 converge })` decides per call.
 
-- The converge job runs after the group's last migration, and **refuses** (`MIGRATION_BLOCKED`)
+- The converge job runs after the group's last migration, and **refuses** (`ALX_ERR_MIGRATION_BLOCKED`)
   while any migration is still pending — so a failed migration stops it too, and a peer still
   applying the last migration is waited out under the lock rather than raced.
 - `group.converge` is `{ id, deduplicated }`, and `group.wait()` resolves with
@@ -637,7 +637,7 @@ end the enqueue they interrupt. So:
 - **Permissions beyond the ordinary are opt-in.** A job can only *ask*; the worker decides with
   `allow`. By default it runs rollbacks but refuses `force` (re-running an applied migration) and
   `ordered: false` (skipping the order guard) — a job asking for either fails as
-  `QUEUE_JOB_INVALID` before anything runs. `allow: { force: true, unordered: true }` turns them
+  `ALX_ERR_QUEUE_JOB_INVALID` before anything runs. `allow: { force: true, unordered: true }` turns them
   on; `allow: { down: false }` makes a worker that never rolls back. The facade applies the same
   policy to its own `enqueue*` calls, so give producers and workers the same `allow`.
 - **No secrets in jobs.** A job carries a filename, a group id and a batch number. The connection
@@ -664,8 +664,8 @@ version, and any field it does not know, as `QueueJobInvalidError` — a meaning
 never dropped silently. So: **roll the workers out before the producers** (the processes that
 enqueue). A migration file is part of the same rule. An `up` job carries the checksum of the file
 its plan saw: a worker that does not have the file yet fails the job with
-`MIGRATION_FILE_NOT_FOUND`, and one that has *another version* of it — an edited pending file —
-fails it with `CHECKSUM_MISMATCH` (`context.planned: true`) instead of applying the wrong one. Enqueue
+`ALX_ERR_MIGRATION_FILE_NOT_FOUND`, and one that has *another version* of it — an edited pending file —
+fails it with `ALX_ERR_CHECKSUM_MISMATCH` (`context.planned: true`) instead of applying the wrong one. Enqueue
 again once every worker runs the new deploy.
 
 ## TypeScript

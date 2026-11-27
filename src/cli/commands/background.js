@@ -373,7 +373,7 @@ const registerBackground = (program) => {
       ['--partitions', 'status: list the partitions of the latest generation'],
       [
         '--check',
-        `status: exit ${EXIT_CODES.BACKGROUND_FAILED} if one failed, ${EXIT_CODES.BACKGROUND_PENDING} if one is not completed`,
+        `status: exit ${EXIT_CODES.ALX_ERR_BACKGROUND_FAILED} if one failed, ${EXIT_CODES.ALX_ERR_BACKGROUND_PENDING} if one is not completed`,
       ],
       ['--all', 'run: every runnable background migration, in order'],
       ['--concurrency <n>', 'run: lanes in this process (at most its maxParallel; default 1)'],
@@ -500,20 +500,20 @@ const registerBackground = (program) => {
         const outcome = checkOutcome(states);
         if (outcome === 'failed') {
           logger.error('✖ A background migration failed');
-          process.exitCode = EXIT_CODES.BACKGROUND_FAILED;
+          process.exitCode = EXIT_CODES.ALX_ERR_BACKGROUND_FAILED;
         } else if (outcome === 'pending') {
           logger.error('✖ Background migrations are not all completed');
-          process.exitCode = EXIT_CODES.BACKGROUND_PENDING;
+          process.exitCode = EXIT_CODES.ALX_ERR_BACKGROUND_PENDING;
         }
       }
-      if (data.verify?.drift.length > 0) process.exitCode = EXIT_CODES.BACKGROUND_PENDING;
+      if (data.verify?.drift.length > 0) process.exitCode = EXIT_CODES.ALX_ERR_BACKGROUND_PENDING;
       const dry = data.dryRun;
       if (dry !== undefined) {
         if (dry.mode === 'step') {
-          if (dry.refusals.length > 0) process.exitCode = EXIT_CODES.SANDBOX_REFUSED;
+          if (dry.refusals.length > 0) process.exitCode = EXIT_CODES.ALX_ERR_SANDBOX_REFUSED;
           else if (!dry.ok) process.exitCode = 1;
         } else if (dry.refusals?.length > 0) {
-          process.exitCode = EXIT_CODES.SANDBOX_REFUSED;
+          process.exitCode = EXIT_CODES.ALX_ERR_SANDBOX_REFUSED;
         } else if (dry.migrated === 0) {
           process.exitCode = 1;
         }

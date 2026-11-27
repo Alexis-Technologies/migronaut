@@ -80,7 +80,11 @@ describe('package entry point', () => {
     }
     // The other direction: EXIT_CODES may add CLI-condition codes, but never
     // a typo'd error code.
-    const cliOnly = new Set(['PENDING_MIGRATIONS', 'AUDIT_FAILED', 'COLLECTIONS_DRIFT']);
+    const cliOnly = new Set([
+      'ALX_ERR_PENDING_MIGRATIONS',
+      'ALX_ERR_AUDIT_FAILED',
+      'ALX_ERR_COLLECTIONS_DRIFT',
+    ]);
     for (const key of Object.keys(api.EXIT_CODES)) {
       assert.ok(codes.has(key) || cliOnly.has(key), `EXIT_CODES key ${key} matches no error code`);
     }
@@ -89,14 +93,22 @@ describe('package entry point', () => {
     assert.strictEqual(new Set(values).size, values.length, 'exit codes must be unique');
     assert.ok(values.every((value) => Number.isInteger(value) && value >= 2 && value <= 125));
   });
+
+  it('should start every code with ALX_ERR_, the CLI conditions included', () => {
+    // 3.0 renamed them all at once; a code added in the 2.x format would split the set again.
+    const api = require(path.join(repoRoot, 'index.js'));
+    for (const code of Object.keys(api.EXIT_CODES)) {
+      assert.match(code, /^ALX_ERR_[A-Z_]+$/, `${code} lacks the ALX_ERR_ prefix`);
+    }
+  });
 });
 
 describe('declaration file', () => {
   it('should list every runtime error code in the MigronautErrorCode union', () => {
-    // The one lockstep surface nothing else pins: classes and exit codes are
-    // checked both ways above, but the code-literal union can silently omit a
-    // new code — tsc/tsd cannot force it in, since subclasses do not narrow
-    // `code`. Same textual-pin style schema-sync uses.
+    // The one lockstep surface nothing else pins both ways: classes and exit
+    // codes are checked above, and a subclass's narrowed `code` makes check:dts
+    // refuse a literal missing from the union — but nothing else drops a stale
+    // member. Same textual-pin style schema-sync uses.
     const dts = readRepoFile('index.d.ts');
     const unionMatch = /export type MigronautErrorCode =([\s\S]*?);/.exec(dts);
     assert.ok(unionMatch, 'expected the MigronautErrorCode union in index.d.ts');

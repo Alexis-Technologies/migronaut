@@ -7,14 +7,21 @@ are releases of the upstream `mongo-migrate-kit`, not of this package.
 
 ## [Unreleased]
 
-The repository moves to alexiskills 1.2, the agent skills and conventions of the Alexis stack. The
-code keeps its behaviour — the same results, codes, messages and events, on the same suites — but
-for the error classes, which take `(message, options = {})` as `Error` does (under **Changed
-(breaking)**), and two lookups keyed by input (under **Fixed**). The package now ships `LICENSE`
-and `SECURITY.md` beside the changelog.
+A major release for the error contract, and the move to alexiskills 1.2, the agent skills and
+conventions of the Alexis stack. Every error code starts with `ALX_ERR_` and every error class
+takes `(message, options = {})` as `Error` does (under **Changed (breaking)**; **Upgrading from
+2.x** lists each old and new name). Everything else keeps its behaviour — the same results,
+messages, events and exit numbers, on the same suites — but for two lookups keyed by input (under
+**Fixed**). The package now ships `LICENSE` and `SECURITY.md` beside the changelog.
 
 ### Changed (breaking)
 
+- **Every error code starts with `ALX_ERR_`**, as alexiskills asks of every string code:
+  `LOCK_ALREADY_HELD` is `ALX_ERR_LOCK_ALREADY_HELD`, the three CLI conditions included
+  (`ALX_ERR_PENDING_MIGRATIONS`, `ALX_ERR_AUDIT_FAILED`, `ALX_ERR_COLLECTIONS_DRIFT`). That is
+  `error.code`, the `MigronautErrorCode` union, the keys of `EXIT_CODES` (the numbers are the
+  same), the CLI's `✖ CODE:` line and `--json` `error.code`, the `code` of a `migration:error` or
+  `run:end` event, and the code a queue job reports. The class names do not change.
 - **Every error class takes `(message, options = {})`, as `Error` does.** `options.cause` is the
   wrapped error and `options.context` the data about the failure; each subclass sets its own
   `code`, and only `MigronautError` itself reads one from the options.
@@ -28,9 +35,9 @@ and `SECURITY.md` beside the changelog.
   other failure.
 - **The types follow.** `MigronautErrorOptions` holds `cause` and `context`; `MigronautError.context`
   is no longer optional; each class's `code` is its literal (`LockLostError['code']` is
-  `'LOCK_LOST'`), so two classes are no longer assignable to each other.
-- **`LOCK_RELEASE_FAILED` keeps the driver's reason in `context.cause`**, as every other wrap site
-  does, instead of `context.error` — the field every reader of a wrapped error looks in
+  `'ALX_ERR_LOCK_LOST'`), so two classes are no longer assignable to each other.
+- **`ALX_ERR_LOCK_RELEASE_FAILED` keeps the driver's reason in `context.cause`**, as every other
+  wrap site does, instead of `context.error` — the field every reader of a wrapped error looks in
   (`errorWithCause`, the queue's failure reason).
 
 ### Changed
@@ -49,9 +56,9 @@ and `SECURITY.md` beside the changelog.
 ### Security
 
 - **A failed migration's `context.cause` masks URI credentials**, through `errorText` as at every
-  other wrap site: `MIGRATION_EXECUTION_FAILED` (the changelog-write case included) and
-  `TRANSACTIONS_UNSUPPORTED` kept the thrown message raw for a caller of the API; the CLI, the
-  changelog's failure trace and the spans redacted it on their own.
+  other wrap site: `ALX_ERR_MIGRATION_EXECUTION_FAILED` (the changelog-write case included) and
+  `ALX_ERR_TRANSACTIONS_UNSUPPORTED` kept the thrown message raw for a caller of the API; the CLI,
+  the changelog's failure trace and the spans redacted it on their own.
 
 ### Documentation
 
@@ -61,7 +68,7 @@ and `SECURITY.md` beside the changelog.
   `Notes` close its `Added`, and the topics of 1.0.0 are groups of its `Added`. The content of the
   old entries is unchanged.
 - **CLAUDE.md says what migronaut adds to alexiskills**: "Conventions" (with the rules kept on
-  purpose and why), "Errors" (the error model, and the codes 3.0 renames to `ALX_ERR_*`), "Skills"
+  purpose and why), "Errors" (the error model and its `ALX_ERR_*` codes), "Skills"
   and "Release process". CONTRIBUTING.md points to them.
 
 ### Tooling
@@ -101,17 +108,61 @@ and `SECURITY.md` beside the changelog.
 - **No `release` script.** The maintainer runs `pnpm publish` itself (`prepublishOnly` still
   gates it), as the `npm-publish` skill of alexiskills 1.2 asks: its steps are the release.
 
-### Upgrading from 2.5
+### Upgrading from 2.x
 
-1. Code that constructs a migronaut error — a test double, a subclass of your own — passes one
+1. Match the new codes: `error.code`, the `EXIT_CODES` keys, `--json` `error.code` and the
+   event payloads. The exit numbers did not change, so a script that branches on `$?` keeps
+   working.
+
+   | 2.x | 3.0 |
+   | --- | --- |
+   | `PENDING_MIGRATIONS` | `ALX_ERR_PENDING_MIGRATIONS` |
+   | `LOCK_ALREADY_HELD` | `ALX_ERR_LOCK_ALREADY_HELD` |
+   | `CHECKSUM_MISMATCH` | `ALX_ERR_CHECKSUM_MISMATCH` |
+   | `CONNECTION_FAILED` | `ALX_ERR_CONNECTION_FAILED` |
+   | `CONFIG_INVALID` | `ALX_ERR_CONFIG_INVALID` |
+   | `MIGRATION_EXECUTION_FAILED` | `ALX_ERR_MIGRATION_EXECUTION_FAILED` |
+   | `MIGRATION_FILE_NOT_FOUND` | `ALX_ERR_MIGRATION_FILE_NOT_FOUND` |
+   | `NOT_APPLIED` | `ALX_ERR_NOT_APPLIED` |
+   | `LOCK_LOST` | `ALX_ERR_LOCK_LOST` |
+   | `RUN_ABORTED` | `ALX_ERR_RUN_ABORTED` |
+   | `HOOK_FAILED` | `ALX_ERR_HOOK_FAILED` |
+   | `MIGRATION_IRREVERSIBLE` | `ALX_ERR_MIGRATION_IRREVERSIBLE` |
+   | `MIGRATION_TIMEOUT` | `ALX_ERR_MIGRATION_TIMEOUT` |
+   | `TRANSACTIONS_UNSUPPORTED` | `ALX_ERR_TRANSACTIONS_UNSUPPORTED` |
+   | `CONFIG_FILE_EXISTS` | `ALX_ERR_CONFIG_FILE_EXISTS` |
+   | `IMPORT_TARGET_NOT_EMPTY` | `ALX_ERR_IMPORT_TARGET_NOT_EMPTY` |
+   | `MIGRATION_FILE_EXISTS` | `ALX_ERR_MIGRATION_FILE_EXISTS` |
+   | `MIGRATION_INVALID_NAME` | `ALX_ERR_MIGRATION_INVALID_NAME` |
+   | `MIGRATION_INVALID_EXPORT` | `ALX_ERR_MIGRATION_INVALID_EXPORT` |
+   | `LOCK_RELEASE_FAILED` | `ALX_ERR_LOCK_RELEASE_FAILED` |
+   | `AUDIT_FAILED` | `ALX_ERR_AUDIT_FAILED` |
+   | `MIGRATION_OUT_OF_ORDER` | `ALX_ERR_MIGRATION_OUT_OF_ORDER` |
+   | `MIGRATION_BLOCKED` | `ALX_ERR_MIGRATION_BLOCKED` |
+   | `QUEUE_JOB_INVALID` | `ALX_ERR_QUEUE_JOB_INVALID` |
+   | `QUEUE_JOB_FAILED` | `ALX_ERR_QUEUE_JOB_FAILED` |
+   | `CONVERGE_FAILED` | `ALX_ERR_CONVERGE_FAILED` |
+   | `COLLECTIONS_DRIFT` | `ALX_ERR_COLLECTIONS_DRIFT` |
+   | `REVISION_CONFLICT` | `ALX_ERR_REVISION_CONFLICT` |
+   | `SHAPE_VERSION_UNSUPPORTED` | `ALX_ERR_SHAPE_VERSION_UNSUPPORTED` |
+   | `BACKGROUND_PENDING` | `ALX_ERR_BACKGROUND_PENDING` |
+   | `BACKGROUND_FAILED` | `ALX_ERR_BACKGROUND_FAILED` |
+   | `BACKGROUND_CONFLICT` | `ALX_ERR_BACKGROUND_CONFLICT` |
+   | `SANDBOX_REFUSED` | `ALX_ERR_SANDBOX_REFUSED` |
+
+2. Upgrade the queue's producers and workers together: the code a job reports, and the codes the
+   adapter decides retries by, are the new names. What 2.x already wrote — a `code` in a stored
+   job or a log line — keeps the old one; migronaut reads none of it back.
+3. Code that constructs a migronaut error — a test double, a subclass of your own — passes one
    options object: `new ChecksumMismatchError(message, { context: { name } })`,
    `new HookFailedError(message, { cause: error, context: { hook } })`, and for the base class
-   `new MigronautError(message, { code: 'CONFIG_INVALID' })`. A subclass of your own calls
+   `new MigronautError(message, { code: 'ALX_ERR_CONFIG_INVALID' })`. A subclass of your own calls
    `super(message, options)`.
-2. Code that tests `error.context === undefined` reads `Object.keys(error.context).length === 0`;
+4. Code that tests `error.context === undefined` reads `Object.keys(error.context).length === 0`;
    `error.context?.x` keeps working.
-3. A reader of `LOCK_RELEASE_FAILED` takes the reason from `context.cause`, not `context.error`.
-4. Catching, `instanceof`, `code`, `EXIT_CODES` and the `--json` document are unchanged.
+5. A reader of `ALX_ERR_LOCK_RELEASE_FAILED` takes the reason from `context.cause`, not
+   `context.error`.
+6. Catching, `instanceof`, the class names and the shape of the `--json` document are unchanged.
 
 ## [2.5.0] - 2026-11-18
 

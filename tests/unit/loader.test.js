@@ -235,7 +235,7 @@ describe('loadMigrationFile — background migrations and requires', () => {
     await assert.rejects(
       loadMigrationFile(path.join(fixtures, '0102-requires-later.cjs')),
       (error) =>
-        error.code === 'MIGRATION_INVALID_EXPORT' &&
+        error.code === 'ALX_ERR_MIGRATION_INVALID_EXPORT' &&
         /must name an earlier migration/.test(error.message),
     );
   });

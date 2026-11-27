@@ -72,16 +72,16 @@ describe('reportUsageError', () => {
     }
   };
 
-  it('should exit as CONFIG_INVALID with the message on stderr', () => {
+  it('should exit as ALX_ERR_CONFIG_INVALID with the message on stderr', () => {
     const seen = captured(() => reportUsageError("unknown option '--bogus'"));
-    assert.strictEqual(seen.code, EXIT_CODES.CONFIG_INVALID);
+    assert.strictEqual(seen.code, EXIT_CODES.ALX_ERR_CONFIG_INVALID);
     assert.strictEqual(seen.err, "error: unknown option '--bogus'\n");
     assert.strictEqual(seen.out, '');
   });
 
   it('should show the help in place of the message when there is one', () => {
     const seen = captured(() => reportUsageError('no command given', { help: 'Usage: x' }));
-    assert.strictEqual(seen.code, EXIT_CODES.CONFIG_INVALID);
+    assert.strictEqual(seen.code, EXIT_CODES.ALX_ERR_CONFIG_INVALID);
     assert.strictEqual(seen.err, 'Usage: x\n');
   });
 
@@ -89,10 +89,10 @@ describe('reportUsageError', () => {
     const seen = captured(() =>
       reportUsageError("option '--yes' does not take a value", { json: true, help: 'Usage: x' }),
     );
-    assert.strictEqual(seen.code, EXIT_CODES.CONFIG_INVALID);
+    assert.strictEqual(seen.code, EXIT_CODES.ALX_ERR_CONFIG_INVALID);
     assert.strictEqual(seen.err, '');
     assert.deepStrictEqual(JSON.parse(seen.out), {
-      error: { code: 'CONFIG_INVALID', message: "option '--yes' does not take a value" },
+      error: { code: 'ALX_ERR_CONFIG_INVALID', message: "option '--yes' does not take a value" },
     });
   });
 });
@@ -121,8 +121,8 @@ describe('EXIT_CODES', () => {
   it('should give the idempotency cases their own codes', () => {
     // "already initialized" / "already imported" must be distinguishable from
     // a crash without parsing stderr — that is what typed exit codes are for.
-    assert.strictEqual(typeof EXIT_CODES.CONFIG_FILE_EXISTS, 'number');
-    assert.strictEqual(typeof EXIT_CODES.IMPORT_TARGET_NOT_EMPTY, 'number');
+    assert.strictEqual(typeof EXIT_CODES.ALX_ERR_CONFIG_FILE_EXISTS, 'number');
+    assert.strictEqual(typeof EXIT_CODES.ALX_ERR_IMPORT_TARGET_NOT_EMPTY, 'number');
   });
 });
 

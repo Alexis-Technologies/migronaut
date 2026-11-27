@@ -60,9 +60,9 @@ Each baselined file gets a normal changelog record, with a few deliberate differ
 
 Plus the [global flags](/guide/configuration#global-cli-flags).
 
-`--json` without `--yes` is refused with `CONFIG_INVALID` (exit `6`) — JSON mode is non-interactive,
+`--json` without `--yes` is refused with `ALX_ERR_CONFIG_INVALID` (exit `6`) — JSON mode is non-interactive,
 so a prompt could never be answered. An unknown `--to` filename exits with
-`MIGRATION_FILE_NOT_FOUND` (code `8`).
+`ALX_ERR_MIGRATION_FILE_NOT_FOUND` (code `8`).
 
 In `--json` mode the output is:
 
@@ -89,7 +89,7 @@ baselines, or a baseline racing an `up`, serialize like any other mutation.
 
 Baselined records are tagged `origin: 'baseline'`. migronaut never executed them, so it will not
 revert them: [`migronaut down`](/commands/down) and [`migronaut redo`](/commands/redo) **refuse them
-up front** with `MIGRATION_IRREVERSIBLE` (exit `13`). New migrations you author with
+up front** with `ALX_ERR_MIGRATION_IRREVERSIBLE` (exit `13`). New migrations you author with
 `migronaut create` remain fully reversible.
 
 ::: warning When NOT to use it

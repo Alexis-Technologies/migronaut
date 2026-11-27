@@ -16,7 +16,7 @@ const { isBareFilename } = require('../utils/migration-name.js');
  *   cannot honour must not be dropped silently. So any new field that changes
  *   what a job does bumps `JOB_DATA_VERSION`, and workers are rolled out
  *   before the producers that write it (an older worker fails a newer job as
- *   QUEUE_JOB_INVALID rather than guessing);
+ *   ALX_ERR_QUEUE_JOB_INVALID rather than guessing);
  * - `MIN_JOB_DATA_VERSION` only moves in a major release.
  */
 const JOB_DATA_VERSION = 1;

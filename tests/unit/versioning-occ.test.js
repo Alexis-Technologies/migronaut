@@ -48,7 +48,7 @@ const conflict =
   (reason, extra = {}) =>
   (error) => {
     assert.ok(error instanceof RevisionConflictError);
-    assert.strictEqual(error.code, 'REVISION_CONFLICT');
+    assert.strictEqual(error.code, 'ALX_ERR_REVISION_CONFLICT');
     assert.strictEqual(error.context.reason, reason);
     for (const [key, value] of Object.entries(extra)) {
       assert.deepStrictEqual(error.context[key], value);

@@ -61,7 +61,7 @@ describe('assertId', () => {
       assert.throws(
         () => assertId(value),
         (error) => {
-          assert.strictEqual(error.code, 'CONFIG_INVALID');
+          assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
           assert.deepStrictEqual(error.context, { returned: type });
           return true;
         },

@@ -169,7 +169,7 @@ describe('MigratorKit.stop (integration)', () => {
 
     await assert.rejects(run, (error) => {
       assert.ok(error instanceof RunAbortedError);
-      assert.strictEqual(error.code, 'RUN_ABORTED');
+      assert.strictEqual(error.code, 'ALX_ERR_RUN_ABORTED');
       // Partial progress is reported, not thrown away.
       assert.strictEqual(error.context.results.length, 1);
       assert.strictEqual(error.context.results[0].file, '0001-a.ts');
@@ -297,7 +297,7 @@ describe('hook guarantees (integration)', () => {
       // The caller must see the migration failure (with its partial results),
       // not the notification hook's own trouble.
       await assert.rejects(kit.up(), (error) => {
-        assert.strictEqual(error.code, 'MIGRATION_EXECUTION_FAILED');
+        assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
         assert.ok(Array.isArray(error.context.results));
         return true;
       });
@@ -411,7 +411,7 @@ describe('hook guarantees (integration)', () => {
     });
     await assert.rejects(kit.up(), (error) => {
       assert.ok(error instanceof HookFailedError);
-      assert.strictEqual(error.code, 'HOOK_FAILED');
+      assert.strictEqual(error.code, 'ALX_ERR_HOOK_FAILED');
       assert.strictEqual(error.context.hook, 'beforeAll');
       assert.strictEqual(error.context.cause, 'hook exploded');
       return true;
@@ -435,8 +435,8 @@ describe('what a failed run says (integration)', () => {
       await kit.disconnect();
     }
     assert.deepStrictEqual(seen, [
-      ['migration:error', 'MIGRATION_EXECUTION_FAILED'],
-      ['run:end', 'MIGRATION_EXECUTION_FAILED', false],
+      ['migration:error', 'ALX_ERR_MIGRATION_EXECUTION_FAILED'],
+      ['run:end', 'ALX_ERR_MIGRATION_EXECUTION_FAILED', false],
     ]);
   });
 
@@ -449,7 +449,7 @@ describe('what a failed run says (integration)', () => {
     kit.on('run:end', (event) => ends.push(event));
     try {
       // What a caller waiting for the lock does, attempt after attempt: every
-      // refusal ends a run — as LOCK_ALREADY_HELD, not as a nameless failure.
+      // refusal ends a run — as ALX_ERR_LOCK_ALREADY_HELD, not as a nameless failure.
       await assert.rejects(kit.up(), LockAlreadyHeldError);
       await assert.rejects(kit.up(), LockAlreadyHeldError);
       await holder.release();
@@ -460,8 +460,8 @@ describe('what a failed run says (integration)', () => {
     assert.deepStrictEqual(
       ends.map((event) => [event.success, event.code]),
       [
-        [false, 'LOCK_ALREADY_HELD'],
-        [false, 'LOCK_ALREADY_HELD'],
+        [false, 'ALX_ERR_LOCK_ALREADY_HELD'],
+        [false, 'ALX_ERR_LOCK_ALREADY_HELD'],
         [true, undefined],
       ],
     );
@@ -476,7 +476,7 @@ describe('what a failed run says (integration)', () => {
     const kit = migrator();
     try {
       await assert.rejects(kit.status(), (error) => {
-        assert.strictEqual(error.code, 'CONNECTION_FAILED');
+        assert.strictEqual(error.code, 'ALX_ERR_CONNECTION_FAILED');
         assert.match(error.message, /^Connected to MongoDB, but could not create the indexes/);
         assert.match(error.message, /ensureIndexes: false/);
         assert.strictEqual(error.context.phase, 'ensure-indexes');
@@ -502,7 +502,7 @@ describe('what a failed run says (integration)', () => {
       const pending = kit.connect();
       await kit.disconnect();
       await assert.rejects(pending, (error) => {
-        assert.strictEqual(error.code, 'CONNECTION_FAILED');
+        assert.strictEqual(error.code, 'ALX_ERR_CONNECTION_FAILED');
         assert.match(error.message, /Disconnected while connecting/);
         return true;
       });
@@ -529,11 +529,11 @@ describe('what a failed run says (integration)', () => {
       // The preview used to list 0002-b.ts as pending — a row the real `up`
       // refuses to apply.
       await assert.rejects(strict.dryRun('up'), (error) => {
-        assert.strictEqual(error.code, 'CHECKSUM_MISMATCH');
+        assert.strictEqual(error.code, 'ALX_ERR_CHECKSUM_MISMATCH');
         assert.strictEqual(error.context.name, '0001-a.ts');
         return true;
       });
-      await assert.rejects(strict.up(), { code: 'CHECKSUM_MISMATCH' });
+      await assert.rejects(strict.up(), { code: 'ALX_ERR_CHECKSUM_MISMATCH' });
     } finally {
       await strict.disconnect();
     }
@@ -753,7 +753,7 @@ describe('custom id format — generateId (integration)', () => {
       project.write('0001-a.ts', insertMigration('things', 'a'));
       const kit = migrator({ generateId });
       await assert.rejects(kit.up(), (error) => {
-        assert.strictEqual(error.code, 'CONFIG_INVALID');
+        assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
         assert.match(error.message, message);
         return true;
       });

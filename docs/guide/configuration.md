@@ -158,7 +158,7 @@ The contract is small, and checked on every call:
 - It must be **synchronous** and return a **non-empty string of at most 128
   characters**.
 - A generator that throws, returns a promise or returns anything else fails the
-  run with `CONFIG_INVALID` before any migration starts.
+  run with `ALX_ERR_CONFIG_INVALID` before any migration starts.
 
 It should return a different value on every call. Ids are how a lock, a set of
 changelog records and a stretch of log lines are tied to one run, so a repeated
@@ -172,7 +172,7 @@ written by earlier runs and the new format sit side by side in the changelog.
 `onOutOfOrder` is about files merged late from a parallel branch: on a bulk
 `up`, a pending migration that sorts *before* the newest applied one would
 apply out of authoring order. `'warn'` (default) logs the late arrivals and
-applies them; `'error'` refuses the run with `MIGRATION_OUT_OF_ORDER`
+applies them; `'error'` refuses the run with `ALX_ERR_MIGRATION_OUT_OF_ORDER`
 (exit 23); `'allow'` applies silently. A single-file `up` — an explicit,
 deliberate target — is never checked. `status` marks such rows
 `outOfOrder: true`, and `audit` reports them in its `ordering` check.
@@ -231,7 +231,7 @@ The remaining options — `fileExtensions`, `clientOptions`, `collections`,
 environment string cannot express.
 
 ::: warning Values are rejected, never coerced
-A value that doesn't parse fails the run with a `CONFIG_INVALID` error naming
+A value that doesn't parse fails the run with a `ALX_ERR_CONFIG_INVALID` error naming
 the variable. `MIGRONAUT_STRICT=on` does **not** quietly mean `false`, and
 `MIGRONAUT_LOCK_TTL=abc` does not quietly mean "no TTL" — a typo in a safety
 setting must never be the reason a safety setting is off.
@@ -268,7 +268,7 @@ entirely with `--no-env` / `envFile: false` — worth doing in CI, so a stray
 `.env` cannot silently outrank a committed config. Loading uses Node's native
 `util.parseEnv` — always present on the supported Node range (≥ 22.18), no dependency needed.
 Real environment variables always win over `.env` values. Files above 1 MB (or anything that is
-not a regular file) are rejected with `CONFIG_INVALID`. Supported syntax: one
+not a regular file) are rejected with `ALX_ERR_CONFIG_INVALID`. Supported syntax: one
 `KEY=VALUE` per line, optional `export ` prefix, matching quotes, full-line and inline `#`
 comments, and multiline values inside double quotes; `${VAR}` interpolation is not supported.
 

@@ -259,7 +259,7 @@ const defineBullMQScenarios = (harness) => {
     write('0001-a.js', insertMigration('things', 'a'));
     const mq = createQueue({ config: { generateId: () => '' } });
     await assert.rejects(mq.enqueueUp(), (error) => {
-      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
       assert.match(error.message, /non-empty string/);
       return true;
     });
@@ -318,7 +318,7 @@ const defineBullMQScenarios = (harness) => {
     assert.strictEqual(view.state, 'failed');
     assert.match(view.failedReason, /0002-b\.js is blocked/);
     assert.match(view.failedReason, /0001-a\.js/);
-    assert.strictEqual(view.progress.code, 'MIGRATION_BLOCKED');
+    assert.strictEqual(view.progress.code, 'ALX_ERR_MIGRATION_BLOCKED');
     assert.deepStrictEqual(await markers(), []);
     assert.deepStrictEqual(await records(), [], 'a blocked job leaves no trace in the changelog');
   });
@@ -370,7 +370,7 @@ const defineBullMQScenarios = (harness) => {
     await mq.startWorker();
     const [view] = await settled(mq, [group.jobs[0].id]);
     assert.strictEqual(view.state, 'failed');
-    assert.strictEqual(view.progress.code, 'CHECKSUM_MISMATCH');
+    assert.strictEqual(view.progress.code, 'ALX_ERR_CHECKSUM_MISMATCH');
     assert.match(view.failedReason, /not the file this run was planned with/);
     assert.deepStrictEqual(await markers(), []);
   });
@@ -400,7 +400,7 @@ const defineBullMQScenarios = (harness) => {
       // The cause travels with the message: it is all the queue ever sees.
       assert.match(error.context.failedReason, /intentional failure/);
       // …and the typed code with the error, so a caller branches without parsing.
-      assert.strictEqual(error.context.code, 'MIGRATION_EXECUTION_FAILED');
+      assert.strictEqual(error.context.code, 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
       assert.strictEqual(error.context.results.length, 1);
       assert.strictEqual(error.context.results[0].status, 'applied');
       return true;
@@ -412,11 +412,11 @@ const defineBullMQScenarios = (harness) => {
     );
     assert.strictEqual(first.state, 'completed');
     assert.strictEqual(second.state, 'failed');
-    assert.strictEqual(second.progress.code, 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(second.progress.code, 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
     assert.strictEqual(second.attemptsMade, 1, 'a failed migration is not retried');
     // The third never ran: it was refused because the second is still pending.
     assert.strictEqual(third.state, 'failed');
-    assert.strictEqual(third.progress.code, 'MIGRATION_BLOCKED');
+    assert.strictEqual(third.progress.code, 'ALX_ERR_MIGRATION_BLOCKED');
     assert.deepStrictEqual(await markers(), ['a']);
     assert.deepStrictEqual(
       (await mq.status()).map((row) => [row.file, row.status]),
@@ -536,7 +536,7 @@ const defineBullMQScenarios = (harness) => {
     await mq.startWorker();
     const [view] = await settled(mq, [group.jobs[0].id]);
     assert.strictEqual(view.state, 'failed');
-    assert.strictEqual(view.progress.code, 'LOCK_ALREADY_HELD');
+    assert.strictEqual(view.progress.code, 'ALX_ERR_LOCK_ALREADY_HELD');
     assert.deepStrictEqual(await markers(), []);
   });
 
@@ -607,7 +607,7 @@ const defineBullMQScenarios = (harness) => {
     );
     const [view] = await settled(mq, [job.id]);
     assert.strictEqual(view.state, 'failed');
-    assert.strictEqual(view.progress.code, 'MIGRATION_BLOCKED');
+    assert.strictEqual(view.progress.code, 'ALX_ERR_MIGRATION_BLOCKED');
     assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
   });
 
@@ -758,7 +758,11 @@ export async function down() {}
     const views = await settled(mq, [forced.id, unordered.id]);
     for (const view of views) {
       assert.strictEqual(view.state, 'failed');
-      assert.strictEqual(view.progress.code, 'QUEUE_JOB_INVALID', 'refused before it ever ran');
+      assert.strictEqual(
+        view.progress.code,
+        'ALX_ERR_QUEUE_JOB_INVALID',
+        'refused before it ever ran',
+      );
       assert.match(view.failedReason, /is not allowed by this worker/);
     }
     assert.deepStrictEqual(await markers(), ['a'], 'nothing was re-run');
@@ -831,7 +835,7 @@ export async function down() {}
     const [view] = await settled(mq, [job.id]);
     assert.strictEqual(view.state, 'failed');
     assert.strictEqual(view.attemptsMade, 1);
-    assert.strictEqual(view.progress.code, 'MIGRATION_BLOCKED');
+    assert.strictEqual(view.progress.code, 'ALX_ERR_MIGRATION_BLOCKED');
   });
 
   it('should keep credentials out of what the queue stores', async () => {
@@ -1038,7 +1042,7 @@ export async function down() {}
     assert.ok(!('convergeHeld' in first));
     const [refused] = await settled(mq, [first.converge.jobId]);
     assert.strictEqual(refused.state, 'failed');
-    assert.strictEqual(refused.progress.code, 'CONVERGE_FAILED');
+    assert.strictEqual(refused.progress.code, 'ALX_ERR_CONVERGE_FAILED');
     // A job a tick adds is kept like the tick: a schedule can add many.
     const live = await mq.queue.getJob(first.converge.jobId);
     assert.deepStrictEqual(live.opts.removeOnComplete, { count: 100 });
@@ -1098,7 +1102,7 @@ export async function down() {}
     await assert.rejects(group.wait({ timeoutMs: 10_000 }), QueueJobFailedError);
     const [blocked] = await settled(mq, [group.converge.id]);
     assert.strictEqual(blocked.state, 'failed');
-    assert.strictEqual(blocked.progress.code, 'MIGRATION_BLOCKED');
+    assert.strictEqual(blocked.progress.code, 'ALX_ERR_MIGRATION_BLOCKED');
     assert.deepStrictEqual(await indexNames(), []);
 
     write('0002-b.js', insertMigration('things', 'b'));

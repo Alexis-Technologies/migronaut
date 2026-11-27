@@ -50,7 +50,7 @@ Some things are working as intended, and are not vulnerabilities:
   the deploy pipeline. What a job can never do is name a file outside that
   directory (or a file next to the migrations that is not one) or carry code:
   payloads are validated as untrusted data, and a job that fails the check is
-  rejected (`QUEUE_JOB_INVALID`) before anything runs. A job also cannot
+  rejected (`ALX_ERR_QUEUE_JOB_INVALID`) before anything runs. A job also cannot
   re-run an applied migration (`force`) or skip the order guard unless the
   worker's `allow` option says so — both are off by default.
 

@@ -18,18 +18,18 @@ const WAIT_TIMEOUT_MS = 5 * 60_000;
 
 /** A typed error code is all it takes to pick the status — no message parsing */
 const STATUS_BY_CODE = {
-  CONFIG_INVALID: 400,
-  MIGRATION_INVALID_NAME: 400,
-  MIGRATION_FILE_NOT_FOUND: 404,
-  NOT_APPLIED: 409,
-  MIGRATION_BLOCKED: 409,
-  MIGRATION_OUT_OF_ORDER: 409,
-  MIGRATION_IRREVERSIBLE: 409,
-  CHECKSUM_MISMATCH: 409,
-  CONVERGE_FAILED: 409,
-  QUEUE_JOB_INVALID: 400,
-  QUEUE_JOB_FAILED: 409,
-  CONNECTION_FAILED: 503,
+  ALX_ERR_CONFIG_INVALID: 400,
+  ALX_ERR_MIGRATION_INVALID_NAME: 400,
+  ALX_ERR_MIGRATION_FILE_NOT_FOUND: 404,
+  ALX_ERR_NOT_APPLIED: 409,
+  ALX_ERR_MIGRATION_BLOCKED: 409,
+  ALX_ERR_MIGRATION_OUT_OF_ORDER: 409,
+  ALX_ERR_MIGRATION_IRREVERSIBLE: 409,
+  ALX_ERR_CHECKSUM_MISMATCH: 409,
+  ALX_ERR_CONVERGE_FAILED: 409,
+  ALX_ERR_QUEUE_JOB_INVALID: 400,
+  ALX_ERR_QUEUE_JOB_FAILED: 409,
+  ALX_ERR_CONNECTION_FAILED: 503,
 };
 
 /**
@@ -223,8 +223,8 @@ const server = http.createServer((req, res) => {
   handle(req, res).catch((error) => {
     if (error instanceof MigronautError) {
       // Messages and context are already redacted by migronaut. A failed wait
-      // carries the job's own code (MIGRATION_BLOCKED, …), which picks the
-      // status better than QUEUE_JOB_FAILED alone.
+      // carries the job's own code (ALX_ERR_MIGRATION_BLOCKED, …), which picks the
+      // status better than ALX_ERR_QUEUE_JOB_FAILED alone.
       const status = STATUS_BY_CODE[error.context?.code] ?? STATUS_BY_CODE[error.code] ?? 500;
       return send(res, status, {
         error: { code: error.code, message: error.message, context: publicContext(error.context) },

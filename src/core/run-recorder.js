@@ -120,7 +120,7 @@ class RunRecorder {
       // chokepoint every log line and result row already goes through.
       ...(failure ? { error: errorText(failure) } : {}),
       // And its typed code: a caller waiting for the lock retries the whole
-      // run, so every refusal ends one as LOCK_ALREADY_HELD — a subscriber
+      // run, so every refusal ends one as ALX_ERR_LOCK_ALREADY_HELD — a subscriber
       // that alerts on failed runs needs to tell those from a migration that
       // threw, without parsing the text.
       ...(failure instanceof MigronautError ? { code: failure.code } : {}),

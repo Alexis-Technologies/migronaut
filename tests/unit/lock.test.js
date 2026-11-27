@@ -540,7 +540,7 @@ describe('runWithLock', () => {
             }),
         ),
         (error) => {
-          assert.strictEqual(error.code, 'LOCK_LOST');
+          assert.strictEqual(error.code, 'ALX_ERR_LOCK_LOST');
           return true;
         },
       );
@@ -758,7 +758,7 @@ describe('runWithLock — any lock-shaped object', () => {
     } finally {
       release();
     }
-    assert.strictEqual(result.code, 'LOCK_LOST');
+    assert.strictEqual(result.code, 'ALX_ERR_LOCK_LOST');
     assert.strictEqual(result.message, 'Lost the partition lease mid-run');
     assert.ok(warnings.some((line) => line.includes('Lost the partition lease mid-run')));
     assert.deepStrictEqual([calls[0], calls.at(-1)], ['acquire', 'release']);

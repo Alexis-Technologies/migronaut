@@ -32,7 +32,7 @@ const registerAudit = (program) => {
     // A failed check is what CI should act on; warnings are advisory. The
     // dedicated code separates "a check failed" from an unclassified crash.
     after: (report) => {
-      if (!report.ok) process.exitCode = EXIT_CODES.AUDIT_FAILED;
+      if (!report.ok) process.exitCode = EXIT_CODES.ALX_ERR_AUDIT_FAILED;
     },
   });
 };

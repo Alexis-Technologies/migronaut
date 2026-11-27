@@ -173,7 +173,7 @@ A search index builds in the background: `result.search.notReady` lists the decl
 building, updating or failed — which does not count against `inSync`.
 
 A conflicting plan, a step that fails, or a `waitForSearchIndexes` that gives up rejects with
-`ConvergeFailedError` (`CONVERGE_FAILED`, `context.phase`: `plan`, `replan`, `apply` or `wait`),
+`ConvergeFailedError` (`ALX_ERR_CONVERGE_FAILED`, `context.phase`: `plan`, `replan`, `apply` or `wait`),
 whose `context.converge` is the result so far. `up(undefined, { converge: true })` converges after
 the migrations under the same lock — what `convergeAfterUp` does for every bulk `up`; `up` still
 returns its migration rows, and the converge outcome arrives as the `converge:end` event.
@@ -341,8 +341,8 @@ const migrator = new MigratorKit({ logger: createLogger(process.stdout, 'debug')
 ### `EXIT_CODES`
 
 The CLI's exit-code map, so a wrapper script can mirror its semantics without hardcoding numbers.
-One entry per error code, plus `PENDING_MIGRATIONS` (from `status --check`), `AUDIT_FAILED` and
-`COLLECTIONS_DRIFT` (from `converge --check`).
+One entry per error code, plus `ALX_ERR_PENDING_MIGRATIONS` (from `status --check`), `ALX_ERR_AUDIT_FAILED` and
+`ALX_ERR_COLLECTIONS_DRIFT` (from `converge --check`).
 See the [exit-code table](/reference/cli#exit-codes).
 
 ## Document versioning
