@@ -72,8 +72,7 @@
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
     "prepare": "alexiskills claude",
-    "prepublishOnly": "pnpm run lint && pnpm run format:check && pnpm run test:coverage && pnpm run test:types && pnpm run check:dts",
-    "release": "pnpm publish"
+    "prepublishOnly": "pnpm run lint && pnpm run format:check && pnpm run test:coverage && pnpm run test:types && pnpm run check:dts"
   },
   "tsd": {
     "directory": "tests/types"

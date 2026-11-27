@@ -727,7 +727,7 @@ this section wins where the two differ. What migronaut adds to its steps:
   are used: `npm install` of the tarball with `mongodb`, `require` and `import` of the three
   entries, `tsc` over an import of each, `npx migronaut --version`, and a deep import that fails
   with `ERR_PACKAGE_PATH_NOT_EXPORTED`. Report the file count and the rows of `pnpm run size`.
-- **Publish.** The maintainer runs `pnpm run release` (`pnpm publish`, which re-runs
-  `prepublishOnly`) from the tagged commit, with npm 2FA, writes the GitHub release notes from
-  the CHANGELOG section, and checks the docs deploy (the nav label shows the new version). The
-  agent never pushes, tags or publishes on its own.
+- **Publish.** The maintainer runs `pnpm publish` (which re-runs `prepublishOnly`) from the
+  tagged commit, with npm 2FA — there is no `release` or `publish` script, as `npm-publish`
+  asks — writes the GitHub release notes from the CHANGELOG section, and checks the docs deploy
+  (the nav label shows the new version). The agent never pushes, tags or publishes on its own.

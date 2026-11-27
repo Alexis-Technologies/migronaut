@@ -1949,7 +1949,8 @@ MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admi
   **never** shipped to npm.
 - **Release:** manual — bump `version` in `package.json` and the three spots a test holds to it,
   turn `## [Unreleased]` in `CHANGELOG.md` into the dated `## [X.Y.Z] - YYYY-MM-DD` with its
-  link, commit `chore(release): X.Y.Z` and tag, then `pnpm run release` (= `pnpm publish`).
+  link, commit `chore(release): X.Y.Z` and tag, then `pnpm publish` (no `release` script:
+  the steps are the release).
   `prepublishOnly` re-runs lint + format:check + test:coverage + test:types + check:dts as the
   pre-publish gate. CLAUDE.md's "Release process" has the steps.
 - **Publish-account hygiene:** the npm account publishing this package keeps 2FA required for

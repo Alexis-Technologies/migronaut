@@ -98,6 +98,8 @@ and `SECURITY.md` beside the changelog.
   places that name the version (`package.json`, the CHANGELOG, ARCHITECTURE.md and the docs nav),
   and a link for every CHANGELOG release.
 - **CI's `ci-success` fails on a skipped job** too, not only on a failed or cancelled one.
+- **No `release` script.** The maintainer runs `pnpm publish` itself (`prepublishOnly` still
+  gates it), as the `npm-publish` skill of alexiskills 1.2 asks: its steps are the release.
 
 ### Upgrading from 2.5
 
