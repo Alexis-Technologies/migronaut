@@ -294,7 +294,9 @@ const withMigrator = async (opts, fn, options = {}) => {
     detachSignals();
     spinner?.stop();
     // A failing close must not replace whatever this command was reporting.
-    await migrator.disconnect().catch(() => undefined);
+    await migrator.disconnect().catch((error) => {
+      logger.debug(`Could not disconnect: ${errorText(error)}`);
+    });
   }
 };
 

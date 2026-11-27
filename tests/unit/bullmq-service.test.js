@@ -507,10 +507,13 @@ describe('createMigrationQueue', () => {
       );
       worker.emit('failed', undefined, new Error('job vanished'));
       worker.emit('stalled', '7', 'active');
+      // A job BullMQ will run again is a warning; one it gave up on (every
+      // migration job — one attempt) an error.
+      worker.emit('failed', { id: 8, attemptsMade: 1, opts: { attempts: 3 } }, new Error('later'));
 
       assert.deepStrictEqual(
         lines.map((line) => line.level),
-        ['error', 'warn', 'warn', 'warn'],
+        ['error', 'error', 'error', 'warn', 'warn'],
       );
       assert.ok(!lines[0].msg.includes('secret'));
       assert.deepStrictEqual(lines[1].fields, {
@@ -873,7 +876,7 @@ describe('createMigrationQueue', () => {
       await mq.close();
       assert.strictEqual(closeWorker.mock.callCount(), 1);
       assert.strictEqual(mq.queue.closed, true);
-      await assert.rejects(mq.enqueueUp(), /closed/);
+      await assert.rejects(mq.enqueueUp(), { code: 'ALX_ERR_QUEUE_CLOSED', message: /closed/ });
       await assert.rejects(mq.enqueueDown(), /closed/);
       await assert.rejects(mq.startWorker(), /closed/);
       await assert.rejects(mq.schedule({ every: 1000 }), /closed/);

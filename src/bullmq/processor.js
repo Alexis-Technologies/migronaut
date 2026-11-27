@@ -1,17 +1,10 @@
 const { MigratorKit, RECORD_LOCK_WAIT } = require('../core/migrator.js');
 const { assertLockWaitOptions, withLockWait } = require('../core/lock-wait.js');
-const {
-  ConfigInvalidError,
-  LockAlreadyHeldError,
-  MigrationBlockedError,
-  MigronautError,
-  NotAppliedError,
-  RunAbortedError,
-} = require('../errors/index.js');
+const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
 const { pickActor } = require('../utils/actor.js');
 const { isPlainObject } = require('../utils/canonical.js');
 const { settledWithin } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
+const { codeOf, errorText } = require('../utils/error.js');
 const { jobRefIssue } = require('../utils/job-ref.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
 const { sanitize } = require('../utils/sanitize.js');
@@ -49,6 +42,7 @@ const RETRYABLE_CODES = Object.freeze([
   'ALX_ERR_RUN_ABORTED',
   'ALX_ERR_CONNECTION_FAILED',
   'ALX_ERR_DATABASE_OPERATION_FAILED',
+  'ALX_ERR_RUN_IN_FLIGHT',
 ]);
 
 /**
@@ -61,16 +55,19 @@ const RETRYABLE_CODES = Object.freeze([
  * real, and that job fails at once, as before.
  */
 const isTransientForJob = (error) => {
-  if (error instanceof LockAlreadyHeldError) return true;
-  return (
-    error instanceof MigrationBlockedError &&
-    Array.isArray(error.context?.failed) &&
-    error.context.failed.length === 0
-  );
+  const code = codeOf(error);
+  if (code === 'ALX_ERR_LOCK_ALREADY_HELD') return true;
+  const failed = error?.context?.failed;
+  return code === 'ALX_ERR_MIGRATION_BLOCKED' && Array.isArray(failed) && failed.length === 0;
 };
 
+/** {@link RETRYABLE_CODES}, to look up */
+const RETRYABLE_CODE_SET = new Set(RETRYABLE_CODES);
+
+/** Not one of ours (unknown origin), or one of ours a retry can get past */
 const isRetryableError = (error) => {
-  return !(error instanceof MigronautError) || RETRYABLE_CODES.includes(error.code);
+  const code = codeOf(error);
+  return code === undefined || RETRYABLE_CODE_SET.has(code);
 };
 
 /** The least time between two `lock-wait` progress updates of one job */
@@ -265,7 +262,7 @@ const jobSummary = (data) => {
  * value. Copy-on-write: the error may be a shared abort reason.
  */
 const attachJobIds = (error, ctx) => {
-  if (!(error instanceof MigronautError)) return;
+  if (codeOf(error) === undefined) return;
   const ids = jobIds(ctx);
   if (Object.keys(ids).length > 0) error.context = { ...error.context, ...ids };
 };
@@ -280,7 +277,7 @@ const attachJobIds = (error, ctx) => {
  */
 const prepareErrorForQueue = (error) => {
   if (!(error instanceof Error)) return;
-  const cause = error instanceof MigronautError ? error.context?.cause : undefined;
+  const cause = codeOf(error) === undefined ? undefined : error.context?.cause;
   try {
     const message = redactOutbound(error.message);
     const isCauseNew = typeof cause === 'string' && cause.length > 0 && !message.includes(cause);
@@ -636,7 +633,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     } catch (error) {
       // A duplicate rollback job: the first one already reverted it. Same
       // outcome as a duplicate `up` job, which the kit reports as skipped.
-      if (data.direction === JOB_NAMES.DOWN && error instanceof NotAppliedError) {
+      if (data.direction === JOB_NAMES.DOWN && codeOf(error) === 'ALX_ERR_NOT_APPLIED') {
         return {
           migration: data.migration,
           direction: data.direction,
@@ -891,7 +888,8 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
    * never put back — it ran, and its outcome is what it is.
    */
   const requeueOnShutdown = async (ctx, error, token) => {
-    if (!(error instanceof RunAbortedError) || !shutdownController.signal.aborted) return undefined;
+    const isStop = codeOf(error) === 'ALX_ERR_RUN_ABORTED';
+    if (!isStop || !shutdownController.signal.aborted) return undefined;
     if (ctx.started || typeof ctx.job?.moveToWait !== 'function' || typeof token !== 'string') {
       return undefined;
     }
@@ -940,7 +938,8 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
     // Reaches a run that is setting up or between migrations; one already
     // executing a migration body finishes it — interrupting a body mid-write
     // is what leaves a database half-migrated.
-    const onAbort = () => kit.stop(errorText(abort.reason ?? 'Queue job cancelled'));
+    const onAbort = () =>
+      kit.stop(errorText(abort.reason ?? 'Queue job cancelled'), { cause: abort.reason });
     try {
       // Validated before anything connects: a payload that fails the contract
       // must not reach the kit, let alone the filesystem.
@@ -982,7 +981,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       prepareErrorForQueue(error);
       if (ctx.data) {
         progress(ctx, 'failed', {
-          code: error instanceof MigronautError ? error.code : 'UNKNOWN',
+          code: codeOf(error) ?? 'ALX_ERR_UNKNOWN',
           ...(ctx.runId ? { runId: ctx.runId } : {}),
         });
       }

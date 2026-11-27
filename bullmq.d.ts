@@ -444,9 +444,9 @@ export interface MigrationJobProgress {
   searchIndexes?: number;
   /**
    * `failed` only — the typed error code, so nobody has to parse
-   * `failedReason`; `'UNKNOWN'` for an error that is not migronaut's.
+   * `failedReason`; `'ALX_ERR_UNKNOWN'` for an error that is not migronaut's.
    */
-  code?: MigronautErrorCode | 'UNKNOWN';
+  code?: MigronautErrorCode | 'ALX_ERR_UNKNOWN';
   /**
    * `completed` and `failed` — the run's correlation id, matching the changelog
    * record and the kit's events. A failed job has no return value, so this is

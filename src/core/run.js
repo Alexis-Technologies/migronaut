@@ -87,7 +87,7 @@ const runMigrations = async (config = {}, options = {}) => {
   // An abort reaches the run wherever it is: the wait loop sees the signal
   // between polls, and kit.stop() stops a run that is setting up or between
   // migrations (one already executing finishes — as stop() always has).
-  const onAbort = () => kit.stop(errorText(signal.reason ?? 'Aborted'));
+  const onAbort = () => kit.stop(errorText(signal.reason ?? 'Aborted'), { cause: signal.reason });
   signal?.addEventListener('abort', onAbort, { once: true });
   try {
     if (signal?.aborted) {
@@ -133,7 +133,10 @@ const runMigrations = async (config = {}, options = {}) => {
     // onKit may have handed the kit out: it leaves without this call's listeners.
     kit.off('converge:end', onConverge);
     kit.off('background:waiting', onWaiting);
-    await kit.disconnect().catch(() => undefined);
+    await kit.disconnect().catch((error) => {
+      // What the call returns or throws is the answer; a failed close is said at debug.
+      kit.logger.debug(`Could not disconnect: ${errorText(error)}`);
+    });
   }
 };
 
@@ -159,7 +162,10 @@ const pendingMigrations = async (config = {}, options = {}) => {
     await kit.connect();
     return await kit.list('pending');
   } finally {
-    await kit.disconnect().catch(() => undefined);
+    await kit.disconnect().catch((error) => {
+      // What the call returns or throws is the answer; a failed close is said at debug.
+      kit.logger.debug(`Could not disconnect: ${errorText(error)}`);
+    });
   }
 };
 

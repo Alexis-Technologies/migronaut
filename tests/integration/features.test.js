@@ -520,6 +520,27 @@ describe('out-of-order detection (integration)', () => {
   });
 });
 
+describe('one run at a time (integration)', () => {
+  it('should refuse a second run on a kit with one in flight, as ALX_ERR_RUN_IN_FLIGHT', async () => {
+    project.write(
+      '0001-slow.ts',
+      'export async function up() { await new Promise((resolve) => setTimeout(resolve, 300)); }\n' +
+        'export async function down() {}\n',
+    );
+    const kit = migrator();
+    try {
+      await kit.connect();
+      const first = kit.up();
+      // The first run holds the instance once its run window opens.
+      await new Promise((resolve) => kit.once('migration:start', resolve));
+      await assert.rejects(kit.up(), { code: 'ALX_ERR_RUN_IN_FLIGHT' });
+      await first;
+    } finally {
+      await kit.disconnect();
+    }
+  });
+});
+
 describe('load and bookkeeping failures (integration)', () => {
   it('should type a file that fails to load and keep the rows applied before it', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));

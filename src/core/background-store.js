@@ -1,5 +1,6 @@
 const os = require('node:os');
 const { ConfigInvalidError, LockLostError } = require('../errors/index.js');
+const { errorText } = require('../utils/error.js');
 const { randomId } = require('../utils/id.js');
 const { MAX_BAD_IDS } = require('./background-spec.js');
 const { backgroundCollectionNames } = require('./config.js');
@@ -77,6 +78,19 @@ const INDEXES = [
 ];
 
 const NAMESPACE_NOT_FOUND = 26;
+
+/**
+ * Whether an E11000 was the migration's lease slot (`lease_slot`) rather than
+ * a group slot: told by the key the server names (`keyPattern`), and by the
+ * index name in the message only where a server does not name it.
+ */
+const isLeaseSlotClash = (error) => {
+  const keyPattern = error?.keyPattern ?? error?.errorResponse?.keyPattern;
+  if (typeof keyPattern === 'object' && keyPattern !== null) {
+    return Object.hasOwn(keyPattern, 'lease.slot');
+  }
+  return errorText(error).includes('lease_slot');
+};
 
 class BackgroundStore {
   #db;
@@ -820,7 +834,7 @@ class BackgroundStore {
           // Claimed by someone else between the pick and the write: pick again.
           taken = true;
         } catch (error) {
-          if (error?.code !== DUPLICATE_KEY || /lease_slot/.test(String(error?.message))) {
+          if (error?.code !== DUPLICATE_KEY || isLeaseSlotClash(error)) {
             throw error;
           }
         }

@@ -1,3 +1,5 @@
+const path = require('node:path');
+
 const { MigronautError } = require('../errors/index.js');
 const { redactOutbound, redactUris } = require('./redact.js');
 
@@ -71,6 +73,24 @@ const isTransientTransaction = (error) => {
 };
 
 /**
+ * A path as an error's context carries it: relative to the working directory.
+ * An absolute one names the user's home directory, and with it their account,
+ * in every log line and `--json` document that quotes the error.
+ */
+const contextPath = (filepath) => path.relative(process.cwd(), filepath) || '.';
+
+/**
+ * The migronaut code a thrown value carries (`ALX_ERR_…`), or undefined. Told
+ * by the code, not the class: a kit from another copy of the package — a
+ * monorepo's duplicate — throws its own classes, and `instanceof` misses all
+ * of them, so every typed failure read as an unknown one.
+ */
+const codeOf = (error) => {
+  const code = error?.code;
+  return typeof code === 'string' && code.startsWith('ALX_ERR_') ? code : undefined;
+};
+
+/**
  * Whether the MongoDB driver threw this: every error class of `mongodb` is
  * named `Mongo…` (a duck test — the driver is not required here, and a kit
  * built on another copy of it must still be recognized).
@@ -78,6 +98,8 @@ const isTransientTransaction = (error) => {
 const isDriverError = (error) => error instanceof Error && `${error.name}`.startsWith('Mongo');
 
 module.exports = {
+  codeOf,
+  contextPath,
   documentErrorText,
   errorText,
   errorWithCause,

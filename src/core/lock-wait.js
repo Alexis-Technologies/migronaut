@@ -94,7 +94,9 @@ const assertLockWaitOptions = ({
 const abortedError = (signal, extra) => {
   const reason = signal.reason;
   if (reason instanceof MigronautError) return reason;
+  // The reason itself is the cause: a timeout and a shutdown read the same as text.
   return new RunAbortedError('Lock wait aborted', {
+    ...(reason !== undefined ? { cause: reason } : {}),
     context: { reason: errorText(reason ?? 'aborted'), ...extra },
   });
 };

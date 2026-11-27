@@ -824,7 +824,7 @@ export default {
   // ── Code-only options (omit in migronaut.config.json) ─────────────────────────
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
   // mongoose: myMongooseInstance, // pass if your migrations use Mongoose models
-  // logger: null,                 // null silences all output; a pino instance works directly
+  // logger: null,                 // null (or false) silences all output; pino works directly
   // generateId: ulid,             // your id format for run ids — any sync `() => string`
   // telemetry: { tracer, meter }, // OpenTelemetry, from your own @opentelemetry/api
 };

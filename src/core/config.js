@@ -9,7 +9,7 @@ const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
 /** The keys a `telemetry` object may hold — a Set, read once per key */
 const TELEMETRY_KEY_SET = new Set(TELEMETRY_KEYS);
 const { applyEnvFile } = require('../utils/env.js');
-const { errorText } = require('../utils/error.js');
+const { contextPath, errorText } = require('../utils/error.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { redactDeep } = require('../utils/redact.js');
 const { collectionsIssues } = require('./collections.js');
@@ -550,7 +550,7 @@ const loadConfigFile = async (filepath, lenient = false) => {
       // mapping and `--json` error shape.
       throw new ConfigInvalidError('Config file is not valid JSON', {
         cause: error,
-        context: { path: filepath, cause: errorText(error) },
+        context: { path: contextPath(filepath), cause: errorText(error) },
       });
     }
   }
@@ -564,7 +564,7 @@ const loadConfigFile = async (filepath, lenient = false) => {
     if (lenient) return null;
     throw new ConfigInvalidError('Config file failed to load', {
       cause: error,
-      context: { path: filepath, cause: errorText(error) },
+      context: { path: contextPath(filepath), cause: errorText(error) },
     });
   }
   const exported = mod.default ?? mod;
@@ -581,7 +581,7 @@ const loadConfigFile = async (filepath, lenient = false) => {
       }
       throw new ConfigInvalidError('Config factory function failed to resolve', {
         cause: error,
-        context: { path: filepath, cause: errorText(error) },
+        context: { path: contextPath(filepath), cause: errorText(error) },
       });
     }
   }
@@ -643,7 +643,9 @@ const loadConfig = async (options = {}) => {
     // "not found") — discovery already proved existence, and re-checking it
     // would pay a redundant fs.access on every invocation.
     if (options.configPath && !(await pathExists(configFilePath))) {
-      throw new ConfigInvalidError('Config file not found', { context: { path: configFilePath } });
+      throw new ConfigInvalidError('Config file not found', {
+        context: { path: contextPath(configFilePath) },
+      });
     }
     const lenient = options.lenient ?? false;
     const fileConfig = await loadConfigFile(configFilePath, lenient);
@@ -655,7 +657,7 @@ const loadConfig = async (options = {}) => {
     if (!usable && fileConfig !== LENIENT_FAILURE && !lenient) {
       throw new ConfigInvalidError(
         'Config file must export an object, or a function that returns one',
-        { context: { path: configFilePath, exported: shapeOf(fileConfig) } },
+        { context: { path: contextPath(configFilePath), exported: shapeOf(fileConfig) } },
       );
     }
     if (usable) {

@@ -553,9 +553,17 @@ describe('runWithLock', () => {
   });
 
   /** A logger that keeps its warnings */
+  /** Records what is warned and what is said at error level — a lost lock is the latter */
   const warningLogger = () => {
     const warnings = [];
-    return { ...silentLogger, warnings, warn: (message) => warnings.push(message) };
+    const errors = [];
+    return {
+      ...silentLogger,
+      warnings,
+      errors,
+      warn: (message) => warnings.push(message),
+      error: (message) => errors.push(message),
+    };
   };
 
   it('should say a reclaimed lock is lost once, and stop renewing what is not its own', async () => {
@@ -589,6 +597,7 @@ describe('runWithLock', () => {
     // It used to be one warning and one `lock:lost` per heartbeat until the
     // run ended — and the deadline's on top.
     assert.deepStrictEqual(reasons, ['another run reclaimed it']);
+    // onLockLost: 'warn' asked for a warning: said once, at that level.
     assert.strictEqual(logger.warnings.filter((line) => /Lost the/.test(line)).length, 1);
     assert.strictEqual(collection.updateOne.mock.callCount(), renewalsAtLoss);
   });
@@ -739,8 +748,8 @@ describe('runWithLock — any lock-shaped object', () => {
       },
       release: async () => calls.push('release'),
     };
-    const warnings = [];
-    const logger = { ...silentLogger, warn: (message) => warnings.push(message) };
+    const errors = [];
+    const logger = { ...silentLogger, error: (message) => errors.push(message) };
     // Once the 50ms timer fires, the unref'ed heartbeat is the only pending
     // handle — see tests/helpers/event-loop.js.
     const release = keepEventLoopAlive();
@@ -760,7 +769,7 @@ describe('runWithLock — any lock-shaped object', () => {
     }
     assert.strictEqual(result.code, 'ALX_ERR_LOCK_LOST');
     assert.strictEqual(result.message, 'Lost the partition lease mid-run');
-    assert.ok(warnings.some((line) => line.includes('Lost the partition lease mid-run')));
+    assert.ok(errors.some((line) => line.includes('Lost the partition lease mid-run')));
     assert.deepStrictEqual([calls[0], calls.at(-1)], ['acquire', 'release']);
     assert.ok(calls.includes('renew'));
   });

@@ -4,7 +4,7 @@ const { ConfigInvalidError } = require('../errors/index.js');
 const { isPlainObject, toWire, unsendable } = require('../utils/canonical.js');
 const { isCollectionName } = require('../utils/collection-name.js');
 const { mapLimit } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
+const { contextPath, errorText } = require('../utils/error.js');
 const { importUserFile, tsLoadMessageOrNull } = require('../utils/loader.js');
 const { indexIssues, normalizeDeclaredIndex, sameDeclaredSignature } = require('./index-spec.js');
 const { normalizeDeclaredSearchIndex, searchIndexIssues } = require('./search-index-spec.js');
@@ -384,7 +384,7 @@ const loadDefinitionFile = async (filepath, options) => {
     } catch (error) {
       throw new ConfigInvalidError('Collection definition file is not valid JSON', {
         cause: error,
-        context: { path: filepath, cause: errorText(error) },
+        context: { path: contextPath(filepath), cause: errorText(error) },
       });
     }
   }
@@ -395,14 +395,14 @@ const loadDefinitionFile = async (filepath, options) => {
     throw new ConfigInvalidError(
       tsLoadMessageOrNull(filepath, error, 'collection definition') ??
         'Collection definition file failed to load',
-      { cause: error, context: { path: filepath, cause: errorText(error) } },
+      { cause: error, context: { path: contextPath(filepath), cause: errorText(error) } },
     );
   }
   const exported = mod.default ?? mod;
   if (typeof exported === 'function') {
     throw new ConfigInvalidError(
       'A collection definition file must export one definition object, not a function',
-      { context: { path: filepath } },
+      { context: { path: contextPath(filepath) } },
     );
   }
   // A shallow copy: an ES module namespace is an exotic object, not a plain one.
@@ -436,11 +436,13 @@ const loadCollectionsDir = async (dir, { extensions, reload = false }) => {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch (error) {
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
-      throw new ConfigInvalidError('collectionsDir not found', { context: { path: dir } });
+      throw new ConfigInvalidError('collectionsDir not found', {
+        context: { path: contextPath(dir) },
+      });
     }
     throw new ConfigInvalidError('collectionsDir could not be read', {
       cause: error,
-      context: { path: dir, cause: errorText(error) },
+      context: { path: contextPath(dir), cause: errorText(error) },
     });
   }
   const accepted = definitionExtensions(extensions);
@@ -509,7 +511,7 @@ const resolveDefinitions = async ({
   }
   if (issues.length > 0) {
     throw new ConfigInvalidError('Invalid collection definition(s)', {
-      context: { path: dir, issues },
+      context: { path: contextPath(dir), issues },
     });
   }
   return definitions;

@@ -56,11 +56,31 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 - **Durations that end in a timer have a ceiling**: `lockTTLSeconds` at most 2147483,
   `timeoutMs` (the config's and a migration's) and `searchIndexWaitTimeoutMs` at most
   2147483647, as are the background runner's `pollIntervalMs`, `verifyIntervalMs` and
-  `stop({ timeoutMs })`, and a queue group's `wait({ timeoutMs })`. Above it Node fires a timer
+  `stop({ timeoutMs })`, the background processor's `pollIntervalMs` and `stallMs`, and a queue
+  group's `wait({ timeoutMs })`. Above it Node fires a timer
   after 1 ms: a 30-day lock TTL lost the lock right after taking it, a long timeout timed out at
   once. `migronaut.schema.json` says so too.
+- **A closed migration queue is `ALX_ERR_QUEUE_CLOSED`** (exit 37) and a second run on a kit
+  with one in flight `ALX_ERR_RUN_IN_FLIGHT` (exit 38, retryable), where both were
+  `ALX_ERR_CONFIG_INVALID`: a producer that met a closing queue during a deploy read it as bad
+  input, never to be retried.
+- **A failed queue job of an error that is not migronaut's reports `code: 'ALX_ERR_UNKNOWN'`**
+  in its progress, where it said `'UNKNOWN'` — the one string code without the prefix.
+- **An error's context names a file relative to the working directory** (`context.filepath`,
+  `context.path`): an absolute path named the user's home directory in every log line and `--json`
+  document that quoted it.
+- **A lost lock that stops the run is said at `error`** (under `onLockLost: 'warn'` it stays a
+  warning), as is a queue job BullMQ gave up on (every migration job — it has one attempt); both
+  were warnings. A job with attempts left is still a warning.
 - **`EXIT_CODES` is frozen, with no prototype.** The CLI reads the same object, so a consumer's
   write changed its exit codes for the whole process.
+
+### Added
+
+- **`stop(reason, { cause })`**: what stopped a run becomes the `RunAbortedError`'s `cause` —
+  `runMigrations` and the queue processor pass their abort signal's `reason`, so an
+  `AbortSignal.timeout` is told from a shutdown.
+- **`logger: false`** silences migronaut as `null` does; it did so by accident and was not typed.
 
 ### Changed
 
@@ -82,6 +102,20 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 - **A migration queue takes its listeners off a Queue it was handed** when it closes, and
   `runMigrations` off the kit it handed `onKit`: each kept the adapter and its kit alive.
 - **`allow` refuses a permission named after an `Object.prototype` key** (`toString`).
+- **Causes are kept**: an aborted lock wait carries the signal's reason as its `cause`, a lock lost
+  to its deadline the last failed renewal, a queue group's `wait()` the error BullMQ threw.
+- **Every deliberate swallow leaves a debug line**: a failed close on the way out, a dry run that
+  could not read what a migration waits for, a partition that could not be marked failed, the
+  drift watcher's last resume token, a session the background engine could not end.
+- **The queue adapter tells errors by their code**, not their class: a kit from another copy of
+  the package (a monorepo's duplicate) made every typed failure an unknown, retryable one — a held
+  lock failed its job instead of waiting, and a shutdown never put a job back.
+- **A background migration's lease slot clash is read from the server's `keyPattern`**, the
+  message only where a server does not name the key; and its `lastError` goes through the driver
+  error's own text, as its partition's does.
+- **`MigrationQueue.close()` says every failure after the first** at `warn`; they were dropped.
+- **The drift watcher loads a file that would not load once per refresh**, not once per write
+  of a busy collection (each with a warning and a reopening write).
 - **An error that escapes the CLI stops the run in flight.** After an unhandled rejection (a
   migration's write no one awaited) the rest is no longer applied on top of it; after an uncaught
   exception the run is stopped and given up to 10 s to release its lock before the exit, where the

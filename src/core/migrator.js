@@ -22,6 +22,7 @@ const {
   NotAppliedError,
   OutOfOrderMigrationError,
   RunAbortedError,
+  RunInFlightError,
 } = require('../errors/index.js');
 const { actorFields, pickActor } = require('../utils/actor.js');
 const { computeChecksum } = require('../utils/checksum.js');
@@ -186,7 +187,7 @@ class MigratorKit extends EventEmitter {
   /** Set while a locked run is in flight, so stop() can interrupt it */
   #abort;
   /** A stop requested before the run reached its lock — consumed when it does */
-  #stopRequested;
+  #stopRequested = null;
   /** >0 while a run method is setting up or executing — the stop() latch window */
   #runSetupDepth = 0;
   /** Correlation id for the run in flight — ties logs, lock and changelog together */
@@ -345,10 +346,13 @@ class MigratorKit extends EventEmitter {
    * latched stop would otherwise silently abort an unrelated run started
    * minutes later.
    */
-  stop(reason = 'Run stopped by request') {
-    if (this.#abort) return void this.#abort(reason);
+  stop(reason = 'Run stopped by request', options = {}) {
+    // What stopped it travels as the RunAbortedError's cause: a signal's
+    // reason (`AbortSignal.timeout` vs a shutdown) is not told by a string.
+    const stopping = { reason, cause: options.cause };
+    if (this.#abort) return void this.#abort(stopping);
     if (this.#runSetupDepth > 0) {
-      this.#stopRequested = reason;
+      this.#stopRequested = stopping;
     }
   }
 
@@ -365,7 +369,7 @@ class MigratorKit extends EventEmitter {
     } finally {
       this.#runSetupDepth -= 1;
       if (this.#runSetupDepth === 0) {
-        this.#stopRequested = undefined;
+        this.#stopRequested = null;
       }
     }
   }
@@ -524,7 +528,10 @@ class MigratorKit extends EventEmitter {
       this.#client = undefined;
       this.#db = undefined;
       this.#changelog = undefined;
-      await dangling?.close().catch(() => undefined);
+      await dangling?.close().catch((closeError) => {
+        // The connect failure is what this call reports; the close is said at debug.
+        this.#logger.debug(`Could not close the half-built client: ${errorText(closeError)}`);
+      });
       // Already says what failed, and it was not the connection.
       if (error instanceof ConnectionFailedError) throw error;
       throw new ConnectionFailedError('Failed to connect to MongoDB', {
@@ -615,7 +622,7 @@ class MigratorKit extends EventEmitter {
     // the first one's runId/abort state in its `finally`. The DB lock already
     // rejects the overlap — this rejects it before any state is disturbed.
     if (this.#runId) {
-      throw new ConfigInvalidError('A run is already in flight on this MigratorKit instance', {
+      throw new RunInFlightError('A run is already in flight on this MigratorKit instance', {
         context: { runId: this.#runId },
       });
     }
@@ -635,15 +642,18 @@ class MigratorKit extends EventEmitter {
     // A second controller layered over the lock's own signal, so stop() and a
     // lost lock abort through the same path the run loops already watch.
     const stopper = new AbortController();
-    this.#abort = (reason) => {
-      if (!stopper.signal.aborted) {
-        stopper.abort(new RunAbortedError(reason, { context: { reason } }));
-      }
+    this.#abort = ({ reason, cause }) => {
+      if (stopper.signal.aborted) return;
+      const errorOptions =
+        cause === undefined
+          ? { context: { reason } }
+          : { cause, context: { reason, cause: errorText(cause) } };
+      stopper.abort(new RunAbortedError(reason, errorOptions));
     };
     // Honor a stop that landed before we got here (config load / connect).
-    if (this.#stopRequested !== undefined) {
+    if (this.#stopRequested !== null) {
       const pending = this.#stopRequested;
-      this.#stopRequested = undefined;
+      this.#stopRequested = null;
       this.#abort(pending);
     }
     const recorder = new RunRecorder({
@@ -1838,7 +1848,12 @@ class MigratorKit extends EventEmitter {
     let loaded = null;
     try {
       loaded = await this.#peek(name);
-    } catch {
+    } catch (error) {
+      // The real run reports a file that does not load; the preview says it here.
+      this.#logger.debug(
+        `Dry run: ${name} did not load — ${errorText(error)}`,
+        this.#fields({ migration: name, error: errorText(error) }),
+      );
       return;
     }
     if (loaded === null) return;
@@ -1847,7 +1862,14 @@ class MigratorKit extends EventEmitter {
     const requires = loaded.requires ?? [];
     if (requires.length === 0) return;
     row.requires = requires;
-    const waiting = await this.#unsatisfied(requires, { reopen: false }).catch(() => []);
+    const waiting = await this.#unsatisfied(requires, { reopen: false }).catch((error) => {
+      // A preview without its waitsFor is still a preview; the reason is not lost.
+      this.#logger.debug(
+        `Dry run: could not read what ${name} waits for — ${errorText(error)}`,
+        this.#fields({ migration: name, error: errorText(error) }),
+      );
+      return [];
+    });
     if (waiting.length > 0) row.waitsFor = migrationsOf(waiting);
   }
 
@@ -2609,6 +2631,11 @@ class MigratorKit extends EventEmitter {
         : (this.#backgroundDefinitions ??= await this.#resolveCollections());
     } catch (error) {
       if (strict) throw error;
+      // Best-effort: no declared versioning to read, and the reason said at debug.
+      this.#logger.debug(
+        `Could not load the collection definitions: ${errorText(error)}`,
+        this.#fields({ collection, error: errorText(error) }),
+      );
       return undefined;
     }
     for (const definition of definitions) {
@@ -2769,7 +2796,9 @@ class MigratorKit extends EventEmitter {
     let checksum = '';
     try {
       checksum = await this.#cachedChecksum(this.#filepath(name));
-    } catch {
+    } catch (error) {
+      // Nothing to read ahead: the load that follows reports the file itself.
+      this.#logger.debug(`Could not read ${name} ahead: ${errorText(error)}`);
       return null;
     }
     const cached = this.#moduleCache.get(name);

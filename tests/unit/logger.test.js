@@ -184,6 +184,11 @@ describe('resolveLogger', () => {
     assert.doesNotThrow(() => logger.info('x'));
   });
 
+  it('should take null and false alike for no logger', () => {
+    assert.strictEqual(resolveLogger(null), silentLogger);
+    assert.strictEqual(resolveLogger(false), silentLogger);
+  });
+
   it('should silence a structurally unfit logger value', () => {
     assert.strictEqual(resolveLogger({}), silentLogger);
     assert.strictEqual(resolveLogger('loud'), silentLogger);

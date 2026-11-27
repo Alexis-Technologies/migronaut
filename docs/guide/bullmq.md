@@ -185,7 +185,7 @@ call's jobs, so both can `wait()`). A job that finds its migration already appli
 tells BullMQ not to retry what cannot succeed without a fix (a blocked, failed, invalid or drifted
 migration), and leaves the transient ones retryable: `ALX_ERR_LOCK_ALREADY_HELD`, `ALX_ERR_LOCK_LOST`,
 `ALX_ERR_LOCK_RELEASE_FAILED`, `ALX_ERR_RUN_ABORTED`, `ALX_ERR_CONNECTION_FAILED`,
-`ALX_ERR_DATABASE_OPERATION_FAILED` (`RETRYABLE_CODES`).
+`ALX_ERR_DATABASE_OPERATION_FAILED`, `ALX_ERR_RUN_IN_FLIGHT` (`RETRYABLE_CODES`).
 
 **Opting out.** `enqueueUp(file, { ordered: false })` gives the CLI's plain single-file `up`, with
 no order guard — for the rare deliberate out-of-sequence apply.
@@ -592,7 +592,7 @@ on the lock. One is the honest setting.
 
 ## Observing
 
-- **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'search-wait' | 'completed' | 'failed', migration, direction, groupId, index, total, code?, runId? }` — `code` is the typed error code of a failed job (`'UNKNOWN'` for one that is not migronaut's), and `runId` the run's correlation id: the join key to the changelog record and the kit's log lines. A failed job has no return value, so its `runId` is found here and on the error's `context`. A `sync` or `converge` job reports `{ phase, kind }` instead of the migration fields — and, while it waits for search index builds, `{ phase: 'search-wait', kind, searchIndexes, waitedMs }` (updated every 30 s, with a job log line).
+- **Job progress** (`job.progress`): `{ phase: 'lock-wait' | 'running' | 'search-wait' | 'completed' | 'failed', migration, direction, groupId, index, total, code?, runId? }` — `code` is the typed error code of a failed job (`'ALX_ERR_UNKNOWN'` for one that is not migronaut's), and `runId` the run's correlation id: the join key to the changelog record and the kit's log lines. A failed job has no return value, so its `runId` is found here and on the error's `context`. A `sync` or `converge` job reports `{ phase, kind }` instead of the migration fields — and, while it waits for search index builds, `{ phase: 'search-wait', kind, searchIndexes, waitedMs }` (updated every 30 s, with a job log line).
 - **Job logs** (`job.log`): lock acquisition, start, applied / reverted / skipped, every converge step (as it starts, and as it ends), the failure line with its run id — and the migration's own `userland: true` lines, as `✎ …` rows (a background lane's in the lane job's log), up to `userlandLogRows` per job; the rest are counted in one closing row. Every row is one line. BullMQ keeps a job's logs as long as the job — `jobOptions: { keepLogs }` caps them further. Each run is told its job, so a migration's `ctx.run` and its [`migration:log`](/guide/migration-logs) events carry `jobId` and `groupId`.
 - **Kit events**: `mq.kit.on('migration:success', …)` — the same [lifecycle events](/guide/api) as everywhere else. `mq.kit.on('migration:log', …)` in the worker's process is where to [keep what migrations log](/guide/migration-logs#keeping-them) for your users.
 - **Worker events**: `mq.worker.on('failed', …)`.

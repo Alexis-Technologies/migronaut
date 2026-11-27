@@ -1023,7 +1023,12 @@ const warnFloorBreach = async (run, position) => {
         maxTimeMS: FLOOR_PROBE_TIMEOUT_MS,
         ...READ_OPTIONS,
       });
-  } catch {
+  } catch (error) {
+    // A warning, at best: a probe that cannot answer leaves the run as it is.
+    deps.logger.debug(
+      `${definition.name}: could not probe for documents below version ${floor.min} — ${errorText(error)}`,
+      deps.fields({ collection: definition.name, error: errorText(error) }),
+    );
     return;
   }
   if (found === null) return;

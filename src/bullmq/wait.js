@@ -1,5 +1,6 @@
 const { ConfigInvalidError, QueueJobFailedError } = require('../errors/index.js');
 const { MAX_TIMER_MS } = require('../utils/concurrency.js');
+const { errorText } = require('../utils/error.js');
 const { redactOutbound } = require('../utils/redact.js');
 
 /** Rejects a budgeted await that outlived the deadline — told apart from every other failure */
@@ -87,8 +88,9 @@ const waitForGroup = async ({
 
   /** Wait for one job; `message` and `fields` say which one in a failure */
   const finish = async (id, message, fields) => {
-    const fail = (failedReason, timedOut, code) =>
+    const fail = (failedReason, timedOut, code, cause) =>
       new QueueJobFailedError(message, {
+        ...(cause !== undefined ? { cause } : {}),
         context: {
           groupId,
           jobId: id,
@@ -116,8 +118,7 @@ const waitForGroup = async ({
       if (error instanceof QueueJobFailedError) throw error;
       // Decided by the clock, not by how BullMQ happens to word its timeout.
       if (error === DEADLINE || isPastDeadline()) throw outOfTime();
-      const reason = redactOutbound(error instanceof Error ? error.message : String(error));
-      throw fail(reason, false, await failureCode(id));
+      throw fail(redactOutbound(errorText(error)), false, await failureCode(id), error);
     }
   };
 

@@ -67,6 +67,20 @@ class RunAbortedError extends MigronautError {
   }
 }
 
+/**
+ * Thrown when a run is asked of a MigratorKit that already has one in flight,
+ * or when it is disconnected under one: one instance runs one thing at a
+ * time, and a second run would clobber the first one's state.
+ * `context.runId` is the run in flight.
+ */
+class RunInFlightError extends MigronautError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'RunInFlightError';
+    this.code = 'ALX_ERR_RUN_IN_FLIGHT';
+  }
+}
+
 /** Thrown when a user-supplied lifecycle hook throws */
 class HookFailedError extends MigronautError {
   constructor(message, options = {}) {
@@ -282,6 +296,18 @@ class QueueJobInvalidError extends MigronautError {
 }
 
 /**
+ * Thrown by a migration queue that is closed, or closing, when it is asked to
+ * enqueue or start something: the work has to go to an open one.
+ */
+class QueueClosedError extends MigronautError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'QueueClosedError';
+    this.code = 'ALX_ERR_QUEUE_CLOSED';
+  }
+}
+
+/**
  * Thrown by a queue group's `wait()` when one of its jobs failed or the wait
  * timed out. The worker's typed error does not cross the queue — only its
  * message does — so `context.failedReason` carries it and `context.results`
@@ -409,6 +435,7 @@ module.exports = {
   LockReleaseFailedError,
   LockLostError,
   RunAbortedError,
+  RunInFlightError,
   HookFailedError,
   ChecksumMismatchError,
   MigrationFileNotFoundError,
@@ -429,6 +456,7 @@ module.exports = {
   OutOfOrderMigrationError,
   MigrationBlockedError,
   QueueJobInvalidError,
+  QueueClosedError,
   QueueJobFailedError,
   ConvergeFailedError,
   RevisionConflictError,

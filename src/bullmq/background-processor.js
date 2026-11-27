@@ -1,7 +1,8 @@
 const { MigratorKit } = require('../core/migrator.js');
-const { ConfigInvalidError, MigronautError, RunAbortedError } = require('../errors/index.js');
+const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
 const { settledWithin } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
+const { MAX_TIMER_MS } = require('../utils/concurrency.js');
+const { codeOf, errorText } = require('../utils/error.js');
 const { redactOutbound } = require('../utils/redact.js');
 const {
   JOB_NAMES,
@@ -134,13 +135,15 @@ const resolveBackgroundProcessorOptions = (options) => {
   if (children !== 'auto' && children !== false) {
     throw new ConfigInvalidError("children must be 'auto' or false", { context: { children } });
   }
-  if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10) {
-    throw new ConfigInvalidError('pollIntervalMs must be an integer ≥ 10', {
+  const badPoll =
+    !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10 || pollIntervalMs > MAX_TIMER_MS;
+  if (badPoll) {
+    throw new ConfigInvalidError(`pollIntervalMs must be an integer from 10 to ${MAX_TIMER_MS}`, {
       context: { pollIntervalMs },
     });
   }
-  if (!Number.isSafeInteger(stallMs) || stallMs < 1000) {
-    throw new ConfigInvalidError('stallMs must be an integer of at least 1000', {
+  if (!Number.isSafeInteger(stallMs) || stallMs < 1000 || stallMs > MAX_TIMER_MS) {
+    throw new ConfigInvalidError(`stallMs must be an integer from 1000 to ${MAX_TIMER_MS}`, {
       context: { stallMs },
     });
   }
@@ -436,7 +439,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
         return {
           ...base,
           outcome: 'gave-up',
-          ...(error instanceof MigronautError ? { code: error.code } : {}),
+          ...(codeOf(error) === undefined ? {} : { code: codeOf(error) }),
         };
       }
       await log(job, `⚠ slice failed (${message}) — retry ${retry}`);

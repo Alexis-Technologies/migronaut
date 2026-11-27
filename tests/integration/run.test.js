@@ -167,10 +167,30 @@ describe('runMigrations signal (integration)', () => {
       (error) => {
         assert.ok(error instanceof RunAbortedError);
         assert.strictEqual(error.context.reason, 'SIGTERM');
+        // The signal's reason itself, so a timeout is told from a shutdown.
+        assert.strictEqual(error.cause, 'SIGTERM');
         return true;
       },
     );
     assert.ok(Date.now() - started < 1500, 'the 2s poll sleep was cut short');
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+  });
+
+  it('should carry a timed-out signal as the cause of the stopped run', async () => {
+    project = makeProject();
+    project.write(
+      '0001-slow.ts',
+      'export async function up() { await new Promise((resolve) => setTimeout(resolve, 400)); }\n' +
+        'export async function down() {}\n',
+    );
+    project.write('0002-a.ts', insertMigration('things', 'a'));
+    await assert.rejects(runMigrations(config(), { signal: AbortSignal.timeout(150) }), (error) => {
+      assert.strictEqual(error.code, 'ALX_ERR_RUN_ABORTED');
+      assert.strictEqual(error.cause?.name, 'TimeoutError');
+      assert.match(error.context.cause, /timed out|TimeoutError|aborted/i);
+      return true;
+    });
+    // The migration in flight finished; the next one never started.
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
   });
 

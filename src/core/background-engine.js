@@ -4,7 +4,7 @@ const {
   LockLostError,
 } = require('../errors/index.js');
 const { canonical, isPlainObject } = require('../utils/canonical.js');
-const { documentErrorText, isTransientTransaction } = require('../utils/error.js');
+const { documentErrorText, errorText, isTransientTransaction } = require('../utils/error.js');
 const {
   cloneDocument,
   occFilter,
@@ -441,6 +441,19 @@ const isOverload = (error) => {
 /** Elapsed milliseconds from `start`, by the injected clock */
 const since = (now, start) => now() - start;
 
+/**
+ * Wind a transaction's session down on the way out: what failed there is said
+ * at debug, never thrown over the outcome the batch is reporting (the server
+ * aborts an abandoned transaction on its own).
+ */
+const settleSession = async (job, step, what) => {
+  try {
+    await step;
+  } catch (error) {
+    job.logger?.debug(`Background migration: could not ${what} — ${errorText(error)}`);
+  }
+};
+
 /** Add `from` into `into`, key by key */
 const addCounters = (into, from) => {
   const keys = Object.keys(from);
@@ -489,11 +502,11 @@ const runStep = async (job, ctx, cursor) => {
       lease.touch();
       return saved;
     } catch (error) {
-      await session.abortTransaction().catch(() => undefined);
+      await settleSession(job, session.abortTransaction(), 'abort a transaction');
       if (!isTransientTransaction(error) || attempt >= job.spec.transaction.maxRetries) throw error;
       await sleep(backoffMs(attempt + 1), signal);
     } finally {
-      await session.endSession().catch(() => undefined);
+      await settleSession(job, session.endSession(), 'end a session');
     }
   }
 };
@@ -712,7 +725,7 @@ const transactionalBatch = async (job, ctx, cursor, batchSize) => {
       if (txnRetries > 0) ctx.onTransactionRetries?.(txnRetries);
       return { result, next, counts };
     } catch (error) {
-      await session.abortTransaction().catch(() => undefined);
+      await settleSession(job, session.abortTransaction(), 'abort a transaction');
       if (error instanceof LockLostError) throw error;
       if (error?.context?.reason === 'document') {
         const entry = error.context.document;
@@ -763,7 +776,7 @@ const transactionalBatch = async (job, ctx, cursor, batchSize) => {
       if (attempts > maxRetries / 2) size = Math.max(1, Math.floor(size / 2));
       await sleep(backoffMs(attempts), signal);
     } finally {
-      await session.endSession().catch(() => undefined);
+      await settleSession(job, session.endSession(), 'end a session');
     }
   }
 };

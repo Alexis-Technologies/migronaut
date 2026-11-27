@@ -668,8 +668,8 @@ export interface MigronautConfig {
   /** Mongoose instance — required only if your migrations use Mongoose models */
   mongoose?: MongooseLike;
   hooks?: MigrationHooks;
-  /** Custom logger — set to null to silence all output (useful in tests) */
-  logger?: MigronautLogger | null;
+  /** Custom logger — `null` or `false` silences all output (useful in tests) */
+  logger?: MigronautLogger | null | false;
   /**
    * Your own identifier format (ULID, CUID, UUIDv7, …) for every id migronaut
    * mints: the run id — stamped on changelog records, events and log lines,
@@ -1504,6 +1504,7 @@ export type MigronautErrorCode =
   | 'ALX_ERR_LOCK_RELEASE_FAILED'
   | 'ALX_ERR_LOCK_LOST'
   | 'ALX_ERR_RUN_ABORTED'
+  | 'ALX_ERR_RUN_IN_FLIGHT'
   | 'ALX_ERR_HOOK_FAILED'
   | 'ALX_ERR_CHECKSUM_MISMATCH'
   | 'ALX_ERR_MIGRATION_FILE_NOT_FOUND'
@@ -1524,6 +1525,7 @@ export type MigronautErrorCode =
   | 'ALX_ERR_MIGRATION_OUT_OF_ORDER'
   | 'ALX_ERR_MIGRATION_BLOCKED'
   | 'ALX_ERR_QUEUE_JOB_INVALID'
+  | 'ALX_ERR_QUEUE_CLOSED'
   | 'ALX_ERR_QUEUE_JOB_FAILED'
   | 'ALX_ERR_CONVERGE_FAILED'
   | 'ALX_ERR_REVISION_CONFLICT'
@@ -2162,9 +2164,10 @@ export class MigratorKit extends EventEmitter {
    * `context.results` lists what was applied. A stop that arrives while config
    * is loading or the connection is opening is remembered and applied as soon
    * as the run reaches its lock; a pending stop is cleared when a run ends, so
-   * it can never abort a later, unrelated run.
+   * it can never abort a later, unrelated run. `options.cause` — what
+   * stopped it, an abort signal's `reason` say — becomes the error's `cause`.
    */
-  stop(reason?: string): void;
+  stop(reason?: string, options?: { cause?: unknown }): void;
   /** Preview what would run — never writes to the database */
   dryRun(
     direction: 'up' | 'down',
@@ -3051,6 +3054,16 @@ export class RunAbortedError extends MigronautError {
 }
 
 /**
+ * Thrown when a run is asked of a {@link MigratorKit} that already has one in
+ * flight, or when it is disconnected under one: one instance runs one thing at
+ * a time. `context.runId` is the run in flight.
+ */
+export class RunInFlightError extends MigronautError {
+  readonly code: 'ALX_ERR_RUN_IN_FLIGHT';
+  constructor(message: string, options?: MigronautErrorOptions);
+}
+
+/**
  * Thrown when a migration exceeds its `timeoutMs`. Best-effort: the migration's
  * own work keeps running, but the run stops rather than hanging.
  */
@@ -3127,6 +3140,15 @@ export class MigrationBlockedError extends MigronautError {
  */
 export class QueueJobInvalidError extends MigronautError {
   readonly code: 'ALX_ERR_QUEUE_JOB_INVALID';
+  constructor(message: string, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by a migration queue that is closed, or closing, when it is asked to
+ * enqueue or start something: the work has to go to an open one.
+ */
+export class QueueClosedError extends MigronautError {
+  readonly code: 'ALX_ERR_QUEUE_CLOSED';
   constructor(message: string, options?: MigronautErrorOptions);
 }
 

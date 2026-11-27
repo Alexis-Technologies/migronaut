@@ -16,6 +16,7 @@ const {
   ConfigInvalidError,
   MigrationBlockedError,
   MigrationInvalidNameError,
+  QueueClosedError,
   QueueJobFailedError,
 } = require('../../src/errors/index.js');
 const {
@@ -547,7 +548,7 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
 
     it('should reject, never throw, whatever goes wrong before the wait starts', async () => {
       const { queue } = harness();
-      const closed = new ConfigInvalidError('The migration queue is closed');
+      const closed = new QueueClosedError('The migration queue is closed');
       const group = await enqueueUp(
         queue,
         pendingKit(),
@@ -565,7 +566,11 @@ describe('enqueueUp / enqueueDown on a queue you own', () => {
         assert.doesNotThrow(() => {
           pending = call();
         });
-        await assert.rejects(pending, ConfigInvalidError);
+        // A closed queue, or options that are not an object.
+        await assert.rejects(
+          pending,
+          (error) => error instanceof QueueClosedError || error instanceof ConfigInvalidError,
+        );
       }
     });
 

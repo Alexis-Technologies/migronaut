@@ -712,7 +712,7 @@ describe('createMigrationProcessor', () => {
         createMigrationProcessor({ kit })(job),
         (thrown) => thrown === 'a bare string',
       );
-      assert.strictEqual(job.progressUpdates.at(-1).code, 'UNKNOWN');
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'ALX_ERR_UNKNOWN');
     });
 
     it('should surface a failed connect as a retryable failure', async () => {
@@ -753,7 +753,7 @@ describe('createMigrationProcessor', () => {
       assert.match(job.logs.at(-1), /\[run run-3\]$/);
     });
 
-    it("should report 'UNKNOWN' for a code that is not migronaut's", async () => {
+    it("should report 'ALX_ERR_UNKNOWN' for a code that is not migronaut's", async () => {
       const kit = stubKit({
         up: mock.fn(async () => {
           throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
@@ -761,7 +761,7 @@ describe('createMigrationProcessor', () => {
       });
       const job = upJob();
       await assert.rejects(createMigrationProcessor({ kit })(job), /EACCES/);
-      assert.strictEqual(job.progressUpdates.at(-1).code, 'UNKNOWN');
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'ALX_ERR_UNKNOWN');
     });
   });
 

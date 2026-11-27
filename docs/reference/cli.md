@@ -190,4 +190,6 @@ working unchanged. The full map is also exported from the package root as
 | `34` | `ALX_ERR_SANDBOX_REFUSED` — a background dry run reached for something the sandbox refuses |
 | `35` | `ALX_ERR_MIGRATION_LOAD_FAILED` — a migration file could not be loaded |
 | `36` | `ALX_ERR_DATABASE_OPERATION_FAILED` — the database refused one of migronaut's own operations (changelog, lock) |
+| `37` | `ALX_ERR_QUEUE_CLOSED` — a closed migration queue was asked to enqueue (library only) |
+| `38` | `ALX_ERR_RUN_IN_FLIGHT` — a kit with a run in flight was asked for another (library only) |
 | `130` / `143` | Killed by a second SIGINT / SIGTERM |

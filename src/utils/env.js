@@ -1,6 +1,7 @@
 const fs = require('node:fs/promises');
 const util = require('node:util');
 const { ConfigInvalidError } = require('../errors/index.js');
+const { contextPath } = require('./error.js');
 
 /** Larger than any sane .env — the same ceiling custom templates get */
 const MAX_ENV_FILE_BYTES = 1024 * 1024;
@@ -32,11 +33,13 @@ const applyEnvFile = async (filePath, env = process.env) => {
   // A device file (/dev/zero reports size 0), FIFO or directory would hang or
   // garble the read — only regular files are .env candidates.
   if (!stats.isFile()) {
-    throw new ConfigInvalidError('env file is not a regular file', { context: { path: filePath } });
+    throw new ConfigInvalidError('env file is not a regular file', {
+      context: { path: contextPath(filePath) },
+    });
   }
   if (stats.size > MAX_ENV_FILE_BYTES) {
     throw new ConfigInvalidError('env file is too large (max 1 MB)', {
-      context: { path: filePath, size: stats.size },
+      context: { path: contextPath(filePath), size: stats.size },
     });
   }
   const content = await fs.readFile(filePath, 'utf8');

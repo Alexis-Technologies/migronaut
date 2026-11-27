@@ -249,7 +249,7 @@ expectType<ParsedJobData>(parseJobData(realJob));
 declare const progress: MigrationJobProgress;
 expectType<'lock-wait' | 'running' | 'search-wait' | 'completed' | 'failed'>(progress.phase);
 expectType<number | undefined>(progress.searchIndexes);
-expectType<MigronautErrorCode | 'UNKNOWN' | undefined>(progress.code);
+expectType<MigronautErrorCode | 'ALX_ERR_UNKNOWN' | undefined>(progress.code);
 expectType<string | undefined>(progress.runId);
 
 // ─── Converge jobs ───────────────────────────────────────────────────────────

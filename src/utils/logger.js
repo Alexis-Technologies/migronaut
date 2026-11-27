@@ -101,7 +101,8 @@ const adapters = new WeakMap();
  * are passed as the first argument rather than the second.
  */
 const resolveLogger = (logger) => {
-  if (logger === null) return silentLogger;
+  // `false` reads as "no logger" as well as `null` does: both are documented.
+  if (logger === null || logger === false) return silentLogger;
   if (logger === undefined) return createLogger();
   if (typeof logger !== 'object' || !isUsableSink(logger)) {
     return silentLogger;

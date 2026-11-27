@@ -359,6 +359,8 @@ const captureBefore = async (state, raw, method, args) => {
       state.report.truncated = true;
       return;
     }
+    // A before-image the sandbox cannot read only leaves the preview without
+    // it: the step's own write, run next, reports what the server refuses.
     const docs = await raw
       .find(filter, { session: state.session, limit: many ? left : 1 })
       .toArray()

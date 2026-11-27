@@ -320,7 +320,12 @@ const startBackgroundRunner = (options = {}) => {
           }
         }
         options.signal?.removeEventListener('abort', onOuterAbort);
-        if (ownsKit) await kit.disconnect().catch(() => undefined);
+        if (ownsKit) {
+          await kit.disconnect().catch((error) => {
+            // The stop is done either way; a failed close is said at debug.
+            kit.logger.debug(`Background runner: could not disconnect — ${errorText(error)}`);
+          });
+        }
       })();
       return stopping;
     },

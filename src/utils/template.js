@@ -7,7 +7,7 @@ const {
   MigrationFileNotFoundError,
 } = require('../errors/index.js');
 const { formatStamp } = require('./date.js');
-const { errorText } = require('./error.js');
+const { contextPath, errorText } = require('./error.js');
 const { redactUris } = require('./redact.js');
 
 /**
@@ -254,7 +254,7 @@ const createMigrationFile = async (options) => {
   } catch (error) {
     if (error.code === 'EEXIST') {
       throw new MigrationFileExistsError('Migration file already exists', {
-        context: { path: filepath },
+        context: { path: contextPath(filepath) },
       });
     }
     throw error;
@@ -287,7 +287,10 @@ const isEsmProject = async (dir) => {
           `Could not parse ${path.join(current, 'package.json')} while detecting the module system`,
           {
             cause: error,
-            context: { path: path.join(current, 'package.json'), cause: errorText(error) },
+            context: {
+              path: contextPath(path.join(current, 'package.json')),
+              cause: errorText(error),
+            },
           },
         );
       }
@@ -704,7 +707,7 @@ const createConfigFile = async (options) => {
       .catch(() => false);
     if (exists) {
       throw new ConfigFileExistsError('Config file already exists', {
-        context: { path: filepath },
+        context: { path: contextPath(filepath) },
       });
     }
   }

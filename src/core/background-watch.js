@@ -424,10 +424,22 @@ const startWatch = (deps, options = {}) => {
       if (serveSignal.aborted) return { token };
       return { token, error };
     } finally {
-      await stream.close().catch(() => undefined);
-      // On the way out, the position is kept whatever the cadence said.
-      await saveToken(true).catch(() => undefined);
+      await windDown(stream, saveToken);
     }
+  };
+
+  /**
+   * A stream's way out: closed, and its position kept whatever the cadence
+   * said. A position not kept makes the next watcher resume from the last
+   * saved token and read some events twice, which it tolerates — but it is said.
+   */
+  const windDown = async (stream, saveToken) => {
+    await stream.close().catch((error) => {
+      deps.logger.debug(`Drift watcher: could not close a change stream — ${errorText(error)}`);
+    });
+    await saveToken(true).catch((error) => {
+      deps.logger.debug(`Drift watcher: could not save its position — ${errorText(error)}`);
+    });
   };
 
   /** Behind by more than maxLagMs: reopen the background migrations instead, start from now */
@@ -471,11 +483,15 @@ const startWatch = (deps, options = {}) => {
         return void drift(collection, edge?.name ?? lastEdge(edges), 'reported');
       }
       let job = jobs.get(edge.name);
+      // A file that would not load stays so until the stream's refresh: said
+      // and handed back once, not for every write of a busy collection.
+      if (job === null) return;
       if (job === undefined) {
         try {
           job = await jobFor(deps, edge.name, byName.get(edge.name));
         } catch (error) {
           // Mid-deploy: another version of the file — the lanes take the document.
+          jobs.set(edge.name, null);
           report(error, collection);
           await handBack(collection, edge.name, 'the drift watcher could not load the migration');
           return;
@@ -551,7 +567,9 @@ const startWatch = (deps, options = {}) => {
         // Upgraded, or no longer one to upgrade, by the write that won.
         if (current === null) return { migrated: 0, errors: [] };
       } finally {
-        await session.endSession().catch(() => undefined);
+        await session.endSession().catch((error) => {
+          deps.logger.debug(`Drift watcher: could not end a session — ${errorText(error)}`);
+        });
       }
     }
   };

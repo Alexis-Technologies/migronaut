@@ -1,7 +1,7 @@
 const { MigratorKit } = require('../core/migrator.js');
-const { ConfigInvalidError, MigronautError } = require('../errors/index.js');
+const { ConfigInvalidError, QueueClosedError } = require('../errors/index.js');
 const { settledWithin } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
+const { codeOf, errorText } = require('../utils/error.js');
 const { isBareFilename } = require('../utils/migration-name.js');
 const { redactDeep, redactOutbound } = require('../utils/redact.js');
 const {
@@ -155,6 +155,15 @@ const addField = (fields, key, value) => {
   if (value !== undefined) fields[key] = value;
 };
 
+/**
+ * How loud a failed job is: `error` once BullMQ gives up on it (a migration
+ * job always — it has one attempt), `warn` while it has attempts left.
+ */
+const failedLevel = (job) => {
+  const attempts = job?.opts?.attempts ?? 1;
+  return (job?.attemptsMade ?? attempts) >= attempts ? 'error' : 'warn';
+};
+
 /** What a failed job's log line can say about it, from the job and from the error */
 const failedJobFields = (job, error) => {
   const data = job?.data ?? {};
@@ -164,7 +173,7 @@ const failedJobFields = (job, error) => {
   addField(fields, 'migration', shortString(data.migration));
   addField(fields, 'direction', shortString(data.direction));
   addField(fields, 'runId', shortString(error?.context?.runId));
-  if (error instanceof MigronautError) addField(fields, 'code', error.code);
+  addField(fields, 'code', codeOf(error));
   return fields;
 };
 
@@ -526,7 +535,7 @@ class MigrationQueue {
 
   #assertOpen() {
     if (this.#closing) {
-      throw new ConfigInvalidError('This migration queue is closed');
+      throw new QueueClosedError('This migration queue is closed');
     }
   }
 
@@ -787,7 +796,7 @@ class MigrationQueue {
       }),
     );
     this.#listen(worker, 'failed', (job, error) =>
-      this.#kit.logger.warn(
+      this.#kit.logger[failedLevel(job)](
         `✖ Migration job failed${job?.id !== undefined ? ` (${job.id})` : ''}: ${errorText(error)}`,
         { ...fields, ...failedJobFields(job, error), error: errorText(error) },
       ),
@@ -865,7 +874,7 @@ class MigrationQueue {
       }),
     );
     this.#listen(worker, 'failed', (job, error) =>
-      this.#kit.logger.warn(
+      this.#kit.logger[failedLevel(job)](
         `✖ Background job failed${job?.id !== undefined ? ` (${job.id})` : ''}: ${errorText(error)}`,
         { ...fields, ...failedJobFields(job, error), error: errorText(error) },
       ),
@@ -1147,11 +1156,20 @@ class MigrationQueue {
       for (let i = 0; i < processors.length; i++) closing.push(processors[i].close());
       Promise.allSettled(closing)
         .then(() => (this.#ownsKit ? this.#kit.disconnect() : undefined))
-        .catch(() => undefined);
+        .catch((error) => {
+          // Nobody awaits a forced close's tail: what went wrong is said at debug.
+          this.#kit.logger.debug(`Migration queue: could not disconnect — ${errorText(error)}`);
+        });
     } else if (this.#ownsKit) {
       await attempt(() => this.#kit.disconnect());
     }
-    if (failures.length > 0) throw failures[0];
+    if (failures.length === 0) return;
+    // The first failure is what close() rejects with; the others are said.
+    for (let i = 1; i < failures.length; i++) {
+      const text = errorText(failures[i]);
+      this.#kit.logger.warn(`⚠ Migration queue close: ${text}`, { error: text });
+    }
+    throw failures[0];
   }
 }
 

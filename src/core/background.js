@@ -1021,8 +1021,14 @@ const runSlice = async (deps, name, { signal, sliceMs, owner } = {}) => {
     if (result.outcome === 'failed' && result.error) {
       await store
         .failPartition(lease, { error: documentErrorText(result.error) })
-        .catch(() => undefined);
-      await failState(deps, state, result.error.message);
+        .catch((error) => {
+          // The state below fails the migration whatever the partition says.
+          deps.logger.debug(
+            `Background migration ${name}: could not mark the partition failed — ${errorText(error)}`,
+            deps.fields({ background: name, error: errorText(error) }),
+          );
+        });
+      await failState(deps, state, documentErrorText(result.error));
       return { outcome: 'failed', counters, error: result.error };
     }
     if (result.outcome !== 'exhausted') return { outcome: result.outcome, counters };

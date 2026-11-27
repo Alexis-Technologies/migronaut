@@ -61,6 +61,8 @@ import {
   SandboxRefusedError,
   MigrationLoadFailedError,
   DatabaseOperationFailedError,
+  QueueClosedError,
+  RunInFlightError,
   type SearchIndexBuild,
   type SearchIndexDefinition,
   type SearchIndexStatus,
@@ -112,6 +114,7 @@ expectAssignable<MigronautLogger>({
 });
 expectAssignable<Partial<MigronautConfig>>({ logger: pino() });
 expectAssignable<Partial<MigronautConfig>>({ logger: null });
+expectAssignable<Partial<MigronautConfig>>({ logger: false });
 
 // Error hierarchy
 expectAssignable<MigronautError>(new ChecksumMismatchError('mismatch', { context: { name: 'x' } }));
@@ -121,6 +124,7 @@ expectAssignable<MigronautError>(new HookFailedError('hook failed'));
 
 // Stopping a run, and redo's options
 expectType<void>(kit.stop());
+expectType<void>(kit.stop('deploy', { cause: AbortSignal.timeout(1).reason }));
 expectType<Promise<RunResult[]>>(kit.redo(undefined, { noLock: true }));
 
 // Resilience/audit config keys
@@ -698,6 +702,8 @@ expectType<'ALX_ERR_SANDBOX_REFUSED'>(new SandboxRefusedError('refused').code);
 for (const code of [
   'ALX_ERR_MIGRATION_LOAD_FAILED',
   'ALX_ERR_DATABASE_OPERATION_FAILED',
+  'ALX_ERR_QUEUE_CLOSED',
+  'ALX_ERR_RUN_IN_FLIGHT',
 ] as const) {
   expectAssignable<MigronautErrorCode>(code);
   expectType<number>(EXIT_CODES[code]);
@@ -708,6 +714,8 @@ expectType<'ALX_ERR_MIGRATION_LOAD_FAILED'>(
 expectType<'ALX_ERR_DATABASE_OPERATION_FAILED'>(
   new DatabaseOperationFailedError('db', { context: { serverCode: 13 } }).code,
 );
+expectType<'ALX_ERR_QUEUE_CLOSED'>(new QueueClosedError('closed').code);
+expectType<'ALX_ERR_RUN_IN_FLIGHT'>(new RunInFlightError('busy', { context: { runId: 'r' } }).code);
 
 // ─── Collection versioning ───────────────────────────────────────────────────
 expectAssignable<CollectionDefinition>({ name: 'orders', versioning: { current: 2 } });

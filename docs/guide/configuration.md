@@ -114,7 +114,7 @@ for Google/Vault/Azure/any source — it just must return `{ uri, dbName }`).
 | `backgroundShardAware` | `'auto' \| 'off'` | `'auto'` | Partition a sharded collection by its shard key and target each write at one shard |
 | `mongoose` | `Mongoose` | — | Mongoose instance, if your migrations use it |
 | `hooks` | `MigrationHooks` | — | [Lifecycle hooks](/guide/hooks) |
-| `logger` | `MigronautLogger \| null` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` silences all output |
+| `logger` | `MigronautLogger \| null \| false` | built-in | Custom logger (pino-compatible `{debug, info, warn, error}` — a pino instance works directly); `null` or `false` silences all output |
 | `generateId` | `() => string` | `crypto.randomUUID()` | Your own id format (ULID, CUID, UUIDv7, …) for every id migronaut mints — see [Custom id format](#custom-id-format) |
 | `telemetry` | `{ tracer?, meter? }` | — | An OpenTelemetry tracer and/or meter from your own `@opentelemetry/api`: a span per run and per migration, and their durations as metrics — see [OpenTelemetry](/guide/opentelemetry) |
 

@@ -71,7 +71,8 @@ describe('loadMigrationFile', () => {
       assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_LOAD_FAILED');
       assert.match(error.cause.message, /boom at import time/);
       assert.match(error.context.cause, /boom at import time/);
-      assert.strictEqual(error.context.filepath, file);
+      // Relative to the working directory: an absolute path names the user's home.
+      assert.strictEqual(error.context.filepath, path.relative(process.cwd(), file));
       return true;
     });
   });

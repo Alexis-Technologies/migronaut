@@ -8,7 +8,7 @@ const {
   MigrationLoadFailedError,
 } = require('../errors/index.js');
 const { MAX_TIMER_MS } = require('./concurrency.js');
-const { errorText } = require('./error.js');
+const { contextPath, errorText } = require('./error.js');
 const { requiresIssues } = require('./migration-name.js');
 
 /** What `fs.access` says when the file is simply not there */
@@ -98,7 +98,7 @@ const tsLoadErrorOrNull = (filepath, error) => {
   }
   return new MigrationInvalidExportError(message, {
     cause: error,
-    context: { filepath, cause: errorText(error) },
+    context: { filepath: contextPath(filepath), cause: errorText(error) },
   });
 };
 
@@ -156,11 +156,13 @@ const importMigrationModule = async (filepath, options = {}) => {
     await fs.access(filepath);
   } catch (error) {
     if (MISSING_FILE_CODES.has(error?.code)) {
-      throw new MigrationFileNotFoundError('Migration file not found', { context: { filepath } });
+      throw new MigrationFileNotFoundError('Migration file not found', {
+        context: { filepath: contextPath(filepath) },
+      });
     }
     throw new MigrationLoadFailedError('Migration file cannot be read', {
       cause: error,
-      context: { filepath, cause: errorText(error) },
+      context: { filepath: contextPath(filepath), cause: errorText(error) },
     });
   }
 
@@ -174,7 +176,7 @@ const importMigrationModule = async (filepath, options = {}) => {
     }
     throw new MigrationLoadFailedError('Migration file failed to load', {
       cause: error,
-      context: { filepath, cause: errorText(error) },
+      context: { filepath: contextPath(filepath), cause: errorText(error) },
     });
   }
   // `mod.default ?? mod` handles the CommonJS default-export case
@@ -187,7 +189,7 @@ const readRequires = (resolved, filepath) => {
   const issues = requiresIssues(resolved.requires, path.basename(filepath));
   if (issues.length > 0) {
     throw new MigrationInvalidExportError(`Invalid ${issues[0].path}: ${issues[0].message}`, {
-      context: { filepath, issues },
+      context: { filepath: contextPath(filepath), issues },
     });
   }
   return { requires: [...resolved.requires] };
@@ -211,7 +213,7 @@ const assertNoNearMiss = (resolved, filepath) => {
     const meant = EXPORT_SPELLINGS.get(spellingOf(name));
     if (meant === undefined || meant === name) continue;
     throw new MigrationInvalidExportError(`Unknown export '${name}' — did you mean '${meant}'?`, {
-      context: { filepath, export: name, expected: meant },
+      context: { filepath: contextPath(filepath), export: name, expected: meant },
     });
   }
 };
@@ -221,19 +223,23 @@ const assertOptionalExports = (resolved, filepath) => {
   const { useTransaction, timeoutMs, description } = resolved;
   if (useTransaction !== undefined && typeof useTransaction !== 'boolean') {
     throw new MigrationInvalidExportError('useTransaction must be a boolean', {
-      context: { filepath, export: 'useTransaction', type: typeof useTransaction },
+      context: {
+        filepath: contextPath(filepath),
+        export: 'useTransaction',
+        type: typeof useTransaction,
+      },
     });
   }
   const isTimeout = Number.isInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= MAX_TIMER_MS;
   if (timeoutMs !== undefined && !isTimeout) {
     throw new MigrationInvalidExportError(
       `timeoutMs must be a positive integer, at most ${MAX_TIMER_MS}`,
-      { context: { filepath, export: 'timeoutMs', type: typeof timeoutMs } },
+      { context: { filepath: contextPath(filepath), export: 'timeoutMs', type: typeof timeoutMs } },
     );
   }
   if (description !== undefined && typeof description !== 'string') {
     throw new MigrationInvalidExportError('description must be a string', {
-      context: { filepath, export: 'description', type: typeof description },
+      context: { filepath: contextPath(filepath), export: 'description', type: typeof description },
     });
   }
 };
@@ -256,7 +262,7 @@ const resolveMigrationExports = (resolved, filepath) => {
       throw new MigrationInvalidExportError(
         'A background migration exports no up() or down() — put the expand steps in a ' +
           'migration of their own',
-        { context: { filepath } },
+        { context: { filepath: contextPath(filepath) } },
       );
     }
     return {
@@ -269,7 +275,7 @@ const resolveMigrationExports = (resolved, filepath) => {
 
   if (!isFunction(resolved.up) || !isFunction(resolved.down)) {
     throw new MigrationInvalidExportError('Migration must export async up() and down() functions', {
-      context: { filepath },
+      context: { filepath: contextPath(filepath) },
     });
   }
 

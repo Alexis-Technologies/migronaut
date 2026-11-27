@@ -342,19 +342,29 @@ const runWithLock = async (lock, options, fn) => {
   // reclaimed on every tick from then on, and the deadline may fire on top.
   // A run of an hour would say so — and emit `lock:lost` — a hundred times.
   let lost = false;
-  const loseLock = (reason) => {
+  // What the last failed renewal said: the cause of a lock lost to the deadline.
+  let lastRenewError = null;
+  const loseLock = (reason, cause) => {
     if (lost) return;
     lost = true;
-    // The most alert-worthy line this module emits — structured fields so a
-    // JSON sink can trigger on it without parsing the human string.
-    options.logger.warn(`⚠ Lost the ${label} mid-run (${reason})`, {
-      event: 'lock:lost',
-      reason,
-    });
+    // The most alert-worthy line this module emits — at error level when the
+    // run stops on it, a warning under `onLockLost: 'warn'` (what that option
+    // asks for) — with structured fields so a JSON sink can trigger on it
+    // without parsing the human string.
+    const fields = { event: 'lock:lost', reason };
+    if (abortOnLoss) options.logger.error(`✖ Lost the ${label} mid-run (${reason})`, fields);
+    else options.logger.warn(`⚠ Lost the ${label} mid-run (${reason})`, fields);
     options.onLockLostEvent?.(reason);
     if (abortOnLoss && !controller.signal.aborted) {
+      const context =
+        cause === null
+          ? { reason, aborted: true }
+          : { reason, aborted: true, cause: errorText(cause) };
       controller.abort(
-        new LockLostError(`Lost the ${label} mid-run`, { context: { reason, aborted: true } }),
+        new LockLostError(`Lost the ${label} mid-run`, {
+          ...(cause === null ? {} : { cause }),
+          context,
+        }),
       );
     }
   };
@@ -378,7 +388,7 @@ const runWithLock = async (lock, options, fn) => {
     clearTimeout(deadline);
     deadline = setTimeout(
       () => {
-        if (!stopped) loseLock('no successful renewal within the TTL');
+        if (!stopped) loseLock('no successful renewal within the TTL', lastRenewError);
       },
       Math.max(1, lock.ttlMs - deadlineMarginMs),
     );
@@ -406,8 +416,9 @@ const runWithLock = async (lock, options, fn) => {
         // final: that document never matches again, so there is nothing left
         // to renew. (A deadline that fired on failing renewals is different —
         // the document may still be ours, and the heartbeat goes on trying.)
+        lastRenewError = null;
         if (!held && !stopped) {
-          loseLock('another run reclaimed it');
+          loseLock('another run reclaimed it', null);
           clearInterval(heartbeat);
           return void clearTimeout(deadline);
         }
@@ -420,6 +431,7 @@ const runWithLock = async (lock, options, fn) => {
         // fires strictly before the lock becomes stale-reclaimable, so
         // failures are tolerated exactly as long as they are harmless.
         consecutiveFailures += 1;
+        lastRenewError = error;
         const message = errorText(error);
         options.logger.warn(`⚠ Lock renewal failed (${consecutiveFailures} in a row): ${message}`, {
           event: 'lock:renew-failed',
