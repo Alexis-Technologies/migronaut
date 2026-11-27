@@ -47,7 +47,9 @@ const planOnlyFlag = (opts) => {
 
 const assertNotStopped = (stopRequested) => {
   if (stopRequested()) {
-    throw new RunAbortedError('Stopped by signal before anything was changed', { results: [] });
+    throw new RunAbortedError('Stopped by signal before anything was changed', {
+      context: { results: [] },
+    });
   }
 };
 
@@ -135,7 +137,7 @@ const registerConverge = (program) => {
             throw new ConfigInvalidError(
               `converge would drop or rebuild an index, drop a search index, or change a validator ` +
                 `(${destructive.length} change(s)) — pass --yes to confirm in --json mode`,
-              { destructive },
+              { context: { destructive } },
             );
           }
           logger.info(renderConvergeTable(plan));

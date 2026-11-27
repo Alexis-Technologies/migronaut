@@ -17,7 +17,7 @@ const { runWithLock } = require('./lock.js');
 const { READ_OPTIONS } = require('./server-info.js');
 
 /** Why a follower or the watcher stopped — a typed abort reason, never a bare Error */
-const stopReason = (reason) => new RunAbortedError(reason, { reason });
+const stopReason = (reason) => new RunAbortedError(reason, { context: { reason } });
 
 /**
  * The live drift watcher: after a background migration completed, an
@@ -80,7 +80,9 @@ const watchOptions = (options) => {
   }
   for (const key of Object.keys(options)) {
     if (!OPTION_KEYS.has(key)) {
-      throw new ConfigInvalidError(`"${key}" is not a watchBackground option`, { key });
+      throw new ConfigInvalidError(`"${key}" is not a watchBackground option`, {
+        context: { key },
+      });
     }
   }
   const resolved = { ...DEFAULTS };
@@ -92,14 +94,16 @@ const watchOptions = (options) => {
     if (value === undefined) continue;
     if (!Number.isSafeInteger(value) || value < min || value > max) {
       throw new ConfigInvalidError(`${key} must be an integer from ${min} to ${max}`, {
-        [key]: value,
+        context: { [key]: value },
       });
     }
     resolved[key] = value;
   }
   if (options.upgrade !== undefined) {
     if (typeof options.upgrade !== 'boolean') {
-      throw new ConfigInvalidError('upgrade must be a boolean', { upgrade: options.upgrade });
+      throw new ConfigInvalidError('upgrade must be a boolean', {
+        context: { upgrade: options.upgrade },
+      });
     }
     resolved.upgrade = options.upgrade;
   }

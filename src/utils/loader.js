@@ -73,11 +73,10 @@ const tsLoadErrorOrNull = (filepath, error) => {
   if (message === null) {
     return null;
   }
-  return new MigrationInvalidExportError(
-    message,
-    { filepath, cause: errorText(error) },
-    { cause: error },
-  );
+  return new MigrationInvalidExportError(message, {
+    cause: error,
+    context: { filepath, cause: errorText(error) },
+  });
 };
 
 /**
@@ -127,7 +126,7 @@ const importMigrationModule = async (filepath, options = {}) => {
   try {
     await fs.access(filepath);
   } catch {
-    throw new MigrationFileNotFoundError('Migration file not found', { filepath });
+    throw new MigrationFileNotFoundError('Migration file not found', { context: { filepath } });
   }
 
   let imported = null;
@@ -150,8 +149,7 @@ const readRequires = (resolved, filepath) => {
   const issues = requiresIssues(resolved.requires, path.basename(filepath));
   if (issues.length > 0) {
     throw new MigrationInvalidExportError(`Invalid ${issues[0].path}: ${issues[0].message}`, {
-      filepath,
-      issues,
+      context: { filepath, issues },
     });
   }
   return { requires: [...resolved.requires] };
@@ -173,7 +171,7 @@ const resolveMigrationExports = (resolved, filepath) => {
       throw new MigrationInvalidExportError(
         'A background migration exports no up() or down() — put the expand steps in a ' +
           'migration of their own',
-        { filepath },
+        { context: { filepath } },
       );
     }
     return {
@@ -186,7 +184,7 @@ const resolveMigrationExports = (resolved, filepath) => {
 
   if (!isFunction(resolved.up) || !isFunction(resolved.down)) {
     throw new MigrationInvalidExportError('Migration must export async up() and down() functions', {
-      filepath,
+      context: { filepath },
     });
   }
 

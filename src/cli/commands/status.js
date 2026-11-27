@@ -17,7 +17,7 @@ const registerStatus = (program) => {
         const limit = Number(opts.limit);
         if (!Number.isInteger(limit) || limit < 1) {
           throw new ConfigInvalidError('--limit must be a positive integer', {
-            limit: opts.limit,
+            context: { limit: opts.limit },
           });
         }
         // --check answers "is ANY migration pending?" — a limited window could

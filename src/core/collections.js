@@ -382,11 +382,10 @@ const loadDefinitionFile = async (filepath, options) => {
     try {
       return JSON.parse(raw);
     } catch (error) {
-      throw new ConfigInvalidError(
-        'Collection definition file is not valid JSON',
-        { path: filepath, cause: errorText(error) },
-        { cause: error },
-      );
+      throw new ConfigInvalidError('Collection definition file is not valid JSON', {
+        cause: error,
+        context: { path: filepath, cause: errorText(error) },
+      });
     }
   }
   let mod = null;
@@ -396,15 +395,14 @@ const loadDefinitionFile = async (filepath, options) => {
     throw new ConfigInvalidError(
       tsLoadMessageOrNull(filepath, error, 'collection definition') ??
         'Collection definition file failed to load',
-      { path: filepath, cause: errorText(error) },
-      { cause: error },
+      { cause: error, context: { path: filepath, cause: errorText(error) } },
     );
   }
   const exported = mod.default ?? mod;
   if (typeof exported === 'function') {
     throw new ConfigInvalidError(
       'A collection definition file must export one definition object, not a function',
-      { path: filepath },
+      { context: { path: filepath } },
     );
   }
   // A shallow copy: an ES module namespace is an exotic object, not a plain one.
@@ -438,13 +436,12 @@ const loadCollectionsDir = async (dir, { extensions, reload = false }) => {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch (error) {
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
-      throw new ConfigInvalidError('collectionsDir not found', { path: dir });
+      throw new ConfigInvalidError('collectionsDir not found', { context: { path: dir } });
     }
-    throw new ConfigInvalidError(
-      'collectionsDir could not be read',
-      { path: dir, cause: errorText(error) },
-      { cause: error },
-    );
+    throw new ConfigInvalidError('collectionsDir could not be read', {
+      cause: error,
+      context: { path: dir, cause: errorText(error) },
+    });
   }
   const accepted = definitionExtensions(extensions);
   const files = [];
@@ -511,7 +508,9 @@ const resolveDefinitions = async ({
     definitions.push(normalizeDefinition(definition, { name, source: file }));
   }
   if (issues.length > 0) {
-    throw new ConfigInvalidError('Invalid collection definition(s)', { path: dir, issues });
+    throw new ConfigInvalidError('Invalid collection definition(s)', {
+      context: { path: dir, issues },
+    });
   }
   return definitions;
 };

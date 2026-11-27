@@ -82,7 +82,7 @@ const integerFlag = (opts, key, { min = 1, max = Number.MAX_SAFE_INTEGER } = {})
   const value = Number(opts[key]);
   if (!Number.isSafeInteger(value) || value < min || value > max) {
     throw new ConfigInvalidError(`${flagName(key)} must be an integer from ${min} to ${max}`, {
-      [key]: opts[key],
+      context: { [key]: opts[key] },
     });
   }
   return value;
@@ -237,7 +237,7 @@ const runAction = async (migrator, opts, name, { logger }) => {
         });
         if (answer.next === 'busy') {
           throw new LockAlreadyHeldError(`Another process is coordinating ${target} right now`, {
-            migration: target,
+            context: { migration: target },
           });
         }
       }

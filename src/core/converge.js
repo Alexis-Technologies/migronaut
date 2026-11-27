@@ -302,18 +302,20 @@ const wrapFailure = (error, collection, actions, result, extra = {}) => {
     `Could not ${VERBS[action.action] ?? action.action} ${describeAll(actions)} on ${collection}: ` +
       `${cause}${hint ? ` — ${hint}` : ''}${uniqueLeftover(mongoCode, extra)}${lostIndexes(extra)}`,
     {
-      phase: 'apply',
-      collection,
-      target: action.target,
-      name: action.name,
-      action: action.action,
-      cause,
-      ...(mongoCode !== undefined ? { mongoCode } : {}),
-      ...(hint ? { hint } : {}),
-      ...extra,
-      converge: result,
+      cause: error,
+      context: {
+        phase: 'apply',
+        collection,
+        target: action.target,
+        name: action.name,
+        action: action.action,
+        cause,
+        ...(mongoCode !== undefined ? { mongoCode } : {}),
+        ...(hint ? { hint } : {}),
+        ...extra,
+        converge: result,
+      },
     },
-    { cause: error },
   );
 };
 
@@ -827,10 +829,12 @@ const refuseConflicts = (result) => {
     `Converge refused: ${conflicts.length} conflict(s) — ${listed}` +
       (unavailable ? ` — ${SEARCH_UNAVAILABLE_HINT}` : ''),
     {
-      phase: 'plan',
-      conflicts,
-      ...(unavailable ? { hint: SEARCH_UNAVAILABLE_HINT } : {}),
-      converge: result,
+      context: {
+        phase: 'plan',
+        conflicts,
+        ...(unavailable ? { hint: SEARCH_UNAVAILABLE_HINT } : {}),
+        converge: result,
+      },
     },
   );
 };
@@ -868,12 +872,7 @@ const replan = async (run, position) => {
   throw new ConvergeFailedError(
     `Converge stopped before ${definition.name}: it changed while the run was under way — ` +
       listed,
-    {
-      phase: 'replan',
-      collection: definition.name,
-      introduced,
-      converge: result,
-    },
+    { context: { phase: 'replan', collection: definition.name, introduced, converge: result } },
   );
 };
 

@@ -20,7 +20,7 @@ const assertMigrationName = (name, context = {}) => {
   if (!isBareFilename(name)) {
     throw new MigrationInvalidNameError(
       'Invalid migration name — must be a bare filename with no path segments',
-      { name, ...context },
+      { context: { name, ...context } },
     );
   }
 };

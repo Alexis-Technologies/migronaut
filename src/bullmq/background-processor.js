@@ -66,7 +66,7 @@ const MAX_SLICE_MS = 3_600_000;
  * cannot import its classes.
  */
 const moved = (name) => {
-  const error = new RunAbortedError(`Moved: ${name}`, { reason: name, moved: true });
+  const error = new RunAbortedError(`Moved: ${name}`, { context: { reason: name, moved: true } });
   error.name = name;
   return error;
 };
@@ -96,7 +96,9 @@ const resolveBackgroundProcessorOptions = (options) => {
   }
   for (const key of Object.keys(options)) {
     if (!PROCESSOR_KEYS.has(key)) {
-      throw new ConfigInvalidError(`createBackgroundProcessor: "${key}" is not an option`, { key });
+      throw new ConfigInvalidError(`createBackgroundProcessor: "${key}" is not an option`, {
+        context: { key },
+      });
     }
   }
   const {
@@ -126,21 +128,25 @@ const resolveBackgroundProcessorOptions = (options) => {
   const isSliceMs = Number.isSafeInteger(sliceMs) && sliceMs >= 1 && sliceMs <= MAX_SLICE_MS;
   if (sliceMs !== undefined && !isSliceMs) {
     throw new ConfigInvalidError(`sliceMs must be an integer from 1 to ${MAX_SLICE_MS}`, {
-      sliceMs,
+      context: { sliceMs },
     });
   }
   if (children !== 'auto' && children !== false) {
-    throw new ConfigInvalidError("children must be 'auto' or false", { children });
+    throw new ConfigInvalidError("children must be 'auto' or false", { context: { children } });
   }
   if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10) {
-    throw new ConfigInvalidError('pollIntervalMs must be an integer ≥ 10', { pollIntervalMs });
+    throw new ConfigInvalidError('pollIntervalMs must be an integer ≥ 10', {
+      context: { pollIntervalMs },
+    });
   }
   if (!Number.isSafeInteger(stallMs) || stallMs < 1000) {
-    throw new ConfigInvalidError('stallMs must be an integer of at least 1000', { stallMs });
+    throw new ConfigInvalidError('stallMs must be an integer of at least 1000', {
+      context: { stallMs },
+    });
   }
   if (!Number.isSafeInteger(maxLaneRetries) || maxLaneRetries < 0 || maxLaneRetries > 100) {
     throw new ConfigInvalidError('maxLaneRetries must be an integer from 0 to 100', {
-      maxLaneRetries,
+      context: { maxLaneRetries },
     });
   }
   assertBackgroundJobOptions(jobOptions);
@@ -528,7 +534,7 @@ const createBackgroundProcessor = (options = {}, internals = {}) => {
    */
   processor.shutdown = (reason = 'Background worker shutting down') => {
     if (!shutdownController.signal.aborted) {
-      shutdownController.abort(new RunAbortedError(reason, { reason }));
+      shutdownController.abort(new RunAbortedError(reason, { context: { reason } }));
     }
   };
 

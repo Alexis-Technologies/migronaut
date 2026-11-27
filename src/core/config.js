@@ -346,8 +346,7 @@ const parseBoolean = (value, name) => {
   if (TRUE_BOOLEAN_STRINGS.has(normalized)) return true;
   if (FALSE_BOOLEAN_STRINGS.has(normalized)) return false;
   throw new ConfigInvalidError(`${name} must be 'true'/'1'/'yes' or 'false'/'0'/'no'`, {
-    name,
-    value,
+    context: { name, value },
   });
 };
 
@@ -378,7 +377,9 @@ const mergeDefined = (target, source) => {
 const parsePositiveInteger = (value, name) => {
   const parsed = Number(value.trim());
   if (!isPositiveInteger(parsed)) {
-    throw new ConfigInvalidError(`${name} must be a positive integer`, { name, value });
+    throw new ConfigInvalidError(`${name} must be a positive integer`, {
+      context: { name, value },
+    });
   }
   return parsed;
 };
@@ -390,7 +391,7 @@ const parseEnum = (allowed) => {
   return (value, name) => {
     const normalized = value.trim();
     if (!values.has(normalized)) {
-      throw new ConfigInvalidError(`${name} must be ${list}`, { name, value });
+      throw new ConfigInvalidError(`${name} must be ${list}`, { context: { name, value } });
     }
     return normalized;
   };
@@ -533,11 +534,10 @@ const loadConfigFile = async (filepath, lenient = false) => {
     } catch (error) {
       // A bare SyntaxError has no typed code, which breaks the CLI's exit-code
       // mapping and `--json` error shape.
-      throw new ConfigInvalidError(
-        'Config file is not valid JSON',
-        { path: filepath, cause: errorText(error) },
-        { cause: error },
-      );
+      throw new ConfigInvalidError('Config file is not valid JSON', {
+        cause: error,
+        context: { path: filepath, cause: errorText(error) },
+      });
     }
   }
   let mod = null;
@@ -548,11 +548,10 @@ const loadConfigFile = async (filepath, lenient = false) => {
     // get the same treatment as a throwing factory below — including the
     // lenient degradation for commands that never touch the database.
     if (lenient) return null;
-    throw new ConfigInvalidError(
-      'Config file failed to load',
-      { path: filepath, cause: errorText(error) },
-      { cause: error },
-    );
+    throw new ConfigInvalidError('Config file failed to load', {
+      cause: error,
+      context: { path: filepath, cause: errorText(error) },
+    });
   }
   const exported = mod.default ?? mod;
 
@@ -566,11 +565,10 @@ const loadConfigFile = async (filepath, lenient = false) => {
         // rather than stopping an otherwise offline command.
         return LENIENT_FAILURE;
       }
-      throw new ConfigInvalidError(
-        'Config factory function failed to resolve',
-        { path: filepath, cause: errorText(error) },
-        { cause: error },
-      );
+      throw new ConfigInvalidError('Config factory function failed to resolve', {
+        cause: error,
+        context: { path: filepath, cause: errorText(error) },
+      });
     }
   }
   return exported;
@@ -614,7 +612,7 @@ const loadConfig = async (options = {}) => {
     // config contract promises.
     if (!isNonEmptyString(envFile)) {
       throw new ConfigInvalidError('Invalid configuration', {
-        issues: [{ path: 'envFile', message: 'must be a non-empty string or false' }],
+        context: { issues: [{ path: 'envFile', message: 'must be a non-empty string or false' }] },
       });
     }
     await applyEnvFile(path.resolve(cwd, envFile));
@@ -631,7 +629,7 @@ const loadConfig = async (options = {}) => {
     // "not found") — discovery already proved existence, and re-checking it
     // would pay a redundant fs.access on every invocation.
     if (options.configPath && !(await pathExists(configFilePath))) {
-      throw new ConfigInvalidError('Config file not found', { path: configFilePath });
+      throw new ConfigInvalidError('Config file not found', { context: { path: configFilePath } });
     }
     const lenient = options.lenient ?? false;
     const fileConfig = await loadConfigFile(configFilePath, lenient);
@@ -643,7 +641,7 @@ const loadConfig = async (options = {}) => {
     if (!usable && fileConfig !== LENIENT_FAILURE && !lenient) {
       throw new ConfigInvalidError(
         'Config file must export an object, or a function that returns one',
-        { path: configFilePath, exported: shapeOf(fileConfig) },
+        { context: { path: configFilePath, exported: shapeOf(fileConfig) } },
       );
     }
     if (usable) {
@@ -671,7 +669,7 @@ const loadConfig = async (options = {}) => {
 
   const issues = validateConfig(merged, { requireDb });
   if (issues.length > 0) {
-    throw new ConfigInvalidError('Invalid configuration', { issues });
+    throw new ConfigInvalidError('Invalid configuration', { context: { issues } });
   }
 
   const config = merged;

@@ -60,7 +60,7 @@ const irreversibleBackground = (name) =>
   new IrreversibleMigrationError(
     `Background migration ${name} has already rewritten documents and declares no revert — ` +
       'write a background migration back instead',
-    { names: [name] },
+    { context: { names: [name] } },
   );
 
 // ─── Driving it from this process ─────────────────────────────────────────────
@@ -82,7 +82,7 @@ const drive = async (
   const deps = host.deps(host.newId(), jobOption);
   const stopped = () =>
     new RunAbortedError(`Stopped driving background migration ${name} — it goes on from here`, {
-      migration: name,
+      context: { migration: name },
     });
   for (;;) {
     if (signal?.aborted) throw stopped();
@@ -100,7 +100,7 @@ const drive = async (
         throw new ChecksumMismatchError(
           `Background migration ${name} changed on disk since it was registered — it cannot ` +
             'run inline until it is pinned again (migronaut background repin)',
-          { migration: name, background: true },
+          { context: { migration: name, background: true } },
         );
       }
       if (!untilDone) break;
@@ -222,7 +222,7 @@ const withdraw = async (host, name, spec, session) => {
       throw new BackgroundConflictError(
         `Background migration ${name} still has lanes at work — down cannot tell whether ` +
           'they rewrote documents; try again once they stop',
-        { migration: name, action: 'withdraw' },
+        { context: { migration: name, action: 'withdraw' } },
       );
     }
     throw irreversibleBackground(name);

@@ -26,7 +26,9 @@ const assertId = (value) => {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_ID_LENGTH) {
     throw new ConfigInvalidError(
       `generateId must return a non-empty string of at most ${MAX_ID_LENGTH} characters`,
-      typeof value === 'string' ? { length: value.length } : { returned: typeof value },
+      {
+        context: typeof value === 'string' ? { length: value.length } : { returned: typeof value },
+      },
     );
   }
   return value;
@@ -50,7 +52,7 @@ const createIdGenerator = (generateId) => {
   if (generateId === undefined) return randomId;
   if (typeof generateId !== 'function') {
     throw new ConfigInvalidError('generateId must be a function', {
-      generateId: typeof generateId,
+      context: { generateId: typeof generateId },
     });
   }
   return () => {
@@ -58,11 +60,10 @@ const createIdGenerator = (generateId) => {
     try {
       value = generateId();
     } catch (error) {
-      throw new ConfigInvalidError(
-        'generateId threw',
-        { cause: errorText(error) },
-        { cause: error },
-      );
+      throw new ConfigInvalidError('generateId threw', {
+        cause: error,
+        context: { cause: errorText(error) },
+      });
     }
     if (typeof value?.then === 'function') {
       // The promise is dropped, so its rejection must not surface as an

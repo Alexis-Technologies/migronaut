@@ -23,7 +23,7 @@ const { jobRefIssue } = require('../utils/job-ref.js');
 const assertFilename = (filename) => {
   if (filename !== undefined && typeof filename !== 'string') {
     throw new MigrationInvalidNameError('Migration name must be a string', {
-      name: filename,
+      context: { name: filename },
     });
   }
 };
@@ -37,13 +37,17 @@ const assertStepsValid = (steps, filename, batch) => {
     return;
   }
   if (filename) {
-    throw new ConfigInvalidError('Cannot combine a filename with --steps', { filename });
+    throw new ConfigInvalidError('Cannot combine a filename with --steps', {
+      context: { filename },
+    });
   }
   if (batch !== undefined) {
-    throw new ConfigInvalidError('Cannot combine --batch with --steps', { batch, steps });
+    throw new ConfigInvalidError('Cannot combine --batch with --steps', {
+      context: { batch, steps },
+    });
   }
   if (!Number.isInteger(steps) || steps < 1) {
-    throw new ConfigInvalidError('--steps must be a positive integer', { steps });
+    throw new ConfigInvalidError('--steps must be a positive integer', { context: { steps } });
   }
 };
 
@@ -55,18 +59,18 @@ const assertToValid = (to, filename, options = {}) => {
   if (to === undefined) return;
   assertFilename(to);
   if (filename) {
-    throw new ConfigInvalidError('Cannot combine a filename with --to', { filename, to });
+    throw new ConfigInvalidError('Cannot combine a filename with --to', {
+      context: { filename, to },
+    });
   }
   if (options.steps !== undefined) {
     throw new ConfigInvalidError('Cannot combine --steps with --to', {
-      steps: options.steps,
-      to,
+      context: { steps: options.steps, to },
     });
   }
   if (options.batch !== undefined) {
     throw new ConfigInvalidError('Cannot combine --batch with --to', {
-      batch: options.batch,
-      to,
+      context: { batch: options.batch, to },
     });
   }
 };
@@ -79,7 +83,7 @@ const assertToValid = (to, filename, options = {}) => {
 const assertBatchValid = (batch) => {
   if (batch === undefined) return;
   if (!Number.isInteger(batch) || batch < 1) {
-    throw new ConfigInvalidError('--batch must be a positive integer', { batch });
+    throw new ConfigInvalidError('--batch must be a positive integer', { context: { batch } });
   }
 };
 
@@ -94,10 +98,12 @@ const assertActorValid = (options) => {
     const issue = actorIssue(key, options?.[key]);
     if (issue) {
       throw new ConfigInvalidError(issue, {
-        [key]:
-          typeof options[key] === 'string'
-            ? `${options[key].length} characters`
-            : typeof options[key],
+        context: {
+          [key]:
+            typeof options[key] === 'string'
+              ? `${options[key].length} characters`
+              : typeof options[key],
+        },
       });
     }
   }
@@ -112,7 +118,7 @@ const assertJobValid = (job, options) => {
   if (issue) {
     // For the error's context: the keys of what was given, not its values.
     throw new ConfigInvalidError(issue, {
-      job: isPlainObject(job) ? Object.keys(job).join(', ') : typeof job,
+      context: { job: isPlainObject(job) ? Object.keys(job).join(', ') : typeof job },
     });
   }
 };
@@ -125,11 +131,11 @@ const assertChecksumValid = (checksum, filename) => {
   if (checksum === undefined) return;
   if (typeof checksum !== 'string' || !/^[0-9a-f]{64}$/.test(checksum)) {
     throw new ConfigInvalidError('checksum must be a SHA-256 hex digest', {
-      checksum: typeof checksum,
+      context: { checksum: typeof checksum },
     });
   }
   if (!filename) {
-    throw new ConfigInvalidError('checksum requires a filename', {});
+    throw new ConfigInvalidError('checksum requires a filename');
   }
 };
 
@@ -141,10 +147,10 @@ const assertChecksumValid = (checksum, filename) => {
 const assertOrderedValid = (ordered, filename) => {
   if (ordered === undefined) return;
   if (typeof ordered !== 'boolean') {
-    throw new ConfigInvalidError('ordered must be a boolean', { ordered });
+    throw new ConfigInvalidError('ordered must be a boolean', { context: { ordered } });
   }
   if (ordered && !filename) {
-    throw new ConfigInvalidError('ordered requires a filename', { ordered });
+    throw new ConfigInvalidError('ordered requires a filename', { context: { ordered } });
   }
 };
 
@@ -157,7 +163,9 @@ const assertOrderedValid = (ordered, filename) => {
 const assertFlags = (options, keys) => {
   for (const key of keys) {
     if (options[key] !== undefined && typeof options[key] !== 'boolean') {
-      throw new ConfigInvalidError(`${key} must be a boolean`, { [key]: options[key] });
+      throw new ConfigInvalidError(`${key} must be a boolean`, {
+        context: { [key]: options[key] },
+      });
     }
   }
 };
@@ -178,18 +186,17 @@ const CONVERGE_FLAGS = Object.freeze([
 const assertConvergeAfterUpValid = (converge, filename, to) => {
   if (converge === undefined) return;
   if (typeof converge !== 'boolean') {
-    throw new ConfigInvalidError('converge must be a boolean', { converge });
+    throw new ConfigInvalidError('converge must be a boolean', { context: { converge } });
   }
   if (converge && filename !== undefined) {
     throw new ConfigInvalidError('converge cannot follow a single-file up', {
-      converge,
-      filename,
+      context: { converge, filename },
     });
   }
   if (converge && to !== undefined) {
     throw new ConfigInvalidError(
       'converge cannot follow up --to: the declared state describes the newest migration',
-      { converge, to },
+      { context: { converge, to } },
     );
   }
 };
@@ -203,7 +210,7 @@ const assertBackgroundPendingValid = (onBackgroundPending) => {
   if (onBackgroundPending === undefined) return;
   if (onBackgroundPending !== 'error' && onBackgroundPending !== 'stop') {
     throw new ConfigInvalidError("onBackgroundPending must be 'error' or 'stop'", {
-      onBackgroundPending,
+      context: { onBackgroundPending },
     });
   }
 };
@@ -218,7 +225,7 @@ const assertUpOptions = (filename, options) => {
   assertBatchValid(options.batch);
   if (options.batch !== undefined && options.step) {
     throw new ConfigInvalidError('Cannot combine --batch with --step', {
-      batch: options.batch,
+      context: { batch: options.batch },
     });
   }
   assertOrderedValid(options.ordered, filename);
@@ -266,8 +273,7 @@ const assertConvergeOptions = (options) => {
   // both is a mistake worth saying, not a wait that silently never happens.
   if (options.dryRun && options.waitForSearchIndexes) {
     throw new ConfigInvalidError('waitForSearchIndexes cannot be combined with dryRun', {
-      dryRun: true,
-      waitForSearchIndexes: true,
+      context: { dryRun: true, waitForSearchIndexes: true },
     });
   }
   assertActorValid(options);
@@ -276,19 +282,23 @@ const assertConvergeOptions = (options) => {
 /** `convergeHistory({ limit })` */
 const assertHistoryLimit = (limit) => {
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
-    throw new ConfigInvalidError('limit must be an integer from 1 to 1000', { limit });
+    throw new ConfigInvalidError('limit must be an integer from 1 to 1000', { context: { limit } });
   }
 };
 
 /** `list(filter, options)` */
 const assertListOptions = (filter, options) => {
   if (options.checksums !== undefined && typeof options.checksums !== 'boolean') {
-    throw new ConfigInvalidError('checksums must be a boolean', { checksums: options.checksums });
+    throw new ConfigInvalidError('checksums must be a boolean', {
+      context: { checksums: options.checksums },
+    });
   }
   // An unknown filter silently returning [] reads as "nothing to report" —
   // the worst possible answer to a typo.
   if (filter !== 'all' && filter !== 'pending' && filter !== 'applied') {
-    throw new ConfigInvalidError("list filter must be 'all', 'pending' or 'applied'", { filter });
+    throw new ConfigInvalidError("list filter must be 'all', 'pending' or 'applied'", {
+      context: { filter },
+    });
   }
 };
 
@@ -310,10 +320,12 @@ const assertRunFlags = (options) => {
 const assertImportOptions = (options) => {
   assertFlags(options, IMPORT_FLAGS);
   if (options.from !== undefined && !isCollectionName(options.from)) {
-    throw new ConfigInvalidError('Invalid source collection name', { from: options.from });
+    throw new ConfigInvalidError('Invalid source collection name', {
+      context: { from: options.from },
+    });
   }
   if (options.to !== undefined && !isCollectionName(options.to)) {
-    throw new ConfigInvalidError('Invalid target collection name', { to: options.to });
+    throw new ConfigInvalidError('Invalid target collection name', { context: { to: options.to } });
   }
 };
 

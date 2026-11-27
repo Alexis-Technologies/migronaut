@@ -214,17 +214,19 @@ const DEFAULT_ALLOW = Object.freeze({ down: true, force: false, unordered: false
 const resolveAllow = (allow) => {
   if (allow === undefined) return DEFAULT_ALLOW;
   if (!isObjectLike(allow)) {
-    throw new ConfigInvalidError('allow must be an object', { allow: typeof allow });
+    throw new ConfigInvalidError('allow must be an object', { context: { allow: typeof allow } });
   }
   for (const key of Object.keys(allow)) {
     if (!(key in DEFAULT_ALLOW)) {
       throw new ConfigInvalidError(
         `allow.${key} is not a known permission (down, force, unordered)`,
-        { key },
+        { context: { key } },
       );
     }
     if (typeof allow[key] !== 'boolean') {
-      throw new ConfigInvalidError(`allow.${key} must be a boolean`, { [key]: allow[key] });
+      throw new ConfigInvalidError(`allow.${key} must be a boolean`, {
+        context: { [key]: allow[key] },
+      });
     }
   }
   return Object.freeze({ ...DEFAULT_ALLOW, ...allow });
@@ -247,9 +249,11 @@ const assertAllowed = (job, data, allow) => {
         `Refused migration job: ${permission === 'unordered' ? 'ordered: false' : permission} ` +
           `is not allowed by this worker (allow.${permission})`,
         {
-          ...(job?.id !== undefined ? { jobId: `${job.id}` } : {}),
-          issue: 'not allowed',
-          permission,
+          context: {
+            ...(job?.id !== undefined ? { jobId: `${job.id}` } : {}),
+            issue: 'not allowed',
+            permission,
+          },
         },
       );
     }
@@ -258,8 +262,7 @@ const assertAllowed = (job, data, allow) => {
 
 const invalid = (job, issue) => {
   return new QueueJobInvalidError(`Invalid migration job: ${issue}`, {
-    ...(job?.id !== undefined ? { jobId: `${job.id}` } : {}),
-    issue,
+    context: { ...(job?.id !== undefined ? { jobId: `${job.id}` } : {}), issue },
   });
 };
 

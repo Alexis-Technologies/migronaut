@@ -51,7 +51,9 @@ const ejson = (value) => {
 const sampleSize = ({ sample, first }) => {
   const n = first ?? sample ?? 5;
   if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAMPLE) {
-    throw new ConfigInvalidError(`The sample must be 1 to ${MAX_SAMPLE} documents`, { sample: n });
+    throw new ConfigInvalidError(`The sample must be 1 to ${MAX_SAMPLE} documents`, {
+      context: { sample: n },
+    });
   }
   if (sample !== undefined && first !== undefined) {
     throw new ConfigInvalidError('Take either a random sample or the first documents, not both');
@@ -153,12 +155,12 @@ const previewSample = async (deps, name, loaded, options = {}) => {
   if (spec.mode !== 'declarative') {
     throw new ConfigInvalidError(
       `${name} is a step background migration — dry-run it by steps, not on a sample`,
-      { migration: name },
+      { context: { migration: name } },
     );
   }
   const direction = options.direction === 'revert' ? 'revert' : 'forward';
   if (direction === 'revert' && !spec.reversible) {
-    throw new ConfigInvalidError(`${name} declares no revert`, { migration: name });
+    throw new ConfigInvalidError(`${name} declares no revert`, { context: { migration: name } });
   }
   const n = sampleSize(options);
   const partitioner = await dryPartitioner(deps, spec.collection);
@@ -255,7 +257,7 @@ const deadlineOf = (options) => {
   const ms = options.deadlineMs ?? MAX_DEADLINE_MS;
   if (!Number.isSafeInteger(ms) || ms < 1 || ms > MAX_DEADLINE_MS) {
     throw new ConfigInvalidError(`deadlineMs must be an integer from 1 to ${MAX_DEADLINE_MS}`, {
-      deadlineMs: ms,
+      context: { deadlineMs: ms },
     });
   }
   return ms;
@@ -362,17 +364,19 @@ const previewSteps = async (deps, name, loaded, options = {}) => {
   const direction = options.direction === 'revert' ? 'revert' : 'forward';
   const fn = direction === 'revert' ? fns.revertStep : fns.step;
   if (typeof fn !== 'function') {
-    throw new ConfigInvalidError(`${name} declares no revertStep`, { migration: name });
+    throw new ConfigInvalidError(`${name} declares no revertStep`, {
+      context: { migration: name },
+    });
   }
   if (options.validate || options.sample !== undefined || options.first !== undefined) {
     throw new ConfigInvalidError(
       `${name} is a step background migration — dry-run it by steps, not on a sample`,
-      { migration: name },
+      { context: { migration: name } },
     );
   }
   const steps = options.steps ?? 1;
   if (!Number.isSafeInteger(steps) || steps < 1 || steps > MAX_STEPS) {
-    throw new ConfigInvalidError(`steps must be 1 to ${MAX_STEPS}`, { steps });
+    throw new ConfigInvalidError(`steps must be 1 to ${MAX_STEPS}`, { context: { steps } });
   }
   const job = {
     name,

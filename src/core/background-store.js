@@ -156,7 +156,7 @@ class BackgroundStore {
         throw new ConfigInvalidError(
           'Background migrations need their indexes, and ensureIndexes is false — create ' +
             `them (or let migronaut): ${missing.join('; ')}`,
-          { missing },
+          { context: { missing } },
         );
       }
     })().catch((error) => {
@@ -906,8 +906,7 @@ class BackgroundStore {
     );
     if (result.matchedCount !== 1) {
       throw new LockLostError('Lost the partition lease mid-slice', {
-        lease: true,
-        partition: `${lease.partitionId}`,
+        context: { lease: true, partition: `${lease.partitionId}` },
       });
     }
     // Inside a transaction the renewal lands only with the commit: the caller

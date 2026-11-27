@@ -23,7 +23,7 @@ const slugify = (name) => {
     .replace(/^-+|-+$/g, '');
   if (slug.length === 0) {
     throw new ConfigInvalidError('Migration name must contain at least one letter or digit', {
-      name,
+      context: { name },
     });
   }
   return slug;
@@ -204,7 +204,7 @@ const resolveTemplateContent = async (templatePath, js, esm = false, background 
     if (!TEMPLATE_EXTENSIONS.includes(ext)) {
       throw new ConfigInvalidError(
         `Template file must have one of the extensions: ${TEMPLATE_EXTENSIONS.join(', ')}`,
-        { templatePath },
+        { context: { templatePath } },
       );
     }
     let stats = null;
@@ -212,14 +212,15 @@ const resolveTemplateContent = async (templatePath, js, esm = false, background 
       stats = await fs.stat(templatePath);
     } catch (error) {
       if (error.code === 'ENOENT') {
-        throw new MigrationFileNotFoundError('Template file not found', { templatePath });
+        throw new MigrationFileNotFoundError('Template file not found', {
+          context: { templatePath },
+        });
       }
       throw error;
     }
     if (stats.size > MAX_TEMPLATE_BYTES) {
       throw new ConfigInvalidError('Template file is too large (max 1 MB)', {
-        templatePath,
-        size: stats.size,
+        context: { templatePath, size: stats.size },
       });
     }
     return fs.readFile(templatePath, 'utf8');
@@ -252,7 +253,9 @@ const createMigrationFile = async (options) => {
     await fs.writeFile(filepath, content, { encoding: 'utf8', flag: 'wx' });
   } catch (error) {
     if (error.code === 'EEXIST') {
-      throw new MigrationFileExistsError('Migration file already exists', { path: filepath });
+      throw new MigrationFileExistsError('Migration file already exists', {
+        context: { path: filepath },
+      });
     }
     throw error;
   }
@@ -282,8 +285,10 @@ const isEsmProject = async (dir) => {
       if (error.code !== 'ENOENT') {
         throw new ConfigInvalidError(
           `Could not parse ${path.join(current, 'package.json')} while detecting the module system`,
-          { path: path.join(current, 'package.json'), cause: errorText(error) },
-          { cause: error },
+          {
+            cause: error,
+            context: { path: path.join(current, 'package.json'), cause: errorText(error) },
+          },
         );
       }
     }
@@ -672,7 +677,7 @@ const configTemplateContent = (format, values = {}, secretProvider = false, esm 
   if (secretProvider) {
     if (format === 'json') {
       throw new ConfigInvalidError('Secret-provider configs are only available for js/ts', {
-        format,
+        context: { format },
       });
     }
     return format === 'ts' ? secretConfigTs(values, esm) : secretConfigJs(values, esm);
@@ -698,7 +703,9 @@ const createConfigFile = async (options) => {
       .then(() => true)
       .catch(() => false);
     if (exists) {
-      throw new ConfigFileExistsError('Config file already exists', { path: filepath });
+      throw new ConfigFileExistsError('Config file already exists', {
+        context: { path: filepath },
+      });
     }
   }
   const content = configTemplateContent(

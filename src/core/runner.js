@@ -48,11 +48,7 @@ const withTimeout = async (promise, timeoutMs, name, direction, onTimeout) => {
           Promise.resolve(promise).catch(() => {});
           const timeoutError = new MigrationTimeoutError(
             `Migration ${direction} timed out after ${timeoutMs}ms: ${name}`,
-            {
-              name,
-              direction,
-              timeoutMs,
-            },
+            { context: { name, direction, timeoutMs } },
           );
           // Told, not just abandoned: the caller aborts the context's signal
           // with this error, so a body that watches ctx.signal can stop
@@ -172,14 +168,16 @@ const runMigration = async (params) => {
         `Migration ${direction} succeeded but recording it in the changelog failed: ${name} — ` +
           'its own writes are committed; verify the changelog before re-running',
         {
-          name,
-          direction,
-          phase: 'changelog-write',
-          bodySucceeded: true,
-          durationMs: elapsed,
-          cause: error.message,
+          cause: error,
+          context: {
+            name,
+            direction,
+            phase: 'changelog-write',
+            bodySucceeded: true,
+            durationMs: elapsed,
+            cause: errorText(error),
+          },
         },
-        { cause: error },
       );
     }
 
@@ -203,24 +201,25 @@ const runMigration = async (params) => {
       error.context = { durationMs: elapsed, ...attemptsField, ...error.context };
       throw error;
     }
-    // What the server said, when the driver put its own words over it.
-    const cause = serverErrorOf(error).message;
+    // What the server said, when the driver put its own words over it — redacted.
+    const cause = errorText(error);
     // A standalone deployment refusing the transaction is a topology problem,
     // not a bug in the migration — say so instead of blaming the file.
     if (useTransaction && isTransactionsUnsupported(error)) {
       throw new TransactionsUnsupportedError(
         `Cannot run ${name} in a transaction — this deployment is standalone. ` +
           'Set useTransaction: false, or run against a replica set / mongos.',
-        { name, direction, durationMs: elapsed, ...attemptsField, cause },
-        { cause: error },
+        {
+          cause: error,
+          context: { name, direction, durationMs: elapsed, ...attemptsField, cause },
+        },
       );
     }
     throw new MigrationExecutionFailedError(
       `Migration ${direction} failed: ${name}`,
       // The message is duplicated into context because that is what survives
       // JSON serialization; `cause` keeps the real Error (and its stack).
-      { name, direction, durationMs: elapsed, ...attemptsField, cause },
-      { cause: error },
+      { cause: error, context: { name, direction, durationMs: elapsed, ...attemptsField, cause } },
     );
   } finally {
     if (session) {

@@ -416,7 +416,7 @@ class MigratorKit extends EventEmitter {
     // now would be nobody's — its pool would keep the process alive.
     if (epoch !== this.#connectEpoch) {
       throw new ConnectionFailedError('Disconnected while connecting', {
-        cause: 'disconnect() was called before the connection was opened',
+        context: { cause: 'disconnect() was called before the connection was opened' },
       });
     }
     // A long-lived kit serves overlapping callers (a status probe while a
@@ -461,8 +461,7 @@ class MigratorKit extends EventEmitter {
             `Connected to MongoDB, but could not create the indexes of ` +
               `${config.migrationsCollection} — create them yourself and set ` +
               'ensureIndexes: false, or grant createIndex on it',
-            { cause: errorText(error), phase: 'ensure-indexes' },
-            { cause: error },
+            { cause: error, context: { cause: errorText(error), phase: 'ensure-indexes' } },
           );
         }
         this.#indexesEnsured = true;
@@ -487,11 +486,10 @@ class MigratorKit extends EventEmitter {
       await dangling?.close().catch(() => undefined);
       // Already says what failed, and it was not the connection.
       if (error instanceof ConnectionFailedError) throw error;
-      throw new ConnectionFailedError(
-        'Failed to connect to MongoDB',
-        { cause: errorText(error) },
-        { cause: error },
-      );
+      throw new ConnectionFailedError('Failed to connect to MongoDB', {
+        cause: error,
+        context: { cause: errorText(error) },
+      });
     }
   }
 
@@ -577,7 +575,7 @@ class MigratorKit extends EventEmitter {
     // rejects the overlap — this rejects it before any state is disturbed.
     if (this.#runId) {
       throw new ConfigInvalidError('A run is already in flight on this MigratorKit instance', {
-        runId: this.#runId,
+        context: { runId: this.#runId },
       });
     }
     // One id per run, reused as the lock's owner token and stamped on every
@@ -598,7 +596,7 @@ class MigratorKit extends EventEmitter {
     const stopper = new AbortController();
     this.#abort = (reason) => {
       if (!stopper.signal.aborted) {
-        stopper.abort(new RunAbortedError(reason, { reason }));
+        stopper.abort(new RunAbortedError(reason, { context: { reason } }));
       }
     };
     // Honor a stop that landed before we got here (config load / connect).
@@ -678,7 +676,7 @@ class MigratorKit extends EventEmitter {
    * place would let a later phase overwrite what an earlier one recorded.
    */
   #attachResults(error, results) {
-    if (!(error instanceof MigronautError) || !error.context) return;
+    if (!(error instanceof MigronautError)) return;
     error.context = { ...error.context, results: [...results] };
   }
 
@@ -690,7 +688,7 @@ class MigratorKit extends EventEmitter {
       if (results) this.#attachResults(reason, results);
       throw reason;
     }
-    throw new RunAbortedError('Run aborted', results ? { results: [...results] } : {});
+    throw new RunAbortedError('Run aborted', { context: results ? { results: [...results] } : {} });
   }
 
   /**
@@ -775,7 +773,7 @@ class MigratorKit extends EventEmitter {
     const relative = path.relative(dir, resolved);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
       throw new MigrationInvalidNameError('Migration name escapes the migrations directory', {
-        name,
+        context: { name },
       });
     }
     return resolved;
@@ -854,7 +852,7 @@ class MigratorKit extends EventEmitter {
       try {
         await fs.access(filepath);
       } catch {
-        throw new MigrationFileNotFoundError('Migration file not found', { filename });
+        throw new MigrationFileNotFoundError('Migration file not found', { context: { filename } });
       }
       return [filename];
     }
@@ -884,7 +882,7 @@ class MigratorKit extends EventEmitter {
       throw new OutOfOrderMigrationError(
         `${late.length} pending migration(s) sort before the newest applied one ` +
           `(${newestApplied}): ${late.join(', ')} — apply deliberately with onOutOfOrder: 'warn' or 'allow'`,
-        { names: late, newestApplied },
+        { context: { names: late, newestApplied } },
       );
     }
     this.#logger.warn(
@@ -1294,7 +1292,7 @@ class MigratorKit extends EventEmitter {
       throw new MigrationFileNotFoundError(
         'Not a migration of the sequence — a dotfile, a declaration file or an extension ' +
           'outside fileExtensions',
-        { filename },
+        { context: { filename } },
       );
     }
     // An already-applied target is exempt (unless forced): a duplicate job
@@ -1311,7 +1309,7 @@ class MigratorKit extends EventEmitter {
         throw new ChecksumMismatchError(
           `${filename} is not the file this run was planned with — this process has another ` +
             'version of it (roll workers out before the producers that enqueue)',
-          { name: filename, expected: options.checksum, actual, planned: true },
+          { context: { name: filename, expected: options.checksum, actual, planned: true } },
         );
       }
     }
@@ -1349,9 +1347,7 @@ class MigratorKit extends EventEmitter {
             const mismatch = existing !== null && existing.checksum !== checksum;
             if (mismatch && config.strict) {
               throw new ChecksumMismatchError(`Checksum mismatch for ${name}`, {
-                name,
-                expected: existing?.checksum,
-                actual: checksum,
+                context: { name, expected: existing?.checksum, actual: checksum },
               });
             }
             if (mismatch) {
@@ -1396,7 +1392,7 @@ class MigratorKit extends EventEmitter {
           }
           throw new BackgroundPendingError(
             `${name} requires background migration(s) that have not completed: ${list}`,
-            { migration: name, waitsFor: waiting },
+            { context: { migration: name, waitsFor: waiting } },
           );
         }
 
@@ -1469,9 +1465,7 @@ class MigratorKit extends EventEmitter {
       }
       if (record.checksum !== actual) {
         throw new ChecksumMismatchError(`Checksum mismatch for ${record.name}`, {
-          name: record.name,
-          expected: record.checksum,
-          actual,
+          context: { name: record.name, expected: record.checksum, actual },
         });
       }
     });
@@ -1486,11 +1480,10 @@ class MigratorKit extends EventEmitter {
     try {
       await hook(...args);
     } catch (error) {
-      throw new HookFailedError(
-        `The ${hookName} hook failed`,
-        { hook: hookName, cause: errorText(error) },
-        { cause: error },
-      );
+      throw new HookFailedError(`The ${hookName} hook failed`, {
+        cause: error,
+        context: { hook: hookName, cause: errorText(error) },
+      });
     }
   }
 
@@ -1526,7 +1519,7 @@ class MigratorKit extends EventEmitter {
     if (filename) {
       const record = await changelog.getByName(db, filename);
       if (!record || record.status !== 'applied') {
-        throw new NotAppliedError('Migration is not applied', { filename });
+        throw new NotAppliedError('Migration is not applied', { context: { filename } });
       }
       records = [record];
     } else if (options.steps !== undefined) {
@@ -1543,7 +1536,7 @@ class MigratorKit extends EventEmitter {
       // covered by indexes instead of filtering the full history client-side.
       const targetRecord = await changelog.getByName(db, options.to);
       if (!targetRecord || targetRecord.status !== 'applied') {
-        throw new NotAppliedError('Migration is not applied', { to: options.to });
+        throw new NotAppliedError('Migration is not applied', { context: { to: options.to } });
       }
       records = await changelog.getAppliedAfter(db, options.to);
     } else {
@@ -1649,7 +1642,7 @@ class MigratorKit extends EventEmitter {
     );
     throw new IrreversibleMigrationError(
       `Cannot roll back forward-only migration(s): ${names.join(', ')}`,
-      { names },
+      { context: { names } },
     );
   }
 
@@ -1693,7 +1686,7 @@ class MigratorKit extends EventEmitter {
           // The revert already happened — after a failed re-apply that is the
           // single most important fact, so the down rows must survive into the
           // error a `--json` consumer sees.
-          if (error instanceof MigronautError && error.context) {
+          if (error instanceof MigronautError) {
             const existing = Array.isArray(error.context.results) ? error.context.results : [];
             this.#attachResults(error, [...downResults, ...existing]);
           }
@@ -2336,7 +2329,7 @@ class MigratorKit extends EventEmitter {
       if (this.#bookkeepingNames().includes(collection)) {
         throw new MigrationInvalidExportError(
           `Background migration ${name} targets "${collection}", one of migronaut's own collections`,
-          { name, collection },
+          { context: { name, collection } },
         );
       }
       const config = this.#config;
@@ -2382,7 +2375,7 @@ class MigratorKit extends EventEmitter {
       if (!sequence.has(required)) {
         throw new MigrationInvalidExportError(
           `${name} requires ${required}, which is not a migration of the sequence`,
-          { name, requires: required },
+          { context: { name, requires: required } },
         );
       }
       // Through the module cache: this runs for every file that requires one.
@@ -2395,7 +2388,7 @@ class MigratorKit extends EventEmitter {
         throw new MigrationInvalidExportError(
           `${name} requires ${required}, which is not a background migration — requires ` +
             'waits for background migrations only (regular ones already run in order)',
-          { name, requires: required },
+          { context: { name, requires: required } },
         );
       }
     }
@@ -2599,7 +2592,7 @@ class MigratorKit extends EventEmitter {
       throw new ConfigInvalidError(
         'The live drift watcher needs change streams — a replica set or a sharded cluster; ' +
           "keep backgroundDrift: 'poll' on a standalone server",
-        { key: 'backgroundDrift' },
+        { context: { key: 'backgroundDrift' } },
       );
     }
     const config = this.#config;
@@ -2654,7 +2647,9 @@ class MigratorKit extends EventEmitter {
     await this.#backgroundReady();
     const onDrift = options.onDrift ?? this.#config.backgroundOnDrift;
     if (onDrift !== 'reopen' && onDrift !== 'report') {
-      throw new ConfigInvalidError("onDrift must be 'reopen' or 'report'", { onDrift });
+      throw new ConfigInvalidError("onDrift must be 'reopen' or 'report'", {
+        context: { onDrift },
+      });
     }
     // With `backgroundDrift: 'stream'` the poll is the safety net: it leaves
     // alone a collection whose watcher is streaming and alive.
@@ -2699,7 +2694,9 @@ class MigratorKit extends EventEmitter {
         reload: this.#config.reloadMigrations,
       }));
     if (loaded.kind !== 'background') {
-      throw new MigrationInvalidExportError(`${name} is not a background migration`, { name });
+      throw new MigrationInvalidExportError(`${name} is not a background migration`, {
+        context: { name },
+      });
     }
     const { spec, fns } = await this.#backgroundSpec(name, loaded, { tolerant });
     return { spec, fns, checksum: await this.#cachedChecksum(filepath) };
@@ -2806,7 +2803,7 @@ class MigratorKit extends EventEmitter {
       }
       throw new BackgroundPendingError(
         `Background migration ${name} cannot run inline: it waits for ${status.waitsFor.join(', ')}`,
-        { migration: name, waitsFor },
+        { context: { migration: name, waitsFor } },
       );
     }
   }
@@ -2838,7 +2835,7 @@ class MigratorKit extends EventEmitter {
     const state = await this.#backgroundStore().get(name);
     if (state === null) {
       throw new NotAppliedError(`Background migration ${name} is not registered — run up first`, {
-        migration: name,
+        context: { migration: name },
       });
     }
     return state;
@@ -2887,7 +2884,9 @@ class MigratorKit extends EventEmitter {
   async runBackground(name, { signal, sliceMs, untilDone = true, concurrency = 1 } = {}) {
     await this.#backgroundReady(name, { lanes: true });
     if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
-      throw new ConfigInvalidError('concurrency must be a positive integer', { concurrency });
+      throw new ConfigInvalidError('concurrency must be a positive integer', {
+        context: { concurrency },
+      });
     }
     if (sliceMs !== undefined) assertSliceMs(sliceMs);
     return drive(this.#backgroundHost(), name, { signal, sliceMs, untilDone, concurrency });
@@ -3017,7 +3016,7 @@ class MigratorKit extends EventEmitter {
       if (loaded.spec.mode !== 'step') {
         throw new ConfigInvalidError(
           `${name} is declarative — dry-run it on a sample (sample, first), not by steps`,
-          { migration: name },
+          { context: { migration: name } },
         );
       }
       // From where the background migration is, unless asked to start over.

@@ -82,7 +82,7 @@ const pendingIn = (sequence, appliedNames, before) => {
  */
 const truncateAtTarget = (pending, allFiles, to) => {
   if (!allFiles.includes(to)) {
-    throw new MigrationFileNotFoundError('Migration file not found', { to });
+    throw new MigrationFileNotFoundError('Migration file not found', { context: { to } });
   }
   const kept = [];
   for (const file of pending) {
@@ -136,7 +136,7 @@ const blockedError = (subject, what, context) => {
   const { blockedBy } = context;
   return new MigrationBlockedError(
     `${subject} is blocked: ${blockedBy.length} ${what}: ${blockedBy.join(', ')}`,
-    context,
+    { context },
   );
 };
 

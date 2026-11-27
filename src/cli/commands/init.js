@@ -34,7 +34,7 @@ const registerInit = (program) => {
       }
       if (opts.format !== undefined && !FORMATS.has(opts.format)) {
         throw new ConfigInvalidError("--format must be 'js', 'ts' or 'json'", {
-          format: opts.format,
+          context: { format: opts.format },
         });
       }
       const format = resolveFormat(opts);

@@ -161,8 +161,7 @@ class MigrationLock {
         // turn "the lock is held" into a driver error.
         const holder = await collection.findOne({ _id: this.#id }).catch(() => null);
         throw new LockAlreadyHeldError(`${sentence(this.#label)} is already held`, {
-          holder: toLockInfo(holder) ?? undefined,
-          ttlMs: this.ttlMs,
+          context: { holder: toLockInfo(holder) ?? undefined, ttlMs: this.ttlMs },
         });
       }
       throw error;
@@ -195,8 +194,7 @@ class MigrationLock {
     }
     if (!current || current.owner !== owner || current.nonce !== nonce) {
       throw new LockAlreadyHeldError(`${sentence(this.#label)} is already held`, {
-        holder: toLockInfo(current) ?? undefined,
-        ttlMs: this.ttlMs,
+        context: { holder: toLockInfo(current) ?? undefined, ttlMs: this.ttlMs },
       });
     }
     this.#owner = owner;
@@ -277,11 +275,10 @@ class MigrationLock {
       this.#owner = undefined;
       this.#nonce = undefined;
     } catch (error) {
-      throw new LockReleaseFailedError(
-        `Failed to release ${this.#label}`,
-        { error: errorText(error) },
-        { cause: error },
-      );
+      throw new LockReleaseFailedError(`Failed to release ${this.#label}`, {
+        cause: error,
+        context: { cause: errorText(error) },
+      });
     }
   }
 }
@@ -351,7 +348,9 @@ const runWithLock = async (lock, options, fn) => {
     });
     options.onLockLostEvent?.(reason);
     if (abortOnLoss && !controller.signal.aborted) {
-      controller.abort(new LockLostError(`Lost the ${label} mid-run`, { reason, aborted: true }));
+      controller.abort(
+        new LockLostError(`Lost the ${label} mid-run`, { context: { reason, aborted: true } }),
+      );
     }
   };
 

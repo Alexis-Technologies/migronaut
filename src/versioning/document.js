@@ -31,7 +31,7 @@ const {
 const assertFieldName = (key, name) => {
   if (name === null) return;
   const issue = fieldNameIssue(name);
-  if (issue) throw new ConfigInvalidError(`${key} ${issue}`, { key });
+  if (issue) throw new ConfigInvalidError(`${key} ${issue}`, { context: { key } });
 };
 
 /**
@@ -47,7 +47,9 @@ const resolveFieldNames = ({ field, revisionField, revision } = {}) => {
   assertFieldName('field', versionName);
   assertFieldName('revisionField', revisionName);
   if (versionName === revisionName) {
-    throw new ConfigInvalidError('field and revisionField must differ', { key: 'revisionField' });
+    throw new ConfigInvalidError('field and revisionField must differ', {
+      context: { key: 'revisionField' },
+    });
   }
   return { field: versionName, revisionField: revisionName };
 };
@@ -97,7 +99,9 @@ const assertPlainDocument = (doc) => {
 const resolveRevisionField = (revisionField) => {
   const name = revisionField ?? VERSIONING_DEFAULTS.revisionField;
   const issue = fieldNameIssue(name);
-  if (issue) throw new ConfigInvalidError(`revisionField ${issue}`, { key: 'revisionField' });
+  if (issue) {
+    throw new ConfigInvalidError(`revisionField ${issue}`, { context: { key: 'revisionField' } });
+  }
   return name;
 };
 
@@ -106,7 +110,7 @@ const nextRevision = (revision) => (toCount(revision) ?? 0) + 1;
 
 const assertCount = (value, what) => {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new ConfigInvalidError(`${what} must be an integer ≥ 0`, { [what]: value });
+    throw new ConfigInvalidError(`${what} must be an integer ≥ 0`, { context: { [what]: value } });
   }
 };
 
@@ -173,8 +177,7 @@ const topLevelKeyIssue = (key) => {
 
 const invalidShape = (detail, extra) => {
   return new ShapeVersionError(`The transformation returned ${detail}`, {
-    reason: 'invalid',
-    ...extra,
+    context: { reason: 'invalid', ...extra },
   });
 };
 
@@ -237,7 +240,7 @@ const refuseTouch = (fields, name, role) => {
   if (name !== null && fields.has(name)) {
     throw new ConfigInvalidError(
       `The update must not write the ${role} field "${name}" — migronaut sets it`,
-      { field: name },
+      { context: { field: name } },
     );
   }
 };

@@ -119,7 +119,7 @@ const runSandbox = async (options, fn) => {
     throw new TransactionsUnsupportedError(
       'A dry run executes in a transaction that is always aborted — it needs a replica set or ' +
         'a mongos',
-      { sandbox: true },
+      { context: { sandbox: true } },
     );
   }
   for (let attempt = 1; ; attempt++) {
@@ -215,18 +215,20 @@ const DEADLINE = Symbol('deadline');
 const refuse = (state, method, reason, collection) => {
   const entry = { method, reason, ...(collection !== undefined ? { collection } : {}) };
   state.report.refusals.push(entry);
-  return new SandboxRefusedError(`The dry run refused ${method}: ${reason}`, entry);
+  return new SandboxRefusedError(`The dry run refused ${method}: ${reason}`, { context: entry });
 };
 
 /** Run `work` after every earlier operation — one at a time in one transaction */
 const serialized = (state, work) => {
   const run = state.queue.then(() => {
     if (Date.now() > state.deadline) {
-      throw new RunAbortedError('the dry run reached its deadline', { reason: 'deadline' });
+      throw new RunAbortedError('the dry run reached its deadline', {
+        context: { reason: 'deadline' },
+      });
     }
     if (state.failed !== undefined) {
       throw new BackgroundFailedError(`the transaction was aborted by ${errorText(state.failed)}`, {
-        reason: 'aborted',
+        context: { reason: 'aborted' },
       });
     }
     return work();

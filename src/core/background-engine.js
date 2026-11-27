@@ -302,7 +302,7 @@ const applyBatch = async (
     }
     if (abortOnConflict) {
       throw new BackgroundConflictError('A document changed under the transactional batch', {
-        reason: 'write-conflict',
+        context: { reason: 'write-conflict' },
       });
     }
     // Some writes matched nothing: see what those documents are now.
@@ -365,8 +365,7 @@ const applyBatch = async (
 /** A document that fails a strict (transactional) batch — caught by transactionalBatch */
 const documentError = (entry) => {
   return new BackgroundFailedError(`A document failed: ${entry.error}`, {
-    reason: 'document',
-    document: entry,
+    context: { reason: 'document', document: entry },
   });
 };
 
@@ -833,9 +832,11 @@ const processPartition = async (job, ctx) => {
               `migrated, more than maxDocumentErrors (${spec.maxDocumentErrors}) — last: ` +
               result.errors[result.errors.length - 1].error,
             {
-              migration: job.name,
-              failedDocuments: total,
-              maxDocumentErrors: spec.maxDocumentErrors,
+              context: {
+                migration: job.name,
+                failedDocuments: total,
+                maxDocumentErrors: spec.maxDocumentErrors,
+              },
             },
           );
           addCounters(counters, batchCounts);

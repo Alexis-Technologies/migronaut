@@ -67,7 +67,7 @@ const runImport = async (deps, options, signal) => {
   if (!options.force && !dryRun && existing.length > 0) {
     throw new ImportTargetNotEmptyError(
       `Target collection "${target}" already has ${existing.length} record(s) — re-run with force to proceed`,
-      { target, existing: existing.length },
+      { context: { target, existing: existing.length } },
     );
   }
 
@@ -145,7 +145,7 @@ const runImport = async (deps, options, signal) => {
         'a --force re-run is idempotent and will resume',
       deps.fields({ source, target, imported: written, total: records.length }),
     );
-    if (error instanceof MigronautError && error.context) {
+    if (error instanceof MigronautError) {
       error.context = { ...error.context, imported: written, total: records.length };
     }
     throw error;

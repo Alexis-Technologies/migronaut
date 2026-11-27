@@ -63,7 +63,7 @@ const splitOptions = (options = {}) => {
 
 const assertCount = (value, what) => {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new ConfigInvalidError(`${what} must be an integer ≥ 0`, { [what]: value });
+    throw new ConfigInvalidError(`${what} must be an integer ≥ 0`, { context: { [what]: value } });
   }
 };
 
@@ -75,7 +75,7 @@ const expectedOf = (expected) => {
   const count = toCount(expected);
   if (count === null) {
     throw new ConfigInvalidError('expectedRevision must be an integer ≥ 0', {
-      expectedRevision: typeof expected,
+      context: { expectedRevision: typeof expected },
     });
   }
   return count;
@@ -152,7 +152,7 @@ const conflictError = async (collection, filter, names, expected, { verify, driv
     }
   }
   const what = conflictDetail(context, expected);
-  return new RevisionConflictError(`Revision conflict: the document ${what}`, context);
+  return new RevisionConflictError(`Revision conflict: the document ${what}`, { context });
 };
 
 /**
@@ -299,7 +299,7 @@ const backoffMs = (ms) => (ms > 0 ? Math.min(ms, MAX_BACKOFF_MS) : 0);
 const retryOnConflict = async (fn, { attempts = 3, backoff, signal } = {}) => {
   if (typeof fn !== 'function') throw new ConfigInvalidError('retryOnConflict needs a function');
   if (!Number.isSafeInteger(attempts) || attempts < 1) {
-    throw new ConfigInvalidError('attempts must be an integer ≥ 1', { attempts });
+    throw new ConfigInvalidError('attempts must be an integer ≥ 1', { context: { attempts } });
   }
   const delay = typeof backoff === 'function' ? backoff : jitter(backoff);
   for (let attempt = 0; ; attempt++) {

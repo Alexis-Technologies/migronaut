@@ -382,7 +382,7 @@ describe('background lane jobs', () => {
   it('should back off after a failed slice, then give up after maxLaneRetries', async () => {
     const kit = backgroundKit({
       runBackgroundSlice: mock.fn(async () => {
-        throw new LockLostError('lease lost', {});
+        throw new LockLostError('lease lost');
       }),
     });
     const processor = createBackgroundProcessor({ kit, queue: fakeQueue(), maxLaneRetries: 2 });

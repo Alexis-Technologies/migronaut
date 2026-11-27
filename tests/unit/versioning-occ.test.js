@@ -270,7 +270,7 @@ describe('findOneAndUpdateWithRevision', () => {
 });
 
 describe('retryOnConflict', () => {
-  const conflictError = (reason) => new RevisionConflictError('x', { reason });
+  const conflictError = (reason) => new RevisionConflictError('x', { context: { reason } });
 
   it('should retry conflicts up to the attempt budget', async () => {
     const waits = [];

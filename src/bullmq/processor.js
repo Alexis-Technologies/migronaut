@@ -217,7 +217,7 @@ const userlandOverflowRow = (dropped, limit) => {
 const assertUserlandLogRows = (value) => {
   if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
     throw new ConfigInvalidError('userlandLogRows must be an integer of at least 0', {
-      userlandLogRows: value,
+      context: { userlandLogRows: value },
     });
   }
 };
@@ -316,10 +316,12 @@ const resolveProcessorOptions = (options) => {
     throw new ConfigInvalidError('kit must be a MigratorKit instance');
   }
   if (typeof ordered !== 'boolean') {
-    throw new ConfigInvalidError('ordered must be a boolean', { ordered });
+    throw new ConfigInvalidError('ordered must be a boolean', { context: { ordered } });
   }
   if (!isObjectLike(lockWait)) {
-    throw new ConfigInvalidError('lockWait must be an object', { lockWait: typeof lockWait });
+    throw new ConfigInvalidError('lockWait must be an object', {
+      context: { lockWait: typeof lockWait },
+    });
   }
   // Unlike runMigrations, waiting is the default: nothing is blocked on this
   // job, and the budget only burns while the lock's holder is stalled.
@@ -341,7 +343,7 @@ const assertBackgroundLink = (background) => {
   }
   for (const key of Object.keys(background)) {
     if (key !== 'queue' && key !== 'jobOptions' && key !== 'stallMs') {
-      throw new ConfigInvalidError(`background.${key} is not an option here`, { key });
+      throw new ConfigInvalidError(`background.${key} is not an option here`, { context: { key } });
     }
   }
   assertBackgroundJobOptions(background.jobOptions);
@@ -906,9 +908,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
       reason,
     });
     const requeued = new RunAbortedError(`Returned to the queue: ${reason}`, {
-      reason,
-      requeued: true,
-      ...jobIds(ctx),
+      context: { reason, requeued: true, ...jobIds(ctx) },
     });
     requeued.name = WAITING_ERROR_NAME;
     return requeued;
@@ -1012,7 +1012,7 @@ const createMigrationProcessor = (options = {}, internals = {}) => {
    */
   processor.shutdown = (reason = 'Migration worker shutting down') => {
     if (!shutdownController.signal.aborted) {
-      shutdownController.abort(new RunAbortedError(reason, { reason }));
+      shutdownController.abort(new RunAbortedError(reason, { context: { reason } }));
     }
   };
 

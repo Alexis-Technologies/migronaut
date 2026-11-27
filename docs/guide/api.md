@@ -432,7 +432,9 @@ All public types are exported from the package — `MigronautConfig`, `Migration
 
 ## Errors
 
-Every error extends `MigronautError`, which carries a typed `code` and an optional `context`:
+Every error extends `MigronautError`, which carries a typed `code` and a `context` (`{}` when
+there is nothing to add), plus `cause` when it wraps another error. Each class is constructed
+as `Error` is, `new LockLostError(message, { cause, context })`:
 
 ```ts
 import { MigronautError } from '@alexify/migronaut';

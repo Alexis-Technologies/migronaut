@@ -2918,41 +2918,51 @@ export function createLogger(stream?: NodeJS.WritableStream, level?: LogLevel): 
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
-/** Construction options shared by every migronaut error — `cause` keeps the wrapped Error */
+/**
+ * The second argument of every migronaut error, as `Error` takes one:
+ * `new LockLostError(message, { cause, context })`. Each subclass sets its own
+ * `code`; only {@link MigronautError} itself reads one from the options.
+ */
 export interface MigronautErrorOptions {
+  /** The error this one wraps — set only when given, so `error.cause.stack` points where it failed */
   cause?: unknown;
+  /** Plain, JSON-safe data about the failure — `error.context`, `{}` when not given */
+  context?: Record<string, unknown>;
 }
 
-/** Base error for all migronaut failures. Carries a typed code and context */
+/**
+ * Base error for all migronaut failures. Every instance carries a typed `code`
+ * and a `context` (`{}` when nothing was given), and `cause` when it wraps
+ * another error.
+ */
 export class MigronautError extends Error {
   readonly code: MigronautErrorCode;
-  readonly context?: Record<string, unknown>;
-  constructor(
-    code: MigronautErrorCode,
-    message: string,
-    context?: Record<string, unknown>,
-    options?: MigronautErrorOptions,
-  );
+  readonly context: Record<string, unknown>;
+  constructor(message: string, options: MigronautErrorOptions & { code: MigronautErrorCode });
 }
 
 /** Thrown when a lock is already held by another process within its TTL */
 export class LockAlreadyHeldError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'LOCK_ALREADY_HELD';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when releasing a lock fails */
 export class LockReleaseFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'LOCK_RELEASE_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a file's checksum differs from the one recorded at apply time */
 export class ChecksumMismatchError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'CHECKSUM_MISMATCH';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a referenced migration file does not exist on disk */
 export class MigrationFileNotFoundError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'MIGRATION_FILE_NOT_FOUND';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -2961,32 +2971,38 @@ export class MigrationFileNotFoundError extends MigronautError {
  * directory (path traversal) when joined into a filesystem path.
  */
 export class MigrationInvalidNameError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'MIGRATION_INVALID_NAME';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a migration file does not export valid up()/down() functions */
 export class MigrationInvalidExportError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'MIGRATION_INVALID_EXPORT';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a migration's up() or down() throws during execution */
 export class MigrationExecutionFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'MIGRATION_EXECUTION_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when the merged configuration fails validation */
 export class ConfigInvalidError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'CONFIG_INVALID';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when creating a config file that already exists without `--force` */
 export class ConfigFileExistsError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'CONFIG_FILE_EXISTS';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when connecting to MongoDB fails */
 export class ConnectionFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'CONNECTION_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -2995,7 +3011,8 @@ export class ConnectionFailedError extends MigronautError {
  * `onLockLost: 'warn'` to downgrade this to a warning.
  */
 export class LockLostError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'LOCK_LOST';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3003,7 +3020,8 @@ export class LockLostError extends MigronautError {
  * or a SIGINT/SIGTERM. `context.results` lists what was applied first.
  */
 export class RunAbortedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'RUN_ABORTED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3011,7 +3029,8 @@ export class RunAbortedError extends MigronautError {
  * own work keeps running, but the run stops rather than hanging.
  */
 export class MigrationTimeoutError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'MIGRATION_TIMEOUT';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3019,32 +3038,38 @@ export class MigrationTimeoutError extends MigronautError {
  * transactions (a standalone server — they need a replica set or mongos).
  */
 export class TransactionsUnsupportedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'TRANSACTIONS_UNSUPPORTED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a user-supplied lifecycle hook throws */
 export class HookFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'HOOK_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when `create` would overwrite an existing migration file */
 export class MigrationFileExistsError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'MIGRATION_FILE_EXISTS';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when attempting to revert a migration that was never applied */
 export class NotAppliedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'NOT_APPLIED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when `migronaut import` targets a non-empty changelog without `--force` */
 export class ImportTargetNotEmptyError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'IMPORT_TARGET_NOT_EMPTY';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when attempting to roll back a forward-only (imported or baselined) migration */
 export class IrreversibleMigrationError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'MIGRATION_IRREVERSIBLE';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3053,7 +3078,8 @@ export class IrreversibleMigrationError extends MigronautError {
  * branch. `context.names` lists the late arrivals.
  */
 export class OutOfOrderMigrationError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'MIGRATION_OUT_OF_ORDER';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3063,7 +3089,8 @@ export class OutOfOrderMigrationError extends MigronautError {
  * `context.blockedBy` (the migrations that must go first).
  */
 export class MigrationBlockedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'MIGRATION_BLOCKED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3073,7 +3100,8 @@ export class MigrationBlockedError extends MigronautError {
  * is untrusted input. `context.jobId`, `context.issue`.
  */
 export class QueueJobInvalidError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'QUEUE_JOB_INVALID';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3085,7 +3113,8 @@ export class QueueJobInvalidError extends MigronautError {
  * `migration`, `direction` and `timedOut`.
  */
 export class QueueJobFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'QUEUE_JOB_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3113,7 +3142,8 @@ export class QueueJobFailedError extends MigronautError {
  * `context.converge` is the {@link ConvergeResult} so far.
  */
 export class ConvergeFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'CONVERGE_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3125,8 +3155,9 @@ export class ConvergeFailedError extends MigronautError {
  * caller held. The filter is never copied into the error. Experimental.
  */
 export class RevisionConflictError extends MigronautError {
-  readonly context?: RevisionConflictContext;
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'REVISION_CONFLICT';
+  readonly context: RevisionConflictContext;
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** {@link RevisionConflictError}'s `context` — what a caller decides on */
@@ -3147,7 +3178,8 @@ export interface RevisionConflictContext {
  * `context.version` and `context.current`. Experimental.
  */
 export class ShapeVersionError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'SHAPE_VERSION_UNSUPPORTED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3156,7 +3188,8 @@ export class ShapeVersionError extends MigronautError {
  * run; `context.waitsFor` lists what it waits for. Experimental.
  */
 export class BackgroundPendingError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'BACKGROUND_PENDING';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3164,7 +3197,8 @@ export class BackgroundPendingError extends MigronautError {
  * it and `context.lastError` says what happened last. Experimental.
  */
 export class BackgroundFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'BACKGROUND_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3173,7 +3207,8 @@ export class BackgroundFailedError extends MigronautError {
  * Experimental.
  */
 export class BackgroundConflictError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'BACKGROUND_CONFLICT';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3182,5 +3217,6 @@ export class BackgroundConflictError extends MigronautError {
  * and `context.reason` the rule. Experimental.
  */
 export class SandboxRefusedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'SANDBOX_REFUSED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }

@@ -41,6 +41,7 @@ import {
   type MigronautConfig,
   type MigronautCounter,
   type MigronautErrorCode,
+  type MigronautErrorOptions,
   type MigronautHistogram,
   type MigronautLogger,
   type MigronautMeter,
@@ -111,7 +112,7 @@ expectAssignable<Partial<MigronautConfig>>({ logger: pino() });
 expectAssignable<Partial<MigronautConfig>>({ logger: null });
 
 // Error hierarchy
-expectAssignable<MigronautError>(new ChecksumMismatchError('mismatch', { name: 'x' }));
+expectAssignable<MigronautError>(new ChecksumMismatchError('mismatch', { context: { name: 'x' } }));
 expectAssignable<MigronautError>(new LockLostError('lock lost'));
 expectAssignable<MigronautError>(new RunAbortedError('stopped'));
 expectAssignable<MigronautError>(new HookFailedError('hook failed'));
@@ -353,9 +354,25 @@ expectError(createLogger(process.stdout, 'chatty'));
 
 expectAssignable<MigronautErrorCode>('TRANSACTIONS_UNSUPPORTED');
 expectAssignable<MigronautError>(new TransactionsUnsupportedError('standalone'));
-// The 4th constructor parameter carries the wrapped cause.
-new MigronautError('CONFIG_INVALID', 'bad', { issues: [] }, { cause: new Error('inner') });
-new ChecksumMismatchError('mismatch', { name: 'x' }, { cause: new Error('inner') });
+// Every class takes (message, options): the wrapped cause and the context travel in the
+// options; only the base class takes a code there, each subclass carries its own.
+new MigronautError('bad', {
+  code: 'CONFIG_INVALID',
+  cause: new Error('inner'),
+  context: { issues: [] },
+});
+new ChecksumMismatchError('mismatch', { cause: new Error('inner'), context: { name: 'x' } });
+const errorOptions: MigronautErrorOptions = { cause: new Error('inner'), context: { name: 'x' } };
+expectType<'LOCK_LOST'>(new LockLostError('lost', errorOptions).code);
+expectError(new MigronautError('bad'));
+expectError(new MigronautError('CONFIG_INVALID', 'bad'));
+expectError(new ChecksumMismatchError('mismatch', { name: 'x' }));
+expectError(new ChecksumMismatchError('mismatch', {}, { cause: new Error('inner') }));
+expectError(new ChecksumMismatchError('mismatch', { code: 'CONFIG_INVALID' }));
+expectType<'CHECKSUM_MISMATCH'>(new ChecksumMismatchError('mismatch').code);
+expectType<MigronautErrorCode>(new MigronautError('bad', { code: 'CONFIG_INVALID' }).code);
+expectType<Record<string, unknown>>(new TransactionsUnsupportedError('standalone').context);
+expectType<unknown>(new TransactionsUnsupportedError('standalone').cause);
 
 // ─── StatusRow markers and audit-trail surface ───────────────────────────────
 
@@ -393,7 +410,9 @@ declare const dryRow: StatusRow;
 expectType<string | undefined>(dryRow.checksum);
 expectError(kit.up('0003-c.ts', { ordered: 'yes' }));
 expectAssignable<MigronautError>(
-  new MigrationBlockedError('blocked', { name: 'x', direction: 'up', blockedBy: ['a'] }),
+  new MigrationBlockedError('blocked', {
+    context: { name: 'x', direction: 'up', blockedBy: ['a'] },
+  }),
 );
 expectAssignable<MigronautError>(new QueueJobInvalidError('bad payload'));
 expectAssignable<MigronautError>(new QueueJobFailedError('job failed'));
@@ -630,7 +649,10 @@ kit.on('converge:wait', (event) => {
 });
 
 expectAssignable<MigronautErrorCode>('CONVERGE_FAILED');
-expectType<MigronautError>(new ConvergeFailedError('refused', { phase: 'plan' }));
+expectAssignable<MigronautError>(
+  new ConvergeFailedError('refused', { context: { phase: 'plan' } }),
+);
+expectType<'CONVERGE_FAILED'>(new ConvergeFailedError('refused').code);
 expectType<number>(EXIT_CODES.CONVERGE_FAILED);
 expectType<number>(EXIT_CODES.COLLECTIONS_DRIFT);
 
@@ -646,15 +668,29 @@ for (const code of [
   expectAssignable<MigronautErrorCode>(code);
   expectType<number>(EXIT_CODES[code]);
 }
-expectAssignable<MigronautError>(new RevisionConflictError('conflict', { reason: 'conflict' }));
-expectType<'conflict' | 'not-found' | 'unknown' | undefined>(
-  new RevisionConflictError('conflict').context?.reason,
+expectAssignable<MigronautError>(
+  new RevisionConflictError('conflict', { context: { reason: 'conflict' } }),
 );
-expectType<MigronautError>(new ShapeVersionError('newer', { reason: 'newer' }));
-expectType<MigronautError>(new BackgroundPendingError('pending', { waitsFor: [] }));
-expectType<MigronautError>(new BackgroundFailedError('failed'));
-expectType<MigronautError>(new BackgroundConflictError('conflict', { action: 'pause' }));
-expectType<MigronautError>(new SandboxRefusedError('refused', { method: 'createIndex' }));
+expectType<'conflict' | 'not-found' | 'unknown'>(
+  new RevisionConflictError('conflict').context.reason,
+);
+expectAssignable<MigronautError>(new ShapeVersionError('newer', { context: { reason: 'newer' } }));
+expectAssignable<MigronautError>(
+  new BackgroundPendingError('pending', { context: { waitsFor: [] } }),
+);
+expectAssignable<MigronautError>(new BackgroundFailedError('failed'));
+expectAssignable<MigronautError>(
+  new BackgroundConflictError('conflict', { context: { action: 'pause' } }),
+);
+expectAssignable<MigronautError>(
+  new SandboxRefusedError('refused', { context: { method: 'createIndex' } }),
+);
+expectType<'REVISION_CONFLICT'>(new RevisionConflictError('conflict').code);
+expectType<'SHAPE_VERSION_UNSUPPORTED'>(new ShapeVersionError('newer').code);
+expectType<'BACKGROUND_PENDING'>(new BackgroundPendingError('pending').code);
+expectType<'BACKGROUND_FAILED'>(new BackgroundFailedError('failed').code);
+expectType<'BACKGROUND_CONFLICT'>(new BackgroundConflictError('conflict').code);
+expectType<'SANDBOX_REFUSED'>(new SandboxRefusedError('refused').code);
 
 // ─── Collection versioning ───────────────────────────────────────────────────
 expectAssignable<CollectionDefinition>({ name: 'orders', versioning: { current: 2 } });

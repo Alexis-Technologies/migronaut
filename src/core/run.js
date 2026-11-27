@@ -54,10 +54,12 @@ const runMigrations = async (config = {}, options = {}) => {
 
   assertRunFlags(options);
   if (onKit !== undefined && typeof onKit !== 'function') {
-    throw new ConfigInvalidError('onKit must be a function', { onKit: typeof onKit });
+    throw new ConfigInvalidError('onKit must be a function', { context: { onKit: typeof onKit } });
   }
   if (signal !== undefined && !(signal instanceof AbortSignal)) {
-    throw new ConfigInvalidError('signal must be an AbortSignal', { signal: typeof signal });
+    throw new ConfigInvalidError('signal must be an AbortSignal', {
+      context: { signal: typeof signal },
+    });
   }
 
   // Validated before anything connects — see assertLockWaitOptions.
@@ -88,8 +90,7 @@ const runMigrations = async (config = {}, options = {}) => {
   try {
     if (signal?.aborted) {
       throw new RunAbortedError('Aborted before the run started', {
-        reason: errorText(signal.reason ?? 'aborted'),
-        results: [],
+        context: { reason: errorText(signal.reason ?? 'aborted'), results: [] },
       });
     }
     await kit.connect();

@@ -102,7 +102,7 @@ const MAX_SLICE_MS = settingRow(INTEGER_SETTINGS, 'sliceMs')[2];
 const assertSliceMs = (sliceMs) => {
   if (!Number.isSafeInteger(sliceMs) || sliceMs < 1 || sliceMs > MAX_SLICE_MS) {
     throw new ConfigInvalidError(`sliceMs must be an integer from 1 to ${MAX_SLICE_MS}`, {
-      sliceMs,
+      context: { sliceMs },
     });
   }
 };
@@ -375,7 +375,7 @@ const resolveBackgroundSpec = (raw, { name, versioning } = {}) => {
   if (issues.length > 0) {
     throw new MigrationInvalidExportError(
       `Invalid background migration${name ? ` ${name}` : ''}: ${issues[0].path} ${issues[0].message}`,
-      { ...(name ? { name } : {}), issues },
+      { context: { ...(name ? { name } : {}), issues } },
     );
   }
   const step = raw.step !== undefined;
@@ -531,13 +531,15 @@ const TRANSITIONS = Object.freeze({
 const transition = (status, action, { migration } = {}) => {
   const rule = TRANSITIONS[action];
   if (rule === undefined) {
-    throw new BackgroundConflictError(`Unknown background action "${action}"`, { action });
+    throw new BackgroundConflictError(`Unknown background action "${action}"`, {
+      context: { action },
+    });
   }
   if (rule.from.includes(status)) return { to: rule.to, applied: 'changed' };
   if (rule.done.includes(status)) return { to: status, applied: 'unchanged' };
   throw new BackgroundConflictError(
     `Cannot ${action} ${migration ? `background migration ${migration}` : 'it'}: it is ${status}`,
-    { action, status, ...(migration ? { migration } : {}) },
+    { context: { action, status, ...(migration ? { migration } : {}) } },
   );
 };
 

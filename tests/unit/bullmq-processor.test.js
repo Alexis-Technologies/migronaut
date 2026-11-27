@@ -148,7 +148,7 @@ describe('createMigrationProcessor', () => {
     it('should fail a failed job with its own error, not hang on reporting it', async () => {
       const kit = stubKit({
         up: mock.fn(async () => {
-          throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {});
+          throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js');
         }),
       });
       const processor = createMigrationProcessor({ kit }, { writeWaitMs: 20 });
@@ -454,7 +454,9 @@ describe('createMigrationProcessor', () => {
       return mock.fn(async (name) => {
         calls += 1;
         if (calls === 1) {
-          throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+          throw new LockAlreadyHeldError('held', {
+            context: { holder: { lockedAt: new Date(0) } },
+          });
         }
         return [{ file: name, status: 'applied' }];
       });
@@ -477,7 +479,9 @@ describe('createMigrationProcessor', () => {
         up: mock.fn(async (name) => {
           calls += 1;
           if (calls <= 6) {
-            throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+            throw new LockAlreadyHeldError('held', {
+              context: { holder: { lockedAt: new Date(0) } },
+            });
           }
           return [{ file: name, status: 'applied' }];
         }),
@@ -508,7 +512,9 @@ describe('createMigrationProcessor', () => {
       const kit = stubKit({
         up: mock.fn(async () => {
           throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
-            cause: 'E11000 duplicate key error index: email_1 dup key: { email: "a@b.c" }',
+            context: {
+              cause: 'E11000 duplicate key error index: email_1 dup key: { email: "a@b.c" }',
+            },
           });
         }),
       });
@@ -529,7 +535,9 @@ describe('createMigrationProcessor', () => {
       return mock.fn(async (name) => {
         calls += 1;
         if (calls === 1) {
-          throw new MigrationBlockedError('blocked', { blockedBy: ['0000-z.js'], failed });
+          throw new MigrationBlockedError('blocked', {
+            context: { blockedBy: ['0000-z.js'], failed },
+          });
         }
         return [{ file: name, status: 'applied' }];
       });
@@ -558,10 +566,12 @@ describe('createMigrationProcessor', () => {
 
     it('should tell the transient cases apart', () => {
       assert.ok(isTransientForJob(new LockAlreadyHeldError('held')));
-      assert.ok(isTransientForJob(new MigrationBlockedError('b', { failed: [] })));
-      assert.ok(!isTransientForJob(new MigrationBlockedError('b', { failed: ['x'] })));
+      assert.ok(isTransientForJob(new MigrationBlockedError('b', { context: { failed: [] } })));
+      assert.ok(!isTransientForJob(new MigrationBlockedError('b', { context: { failed: ['x'] } })));
       // A block from a hand-made kit without the field is never waited on.
-      assert.ok(!isTransientForJob(new MigrationBlockedError('b', { blockedBy: ['x'] })));
+      assert.ok(
+        !isTransientForJob(new MigrationBlockedError('b', { context: { blockedBy: ['x'] } })),
+      );
       assert.ok(!isTransientForJob(new Error('other')));
     });
   });
@@ -576,7 +586,7 @@ describe('createMigrationProcessor', () => {
 
     it('should throw the original typed error', async () => {
       const original = new MigrationBlockedError('0002-b.js is blocked', {
-        blockedBy: ['0001-a.js'],
+        context: { blockedBy: ['0001-a.js'] },
       });
       const job = upJob();
       await assert.rejects(
@@ -645,7 +655,7 @@ describe('createMigrationProcessor', () => {
 
     it('should fold the cause into the message — it is all a dashboard shows', async () => {
       const error = new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
-        cause: 'E11000 duplicate key',
+        context: { cause: 'E11000 duplicate key' },
       });
       const job = upJob();
       await assert.rejects(createMigrationProcessor({ kit: failingWith(error) })(job), (thrown) => {
@@ -660,7 +670,7 @@ describe('createMigrationProcessor', () => {
     it('should redact credentials from everything BullMQ stores', async () => {
       const error = new MigrationExecutionFailedError(
         'Failed against mongodb://admin:hunter2@db.internal/app',
-        { cause: 'connect mongodb://admin:hunter2@db.internal/app refused' },
+        { context: { cause: 'connect mongodb://admin:hunter2@db.internal/app refused' } },
       );
       const job = upJob();
       await assert.rejects(createMigrationProcessor({ kit: failingWith(error) })(job), (thrown) => {
@@ -673,7 +683,9 @@ describe('createMigrationProcessor', () => {
     });
 
     it('should not repeat a cause the message already carries', async () => {
-      const error = new MigrationExecutionFailedError('boom: disk full', { cause: 'disk full' });
+      const error = new MigrationExecutionFailedError('boom: disk full', {
+        context: { cause: 'disk full' },
+      });
       await assert.rejects(
         createMigrationProcessor({ kit: failingWith(error) })(upJob()),
         (thrown) => thrown.message === 'boom: disk full',
@@ -725,7 +737,7 @@ describe('createMigrationProcessor', () => {
       const kit = stubKit({
         up: mock.fn(async () => {
           kit.emit('run:start', { runId: 'run-3', command: 'up' });
-          throw new MigrationBlockedError('blocked', { blockedBy: ['0000-z.js'] });
+          throw new MigrationBlockedError('blocked', { context: { blockedBy: ['0000-z.js'] } });
         }),
       });
       const job = upJob();
@@ -794,7 +806,9 @@ describe('createMigrationProcessor', () => {
     it('should interrupt a lock wait on shutdown, failing the job as aborted', async () => {
       const kit = stubKit({
         up: mock.fn(async () => {
-          throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+          throw new LockAlreadyHeldError('held', {
+            context: { holder: { lockedAt: new Date(0) } },
+          });
         }),
       });
       const processor = createMigrationProcessor({
@@ -814,7 +828,9 @@ describe('createMigrationProcessor', () => {
     it('should put a job a shutdown stopped before its migration back at the head of the queue', async () => {
       const kit = stubKit({
         up: mock.fn(async () => {
-          throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+          throw new LockAlreadyHeldError('held', {
+            context: { holder: { lockedAt: new Date(0) } },
+          });
         }),
       });
       const processor = createMigrationProcessor({
@@ -864,7 +880,7 @@ describe('createMigrationProcessor', () => {
         up: mock.fn(async () => {
           kit.emit('migration:start', { migration: '0001-a.js', direction: 'up' });
           processor.shutdown('deploying');
-          throw new RunAbortedError('Run stopped', { reason: 'deploying' });
+          throw new RunAbortedError('Run stopped', { context: { reason: 'deploying' } });
         }),
       });
       // Called by the stub only once the job runs — after this line.
@@ -1042,7 +1058,7 @@ describe('createMigrationProcessor', () => {
     it('should fail a blocked converge without a retry', async () => {
       const kit = stubKit({
         converge: mock.fn(async () => {
-          throw new MigrationBlockedError('converge is blocked: 1 migration(s) still pending', {});
+          throw new MigrationBlockedError('converge is blocked: 1 migration(s) still pending');
         }),
       });
       const job = convergeJob();
@@ -1055,7 +1071,7 @@ describe('createMigrationProcessor', () => {
       const kit = stubKit({
         converge: mock.fn(async () => {
           calls += 1;
-          if (calls === 1) throw new LockAlreadyHeldError('held', {});
+          if (calls === 1) throw new LockAlreadyHeldError('held');
           return converged;
         }),
         lockInfo: mock.fn(async () => null),
@@ -1468,7 +1484,7 @@ describe('userland lines in the job log', () => {
       up: mock.fn(async (_name, options) => {
         kit.emit('run:start', { runId: 'run-1', command: 'up' });
         kit.emit('migration:log', userland(options.job.id));
-        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {});
+        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js');
       }),
     });
     const job = upJob();
@@ -1496,7 +1512,7 @@ describe('userland lines in the job log', () => {
       up: mock.fn(async (_name, options) => {
         kit.emit('run:start', { runId: 'run-1', command: 'up' });
         kit.emit('migration:log', userland(options.job.id, { level: 'error', msg: 'gave up' }));
-        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {});
+        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js');
       }),
     });
     const job = upJob();

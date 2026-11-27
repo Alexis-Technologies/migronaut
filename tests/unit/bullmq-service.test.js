@@ -491,7 +491,7 @@ describe('createMigrationQueue', () => {
       worker.emit(
         'failed',
         { id: 7, data: { groupId: 'g-1', migration: '0002-b.js', direction: 'up' } },
-        new MigrationBlockedError('blocked', { runId: 'run-2' }),
+        new MigrationBlockedError('blocked', { context: { runId: 'run-2' } }),
       );
       worker.emit('failed', undefined, new Error('job vanished'));
       worker.emit('stalled', '7', 'active');
@@ -955,7 +955,9 @@ describe('createMigrationQueue', () => {
       const kit = stubKit({
         dryRun: mock.fn(async () => pendingRows('0001-a.js')),
         up: mock.fn(async () => {
-          throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+          throw new LockAlreadyHeldError('held', {
+            context: { holder: { lockedAt: new Date(0) } },
+          });
         }),
       });
       const { mq } = make({

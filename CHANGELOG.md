@@ -7,10 +7,31 @@ are releases of the upstream `mongo-migrate-kit`, not of this package.
 
 ## [Unreleased]
 
-The repository moves to alexiskills 1.1, the agent skills and conventions of the Alexis stack. The
-code keeps its behaviour — the same results, errors, codes, messages and events, on the same
-suites — but for two lookups keyed by input (under **Fixed**). The package now ships `LICENSE`
+The repository moves to alexiskills 1.2, the agent skills and conventions of the Alexis stack. The
+code keeps its behaviour — the same results, codes, messages and events, on the same suites — but
+for the error classes, which take `(message, options = {})` as `Error` does (under **Changed
+(breaking)**), and two lookups keyed by input (under **Fixed**). The package now ships `LICENSE`
 and `SECURITY.md` beside the changelog.
+
+### Changed (breaking)
+
+- **Every error class takes `(message, options = {})`, as `Error` does.** `options.cause` is the
+  wrapped error and `options.context` the data about the failure; each subclass sets its own
+  `code`, and only `MigronautError` itself reads one from the options.
+  `new LockLostError(message, context, { cause })` is now
+  `new LockLostError(message, { cause, context })`, and `new MigronautError(code, message, …)` is
+  `new MigronautError(message, { code, … })`. The 338 constructions in `src/` and `bin/` follow
+  it, the 18 that wrap an error as `{ cause: error, context: { …, cause: errorText(error) } }`.
+- **`context` is on every error**, `{}` when nothing was given (it was absent), and `cause` only
+  when one was given, as before. A failure without context of its own now also carries the rows a
+  stopped run applied before it in `context.results` (and `partial` under `--json`), like every
+  other failure.
+- **The types follow.** `MigronautErrorOptions` holds `cause` and `context`; `MigronautError.context`
+  is no longer optional; each class's `code` is its literal (`LockLostError['code']` is
+  `'LOCK_LOST'`), so two classes are no longer assignable to each other.
+- **`LOCK_RELEASE_FAILED` keeps the driver's reason in `context.cause`**, as every other wrap site
+  does, instead of `context.error` — the field every reader of a wrapped error looks in
+  (`errorWithCause`, the queue's failure reason).
 
 ### Changed
 
@@ -25,6 +46,13 @@ and `SECURITY.md` beside the changelog.
   silencing every method, and a text index field named `__proto__` keeps its weight in the
   converge comparison, where it read as changed on every run.
 
+### Security
+
+- **A failed migration's `context.cause` masks URI credentials**, through `errorText` as at every
+  other wrap site: `MIGRATION_EXECUTION_FAILED` (the changelog-write case included) and
+  `TRANSACTIONS_UNSUPPORTED` kept the thrown message raw for a caller of the API; the CLI, the
+  changelog's failure trace and the spans redacted it on their own.
+
 ### Documentation
 
 - **The CHANGELOG follows Keep a Changelog.** `## [X.Y.Z] - YYYY-MM-DD` headings under an
@@ -38,12 +66,12 @@ and `SECURITY.md` beside the changelog.
 
 ### Tooling
 
-- **The skills come from `@alexify/metaskills` 1.1.2**, a devDependency, linked into
+- **The skills come from `@alexify/metaskills` 1.2.0**, a devDependency, linked into
   `.claude/skills` by `prepare` (`alexiskills claude`) in place of the six skills of
   metarhia/metaskills 1.0.5 the repository kept. 1.1.1 changed the App profile only; 1.1.2 allows
   `for...of` and `for...in` over a plain object in library code (the `Object.keys` loops stay) and
   asks a loop that replaces an array method on a caller's array to skip its holes, as the method
-  did.
+  did; 1.2.0 gives every error class the signature of `Error`.
 - **The lint of alexiskills 1.1**: the `correctness` and `suspicious` categories as errors,
   `eqeqeq` with `null` included, `func-style: expression`, `max-depth` 4, `no-nested-ternary`,
   `no-console`, `no-undef`, `getter-return`; in `src/` the array iteration methods,
@@ -70,6 +98,18 @@ and `SECURITY.md` beside the changelog.
   places that name the version (`package.json`, the CHANGELOG, ARCHITECTURE.md and the docs nav),
   and a link for every CHANGELOG release.
 - **CI's `ci-success` fails on a skipped job** too, not only on a failed or cancelled one.
+
+### Upgrading from 2.5
+
+1. Code that constructs a migronaut error — a test double, a subclass of your own — passes one
+   options object: `new ChecksumMismatchError(message, { context: { name } })`,
+   `new HookFailedError(message, { cause: error, context: { hook } })`, and for the base class
+   `new MigronautError(message, { code: 'CONFIG_INVALID' })`. A subclass of your own calls
+   `super(message, options)`.
+2. Code that tests `error.context === undefined` reads `Object.keys(error.context).length === 0`;
+   `error.context?.x` keeps working.
+3. A reader of `LOCK_RELEASE_FAILED` takes the reason from `context.cause`, not `context.error`.
+4. Catching, `instanceof`, `code`, `EXIT_CODES` and the `--json` document are unchanged.
 
 ## [2.5.0] - 2026-11-18
 

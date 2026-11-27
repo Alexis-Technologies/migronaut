@@ -575,7 +575,7 @@ describe('runConverge — refusals and failures', () => {
   it('should stop between steps when aborted, keeping what was applied', async () => {
     const db = fakeDb({});
     let checks = 0;
-    const abort = new RunAbortedError('Stopped', { reason: 'Stopped' });
+    const abort = new RunAbortedError('Stopped', { context: { reason: 'Stopped' } });
     const { deps } = makeDeps(db, {
       assertNotAborted: () => {
         checks += 1;
@@ -1645,7 +1645,7 @@ describe('runConverge — search indexes', () => {
         aborted = true;
       },
       assertNotAborted: () => {
-        if (aborted) throw new RunAbortedError('Stopped', { reason: 'Stopped' });
+        if (aborted) throw new RunAbortedError('Stopped', { context: { reason: 'Stopped' } });
       },
     });
     await assert.rejects(
@@ -2166,7 +2166,10 @@ describe('runConverge — waiting for search indexes', () => {
       },
     });
     delete deps.sleep; // the real pause: a second before the second poll
-    setTimeout(() => controller.abort(new RunAbortedError('Stopped', { reason: 'Stopped' })), 20);
+    setTimeout(
+      () => controller.abort(new RunAbortedError('Stopped', { context: { reason: 'Stopped' } })),
+      20,
+    );
     const startedAt = Date.now();
     await assert.rejects(
       runConverge(
@@ -2228,7 +2231,7 @@ describe('runConverge — waiting for search indexes', () => {
         aborted = true;
       },
       assertNotAborted: () => {
-        if (aborted) throw new RunAbortedError('Stopped', { reason: 'Stopped' });
+        if (aborted) throw new RunAbortedError('Stopped', { context: { reason: 'Stopped' } });
       },
     });
     await assert.rejects(
@@ -2371,7 +2374,7 @@ describe('runConverge — waiting for search indexes', () => {
         aborted = true;
       },
       assertNotAborted: () => {
-        if (aborted) throw new RunAbortedError('Stopped', { reason: 'Stopped' });
+        if (aborted) throw new RunAbortedError('Stopped', { context: { reason: 'Stopped' } });
       },
     });
     const points = [];

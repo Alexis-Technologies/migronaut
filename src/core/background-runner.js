@@ -34,11 +34,15 @@ const nothing = () => undefined;
 const readOptions = (options) => {
   const concurrency = options.concurrency ?? DEFAULTS.concurrency;
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 64) {
-    throw new ConfigInvalidError('concurrency must be an integer from 1 to 64', { concurrency });
+    throw new ConfigInvalidError('concurrency must be an integer from 1 to 64', {
+      context: { concurrency },
+    });
   }
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULTS.pollIntervalMs;
   if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10) {
-    throw new ConfigInvalidError('pollIntervalMs must be an integer ≥ 10', { pollIntervalMs });
+    throw new ConfigInvalidError('pollIntervalMs must be an integer ≥ 10', {
+      context: { pollIntervalMs },
+    });
   }
   const verifyIntervalMs = options.verifyIntervalMs ?? DEFAULTS.verifyIntervalMs;
   const badVerify =
@@ -46,7 +50,7 @@ const readOptions = (options) => {
     (!Number.isSafeInteger(verifyIntervalMs) || verifyIntervalMs < 100);
   if (badVerify) {
     throw new ConfigInvalidError('verifyIntervalMs must be false or an integer ≥ 100', {
-      verifyIntervalMs,
+      context: { verifyIntervalMs },
     });
   }
   if (options.sliceMs !== undefined) assertSliceMs(options.sliceMs);
@@ -273,14 +277,14 @@ const startBackgroundRunner = (options = {}) => {
     stop({ timeoutMs } = {}) {
       if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0)) {
         return Promise.reject(
-          new ConfigInvalidError('timeoutMs must be an integer ≥ 0', { timeoutMs }),
+          new ConfigInvalidError('timeoutMs must be an integer ≥ 0', { context: { timeoutMs } }),
         );
       }
       stopping ??= (async () => {
         if (!signal.aborted) {
           controller.abort(
             new RunAbortedError('Background runner stopped', {
-              reason: 'Background runner stopped',
+              context: { reason: 'Background runner stopped' },
             }),
           );
         }

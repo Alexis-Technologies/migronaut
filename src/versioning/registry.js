@@ -61,7 +61,7 @@ const assertBoundName = (collection, options, key, value) => {
   if (options[key] !== undefined && options[key] !== value) {
     throw new ConfigInvalidError(
       `${collection}: ${key} is "${value}" — the guards bound to it take no other`,
-      { collection, [key]: options[key] },
+      { context: { collection, [key]: options[key] } },
     );
   }
 };
@@ -91,7 +91,7 @@ const defineShapes = (...args) => {
     if (versioning === undefined) {
       throw new ConfigInvalidError(
         `"${name}" is not a versioned collection (known: ${names.join(', ') || 'none'})`,
-        { collection: name },
+        { context: { collection: name } },
       );
     }
     return versioning;
@@ -103,7 +103,7 @@ const defineShapes = (...args) => {
     if (version === null) {
       throw new ShapeVersionError(
         `${name}: the document's ${versioning.field} is not a non-negative integer`,
-        { collection: name, reason: 'invalid', current: versioning.current },
+        { context: { collection: name, reason: 'invalid', current: versioning.current } },
       );
     }
     return version;
@@ -141,7 +141,7 @@ const defineShapes = (...args) => {
       if (revisionField === null) {
         throw new ConfigInvalidError(
           `"${name}" declares revision: false — it has no revision to guard`,
-          { collection: name },
+          { context: { collection: name } },
         );
       }
       const bound = (options = {}) => {

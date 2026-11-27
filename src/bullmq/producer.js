@@ -34,14 +34,16 @@ const LOOKUP_CONCURRENCY = 16;
 const assertJobOptions = (jobOptions) => {
   if (jobOptions === undefined) return;
   if (!isObjectLike(jobOptions)) {
-    throw new ConfigInvalidError('jobOptions must be an object', { jobOptions: typeof jobOptions });
+    throw new ConfigInvalidError('jobOptions must be an object', {
+      context: { jobOptions: typeof jobOptions },
+    });
   }
   for (const key of FORBIDDEN_JOB_OPTIONS) {
     if (jobOptions[key] !== undefined) {
       throw new ConfigInvalidError(
         `jobOptions.${key} is not configurable — migration jobs run strictly first-in, ` +
           'first-out with a single attempt',
-        { key },
+        { context: { key } },
       );
     }
   }
@@ -55,14 +57,14 @@ const assertBackgroundJobOptions = (jobOptions) => {
   if (jobOptions === undefined) return;
   if (!isObjectLike(jobOptions)) {
     throw new ConfigInvalidError('background jobOptions must be an object', {
-      jobOptions: typeof jobOptions,
+      context: { jobOptions: typeof jobOptions },
     });
   }
   for (const key of BACKGROUND_FORBIDDEN_JOB_OPTIONS) {
     if (jobOptions[key] !== undefined) {
       throw new ConfigInvalidError(
         `background jobOptions.${key} is not configurable — coordinators and lanes set their own`,
-        { key },
+        { context: { key } },
       );
     }
   }
@@ -72,14 +74,14 @@ const assertBackgroundJobOptions = (jobOptions) => {
 const actorOf = (options) => {
   for (const key of ['requestedBy', 'reason']) {
     const issue = actorIssue(key, options[key]);
-    if (issue) throw new ConfigInvalidError(issue, { [key]: typeof options[key] });
+    if (issue) throw new ConfigInvalidError(issue, { context: { [key]: typeof options[key] } });
   }
   return pickActor(options);
 };
 
 const assertBoolean = (value, name) => {
   if (typeof value !== 'boolean') {
-    throw new ConfigInvalidError(`${name} must be a boolean`, { [name]: value });
+    throw new ConfigInvalidError(`${name} must be a boolean`, { context: { [name]: value } });
   }
 };
 
@@ -114,7 +116,7 @@ const resolveConverge = async (kit, { converge, filename, to }) => {
     if (converge && (filename !== undefined || to !== undefined)) {
       throw new ConfigInvalidError(
         'converge needs a group that reaches the newest migration — not a filename or `to`',
-        { converge },
+        { context: { converge } },
       );
     }
     return converge;
@@ -146,7 +148,7 @@ const planUpJobs = async (kit, options = {}) => {
   if (force && filename === undefined) {
     // A bulk plan only ever holds pending files — there is no applied target
     // for `force` to re-run.
-    throw new ConfigInvalidError('force requires a filename', { force });
+    throw new ConfigInvalidError('force requires a filename', { context: { force } });
   }
   assertJobOptions(jobOptions);
   const converge = await resolveConverge(kit, { converge: options.converge, filename, to });
@@ -179,7 +181,7 @@ const planUpJobs = async (kit, options = {}) => {
     throw new BackgroundPendingError(
       `${waiting.migration} requires background migration(s) that have not completed: ` +
         waiting.waitsFor.join(', '),
-      { migration: waiting.migration, waitsFor },
+      { context: { migration: waiting.migration, waitsFor } },
     );
   }
   const groupId = await newGroupId(kit);
@@ -249,7 +251,7 @@ const assertTopOfStack = async (kit, migrations) => {
   throw new MigrationBlockedError(
     `Rollback is blocked: ${blockedBy.length} later migration(s) still applied and not part of ` +
       `it: ${blockedBy.join(', ')}`,
-    { direction: JOB_NAMES.DOWN, names: [...migrations], blockedBy },
+    { context: { direction: JOB_NAMES.DOWN, names: [...migrations], blockedBy } },
   );
 };
 
@@ -368,7 +370,7 @@ const enqueueGroup = async (queue, kit, plan, { queueEvents, getQueueEvents } = 
     const added = await queue.addBulk(specs);
     if (!Array.isArray(added) || added.length !== specs.length) {
       throw new ConfigInvalidError('queue.addBulk did not return one job per migration', {
-        expected: specs.length,
+        context: { expected: specs.length },
       });
     }
     // The ids of every job added, and the migration ones as jobs — one pass.
@@ -532,14 +534,18 @@ const enqueueBackground = async (queue, kit, options = {}) => {
   }
   for (const key of Object.keys(options)) {
     if (!ENQUEUE_BACKGROUND_KEYS.has(key)) {
-      throw new ConfigInvalidError(`enqueueBackground: "${key}" is not an option`, { key });
+      throw new ConfigInvalidError(`enqueueBackground: "${key}" is not an option`, {
+        context: { key },
+      });
     }
   }
   const { migration, jobOptions, stallMs = DEFAULT_STALL_MS } = options;
   assertQueue(queue);
   assertBackgroundJobOptions(jobOptions);
   if (!Number.isSafeInteger(stallMs) || stallMs < 1000) {
-    throw new ConfigInvalidError('stallMs must be an integer of at least 1000', { stallMs });
+    throw new ConfigInvalidError('stallMs must be an integer of at least 1000', {
+      context: { stallMs },
+    });
   }
   const actor = actorOf(options);
   const targets = [];
@@ -549,7 +555,7 @@ const enqueueBackground = async (queue, kit, options = {}) => {
     if (status === null) {
       throw new NotAppliedError(
         `Background migration ${migration} is not registered — run up first`,
-        { migration },
+        { context: { migration } },
       );
     }
     targets.push(status);

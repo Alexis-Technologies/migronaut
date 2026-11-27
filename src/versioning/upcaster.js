@@ -21,7 +21,7 @@ const { isPlainObject, unwrapDefinition } = require('./internal.js');
 const NEWER = new Set(['throw', 'keep']);
 
 const shapeError = (message, context) => {
-  return new ShapeVersionError(message, context);
+  return new ShapeVersionError(message, { context });
 };
 
 /** The steps, validated against the versioning: `Map<from, fn>` */
@@ -58,7 +58,7 @@ const readSteps = (steps, versioning, label) => {
       throw new ConfigInvalidError(
         `${label}: no step from version ${from} — every version from min (${versioning.min}) ` +
           `to current (${versioning.current}) needs one`,
-        { missing: from },
+        { context: { missing: from } },
       );
     }
   }
@@ -93,7 +93,9 @@ const runStep = (step, doc, from, versioning, context) => {
 const createUpcaster = (versioning, steps, { newer = 'throw', collection } = {}) => {
   const label = collection ? `upcaster(${collection})` : 'upcaster';
   if (!NEWER.has(newer)) {
-    throw new ConfigInvalidError(`${label}: newer must be 'throw' or 'keep'`, { newer });
+    throw new ConfigInvalidError(`${label}: newer must be 'throw' or 'keep'`, {
+      context: { newer },
+    });
   }
   const chain = readSteps(steps, versioning, label);
   const { current, min, field } = versioning;

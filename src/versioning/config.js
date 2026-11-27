@@ -109,7 +109,7 @@ const resolveVersioning = (value, { path = 'versioning' } = {}) => {
   const issues = versioningIssues(value, path);
   if (issues.length > 0) {
     throw new ConfigInvalidError(`Invalid ${path}: ${issues[0].path} ${issues[0].message}`, {
-      issues,
+      context: { issues },
     });
   }
   const revision = value.revision ?? VERSIONING_DEFAULTS.revision;

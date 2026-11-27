@@ -71,7 +71,7 @@ const applyVersioningPlugin = (schema, versioning) => {
     throw new ConfigInvalidError(
       `versioningPlugin: the schema gives "${field}" a default — Mongoose applies defaults to ` +
         'documents it loads, which would mark legacy documents as current; remove it',
-      { field },
+      { context: { field } },
     );
   }
 
@@ -108,7 +108,7 @@ const applyVersioningPlugin = (schema, versioning) => {
       throw new ConfigInvalidError(
         `versioningPlugin: this document was loaded without "${revisionField}" — select it ` +
           '(or every field) to save it',
-        { field: revisionField },
+        { context: { field: revisionField } },
       );
     }
     const where = isPlainObject(this.$where) ? { ...this.$where } : {};

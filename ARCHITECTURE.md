@@ -353,6 +353,11 @@ Each entry: **responsibility · key exports · nuances you must know.**
 ### `src/errors/index.js` — the error model
 - **Responsibility:** `MigronautError` base class (carries a typed `code` + `context`) and exactly one
   subclass per `MigronautErrorCode`.
+- **Shape:** every class takes `(message, options = {})`, as `Error` does: `options.cause` is the
+  wrapped error and `options.context` the JSON-safe data; only the base class reads `options.code`,
+  each subclass sets its own. `options` reaches `Error` whole, so `cause` exists only when given,
+  while `code` and `context` (`{}` by default) exist on every instance — `#attachResults` and the
+  import runner add `context.results` / `imported` to any of them without asking whether it is there.
 - **Nuances:** never `throw new Error(...)` anywhere in `src/`. Always a domain error. The `code` is
   what the CLI prints (`✖ LOCK_ALREADY_HELD: …`) and what `--json` emits as `error.code`. Adding an
   error = add the literal to `MigronautErrorCode` in [index.d.ts](index.d.ts), add the subclass here,

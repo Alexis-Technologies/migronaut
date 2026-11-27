@@ -32,12 +32,11 @@ const applyEnvFile = async (filePath, env = process.env) => {
   // A device file (/dev/zero reports size 0), FIFO or directory would hang or
   // garble the read — only regular files are .env candidates.
   if (!stats.isFile()) {
-    throw new ConfigInvalidError('env file is not a regular file', { path: filePath });
+    throw new ConfigInvalidError('env file is not a regular file', { context: { path: filePath } });
   }
   if (stats.size > MAX_ENV_FILE_BYTES) {
     throw new ConfigInvalidError('env file is too large (max 1 MB)', {
-      path: filePath,
-      size: stats.size,
+      context: { path: filePath, size: stats.size },
     });
   }
   const content = await fs.readFile(filePath, 'utf8');

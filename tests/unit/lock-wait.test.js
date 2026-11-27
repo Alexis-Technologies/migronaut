@@ -19,7 +19,7 @@ const {
 
 /** A refusal as lock.js produces it — the holder's lockedAt is what the wait loop watches */
 const held = (lockedAt = new Date(0)) =>
-  new LockAlreadyHeldError('Migration lock is already held', { holder: { lockedAt } });
+  new LockAlreadyHeldError('Migration lock is already held', { context: { holder: { lockedAt } } });
 
 /** An attempt that is refused `refusals` times, then succeeds */
 const refusedThenFree = (refusals, makeError = () => held()) => {
@@ -306,8 +306,7 @@ describe('withLockWait', () => {
         3,
         () =>
           new LockAlreadyHeldError('held', {
-            holder: { lockedAt: new Date(0), ttlMs: 60_000 },
-            ttlMs: 60_000,
+            context: { holder: { lockedAt: new Date(0), ttlMs: 60_000 }, ttlMs: 60_000 },
           }),
       ),
       { onLockHeld: 'wait', lockPollIntervalMs: 2, lockWaitTimeoutMs: 1000, logger },
@@ -409,7 +408,7 @@ describe('assertLockWaitOptions', () => {
 });
 
 describe('waitBudget', () => {
-  const refusal = (context) => new LockAlreadyHeldError('held', context);
+  const refusal = (context) => new LockAlreadyHeldError('held', { context });
 
   it("should honour the caller's budget whatever the TTL", () => {
     assert.strictEqual(waitBudget(5000, refusal({ ttlMs: 600_000 })), 5000);

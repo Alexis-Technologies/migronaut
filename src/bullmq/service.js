@@ -84,7 +84,7 @@ const resolveBackground = (background, { queueName, QueueSource }) => {
   }
   for (const key of Object.keys(options)) {
     if (!BACKGROUND_KEYS.has(key)) {
-      throw new ConfigInvalidError(`background.${key} is not a known option`, { key });
+      throw new ConfigInvalidError(`background.${key} is not a known option`, { context: { key } });
     }
   }
   const queueIsInstance =
@@ -106,7 +106,7 @@ const resolveBackground = (background, { queueName, QueueSource }) => {
   assertName(name, 'background.queueName');
   if (name === queueName) {
     throw new ConfigInvalidError('background.queueName must differ from the migration queue', {
-      queueName: name,
+      context: { queueName: name },
     });
   }
   if (options.workerOptions !== undefined && !isObjectLike(options.workerOptions)) {
@@ -117,7 +117,7 @@ const resolveBackground = (background, { queueName, QueueSource }) => {
   if (verifyIntervalMs !== false && !isScheduleInterval(verifyIntervalMs)) {
     throw new ConfigInvalidError(
       `background.verifyIntervalMs must be false or an integer ≥ ${MIN_SCHEDULE_EVERY_MS}`,
-      { verifyIntervalMs },
+      { context: { verifyIntervalMs } },
     );
   }
   const { watch } = options;
@@ -138,7 +138,7 @@ const resolveBackground = (background, { queueName, QueueSource }) => {
 const assertBackgroundConcurrency = (concurrency) => {
   if (concurrency !== undefined && (!Number.isSafeInteger(concurrency) || concurrency < 1)) {
     throw new ConfigInvalidError('background worker concurrency must be a positive integer', {
-      concurrency,
+      context: { concurrency },
     });
   }
 };
@@ -172,7 +172,7 @@ const assertName = (value, name) => {
   // BullMQ builds its Redis keys by joining with `:` and rejects it in names.
   if (typeof value !== 'string' || value.length === 0 || value.includes(':')) {
     throw new ConfigInvalidError(`${name} must be a non-empty string without ':'`, {
-      [name]: value,
+      context: { [name]: value },
     });
   }
 };
@@ -254,7 +254,7 @@ class MigrationQueue {
     if (telemetry !== undefined && (typeof telemetry !== 'object' || telemetry === null)) {
       throw new ConfigInvalidError(
         'bullmq.telemetry must be a BullMQ telemetry object — e.g. new BullMQOtel(…)',
-        { telemetry: typeof telemetry },
+        { context: { telemetry: typeof telemetry } },
       );
     }
     const queueIsInstance = isObjectLike(Queue) && typeof Queue.addBulk === 'function';
@@ -304,7 +304,9 @@ class MigrationQueue {
     }
     MigrationQueue.#assertConcurrency(workerOptions.concurrency);
     if (typeof globalConcurrency !== 'boolean') {
-      throw new ConfigInvalidError('globalConcurrency must be a boolean', { globalConcurrency });
+      throw new ConfigInvalidError('globalConcurrency must be a boolean', {
+        context: { globalConcurrency },
+      });
     }
 
     this.#connection = connection;
@@ -468,7 +470,7 @@ class MigrationQueue {
         throw new ConfigInvalidError(
           `${permission === 'unordered' ? 'ordered: false' : permission} is not allowed by this ` +
             `queue (allow.${permission})`,
-          { permission },
+          { context: { permission } },
         );
       }
     }
@@ -478,13 +480,13 @@ class MigrationQueue {
   static #assertSameQueue(label, instance, name, prefix) {
     if (typeof instance.name === 'string' && instance.name !== name) {
       throw new ConfigInvalidError(`${label} is on queue "${instance.name}", not "${name}"`, {
-        queueName: name,
+        context: { queueName: name },
       });
     }
     const instancePrefix = instance.opts?.prefix;
     if (instancePrefix !== undefined && prefix !== undefined && instancePrefix !== prefix) {
       throw new ConfigInvalidError(`${label} uses prefix "${instancePrefix}", not "${prefix}"`, {
-        prefix,
+        context: { prefix },
       });
     }
   }
@@ -493,7 +495,7 @@ class MigrationQueue {
     if (concurrency !== undefined && concurrency !== 1) {
       throw new ConfigInvalidError(
         'Worker concurrency must be 1 — migrations run one at a time, in order',
-        { concurrency },
+        { context: { concurrency } },
       );
     }
   }
@@ -914,7 +916,7 @@ class MigrationQueue {
   async getJob(id) {
     this.#assertOpen();
     if (typeof id !== 'string' || id.length === 0) {
-      throw new ConfigInvalidError('Job id must be a non-empty string', { id });
+      throw new ConfigInvalidError('Job id must be a non-empty string', { context: { id } });
     }
     let job = await this.#queue.getJob(id);
     if (!job) return null;
@@ -968,7 +970,7 @@ class MigrationQueue {
     if (!SCHEDULER_IDS.has(job)) {
       throw new ConfigInvalidError(
         "schedule job must be 'sync', 'converge' or 'background-verify'",
-        { job },
+        { context: { job } },
       );
     }
     const verify = job === JOB_NAMES.BACKGROUND_VERIFY;
@@ -976,7 +978,7 @@ class MigrationQueue {
     const { id = SCHEDULER_IDS.get(job) } = options;
     assertName(id, 'id');
     if (job !== JOB_NAMES.SYNC && to !== undefined) {
-      throw new ConfigInvalidError('to only applies to a sync schedule', { to });
+      throw new ConfigInvalidError('to only applies to a sync schedule', { context: { to } });
     }
     if ((every === undefined) === (pattern === undefined)) {
       throw new ConfigInvalidError(
@@ -987,17 +989,17 @@ class MigrationQueue {
     // faster than once a second is a typo, not a cadence.
     if (every !== undefined && (!Number.isFinite(every) || every < MIN_SCHEDULE_EVERY_MS)) {
       throw new ConfigInvalidError(`every must be at least ${MIN_SCHEDULE_EVERY_MS} milliseconds`, {
-        every,
+        context: { every },
       });
     }
     if (pattern !== undefined && (typeof pattern !== 'string' || pattern.length === 0)) {
-      throw new ConfigInvalidError('pattern must be a cron expression', { pattern });
+      throw new ConfigInvalidError('pattern must be a cron expression', { context: { pattern } });
     }
     if (tz !== undefined && (typeof tz !== 'string' || tz.length === 0)) {
-      throw new ConfigInvalidError('tz must be a time zone name', { tz });
+      throw new ConfigInvalidError('tz must be a time zone name', { context: { tz } });
     }
     if (to !== undefined && !isBareFilename(to)) {
-      throw new ConfigInvalidError('to must be a migration filename', { to });
+      throw new ConfigInvalidError('to must be a migration filename', { context: { to } });
     }
     const queue = verify ? this.#backgroundQueue : this.#queue;
     if (typeof queue.upsertJobScheduler !== 'function') {

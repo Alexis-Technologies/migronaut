@@ -19,7 +19,9 @@ const registerDryRun = (program) => {
     preflight: (_opts, positionals) => {
       const direction = positionals[0];
       if (direction !== 'up' && direction !== 'down') {
-        throw new ConfigInvalidError("Direction must be 'up' or 'down'", { direction });
+        throw new ConfigInvalidError("Direction must be 'up' or 'down'", {
+          context: { direction },
+        });
       }
     },
     run: (migrator, opts, positionals) =>

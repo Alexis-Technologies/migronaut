@@ -67,14 +67,16 @@ const assertLockWaitOptions = ({
   lockPollIntervalMs = DEFAULT_LOCK_POLL_INTERVAL_MS,
 } = {}) => {
   if (onLockHeld !== undefined && onLockHeld !== 'wait' && onLockHeld !== 'throw') {
-    throw new ConfigInvalidError("onLockHeld must be 'wait' or 'throw'", { onLockHeld });
+    throw new ConfigInvalidError("onLockHeld must be 'wait' or 'throw'", {
+      context: { onLockHeld },
+    });
   }
   const timeoutInvalid =
     lockWaitTimeoutMs !== undefined &&
     (!Number.isFinite(lockWaitTimeoutMs) || lockWaitTimeoutMs <= 0);
   if (timeoutInvalid) {
     throw new ConfigInvalidError('lockWaitTimeoutMs must be a positive finite number', {
-      lockWaitTimeoutMs,
+      context: { lockWaitTimeoutMs },
     });
   }
   const intervalInvalid =
@@ -84,7 +86,7 @@ const assertLockWaitOptions = ({
   if (intervalInvalid) {
     throw new ConfigInvalidError(
       `lockPollIntervalMs must be a positive number of milliseconds, at most ${MAX_TIMER_MS}`,
-      { lockPollIntervalMs },
+      { context: { lockPollIntervalMs } },
     );
   }
 };
@@ -94,8 +96,7 @@ const abortedError = (signal, extra) => {
   const reason = signal.reason;
   if (reason instanceof MigronautError) return reason;
   return new RunAbortedError('Lock wait aborted', {
-    reason: errorText(reason ?? 'aborted'),
-    ...extra,
+    context: { reason: errorText(reason ?? 'aborted'), ...extra },
   });
 };
 

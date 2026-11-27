@@ -364,8 +364,7 @@ describe('wrap', () => {
   it('should fail the span and rethrow when the work rejects', async () => {
     const tracer = fakeTracer();
     const boom = new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
-      name: '0001-a.js',
-      cause: 'E11000 duplicate key',
+      context: { name: '0001-a.js', cause: 'E11000 duplicate key' },
     });
     await assert.rejects(
       createTelemetry({ tracer }).wrap(SPANS.MIGRATION, {}, async () => {
@@ -458,7 +457,9 @@ describe('errorType', () => {
 describe('failureText — what a tracing backend receives', () => {
   it('should mask the values a duplicate-key error quotes', () => {
     const error = new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
-      cause: 'E11000 duplicate key error index: email_1 dup key: { email: "alice@example.com" }',
+      context: {
+        cause: 'E11000 duplicate key error index: email_1 dup key: { email: "alice@example.com" }',
+      },
     });
     assert.strictEqual(
       failureText(error),
@@ -482,7 +483,7 @@ describe('failureText', () => {
 
   it('should append the wrapped cause, redacted too', () => {
     const error = new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
-      cause: 'bad auth mongodb://app:hunter2@db.internal/app',
+      context: { cause: 'bad auth mongodb://app:hunter2@db.internal/app' },
     });
     assert.strictEqual(
       failureText(error),
@@ -492,7 +493,9 @@ describe('failureText', () => {
 
   it('should ignore a cause that is not a string, or not on a migronaut error', () => {
     assert.strictEqual(
-      failureText(new ConfigInvalidError('Invalid configuration', { cause: { nested: true } })),
+      failureText(
+        new ConfigInvalidError('Invalid configuration', { context: { cause: { nested: true } } }),
+      ),
       'Invalid configuration',
     );
     const plain = new Error('plain');
@@ -755,7 +758,7 @@ describe('createTelemetry — against the real OpenTelemetry SDK', () => {
     await assert.rejects(
       telemetry.wrap(SPANS.MIGRATION, {}, async () => {
         throw new MigrationExecutionFailedError('Migration up failed: 0002-b.js', {
-          cause: 'mongodb://app:hunter2@db/app refused',
+          context: { cause: 'mongodb://app:hunter2@db/app refused' },
         });
       }),
     );

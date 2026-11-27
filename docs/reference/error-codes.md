@@ -1,7 +1,7 @@
 # Error Codes
 
 Every error thrown by `migronaut` extends `MigronautError` and carries a typed `code`, a `message`,
-and an optional `context` object. Catch `MigronautError` and switch on `code` for precise handling:
+and a `context` object (`{}` when there is nothing to add). Catch `MigronautError` and switch on `code` for precise handling:
 
 ```ts
 import { MigronautError } from '@alexify/migronaut';
@@ -18,6 +18,18 @@ try {
 Every error also carries `cause` — the original `Error`, with its stack — when it
 wraps one, so `err.cause.stack` still points into your own migration. Pass
 `--verbose` to have the CLI print it.
+
+Every class takes `(message, options)`, as `Error` does — handy for a test double of a failure:
+
+```ts
+import { LockAlreadyHeldError } from '@alexify/migronaut';
+
+const error = new LockAlreadyHeldError('The migration lock is already held', {
+  cause: new Error('E11000 duplicate key'),
+  context: { holder: { owner: 'deploy-42' } },
+});
+error.code; // 'LOCK_ALREADY_HELD' — each class sets its own
+```
 
 In `--json` mode the CLI prints:
 

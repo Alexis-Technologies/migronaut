@@ -95,15 +95,17 @@ const searchReadFailure = (error, collection, phase) => {
   return new ConvergeFailedError(
     `Could not read the search indexes of ${collection}: ${cause}${hint ? ` — ${hint}` : ''}`,
     {
-      phase,
-      ...(phase === 'wait' ? { reason: 'unreadable' } : {}),
-      collection,
-      target: 'searchIndex',
-      cause,
-      ...(mongoCode !== undefined ? { mongoCode } : {}),
-      ...(hint ? { hint } : {}),
+      cause: error,
+      context: {
+        phase,
+        ...(phase === 'wait' ? { reason: 'unreadable' } : {}),
+        collection,
+        target: 'searchIndex',
+        cause,
+        ...(mongoCode !== undefined ? { mongoCode } : {}),
+        ...(hint ? { hint } : {}),
+      },
     },
-    { cause: error },
   );
 };
 
@@ -384,12 +386,14 @@ const settleWait = (deps, targets, outcome, wait, result) => {
       : `Search index(es) not queryable after ${Math.round(outcome.waitedMs / 1000)}s: ` +
           `${describeNotReady(outcome.notReady)} — ${timeoutAdvice(outcome.notReady)}`,
     {
-      phase: 'wait',
-      reason: failed ? 'failed' : 'timeout',
-      notReady: outcome.notReady,
-      waitedMs: outcome.waitedMs,
-      ...(wait.timeoutMs !== undefined ? { timeoutMs: wait.timeoutMs } : {}),
-      converge: result,
+      context: {
+        phase: 'wait',
+        reason: failed ? 'failed' : 'timeout',
+        notReady: outcome.notReady,
+        waitedMs: outcome.waitedMs,
+        ...(wait.timeoutMs !== undefined ? { timeoutMs: wait.timeoutMs } : {}),
+        converge: result,
+      },
     },
   );
 };

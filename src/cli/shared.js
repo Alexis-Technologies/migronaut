@@ -258,7 +258,9 @@ const withMigrator = async (opts, fn, options = {}) => {
     // migrator.stop() was a no-op — honor it here, before starting the run the
     // handler already told the operator would be stopped.
     if (detachSignals.stopRequested?.()) {
-      throw new RunAbortedError('Stopped by signal before the run started', { results: [] });
+      throw new RunAbortedError('Stopped by signal before the run started', {
+        context: { results: [] },
+      });
     }
     await fn(migrator, {
       logger,

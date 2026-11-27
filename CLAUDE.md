@@ -390,8 +390,8 @@ A rule of alexiskills that migronaut breaks by design, with the reason:
 - **Three disable directives**: `no-control-regex` twice in `utils/sanitize.js` (stripping control
   characters is the point) and `no-restricted-properties` once in `bullmq/service.js` (the public
   `schedule({ every })` option destructured, not `Array#every`).
-- **`max-lines-per-function` warns on 39 functions** — the orchestrators of `core/migrator.js`,
-  the queue processors, the converge planners, the CLI command registrations. They are long
+- **`max-lines-per-function` warns on 40 functions** — the orchestrators of `core/migrator.js`,
+  the queue processors and the group wait, the converge planners, the CLI command registrations. They are long
   because they are sequential protocols; a piece is split out where it reads better named, not to
   reach 80 lines.
 - **Error codes without `ALX_ERR_`**: see "Errors".
@@ -402,6 +402,12 @@ A rule of alexiskills that migronaut breaks by design, with the reason:
 ends in `Error` and its code is that name in `UPPER_SNAKE_CASE` (`LockAlreadyHeldError` /
 `LOCK_ALREADY_HELD`).
 
+- Every class takes `(message, options = {})`, as `Error` does (alexiskills 1.2):
+  `new LockLostError(message, { cause, context })`. `options` goes to `super` whole, so `cause` is
+  set only when given; only `MigronautError` itself reads `options.code`, and each subclass sets
+  its own after `super`. Every instance has `name`, `message`, `code` and `context` (`{}` when none
+  was given — so `context.results` attaches to any of them), and `cause` when it wraps one. A
+  wrap site writes `{ cause: error, context: { …, cause: errorText(error) } }`, in that order.
 - `code` is the contract: what the CLI prints (`✖ LOCK_ALREADY_HELD: …`), what `--json` emits as
   `error.code`, what `EXIT_CODES` maps and what the queue decides retries by. `context` is plain,
   JSON-safe data about the failure (it survives `--json` and the changelog's failure trace);
@@ -431,8 +437,10 @@ ends in `Error` and its code is that name in `UPPER_SNAKE_CASE` (`LockAlreadyHel
   130/143; otherwise it sets `process.exitCode` from `EXIT_CODES[error.code] ?? 1` and lets the
   process drain (`process.exit()` would truncate piped output).
 
-**Adding an error code**, one change: the subclass in `src/errors/index.js` (and its exports);
-the literal in the `MigronautErrorCode` union and the class in `index.d.ts`; the export from
+**Adding an error code**, one change: the subclass in `src/errors/index.js` (and its exports),
+`constructor(message, options = {})` with `super(message, options)`, its `name` and its `code`;
+the literal in the `MigronautErrorCode` union and the class in `index.d.ts` (`readonly code` the
+literal, `constructor(message: string, options?: MigronautErrorOptions)`); the export from
 `src/index.js` with a `tsd` assertion; an exit code in `src/cli/exit-codes.js` (the next free
 number, never renumber one); a row in the table of `docs/reference/error-codes.md` and in the
 exit-code table of `docs/reference/cli.md`; the queue's verdict (`RETRYABLE_CODES` lists the codes
@@ -461,7 +469,7 @@ them together, with `Upgrading from 2.x` in the CHANGELOG listing each old and n
 
 ## Skills
 
-The skills are [alexiskills](https://alexiskills.vercel.app), `@alexify/metaskills` 1.1.2, a
+The skills are [alexiskills](https://alexiskills.vercel.app), `@alexify/metaskills` 1.2.0, a
 devDependency: the skills of the Alexis libraries, forked from
 [metarhia/metaskills](https://github.com/metarhia/metaskills). All 37 of them are linked:
 `.claude/skills` is one symlink to `node_modules/@alexify/metaskills/skills`, made by the

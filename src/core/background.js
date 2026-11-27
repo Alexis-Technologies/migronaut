@@ -183,7 +183,7 @@ const assertTransactions = async (deps, name, spec) => {
     throw new TransactionsUnsupportedError(
       `Background migration ${name} asks for transactions, which need a replica set or a ` +
         'mongos — this server is standalone (run it with transaction: false)',
-      { migration: name, background: true },
+      { context: { migration: name, background: true } },
     );
   }
 };
@@ -197,7 +197,14 @@ const jobFor = async (deps, name, state, { direction } = {}) => {
     throw new ChecksumMismatchError(
       `Background migration ${name} changed on disk since it was registered — finish the ` +
         'deploy, or pin the new version (migronaut background repin)',
-      { migration: name, background: true, expected: state.checksum, actual: loaded.checksum },
+      {
+        context: {
+          migration: name,
+          background: true,
+          expected: state.checksum,
+          actual: loaded.checksum,
+        },
+      },
     );
   }
   const spec = { ...loaded.spec, ...state.spec };
@@ -1056,9 +1063,7 @@ const control = async (deps, name, action, { requestedBy, reason, fromStart = fa
   const state = await store.get(name);
   if (state === null) {
     throw new BackgroundConflictError(`Background migration ${name} is not registered`, {
-      action,
-      migration: name,
-      status: 'unregistered',
+      context: { action, migration: name, status: 'unregistered' },
     });
   }
   const effective = action === 'retry' && state.status === 'completed' ? 'reopen' : action;
@@ -1151,9 +1156,7 @@ const repin = async (deps, name, { requestedBy, reason } = {}) => {
   const state = await store.get(name);
   if (state === null) {
     throw new BackgroundConflictError(`Background migration ${name} is not registered`, {
-      action: 'repin',
-      migration: name,
-      status: 'unregistered',
+      context: { action: 'repin', migration: name, status: 'unregistered' },
     });
   }
   const loaded = await deps.load(name);
@@ -1197,7 +1200,7 @@ const waitForLanes = async (deps, name, { signal, timeoutMs = 120_000, pollMs = 
 const failedError = (state) => {
   return new BackgroundFailedError(
     `Background migration ${state._id} failed${state.lastError ? `: ${state.lastError}` : ''}`,
-    { migration: state._id, lastError: state.lastError },
+    { context: { migration: state._id, lastError: state.lastError } },
   );
 };
 

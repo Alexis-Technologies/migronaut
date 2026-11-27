@@ -38,7 +38,9 @@ const waitForGroup = async ({
   timeoutMs,
 }) => {
   if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
-    throw new ConfigInvalidError('timeoutMs must be a positive finite number', { timeoutMs });
+    throw new ConfigInvalidError('timeoutMs must be a positive finite number', {
+      context: { timeoutMs },
+    });
   }
   const results = [];
   // Nothing was enqueued: nothing to wait for, and no reason to need QueueEvents.
@@ -47,7 +49,7 @@ const waitForGroup = async ({
     throw new ConfigInvalidError(
       'wait() needs QueueEvents — pass bullmq.QueueEvents to createMigrationQueue, ' +
         'or a queueEvents instance to wait()',
-      { groupId },
+      { context: { groupId } },
     );
   }
 
@@ -83,13 +85,15 @@ const waitForGroup = async ({
   const finish = async (id, message, fields) => {
     const fail = (failedReason, timedOut, code) =>
       new QueueJobFailedError(message, {
-        groupId,
-        jobId: id,
-        ...fields,
-        failedReason,
-        timedOut,
-        ...(code !== undefined ? { code } : {}),
-        results: [...results],
+        context: {
+          groupId,
+          jobId: id,
+          ...fields,
+          failedReason,
+          timedOut,
+          ...(code !== undefined ? { code } : {}),
+          results: [...results],
+        },
       });
 
     const outOfTime = () => fail(`wait timed out after ${timeoutMs}ms`, true);
