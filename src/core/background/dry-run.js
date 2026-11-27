@@ -199,8 +199,8 @@ const transformRows = async (job, docs) => {
   for (const { doc, next, error } of transformed) {
     const row = { _id: ejson(doc._id), before: ejson(doc) };
     // What the write path would refuse before it wrote: a changed shard key.
-    const refused = error === undefined ? job.partitioner.checkTransform(doc, next) : null;
-    if (error !== undefined) {
+    const refused = error === null ? job.partitioner.checkTransform(doc, next) : null;
+    if (error !== null) {
       row.error = errorText(error);
     } else if (refused) {
       row.error = refused.message;

@@ -340,9 +340,9 @@ describe('state transitions', () => {
   it('should move, keep or refuse every action from every status', () => {
     for (const [action, rule] of Object.entries(TRANSITIONS)) {
       for (const status of STATUSES) {
-        if (rule.from.includes(status)) {
+        if (rule.from.has(status)) {
           assert.deepStrictEqual(transition(status, action), { to: rule.to, applied: 'changed' });
-        } else if (rule.done.includes(status)) {
+        } else if (rule.done.has(status)) {
           assert.deepStrictEqual(transition(status, action), { to: status, applied: 'unchanged' });
         } else {
           assert.throws(

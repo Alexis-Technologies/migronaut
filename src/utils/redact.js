@@ -1,4 +1,4 @@
-const { isPlainObject } = require('./canonical.js');
+const { assign: put, isPlainObject } = require('./canonical.js');
 
 /**
  * Credential redaction for anything that leaves the process — error messages,
@@ -157,24 +157,6 @@ const redactWithin = (text, limit) => {
     '$1{ <redacted> }',
   );
   return { text: redactOutbound(head), cut };
-};
-
-/**
- * Set `key` on a copy as an own property. A plain assignment of `__proto__` —
- * a key `JSON.parse` happily makes — would replace the copy's prototype and
- * lose the key instead.
- */
-const put = (target, key, value) => {
-  if (key === '__proto__') {
-    Object.defineProperty(target, key, {
-      value,
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
-  } else {
-    target[key] = value;
-  }
 };
 
 /**

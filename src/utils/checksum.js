@@ -16,7 +16,7 @@ const computeChecksum = async (filepath) => {
   const buffer = await fs.readFile(filepath);
   let contents = buffer.toString('utf8');
   if (contents.charCodeAt(0) === UTF8_BOM) contents = contents.slice(1);
-  contents = contents.replace(/\r\n/g, '\n');
+  contents = contents.replaceAll('\r\n', '\n');
   return crypto.createHash('sha256').update(contents, 'utf8').digest('hex');
 };
 

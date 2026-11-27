@@ -284,7 +284,8 @@ const idRangePartitioner = Object.freeze({
   advance: idRangeAdvance,
   past: idRangePast,
   /** Nothing to add to the optimistic filter — `_id` is already in it */
-  writeFilter: () => ({}),
+  // No shard key to add: null, not a fresh `{}` for every document written.
+  writeFilter: () => null,
   /** Every transformation is fine: `_id` is checked by stampedDiff itself */
   checkTransform: () => null,
   /** An `_id` range never goes stale */

@@ -506,20 +506,20 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
  * a redelivered job or a second click must be harmless). Anything else is a
  * conflict.
  */
+/** One action's rule: the statuses it moves from, where to, and where it is already done */
+const rule = (from, to, done) => Object.freeze({ from: new Set(from), to, done: new Set(done) });
+
 const TRANSITIONS = Object.freeze({
-  unblock: { from: ['blocked'], to: 'pending', done: ['pending', 'running', 'paused'] },
-  plan: { from: ['pending'], to: 'running', done: ['running'] },
-  complete: { from: ['running'], to: 'completed', done: ['completed'] },
-  fail: { from: ['blocked', 'pending', 'running'], to: 'failed', done: ['failed'] },
-  pause: { from: ['blocked', 'pending', 'running'], to: 'paused', done: ['paused'] },
-  resume: { from: ['paused'], to: 'pending', done: ['blocked', 'pending', 'running'] },
-  cancel: {
-    from: ['blocked', 'pending', 'running', 'paused'],
-    to: 'cancelled',
-    done: ['cancelled'],
-  },
-  retry: { from: ['failed', 'cancelled'], to: 'pending', done: ['pending'] },
-  reopen: { from: ['completed'], to: 'running', done: ['running'] },
+  __proto__: null,
+  unblock: rule(['blocked'], 'pending', ['pending', 'running', 'paused']),
+  plan: rule(['pending'], 'running', ['running']),
+  complete: rule(['running'], 'completed', ['completed']),
+  fail: rule(['blocked', 'pending', 'running'], 'failed', ['failed']),
+  pause: rule(['blocked', 'pending', 'running'], 'paused', ['paused']),
+  resume: rule(['paused'], 'pending', ['blocked', 'pending', 'running']),
+  cancel: rule(['blocked', 'pending', 'running', 'paused'], 'cancelled', ['cancelled']),
+  retry: rule(['failed', 'cancelled'], 'pending', ['pending']),
+  reopen: rule(['completed'], 'running', ['running']),
 });
 
 /**
@@ -529,14 +529,14 @@ const TRANSITIONS = Object.freeze({
  * @throws {BackgroundConflictError} when the action does not fit the status
  */
 const transition = (status, action, { migration } = {}) => {
-  const rule = TRANSITIONS[action];
-  if (rule === undefined) {
+  const found = TRANSITIONS[action];
+  if (found === undefined) {
     throw new BackgroundConflictError(`Unknown background action "${action}"`, {
       context: { action },
     });
   }
-  if (rule.from.includes(status)) return { to: rule.to, applied: 'changed' };
-  if (rule.done.includes(status)) return { to: status, applied: 'unchanged' };
+  if (found.from.has(status)) return { to: found.to, applied: 'changed' };
+  if (found.done.has(status)) return { to: status, applied: 'unchanged' };
   throw new BackgroundConflictError(
     `Cannot ${action} ${migration ? `background migration ${migration}` : 'it'}: it is ${status}`,
     { context: { action, status, ...(migration ? { migration } : {}) } },

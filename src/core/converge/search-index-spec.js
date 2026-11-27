@@ -29,6 +29,7 @@ const {
 const SEARCH_INDEX_KEYS = ['name', 'type', 'definition'];
 const SEARCH_INDEX_KEY_SET = new Set(SEARCH_INDEX_KEYS);
 const SEARCH_INDEX_TYPES = ['search', 'vectorSearch'];
+const SEARCH_INDEX_TYPE_SET = new Set(SEARCH_INDEX_TYPES);
 
 /** What the server names an index declared without a name, and the type it assumes */
 const DEFAULT_SEARCH_INDEX_NAME = 'default';
@@ -113,7 +114,7 @@ const searchIndexIssues = (index, path) => {
   if (index.name !== undefined && (typeof index.name !== 'string' || index.name.length === 0)) {
     report('name', 'must be a non-empty string');
   }
-  const typeValid = index.type === undefined || SEARCH_INDEX_TYPES.includes(index.type);
+  const typeValid = index.type === undefined || SEARCH_INDEX_TYPE_SET.has(index.type);
   if (!typeValid) report('type', "must be 'search' or 'vectorSearch'");
 
   const { definition } = index;
@@ -248,7 +249,7 @@ const normalizeLiveSearchIndex = (raw) => {
   const version = raw.latestDefinitionVersion?.version ?? raw.latestVersion;
   return {
     name: raw.name,
-    type: SEARCH_INDEX_TYPES.includes(raw.type) ? raw.type : inferSearchIndexType(definition),
+    type: SEARCH_INDEX_TYPE_SET.has(raw.type) ? raw.type : inferSearchIndexType(definition),
     definition,
     status: typeof raw.status === 'string' ? raw.status : undefined,
     queryable: raw.queryable === true,

@@ -54,10 +54,14 @@ const quotedList = (items) => {
 
 /** The validation options, each with the values it takes */
 const VALIDATION_OPTIONS = [
-  { key: 'validationLevel', allowed: VALIDATION_LEVELS, expected: quotedList(VALIDATION_LEVELS) },
+  {
+    key: 'validationLevel',
+    allowed: new Set(VALIDATION_LEVELS),
+    expected: quotedList(VALIDATION_LEVELS),
+  },
   {
     key: 'validationAction',
-    allowed: VALIDATION_ACTIONS,
+    allowed: new Set(VALIDATION_ACTIONS),
     expected: quotedList(VALIDATION_ACTIONS),
   },
 ];
@@ -253,7 +257,7 @@ const definitionIssues = (definition, { path: base, reserved = [], fallbackName 
     const { key, allowed, expected } = VALIDATION_OPTIONS[i];
     const value = definition[key];
     if (value === undefined) continue;
-    if (!allowed.includes(value)) {
+    if (!allowed.has(value)) {
       report(key, `must be ${expected}`);
     } else if (!hasValidator) {
       report(key, 'has no effect without a validator');

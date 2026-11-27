@@ -119,7 +119,7 @@ describe('resolveMigrationExports', () => {
       'x.js',
     );
     assert.strictEqual(migration.up, up);
-    assert.strictEqual('timeoutMs' in migration, false);
+    assert.strictEqual(migration.timeoutMs, undefined);
   });
 });
 

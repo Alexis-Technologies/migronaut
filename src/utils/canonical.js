@@ -143,17 +143,25 @@ const unsendable = (value, seen = new Set()) => {
 };
 
 /**
- * Assign without invoking setters: a key named `__proto__` (JSON.parse makes
- * one an own property) must stay a key, not replace the object's prototype —
- * otherwise it vanishes from what is sent and what is compared.
+ * Set `key` on `target` as an own property. Only `__proto__` needs
+ * `defineProperty` — the one accessor of `Object.prototype`: a key JSON.parse
+ * makes an own property must stay a key, not replace the object's prototype
+ * and vanish from what is sent and what is compared. Every other key is a
+ * plain assignment, which the comparison — on every plan, replan, verify and
+ * settle read — pays far less for. (src/versioning keeps a copy of its own:
+ * it requires nothing outside itself.)
  */
 const assign = (target, key, value) => {
-  Object.defineProperty(target, key, {
-    value,
-    enumerable: true,
-    writable: true,
-    configurable: true,
-  });
+  if (key === '__proto__') {
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  } else {
+    target[key] = value;
+  }
 };
 
 /** Orders `[key, item]` pairs by key, as the default sort orders strings */

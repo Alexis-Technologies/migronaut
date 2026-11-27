@@ -106,6 +106,19 @@ const transformContext = (job, extra = {}, attempt = 1) => {
   };
 };
 
+/**
+ * `filter` (a fresh object of the caller's) with the partitioner's write
+ * filter for `doc` laid onto it — the shard key, on a sharded collection. Key
+ * by key, not a spread: it runs once for every document written.
+ */
+const withWriteFilter = (filter, partitioner, doc) => {
+  const extra = partitioner?.writeFilter?.(doc);
+  if (extra === undefined || extra === null) return filter;
+  const keys = Object.keys(extra);
+  for (let i = 0; i < keys.length; i++) filter[keys[i]] = extra[keys[i]];
+  return filter;
+};
+
 const docError = (doc, error, reason) => ({
   id: doc._id,
   error: documentErrorText(error),
@@ -113,8 +126,9 @@ const docError = (doc, error, reason) => ({
 });
 
 /**
- * Transform `docs` (each on a copy): `[{ doc, next } | { doc, error }]`,
- * aligned. A batch transformation that throws, or returns the wrong number
+ * Transform `docs` (each on a copy): `[{ doc, next, error }]`, aligned — one
+ * shape for both outcomes, `error` null when the document transformed.
+ * Every result is read once more, per document, by the write path. A batch transformation that throws, or returns the wrong number
  * of results, fails the slice — it cannot say which document was at fault.
  */
 const transformAll = async (job, docs, ctx) => {
@@ -131,20 +145,24 @@ const transformAll = async (job, docs, ctx) => {
       );
     }
     for (let i = 0; i < docs.length; i++) {
-      results.push(
-        out[i] instanceof Error ? { doc: docs[i], error: out[i] } : { doc: docs[i], next: out[i] },
-      );
+      const failed = out[i] instanceof Error;
+      results.push({
+        doc: docs[i],
+        next: failed ? undefined : out[i],
+        error: failed ? out[i] : null,
+      });
     }
     return results;
   }
   for (let i = 0; i < docs.length; i++) {
     try {
-      results.push({ doc: docs[i], next: await one(cloneDocument(docs[i]), ctx) });
+      const next = await one(cloneDocument(docs[i]), ctx);
+      results.push({ doc: docs[i], next, error: null });
     } catch (error) {
       // A side write that hit a transient transaction error is the batch's,
       // not the document's: the whole transaction is retried.
       if (isTransientTransaction(error)) throw error;
-      results.push({ doc: docs[i], error });
+      results.push({ doc: docs[i], next: undefined, error });
     }
   }
   return results;
@@ -157,11 +175,14 @@ const transformAll = async (job, docs, ctx) => {
 const buildOps = (job, transformed) => {
   const { source, target } = directionOf(job.spec, job.fns, job.direction);
   const partitioner = job.partitioner;
+  // The same two option objects for every document of the batch.
+  const fromSource = { from: source };
+  const toTarget = { to: target };
   const ops = [];
   const owners = [];
   const errors = [];
   for (const { doc, next, error } of transformed) {
-    if (error !== undefined) {
+    if (error !== null) {
       errors.push(docError(doc, error, 'transform'));
       continue;
     }
@@ -172,20 +193,13 @@ const buildOps = (job, transformed) => {
     }
     let update = null;
     try {
-      update = stampedDiff(doc, next, job.spec, { to: target });
+      update = stampedDiff(doc, next, job.spec, toTarget);
     } catch (stampError) {
       errors.push(docError(doc, stampError, 'shape'));
       continue;
     }
-    ops.push({
-      updateOne: {
-        filter: {
-          ...occFilter(doc, job.spec, { from: source }),
-          ...partitioner?.writeFilter?.(doc),
-        },
-        update,
-      },
-    });
+    const filter = withWriteFilter(occFilter(doc, job.spec, fromSource), partitioner, doc);
+    ops.push({ updateOne: { filter, update } });
     owners.push(doc);
   }
   return { ops, owners, errors };
@@ -238,14 +252,14 @@ const writeOps = async (collection, ops, { writeConcern, session, bare = false }
 const byIds = (docs, partitioner) => {
   const ids = [];
   const branches = [];
-  let keyed = false;
+  let isKeyed = false;
   for (const doc of docs) {
     ids.push(doc._id);
-    const key = partitioner?.writeFilter?.(doc) ?? {};
-    if (Object.keys(key).length > 0) keyed = true;
-    branches.push({ _id: doc._id, ...key });
+    const branch = withWriteFilter({ _id: doc._id }, partitioner, doc);
+    if (!isKeyed && Object.keys(branch).length > 1) isKeyed = true;
+    branches.push(branch);
   }
-  return keyed ? { $or: branches } : { _id: { $in: ids } };
+  return isKeyed ? { $or: branches } : { _id: { $in: ids } };
 };
 
 /**

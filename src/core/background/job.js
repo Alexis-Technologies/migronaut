@@ -191,20 +191,35 @@ const jobFor = async (deps, name, state, { direction } = {}) => {
   const spec = { ...loaded.spec, ...state.spec };
   const dir = direction ?? state.direction ?? 'forward';
   const match = spec.mode === 'step' ? undefined : excludeBadIds(matchOf(spec, dir), state.badIds);
+  const { partitioner, hint, sharding } = await partitionerFor(
+    deps,
+    spec,
+    dir,
+    state.plan?.partitioner,
+  );
+  // One shape for every job, its every field set here: the engine reads it
+  // for each document. What a lane learns as it works — the state's
+  // generation, the partition, the lease's signal — starts undefined, as
+  // `ctx.background` and `ctx.signal` have always shown it before a lane.
   return {
     name,
     spec,
     fns: loaded.fns,
     direction: dir === 'revert' ? 'revert' : 'forward',
     match,
-    ...(await partitionerFor(deps, spec, dir, state.plan?.partitioner)),
+    partitioner,
+    hint,
+    sharding,
     logger: deps.logger,
     // For ctx.background and ctx.logger: the lane working it and its queue job
     // (with its group when a run drives it inline).
-    ...(deps.logs ? { logs: deps.logs } : {}),
-    ...(deps.runId !== undefined ? { runId: deps.runId } : {}),
-    ...(deps.job?.id !== undefined ? { jobId: deps.job.id } : {}),
-    ...(deps.job?.groupId !== undefined ? { groupId: deps.job.groupId } : {}),
+    logs: deps.logs ?? null,
+    runId: deps.runId,
+    jobId: deps.job?.id,
+    groupId: deps.job?.groupId,
+    generation: undefined,
+    partitionId: undefined,
+    signal: undefined,
   };
 };
 

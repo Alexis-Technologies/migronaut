@@ -202,7 +202,7 @@ describe('sliceBracket', () => {
     assert.deepStrictEqual(sliceBracket('number', [1], 4), [
       { scope: { kind: 'id-range', bracket: 'number' }, count: 1 },
     ]);
-    assert.deepStrictEqual(idRangePartitioner.writeFilter({ _id: 1 }), {});
+    assert.strictEqual(idRangePartitioner.writeFilter({ _id: 1 }), null);
     assert.strictEqual(idRangePartitioner.checkTransform({}, {}), null);
     assert.strictEqual(idRangePartitioner.stale(), false);
   });

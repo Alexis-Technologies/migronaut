@@ -194,13 +194,14 @@ module.exports = { description, background };
 
 /** Extensions a custom `--template` file may have — anything else is refused */
 const TEMPLATE_EXTENSIONS = ['.ts', '.js', '.cjs', '.mjs'];
+const TEMPLATE_EXTENSION_SET = new Set(TEMPLATE_EXTENSIONS);
 
 /** Resolve template file contents — a custom template if provided, else the built-in */
 const resolveTemplateContent = async (templatePath, js, esm = false, background = false) => {
   if (background) return defaultBackgroundTemplate(js, esm);
   if (templatePath) {
     const ext = path.extname(templatePath);
-    if (!TEMPLATE_EXTENSIONS.includes(ext)) {
+    if (!TEMPLATE_EXTENSION_SET.has(ext)) {
       throw new ConfigInvalidError(
         `Template file must have one of the extensions: ${TEMPLATE_EXTENSIONS.join(', ')}`,
         { context: { templatePath } },

@@ -183,16 +183,16 @@ const importMigrationModule = async (filepath, options = {}) => {
   return imported.default ?? imported;
 };
 
-/** The `requires` export, validated against the file's own name */
-const readRequires = (resolved, filepath) => {
-  if (resolved.requires === undefined) return {};
+/** The `requires` export, validated against the file's own name — undefined when it has none */
+const requiresOf = (resolved, filepath) => {
+  if (resolved.requires === undefined) return undefined;
   const issues = requiresIssues(resolved.requires, path.basename(filepath));
   if (issues.length > 0) {
     throw new MigrationInvalidExportError(`Invalid ${issues[0].path}: ${issues[0].message}`, {
       context: { filepath: contextPath(filepath), issues },
     });
   }
-  return { requires: [...resolved.requires] };
+  return [...resolved.requires];
 };
 
 /** `name` as {@link EXPORT_SPELLINGS} keys it */
@@ -268,8 +268,8 @@ const resolveMigrationExports = (resolved, filepath) => {
     return {
       kind: 'background',
       background: resolved.background,
-      ...(typeof resolved.description === 'string' ? { description: resolved.description } : {}),
-      ...readRequires(resolved, filepath),
+      description: resolved.description,
+      requires: requiresOf(resolved, filepath),
     };
   }
 
@@ -279,14 +279,17 @@ const resolveMigrationExports = (resolved, filepath) => {
     });
   }
 
-  const migration = { up: resolved.up, down: resolved.down };
-
-  if (resolved.useTransaction !== undefined) migration.useTransaction = resolved.useTransaction;
-  if (resolved.timeoutMs !== undefined) migration.timeoutMs = resolved.timeoutMs;
-  if (resolved.description !== undefined) migration.description = resolved.description;
-  Object.assign(migration, readRequires(resolved, filepath));
-
-  return migration;
+  // One literal, every key present: the record of every migration a run
+  // loads has one shape (an export left out is undefined, as it was absent).
+  return {
+    kind: undefined,
+    up: resolved.up,
+    down: resolved.down,
+    useTransaction: resolved.useTransaction,
+    timeoutMs: resolved.timeoutMs,
+    description: resolved.description,
+    requires: requiresOf(resolved, filepath),
+  };
 };
 
 /**

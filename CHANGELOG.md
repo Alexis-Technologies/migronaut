@@ -103,6 +103,12 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 
 ### Changed
 
+- **The converge comparison is two to four times faster**: `canonical()` and `toWire()` — run on
+  every plan, replan, verify and settle read — define a property only for a `__proto__` key and
+  assign every other (`canonical` of an index 430 k → 1.1 M ops/s, `toWire` of a validator
+  580 k → 2.5 M on an M3 Max). The background engine builds each document's write without
+  spreads, one result shape and one job shape for every document, and the `_id` partitioner's
+  write filter is `null`, not a fresh `{}` per document. The bench's rows did not move.
 - **An unknown config key is a warning**, where it was a debug line: a mistyped safety option
   (`useTransactions`) runs with its default.
 - **`LICENSE` and `SECURITY.md` ship in the package.** `files` lists them next to `README.md` and

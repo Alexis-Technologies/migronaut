@@ -158,16 +158,20 @@ const runOnce = async (options, fn, attempt) => {
     images: new Map(),
     forbidden: new Set(options.forbidden ?? []),
     deadline: Date.now() + deadlineMs,
-    failed: undefined,
+    // What aborted the transaction, when something did (an error, a reference).
+    failed: null,
+    // The session handed to the step — made below, compared on the way out.
+    sessionProxy: null,
   };
   let retry = false;
   let timer = null;
   try {
     session.startTransaction({ readConcern: { level: 'snapshot' } });
+    state.sessionProxy = proxySession(state);
     const handles = {
       db: proxyDb(state, options.db),
       client: proxyClient(state),
-      session: (state.sessionProxy = proxySession(state)),
+      session: state.sessionProxy,
       mongoose: refusedMongoose(state),
       /** For a caller that runs several steps: number the operations by step */
       nextStep: () => {
@@ -186,7 +190,7 @@ const runOnce = async (options, fn, attempt) => {
       report.value = value;
     }
   } catch (error) {
-    if (state.failed !== undefined) {
+    if (state.failed !== null) {
       report.abortedBy = errorText(state.failed);
     } else if (isTransientTransaction(error)) {
       retry = true;
@@ -226,7 +230,7 @@ const serialized = (state, work) => {
         context: { reason: 'deadline' },
       });
     }
-    if (state.failed !== undefined) {
+    if (state.failed !== null) {
       throw new BackgroundFailedError(`the transaction was aborted by ${errorText(state.failed)}`, {
         context: { reason: 'aborted' },
       });
@@ -565,7 +569,7 @@ const writeOp = (state, raw, method, args) => {
     } catch (error) {
       // A write error aborts the transaction on the server: nothing after it
       // can run. A transient one (a write conflict) runs the whole sandbox again.
-      if (!isTransientTransaction(error)) state.failed = error;
+      if (!isTransientTransaction(error)) state.failed = error ?? null;
       record(state, { collection: name, method, error: errorText(error) });
       throw error;
     }
