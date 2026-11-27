@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { describe, it, mock } = require('node:test');
 const { Decimal128, Int32, Long, MaxKey, MinKey, ObjectId } = require('mongodb');
-const { idRangePartitioner } = require('../../src/core/background-partition.js');
+const { idRangePartitioner } = require('../../src/core/background/partition.js');
 const {
   MAX_STUCK,
   capRuns,
@@ -15,8 +15,8 @@ const {
   staleEpoch,
   valueAt,
   withShardKey,
-} = require('../../src/core/background-shard.js');
-const { partitionerFor, planMismatch, probeHint } = require('../../src/core/background.js');
+} = require('../../src/core/background/shard.js');
+const { partitionerFor, planMismatch, probeHint } = require('../../src/core/background/job.js');
 
 const MIN = new MinKey();
 const MAX = new MaxKey();
@@ -675,7 +675,7 @@ describe('partitionerFor — which partitioner a collection gets', () => {
 });
 
 describe('sampleRequest — a sample-first pass under the random cursor', () => {
-  const { RANDOM_CURSOR_SHARE, sampleRequest } = require('../../src/core/background-partition.js');
+  const { RANDOM_CURSOR_SHARE, sampleRequest } = require('../../src/core/background/partition.js');
 
   it('should oversample by how little matches, never to 5% of the collection', () => {
     // 100 matches wanted, half the collection matching: 200 asked.

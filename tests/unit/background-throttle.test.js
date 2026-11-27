@@ -6,7 +6,7 @@ const {
   replicationLagMs,
   sleep,
   MAX_HOOK_PAUSE_MS,
-} = require('../../src/core/background-throttle.js');
+} = require('../../src/core/background/throttle.js');
 
 const at = (ms) => new Date(ms);
 const status = (secondaries) => ({
@@ -79,7 +79,7 @@ describe('replication lag', () => {
 });
 
 describe('adaptiveFor — the controller a process keeps per migration and group', () => {
-  const { adaptiveFor } = require('../../src/core/background.js');
+  const { adaptiveFor } = require('../../src/core/background/lane.js');
   const settings = { targetLatencyMs: 100, minBatchSize: 10, maxBatchSize: 500, maxPauseMs: 5000 };
   const partition = { group: 'shard-a' };
 
@@ -364,7 +364,7 @@ describe('createAdaptive (AIMD)', () => {
   const {
     createAdaptive,
     THROTTLE_REPORT_INTERVAL_MS,
-  } = require('../../src/core/background-throttle.js');
+  } = require('../../src/core/background/throttle.js');
   const settings = { targetLatencyMs: 100, minBatchSize: 10, maxBatchSize: 200, maxPauseMs: 1000 };
 
   it('should warm up, halve on a slow batch and grow back additively', () => {
@@ -424,7 +424,7 @@ describe('createAdaptive (AIMD)', () => {
 });
 
 describe('isOverload', () => {
-  const { isOverload } = require('../../src/core/background-engine.js');
+  const { isOverload } = require('../../src/core/background/engine.js');
   it('should tell capacity trouble from data trouble', () => {
     assert.ok(isOverload({ err: {} }));
     assert.ok(isOverload({ writeConcernError: {} }));

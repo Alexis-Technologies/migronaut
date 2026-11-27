@@ -1,6 +1,6 @@
-const { isPlainObject } = require('../utils/canonical.js');
-const { versionIndexKey } = require('../versioning/document.js');
-const { toCount } = require('../versioning/internal.js');
+const { isPlainObject } = require('../../utils/canonical.js');
+const { versionIndexKey } = require('../../versioning/document.js');
+const { toCount } = require('../../versioning/internal.js');
 
 /**
  * What a collection's `versioning` block asks of the database: the validator

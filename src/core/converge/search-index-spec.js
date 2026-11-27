@@ -5,7 +5,7 @@ const {
   isPlainObject,
   toWire,
   unsendable,
-} = require('../utils/canonical.js');
+} = require('../../utils/canonical.js');
 
 /**
  * One declared Atlas Search / Vector Search index against one live index:

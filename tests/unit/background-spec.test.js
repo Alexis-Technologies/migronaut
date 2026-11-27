@@ -16,7 +16,7 @@ const {
   resolveBackgroundSpec,
   scopeFilter,
   transition,
-} = require('../../src/core/background-spec.js');
+} = require('../../src/core/background/spec.js');
 const { assertUpOptions } = require('../../src/core/options.js');
 const {
   BackgroundConflictError,

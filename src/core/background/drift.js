@@ -1,8 +1,9 @@
-const { BackgroundConflictError } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
-const { STATE_SUMMARY, control, probeHint } = require('./background.js');
-const { excludeBadIds, matchOf } = require('./background-engine.js');
-const { READ_OPTIONS } = require('./server-info.js');
+const { BackgroundConflictError } = require('../../errors/index.js');
+const { errorText } = require('../../utils/error.js');
+const { control } = require('./controls.js');
+const { STATE_SUMMARY, probeHint } = require('./job.js');
+const { excludeBadIds, matchOf } = require('./engine.js');
+const { READ_OPTIONS } = require('../server-info.js');
 
 /**
  * Drift: old-shape documents that appear after a background migration

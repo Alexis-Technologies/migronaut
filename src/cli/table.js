@@ -1,5 +1,5 @@
-const { TARGET_LABELS, isDestructive } = require('../core/converge-plan.js');
-const { searchBuildState } = require('../core/search-index-spec.js');
+const { TARGET_LABELS, isDestructive } = require('../core/converge/plan.js');
+const { searchBuildState } = require('../core/converge/search-index-spec.js');
 const { createColors, stripAnsi } = require('../utils/colors.js');
 const { formatDateTime } = require('../utils/date.js');
 // Shared with the logger and spinner — cell values come from the changelog and

@@ -4,9 +4,9 @@ const {
   MATCH_FIRST_CAP,
   previewSample,
   sampleDocuments,
-} = require('../../src/core/background-dry-run.js');
-const { SAMPLE_TIMEOUT_MS } = require('../../src/core/background-partition.js');
-const { resolveBackgroundSpec } = require('../../src/core/background-spec.js');
+} = require('../../src/core/background/dry-run.js');
+const { SAMPLE_TIMEOUT_MS } = require('../../src/core/background/partition.js');
+const { resolveBackgroundSpec } = require('../../src/core/background/spec.js');
 
 const MATCH = { __v: { $in: [null, 1] } };
 

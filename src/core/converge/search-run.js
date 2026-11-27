@@ -1,16 +1,11 @@
 const { setTimeout: sleepFor } = require('node:timers/promises');
-const { ConvergeFailedError, MigronautError } = require('../errors/index.js');
-const { mapLimit } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
-const { SERVED_ACTIONS } = require('./converge-plan.js');
-const {
-  awaitSearchIndexes,
-  listSearchIndexes,
-  probeSearch,
-  searchHint,
-} = require('./converge-search.js');
+const { ConvergeFailedError, MigronautError } = require('../../errors/index.js');
+const { mapLimit } = require('../../utils/concurrency.js');
+const { errorText } = require('../../utils/error.js');
+const { SERVED_ACTIONS } = require('./plan.js');
+const { awaitSearchIndexes, listSearchIndexes, probeSearch, searchHint } = require('./search.js');
 const { searchBuild, searchBuildState } = require('./search-index-spec.js');
-const { READ_CONCURRENCY, READ_OPTIONS } = require('./server-info.js');
+const { READ_CONCURRENCY, READ_OPTIONS } = require('../server-info.js');
 
 /**
  * The search half of a converge run: reading the live search indexes (and
@@ -18,7 +13,7 @@ const { READ_CONCURRENCY, READ_OPTIONS } = require('./server-info.js');
  * result, and the optional wait for the builds — with the log lines, events
  * and metric point that tell it. Orchestration over the same `deps` as
  * converge.js, which calls in at its read, verify, wait and report phases;
- * the commands themselves are converge-search.js's.
+ * the commands themselves are search.js's.
  */
 
 /**

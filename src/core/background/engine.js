@@ -2,9 +2,9 @@ const {
   BackgroundConflictError,
   BackgroundFailedError,
   LockLostError,
-} = require('../errors/index.js');
-const { canonical, isPlainObject } = require('../utils/canonical.js');
-const { documentErrorText, errorText, isTransientTransaction } = require('../utils/error.js');
+} = require('../../errors/index.js');
+const { canonical, isPlainObject } = require('../../utils/canonical.js');
+const { documentErrorText, errorText, isTransientTransaction } = require('../../utils/error.js');
 const {
   cloneDocument,
   occFilter,
@@ -12,11 +12,11 @@ const {
   stampedDiff,
   versionFilter,
   versionOf,
-} = require('../versioning/document.js');
-const { MAX_CHECKPOINT_BYTES } = require('./background-spec.js');
+} = require('../../versioning/document.js');
+const { MAX_CHECKPOINT_BYTES } = require('./spec.js');
 const { bsonSize } = require('./bson-peer.js');
-const { sleep } = require('./background-throttle.js');
-const { READ_OPTIONS } = require('./server-info.js');
+const { sleep } = require('./throttle.js');
+const { READ_OPTIONS } = require('../server-info.js');
 
 /**
  * The batch engine: one background migration's documents rewritten, batch

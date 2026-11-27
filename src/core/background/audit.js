@@ -1,5 +1,5 @@
-const { STATE_SUMMARY, probeHint } = require('./background.js');
-const { probeOldShape } = require('./background-drift.js');
+const { STATE_SUMMARY, probeHint } = require('./job.js');
+const { probeOldShape } = require('./drift.js');
 
 /**
  * What `audit` says about background migrations — read-only, from what the

@@ -107,8 +107,8 @@ file's process alive, and the run hangs instead of failing.
 
 `search-atlas.test.js` is manual: CI does not run it. Run it locally after a
 change to how search indexes are compared, planned or applied
-(`src/core/search-index-spec.js`, `src/core/converge-search.js`,
-`src/core/converge-search-run.js`, the search part of `src/core/converge-plan.js`)
+(`src/core/converge/search-index-spec.js`, `src/core/converge/search.js`,
+`src/core/converge/search-run.js`, the search part of `src/core/converge/plan.js`)
 — the unit tests carry the coverage, but only a real `mongot` shows what the
 server reports back. Run it on `mongodb/mongodb-atlas-local:8.0` and `:latest`:
 

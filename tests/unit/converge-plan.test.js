@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { normalizeDefinition } = require('../../src/core/collections.js');
+const { normalizeDefinition } = require('../../src/core/converge/collections.js');
 const {
   SEARCH_UNAVAILABLE_REASON,
   UNIQUE_REBUILD_REASON,
@@ -9,7 +9,7 @@ const {
   liveValidator,
   needsConfirmation,
   planCollection,
-} = require('../../src/core/converge-plan.js');
+} = require('../../src/core/converge/plan.js');
 
 const ID_INDEX = { v: 2, key: { _id: 1 }, name: '_id_' };
 const FR = { locale: 'fr', strength: 3, version: '57.1' };

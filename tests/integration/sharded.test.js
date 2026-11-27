@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { after, before, describe, it } = require('node:test');
-const { createShardPartitioner } = require('../../src/core/background-shard.js');
+const { createShardPartitioner } = require('../../src/core/background/shard.js');
 const { BackgroundFailedError } = require('../../src/errors/index.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 

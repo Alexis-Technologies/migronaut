@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { verify } = require('../../src/core/background-drift.js');
+const { verify } = require('../../src/core/background/drift.js');
 
 /** A completed forward migration over its own collection, as the store lists it */
 const completed = (name, collection) => ({

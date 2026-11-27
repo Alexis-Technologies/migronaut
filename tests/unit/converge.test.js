@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { normalizeDefinition } = require('../../src/core/collections.js');
-const { readLiveState, runConverge } = require('../../src/core/converge.js');
+const { normalizeDefinition } = require('../../src/core/converge/collections.js');
+const { runConverge } = require('../../src/core/converge/converge.js');
+const { readLiveState } = require('../../src/core/converge/live.js');
 const { READ_OPTIONS } = require('../../src/core/server-info.js');
 const { ConvergeFailedError, RunAbortedError } = require('../../src/errors/index.js');
 

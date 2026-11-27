@@ -1,4 +1,4 @@
-const { deepEqual } = require('../utils/canonical.js');
+const { deepEqual } = require('../../utils/canonical.js');
 const { shardedVersionIndexKey, versionFloorConflict } = require('./versioning-spec.js');
 const {
   compareIndex,

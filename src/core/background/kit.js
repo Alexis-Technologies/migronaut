@@ -3,20 +3,14 @@ const {
   ChecksumMismatchError,
   IrreversibleMigrationError,
   RunAbortedError,
-} = require('../errors/index.js');
-const { jitter } = require('../utils/concurrency.js');
-const { FATAL_SLICE_CODES, errorText } = require('../utils/error.js');
-const {
-  control,
-  coordinate,
-  failedError,
-  requiresStatus,
-  runSlice,
-  tryUnblock,
-  waitForLanes,
-} = require('./background.js');
-const { stillDirty } = require('./background-drift.js');
-const { sleep } = require('./background-throttle.js');
+} = require('../../errors/index.js');
+const { jitter } = require('../../utils/concurrency.js');
+const { FATAL_SLICE_CODES, errorText } = require('../../utils/error.js');
+const { control, failedError, waitForLanes } = require('./controls.js');
+const { coordinate, requiresStatus, tryUnblock } = require('./coordinator.js');
+const { runSlice } = require('./lane.js');
+const { stillDirty } = require('./drift.js');
+const { sleep } = require('./throttle.js');
 
 /**
  * The kit's background side — what MigratorKit's background methods do

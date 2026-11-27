@@ -1,6 +1,6 @@
-const { ConfigInvalidError } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
-const { cloneDocument, stampedDiff } = require('../versioning/document.js');
+const { ConfigInvalidError } = require('../../errors/index.js');
+const { errorText } = require('../../utils/error.js');
+const { cloneDocument, stampedDiff } = require('../../versioning/document.js');
 const {
   applyBatch,
   buildStepContext,
@@ -9,18 +9,18 @@ const {
   readStepResult,
   transformAll,
   transformContext,
-} = require('./background-engine.js');
+} = require('./engine.js');
 const {
   MAX_TIME_EXPIRED,
   SAMPLE_TIMEOUT_MS,
   idRangePartitioner,
   sampleRequest,
-} = require('./background-partition.js');
-const { runSandbox } = require('./background-sandbox.js');
-const { withShardKey } = require('./background-shard.js');
+} = require('./partition.js');
+const { runSandbox } = require('./sandbox.js');
+const { withShardKey } = require('./shard.js');
 const { toRelaxedEjson } = require('./bson-peer.js');
-const { backgroundLogs } = require('./migration-logger.js');
-const { READ_OPTIONS } = require('./server-info.js');
+const { backgroundLogs } = require('../migration-logger.js');
+const { READ_OPTIONS } = require('../server-info.js');
 
 /**
  * Dry runs of a background migration — what it would do, on real documents,

@@ -1,17 +1,12 @@
 const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it } = require('node:test');
 const { ObjectId } = require('mongodb');
-const {
-  control,
-  coordinate,
-  finalize,
-  jobFor,
-  repin,
-  runSlice,
-  waitForLanes,
-} = require('../../src/core/background.js');
-const { matchHash, resolveBackgroundSpec } = require('../../src/core/background-spec.js');
-const { BackgroundStore } = require('../../src/core/background-store.js');
+const { control, repin, waitForLanes } = require('../../src/core/background/controls.js');
+const { coordinate, finalize } = require('../../src/core/background/coordinator.js');
+const { jobFor } = require('../../src/core/background/job.js');
+const { runSlice } = require('../../src/core/background/lane.js');
+const { matchHash, resolveBackgroundSpec } = require('../../src/core/background/spec.js');
+const { BackgroundStore } = require('../../src/core/background/store.js');
 const { MigrationLock } = require('../../src/core/lock.js');
 const { BackgroundConflictError, ChecksumMismatchError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');

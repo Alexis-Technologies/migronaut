@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { planFingerprint } = require('../../src/core/converge.js');
-const { ConvergeLog } = require('../../src/core/converge-log.js');
+const { planFingerprint } = require('../../src/core/converge/converge.js');
+const { ConvergeLog } = require('../../src/core/converge/log.js');
 
 /** A database with one collection that keeps its documents in memory, newest last */
 const fakeDb = () => {

@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it } = require('node:test');
 const { ObjectId } = require('mongodb');
-const { BackgroundStore, STATE_SCHEMA } = require('../../src/core/background-store.js');
+const { BackgroundStore, STATE_SCHEMA } = require('../../src/core/background/store.js');
 const { runWithLock } = require('../../src/core/lock.js');
 const { LockLostError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');

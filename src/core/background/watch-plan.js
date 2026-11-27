@@ -2,7 +2,7 @@
  * The live drift watcher's decisions, kept pure: which background migrations
  * a collection's watcher upgrades with, what its change stream asks the
  * server for, how a stream error is read, and when a resume token is due.
- * background-watch.js does the I/O.
+ * watch.js does the I/O.
  */
 
 /** Server errors that mean the stream cannot resume from where it was */

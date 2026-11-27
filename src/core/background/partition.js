@@ -1,7 +1,7 @@
-const { mapLimit } = require('../utils/concurrency.js');
-const { sameValue } = require('../versioning/internal.js');
-const { ID_BRACKETS, bracketOfType, keysetFilter, scopeFilter } = require('./background-spec.js');
-const { READ_CONCURRENCY, READ_OPTIONS } = require('./server-info.js');
+const { mapLimit } = require('../../utils/concurrency.js');
+const { sameValue } = require('../../versioning/internal.js');
+const { ID_BRACKETS, bracketOfType, keysetFilter, scopeFilter } = require('./spec.js');
+const { READ_CONCURRENCY, READ_OPTIONS } = require('../server-info.js');
 
 /**
  * The default partitioner: a background migration's documents split into

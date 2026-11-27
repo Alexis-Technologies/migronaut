@@ -8,7 +8,7 @@ const {
   loadCollectionsDir,
   normalizeDefinition,
   resolveDefinitions,
-} = require('../../src/core/collections.js');
+} = require('../../src/core/converge/collections.js');
 const { validateConfig, DEFAULT_CONFIG } = require('../../src/core/config.js');
 const { ConfigInvalidError } = require('../../src/errors/index.js');
 

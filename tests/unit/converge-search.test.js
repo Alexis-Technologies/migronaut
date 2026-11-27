@@ -10,7 +10,7 @@ const {
   probeSearch,
   runSearchStep,
   searchHint,
-} = require('../../src/core/converge-search.js');
+} = require('../../src/core/converge/search.js');
 
 const serverError = (code, message = `server error ${code}`, fields = {}) =>
   Object.assign(new Error(message), { code, ...fields });

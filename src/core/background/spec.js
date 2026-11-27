@@ -3,12 +3,12 @@ const {
   BackgroundConflictError,
   ConfigInvalidError,
   MigrationInvalidExportError,
-} = require('../errors/index.js');
-const { canonical, isPlainObject, toWire, unsendable } = require('../utils/canonical.js');
-const { isCollectionName } = require('../utils/collection-name.js');
-const { fieldNameIssue } = require('../versioning/config.js');
-const { resolveFieldNames } = require('../versioning/document.js');
-const { filterTouches } = require('../versioning/internal.js');
+} = require('../../errors/index.js');
+const { canonical, isPlainObject, toWire, unsendable } = require('../../utils/canonical.js');
+const { isCollectionName } = require('../../utils/collection-name.js');
+const { fieldNameIssue } = require('../../versioning/config.js');
+const { resolveFieldNames } = require('../../versioning/document.js');
+const { filterTouches } = require('../../versioning/internal.js');
 
 /**
  * Background migrations, declared: what a migration file's

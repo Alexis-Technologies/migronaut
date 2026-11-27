@@ -133,7 +133,7 @@ through its one `safe()` guard (telemetry must never break a run), failures are 
 redacted status message plus `error.type`, and there are exactly three wrap sites, all in
 `core/migrator.js`: the `migronaut.run` span (opened once the lock is held), the
 `migronaut.migration` span (the *active* span while a migration runs — the one thing lifecycle
-events cannot provide), and the background spans handed to `background.js` through its deps —
+events cannot provide), and the background spans handed to the coordinator and the lanes through their deps —
 `migronaut.background.slice` (one lease held) and `migronaut.background.coordinate` (one
 coordinator step), each opened only once the lease or the coordinator lock is held. Nothing under `src/` or `bin/` may `require` an `@opentelemetry/*` package or
 `bullmq-otel`, and no `.d.ts` may import one (a unit test greps for it); the types are
@@ -191,11 +191,12 @@ steps and owns the connection lifecycle. Mechanism modules
 imports. The CLI injects a `ProgressReporter` callback into core instead. The queue adapter
 (`bullmq/`) is a second orchestration layer *above* the kit: it may require `core/migrator.js`,
 `core/lock-wait.js`, `utils/` and `errors/`, but never a mechanism module (`lock`, `changelog`,
-`runner`, any `background-*`) and never the database — if it needs something the kit does not
-offer, the kit gains a small public option (that is where `up({ batch, ordered })`, `nextBatch()`,
-`coordinateBackground()` and `driftMode()` came from). `core/background.js` (with
-`background-drift.js`, `background-audit.js` and `background-kit.js`) and `core/background-watch.js`
-are flows like `converge.js`: they get what they need as `deps`, built only by `migrator.js`.
+`runner`, anything under `core/background/`) and never the database — if it needs something the
+kit does not offer, the kit gains a small public option (that is where `up({ batch, ordered })`,
+`nextBatch()`, `coordinateBackground()` and `driftMode()` came from). The background flows
+(`core/background/coordinator.js`, `lane.js`, `controls.js`, with `job.js`, `drift.js`, `audit.js`,
+`kit.js` and `watch.js`) are flows like `core/converge/converge.js`: they get what they need as
+`deps`, built only by the kit's hosts (`background/host.js`, `converge/host.js`).
 The core may require `src/versioning/`; `src/versioning/` never requires the core.
 
 ## Naming conventions (post-rename)
@@ -296,7 +297,7 @@ section is what migronaut adds to it or does otherwise. **This file wins** where
   assertion in `tests/types/`. No `.d.ts` imports an optional package (`mongoose`, `bullmq`,
   `@opentelemetry/*`); the subpaths import root types from `./index.js`; `versioning.d.ts` may use
   TypeScript 5.0 (`const` type parameters), the others stay within 4.8.
-- `require('mongodb')` only in `core/migrator.js` and `core/bson-peer.js` (lazily, for `BSON`);
+- `require('mongodb')` only in `core/migrator.js` and `core/background/bson-peer.js` (lazily, for `BSON`);
   never `require('mongoose')` under `src/` — the Mongoose plugin works on the schema it is given
   (a unit test greps for both).
 - Never `require('bullmq')` (or `ioredis`) under `src/`, and never import it in a `.d.ts` — the
@@ -355,10 +356,10 @@ A rule of alexiskills that migronaut breaks by design, with the reason:
 - **`String(value)` where the value may be a symbol** (a template literal throws on one):
   anything thrown — a non-`Error` throw wrapped as a cause (`core/runner.js`), `errorText`
   (`utils/error.js`), an error's `name` (`utils/redact.js`), what BullMQ or Redis threw
-  (`bullmq/wait.js`), a thrown driver error's message (`core/background-store.js`); a key of a
+  (`bullmq/wait.js`), a thrown driver error's message (`core/background/store.js`); a key of a
   user `Map` (`utils/redact.js`, `utils/canonical.js`); an event name (`core/migrator.js`); what a
   caller logs (`core/migration-logger.js`, `utils/sanitize.js`); the argument of a sandboxed
-  `db.collection(name)` (`core/background-sandbox.js`), refused when it is not a string.
+  `db.collection(name)` (`core/background/sandbox.js`), refused when it is not a string.
   Everything else is a template literal.
 - **`delete` on data whose missing key means something.** `delete require.cache[…]` in
   `src/utils/loader.js`: `reloadMigrations` drops the file's entry as well as adding a query
@@ -366,17 +367,17 @@ A rule of alexiskills that migronaut breaks by design, with the reason:
   old module. `process.env` in `src/cli/index.js`: assigning `undefined` stores the string
   `'undefined'`. A MongoDB query filter and an update document in `src/versioning/mongoose.js`:
   an absent key is no constraint, and an empty `$setOnInsert` must be absent. The dry run's copy of
-  a user document (`core/background-dry-run.js`), where the delete previews `$unset`.
+  a user document (`core/background/dry-run.js`), where the delete previews `$unset`.
 - **Spreads of rest arguments**: `cli/args.js` hands a command its positionals (at most the two
-  it declares) the commander way, `core/background-sandbox.js` forwards the arguments of a proxied
+  it declares) the commander way, `core/background/sandbox.js` forwards the arguments of a proxied
   driver call, and `core/migrator.js` calls a hook with a fixed list of one or two. No data array
   is spread into arguments.
 - **`let x = undefined`, written out**, where `undefined` is the value of no return or part of a
   contract: what a function or user code returned (`#withLock` and `runWithLock` in
   `core/migrator.js`, `utils/id.js`, `utils/telemetry.js`); `failure` in `#withLock` and
   `#runSequence`, where a thrown `undefined` still counts as no failure, as before; `hosted` in
-  `core/background-runner.js` (`runner.watcher` is `BackgroundWatcher | undefined`); `target` and
-  `suspended` in `core/background-watch-plan.js`, returned as `undefined`.
+  `core/background/runner.js` (`runner.watcher` is `BackgroundWatcher | undefined`); `target` and
+  `suspended` in `core/background/watch-plan.js`, returned as `undefined`.
 - **A sort in place** only as a statement of its own, on an array the function just built (a copy
   of a `Set`, the characters of a string, rows the kit reads fresh); everything else is
   `toSorted` (engines is Node ≥ 22.18).
@@ -491,7 +492,7 @@ migronaut alone is in this file now ("Conventions", "Errors", "Release process")
   sanctioned exceptions, all environment-capability skips with a reason, not disabled tests:
   `tests/integration/bullmq-redis.test.js` when `MIGRONAUT_TEST_REDIS_URL` is unset (CI sets it),
   `tests/integration/search-atlas.test.js` when `MIGRONAUT_TEST_ATLAS_URI` is unset (CI never
-  does — run it by hand after changing `search-index-spec.js`, `converge-search.js` or the search
+  does — run it by hand after changing `converge/search-index-spec.js`, `converge/search.js` or the search
   planner; the unit fake carries the coverage, but only a real `mongot` proves the fixed point),
   and `tests/integration/sharded.test.js` when `MIGRONAUT_TEST_SHARDED_URI` is unset (CI never
   does — run it by hand after changing the shard-aware code; its `[probe]` describes pin what

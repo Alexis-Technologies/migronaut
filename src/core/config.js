@@ -13,7 +13,7 @@ const { contextPath, errorText } = require('../utils/error.js');
 const { readSmallFile } = require('../utils/file.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { redactDeep } = require('../utils/redact.js');
-const { collectionsIssues } = require('./collections.js');
+const { collectionsIssues } = require('./converge/collections.js');
 
 /**
  * Default values applied when no flag, env var, or config-file value is
@@ -212,7 +212,7 @@ const CONFIG_KEYS = [
   },
   { path: 'reloadMigrations', check: isBoolean, message: 'must be a boolean', optional: true },
   // Only the outer shape here — each definition is checked by
-  // collectionsIssues (core/collections.js), which reports nested paths
+  // collectionsIssues (core/converge/collections.js), which reports nested paths
   // (`collections[2].indexes[0].key`) instead of one opaque message.
   {
     path: 'collections',
@@ -805,7 +805,7 @@ module.exports = {
   backgroundCollectionNames,
   bookkeepingCollections,
   // Re-exported from utils/collection-name.js, where it moved so that
-  // core/collections.js can use it without a require cycle through here.
+  // core/converge/collections.js can use it without a require cycle through here.
   isCollectionName,
   loadConfig,
   validateConfig,

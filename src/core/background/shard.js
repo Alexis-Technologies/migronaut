@@ -1,15 +1,15 @@
-const { mapLimit } = require('../utils/concurrency.js');
-const { sameValue } = require('../versioning/internal.js');
+const { mapLimit } = require('../../utils/concurrency.js');
+const { sameValue } = require('../../versioning/internal.js');
 const {
   MAX_TIME_EXPIRED,
   SAMPLE_TIMEOUT_MS,
   largestFirst,
   sampleRequest,
   targetPartitions,
-} = require('./background-partition.js');
+} = require('./partition.js');
 const { loadBson } = require('./bson-peer.js');
-const { READ_OPTIONS } = require('./server-info.js');
-const { shardedVersionIndexKey } = require('./versioning-spec.js');
+const { READ_OPTIONS } = require('../server-info.js');
+const { shardedVersionIndexKey } = require('../converge/versioning-spec.js');
 
 /**
  * The shard-aware partitioner: a sharded collection's documents split along

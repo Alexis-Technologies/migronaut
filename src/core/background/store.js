@@ -1,10 +1,10 @@
 const os = require('node:os');
-const { ConfigInvalidError, LockLostError } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
-const { randomId } = require('../utils/id.js');
-const { MAX_BAD_IDS } = require('./background-spec.js');
-const { backgroundCollectionNames } = require('./config.js');
-const { READ_OPTIONS } = require('./server-info.js');
+const { ConfigInvalidError, LockLostError } = require('../../errors/index.js');
+const { errorText } = require('../../utils/error.js');
+const { randomId } = require('../../utils/id.js');
+const { MAX_BAD_IDS } = require('./spec.js');
+const { backgroundCollectionNames } = require('../config.js');
+const { READ_OPTIONS } = require('../server-info.js');
 
 /**
  * Where background migrations keep their state, in MongoDB — the truth every

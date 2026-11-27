@@ -2,7 +2,7 @@ const { mkdirSync, writeFileSync } = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
-const { BackgroundStore } = require('../../src/core/background-store.js');
+const { BackgroundStore } = require('../../src/core/background/store.js');
 const {
   IrreversibleMigrationError,
   MigrationInvalidExportError,

@@ -16,7 +16,7 @@ const {
   searchIndexIssues,
   searchIndexSpec,
   searchIndexValue,
-} = require('../../src/core/search-index-spec.js');
+} = require('../../src/core/converge/search-index-spec.js');
 
 const issuesOf = (index) => searchIndexIssues(index, 'searchIndexes[0]');
 const pathsOf = (index) => issuesOf(index).map((issue) => issue.path);

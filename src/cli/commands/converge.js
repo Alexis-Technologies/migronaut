@@ -1,5 +1,5 @@
-const { needsConfirmation } = require('../../core/converge-plan.js');
-const { searchBuildState } = require('../../core/search-index-spec.js');
+const { needsConfirmation } = require('../../core/converge/plan.js');
+const { searchBuildState } = require('../../core/converge/search-index-spec.js');
 const { ConfigInvalidError, RunAbortedError } = require('../../errors/index.js');
 const { confirm, defineCommand, EXIT_CODES } = require('../shared.js');
 const { renderConvergeHistory, renderConvergeTable } = require('../table.js');

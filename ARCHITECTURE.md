@@ -72,9 +72,9 @@ flowchart TB
   end
   subgraph FLOWS ["flows — deps built by migrator.js"]
     direction TB
-    F1["converge.js<br/>+ planner, search"]
-    F2["background.js<br/>+ store, engine, throttle"]
-    F3["background-watch.js"]
+    F1["converge/<br/>planner, search, host"]
+    F2["background/<br/>store, engine, throttle, host"]
+    F3["background/watch.js"]
   end
 
   subgraph DB ["MongoDB — all of the state"]
@@ -142,37 +142,48 @@ src/
 │   ├── migration-logger.js  # ctx.run + ctx.logger correlation, the migration:log event (userland: true)
 │   ├── audit.js             # runAudit() — the read-only health-check flow
 │   ├── baseline.js          # runBaseline() — mark existing files applied without running them
-│   ├── collections.js       # Declared collections: validate, normalize, load collectionsDir
-│   ├── index-spec.js        # PURE: one declared index vs one live index (names, keys, options)
-│   ├── search-index-spec.js # PURE: one declared search index vs one live one (defaults, type, build)
-│   ├── converge-plan.js     # PURE: plan one collection — result rows + executable steps
-│   ├── converge-search.js   # Atlas Search: raw commands, the availability probe, error hints, the wait
-│   ├── converge-search-run.js # The search half of a converge run: read, report, wait for builds
-│   ├── server-info.js       # Read options, read pace, server version/topology, not-found codes
-│   ├── converge.js          # runConverge() — read live state, plan, carry the plan out
-│   ├── converge-log.js      # ConvergeLog — the append-only converge history (_migronaut_converge)
+│   ├── server-info.js       # Read options (BOOKKEEPING_OPTIONS too), read pace, server version/topology
 │   ├── import.js            # PURE migrate-mongo → MigrationRecord mapping
 │   ├── import-runner.js     # runImport() — the impure import flow (read/map/write)
 │   ├── run.js               # Programmatic helpers: runMigrations(), pendingMigrations()
-│   ├── versioning-spec.js   # PURE: a collection's versioning as validator rules, an index, a floor guard
 │   ├── shard-info.js        # A collection's shard key and chunks, from config (clusterMonitor)
-│   ├── background-spec.js   # PURE: background specs, settings, state transitions, scopes, keysets
-│   ├── background-partition.js # The _id-range partitioner (sampled _id quantiles per BSON bracket)
-│   ├── background-shard.js  # The shard-aware partitioner, targeted writes, the shard-key guard
-│   ├── background-store.js  # BackgroundStore — state, partitions, leases (= slots), fenced checkpoints
-│   ├── background-engine.js # One batch / one partition: read, transform, stampedDiff, OCC write
-│   ├── background-throttle.js # pauseMs, the throttle hook, replication lag, the AIMD controller
-│   ├── background.js        # The flow: coordinate, runSlice, control, repin, requires
-│   ├── background-drift.js  # The drift probes: the requires guard's, the poll's (verifyBackground)
-│   ├── background-audit.js  # What audit says about background migrations
-│   ├── background-kit.js    # The kit's background side: lanes in-process, down, requires, views
-│   ├── background-sandbox.js # The always-aborted transaction + allow-list proxies of a dry run
-│   ├── background-dry-run.js # previewSample / previewSteps
-│   ├── background-runner.js # startBackgroundRunner() — lanes in the application's own process
-│   ├── background-watch-plan.js # PURE: the live drift watcher's edges, pipeline, error reading
-│   ├── background-watch-store.js # Its resume tokens and leaders (<backgroundCollection>_watch)
-│   ├── background-watch.js  # The live drift watcher: change streams, one leader per collection
-│   └── bson-peer.js         # The one lazy require('mongodb').BSON outside migrator.js
+│   ├── converge/            # Declared collections and converge (its own CLAUDE.md)
+│   │   ├── host.js          # ConvergeHost — the kit's converge deps and history
+│   │   ├── converge.js      # runConverge() — read and plan, guard, re-plan, apply, verify, report
+│   │   ├── live.js          # The live state of the declared collections, shard keys, the floor probe
+│   │   ├── steps.js         # One planned step against the server, and what it left on failure
+│   │   ├── report.js        # The result as it grows: tallies, the closing totals, the history entry
+│   │   ├── failure.js       # The words for an action, the hints, ConvergeFailedError
+│   │   ├── collections.js   # Declared collections: validate, normalize, load collectionsDir
+│   │   ├── index-spec.js    # PURE: one declared index vs one live index (names, keys, options)
+│   │   ├── search-index-spec.js # PURE: one declared search index vs one live one (defaults, type, build)
+│   │   ├── plan.js          # PURE: plan one collection — result rows + executable steps
+│   │   ├── search.js        # Atlas Search: raw commands, the availability probe, error hints, the wait
+│   │   ├── search-run.js    # The search half of a converge run: read, report, wait for builds
+│   │   ├── log.js           # ConvergeLog — the append-only converge history (_migronaut_converge)
+│   │   └── versioning-spec.js # PURE: a collection's versioning as validator rules, an index, a floor guard
+│   └── background/          # Background migrations (its own CLAUDE.md)
+│       ├── host.js          # BackgroundHost — the kit's background side: stores, deps, caches, controls
+│       ├── job.js           # jobFor(): what one runs as — spec, match, the partitioner; planMismatch
+│       ├── coordinator.js   # One coordinator step: plan, wait for lanes, finalize; requires
+│       ├── lane.js          # runSlice(): a lane's slice over the partitions
+│       ├── controls.js      # pause, resume, cancel, retry, repin, the wait for lanes
+│       ├── spec.js          # PURE: background specs, settings, state transitions, scopes, keysets
+│       ├── partition.js     # The _id-range partitioner (sampled _id quantiles per BSON bracket)
+│       ├── shard.js         # The shard-aware partitioner, targeted writes, the shard-key guard
+│       ├── store.js         # BackgroundStore — state, partitions, leases (= slots), fenced checkpoints
+│       ├── engine.js        # One batch / one partition: read, transform, stampedDiff, OCC write
+│       ├── throttle.js      # pauseMs, the throttle hook, replication lag, the AIMD controller
+│       ├── drift.js         # The drift probes: the requires guard's, the poll's (verifyBackground)
+│       ├── audit.js         # What audit says about background migrations
+│       ├── kit.js           # Lanes in-process, down, requires, views — over the host's interface
+│       ├── sandbox.js       # The always-aborted transaction + allow-list proxies of a dry run
+│       ├── dry-run.js       # previewSample / previewSteps
+│       ├── runner.js        # startBackgroundRunner() — lanes in the application's own process
+│       ├── watch-plan.js    # PURE: the live drift watcher's edges, pipeline, error reading
+│       ├── watch-store.js   # Its resume tokens and leaders (<backgroundCollection>_watch)
+│       ├── watch.js         # The live drift watcher: change streams, one leader per collection
+│       └── bson-peer.js     # The one lazy require('mongodb').BSON outside migrator.js
 ├── utils/
 │   ├── logger.js            # Pino-compatible logger (default console, silent, pino adapter)
 │   ├── colors.js            # ANSI palette + FORCE_COLOR/NO_COLOR/TTY detection + stripAnsi
@@ -242,8 +253,8 @@ flowchart TB
   accTitle: The layers and what each requires
   PRES["presentation<br/>bin/ · src/cli/"]
   ADAPT["integration adapter<br/>src/bullmq/"]
-  ORCH["orchestration<br/>migrator.js · run-recorder.js · run.js · background-runner.js"]
-  FLOW["flows — deps built by migrator.js<br/>converge.js · background.js · background-watch.js"]
+  ORCH["orchestration<br/>migrator.js · run-recorder.js · run.js · background/runner.js"]
+  FLOW["flows — deps built by migrator.js<br/>converge/converge.js · background/coordinator.js, lane.js, controls.js · background/watch.js"]
   MECH["mechanism<br/>lock · changelog · runner · context · config · collections · background-store …"]
   PURE["pure<br/>options · sequence · converge-plan · index-spec · background-spec …"]
   VERS["versioning runtime<br/>src/versioning/"]
@@ -265,12 +276,14 @@ flowchart TB
   VERS -- "errors/ only" --> BASE
 ```
 
-The background modules split the same way: `background-spec.js`, `background-watch-plan.js` and
-the planning halves of the partitioners are pure; `background-store.js`,
-`background-watch-store.js`, the engine and the throttle are mechanism; `background.js` (with
-`background-drift.js`, `background-audit.js` and `background-kit.js`) and `background-watch.js` are
-flows that receive what they need as `deps` from the kit (like `converge.js`), and only
-`migrator.js` builds those deps. The core may require `src/versioning/`;
+The background modules split the same way: `background/spec.js`, `background/watch-plan.js` and
+the planning halves of the partitioners are pure; `background/store.js`,
+`background/watch-store.js`, the engine and the throttle are mechanism; `background/coordinator.js`,
+`background/lane.js` and `background/controls.js` (with `background/job.js`, `background/drift.js`,
+`background/audit.js` and `background/kit.js`) and `background/watch.js` are flows that receive what
+they need as `deps` (like `converge/converge.js`), and only the kit builds those deps — through its
+two hosts, `background/host.js` (`BackgroundHost`) and `converge/host.js` (`ConvergeHost`), which
+reach the kit's private state through one adapter (`#hostAdapter`). The core may require `src/versioning/`;
 `src/versioning/` never requires the core.
 
 **Why this matters for you:** the CLI's spinner lives *entirely* in the CLI layer
@@ -507,6 +520,17 @@ Each entry: **responsibility · key exports · nuances you must know.**
   [sequence.js](src/core/sequence.js); and the bookkeeping of a locked run — events, metrics, the
   span's end, the closing line — is a [`RunRecorder`](src/core/run-recorder.js). What stays here is
   the flow and the state only the kit has (config, connection, run id, abort wiring).
+- **Its two hosts:** the background migrations and the declared collections are the kit's too, but
+  their machinery lives beside it. [`BackgroundHost`](src/core/background/host.js) holds the
+  background stores, the deps a lane, a coordinator and the drift watcher run with, the caches of
+  index and shard keys, the adaptive throttles and the warnings said once, the run loop's side of a
+  background file (register, revert, `requires`, inline lanes), and every public background method
+  — the kit keeps a one-line delegate for each. [`ConvergeHost`](src/core/converge/host.js) holds
+  what a converge run works with, its search options and the converge history; the converge run
+  itself, under the migration lock, stays in the kit. Both reach the kit through one adapter
+  (`#hostAdapter`): getters for its config, client, logger, telemetry and run, and the few private
+  methods they need. `disconnect()` calls `BackgroundHost.reset()`, which forgets what the
+  connection read.
 - **Nuances:** `#filepath(name)` centralizes **path-traversal defense** — every user-supplied name
   flows through it (`assertMigrationName`, then a containment check). Batch numbers come from
   `nextBatch()` (monotonic max+1). `down --steps` and its dry-run share `#selectDownTargets` and the
@@ -535,7 +559,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
   - `#executeMigration` wraps `#executeMigrationSteps` (hooks, load, body, changelog write) in the
     `migronaut.migration` span, which makes it the *active* span for everything the migration
     does, and records the duration histogram on both the success and the failure path.
-  - `#backgroundDeps` hands `background.js` a `span(kind, name, fn)` that wraps one background
+  - `BackgroundHost.deps()` hands the coordinator and the lanes a `span(kind, name, fn)` that wraps one background
     step: `migronaut.background.slice` (one lease held by one lane) or
     `migronaut.background.coordinate` (one coordinator step). Each is opened only once the lease or
     the coordinator lock is held — a `busy` answer opens none — and is active for that step's
@@ -585,7 +609,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **Key export:** `runBaseline(deps, options, signal)` — same `runX(deps)` injection pattern as
   audit and import.
 
-### `src/core/collections.js` — declared collections
+### `src/core/converge/collections.js` — declared collections
 - **Responsibility:** everything about a collection definition that is not the database:
   `definitionIssues` / `collectionsIssues` (strict validation — unknown keys and index options are
   errors, with nested paths like `collections[2].indexes[0].key` or `users.ts: indexes[0]`),
@@ -595,7 +619,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
   config; the *files* are loaded only by `resolveDefinitions`, at converge time. A function export
   is refused rather than called (a Mongoose model is a function).
 
-### `src/core/index-spec.js` — declared index vs live index (pure)
+### `src/core/converge/index-spec.js` — declared index vs live index (pure)
 - **Responsibility:** `indexIssues` (the option whitelist), `normalizeDeclaredIndex` (effective
   name, server-form key, the spec to send — key as a `Map`, `false` booleans dropped),
   `normalizeLiveIndex`, `compareIndex` (`{ diffs, inPlace, rebuild }`), `sameSignature`,
@@ -603,7 +627,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **The invariant:** what the server stores for a declaration must compare as unchanged against
   that declaration — see [§6.7](#67-declared-collections-converge).
 
-### `src/core/search-index-spec.js` — declared search index vs live search index (pure)
+### `src/core/converge/search-index-spec.js` — declared search index vs live search index (pure)
 - **Responsibility:** `searchIndexIssues` (light validation: unknown keys, the shape that tells
   `search` from `vectorSearch`, vector/`autoEmbed` mixing, repeated fields),
   `normalizeDeclaredSearchIndex` (default name `default`, type `search`),
@@ -613,7 +637,7 @@ Each entry: **responsibility · key exports · nuances you must know.**
   `compareSearchIndex` (`{ diffs, paths, more, typeChange, immutable, ignored }`),
   `searchBuildState` (`serving`/`updating`/`building`/`stale`/`failed`/`removing` — the one word
   every reporter uses), `isSearchIndexReady`, `searchBuild`, `searchIndexSpec`.
-- **The invariant** is index-spec.js's: what the server reports for a declaration must compare as
+- **The invariant** is converge/index-spec.js's: what the server reports for a declaration must compare as
   unchanged against it — hence defaults filled on *both* sides, from one table. What the tables do
   not know, `tolerateServerOptions` drops: after the fill, an option the live side has and the
   declared side lacks can only be one whose default migronaut does not know, so it is left out
@@ -623,22 +647,22 @@ Each entry: **responsibility · key exports · nuances you must know.**
   stays a difference. Keys are written with `canonical.js`'s `assign`, so a field named
   `__proto__` stays a field.
 
-### `src/core/converge-search.js` — Atlas Search, the mechanism
+### `src/core/converge/search.js` — Atlas Search, the mechanism
 - **Responsibility:** the raw search commands (`runSearchStep`: create, update — retried once with
   its type for a self-managed `mongot` — and drop, tolerating "already gone"),
   `listSearchIndexes`, `probeSearch` (does the server have Search at all — see
   [§6.7](#67-declared-collections-converge)), `isSearchUnavailable` / `searchHint` (what the
   server's errors mean), `isTransientError` (a read worth trying again), and
-  `awaitSearchIndexes` / `nextPollDelay` (the optional wait). Returns outcomes; converge.js
+  `awaitSearchIndexes` / `nextPollDelay` (the optional wait). Returns outcomes; converge/converge.js
   decides what they do to a run.
 
-### `src/core/converge-search-run.js` — the search half of a converge run
-- **Responsibility:** what converge.js calls in at each phase when definitions declare search
+### `src/core/converge/search-run.js` — the search half of a converge run
+- **Responsibility:** what converge/converge.js calls in at each phase when definitions declare search
   indexes — `readSearch` (the probe, then every declaring collection's list), `readSearchIndexes`
   (a failed read reported in the phase that read it), `warnIgnored` / `warnSkipping`,
   `searchSummary` (`result.search`), `refreshBuilds` (the verify phase), `waitPhase` (release the
   lock, poll, emit `converge:wait`, record the metric point, fail on a build the run started),
-  and `reportNotReady` (the closing lines). Orchestration over the same `deps` as converge.js;
+  and `reportNotReady` (the closing lines). Orchestration over the same `deps` as converge/converge.js;
   split out so the main flow reads as one. `pause` (an abortable sleep) and
   `SEARCH_SETTLE_DELAYS_MS` live here too.
 
@@ -648,14 +672,20 @@ Each entry: **responsibility · key exports · nuances you must know.**
   `NAMESPACE_NOT_FOUND` / `INDEX_NOT_FOUND` codes — shared by converge, its search half and the
   audit, so none of them reaches into another for it.
 
-### `src/core/converge-plan.js` — the converge planner (pure)
+### `src/core/converge/plan.js` — the converge planner (pure)
 - **Responsibility:** `planCollection(definition, live, { prune, search })` → `{ name, actions,
   steps }`: result rows (`create`/`modify`/`recreate`/`drop`/`keep`/`unchanged`/`conflict`/`skip`)
   and the steps that carry them out, in execution order, each pointing at the rows it settles.
   `planSearchIndexes` plans the `searchIndex` rows. Plus `isDestructive`, `needsConfirmation`,
   `SERVED_ACTIONS`, `TARGET_LABELS`, the validator helpers.
 
-### `src/core/converge.js` — the converge flow
+### `src/core/converge/converge.js` — the converge flow
+
+Its halves are modules of their own beside it: `live.js` (the live states, one `listCollections`
+for all of them, the shard keys, the version floor probe), `steps.js` (one planned step against
+the server), `report.js` (tallies, the closing totals, the history entry) and `failure.js` (the
+words for an action, the hints, `ConvergeFailedError`). `converge/host.js` is the kit's side: the
+`deps` a run works with, the search options, the converge history.
 - **Responsibility:** `runConverge(deps, options, signal)`, in phases that are functions of their
   own: *read and plan* (`readAndPlan` — every live state in one `listCollections` plus bounded
   `listIndexes`, primary reads with forced BSON promotion; shard keys behind a mongos), *guard*
@@ -668,10 +698,10 @@ Each entry: **responsibility · key exports · nuances you must know.**
 - **Key exports:** `runConverge`, `readLiveState`, `readLiveStates` (`READ_OPTIONS` lives in
   `server-info.js`). Same `runX(deps)` injection pattern as audit, import and baseline.
 
-### `src/core/converge-log.js` — the converge history
+### `src/core/converge/log.js` — the converge history
 - **Responsibility:** `ConvergeLog` — `append(db, entry)` (creates the `startedAt` index on first
   use) and `list(db, limit)`, newest first, over `convergeLogCollection`. Written best-effort by
-  converge.js; read only by `kit.convergeHistory()` / `converge --history`, never by a run.
+  converge/report.js; read only by `kit.convergeHistory()` / `converge --history`, never by a run.
 
 ### `src/core/run.js` — programmatic entry points
 - **Responsibility:** the "blessed" lifecycle-safe helpers for app startup / serverless / tests.
@@ -702,16 +732,17 @@ symbol.
 
 ### `src/core/background*.js` — background migrations
 Background migrations get their own section, [§6.8](#68-background-migrations). In short:
-`background-spec.js` validates a file's `background` export and holds the pure tables (defaults,
-the state transitions, `_id` brackets, keysets); the two partitioners (`background-partition.js`
-by `_id`, `background-shard.js` by shard key) plan a pass and build each batch's query;
-`background-store.js` owns the state and partition documents and their leases;
-`background-engine.js` rewrites one batch and works one partition; `background-throttle.js`
-paces it; `background.js` is the flow (`coordinate`, `runSlice`, `control`, `verify`, the audit
-findings); `background-sandbox.js` and `background-dry-run.js` preview without writing;
-`background-runner.js` drives lanes in-process; and `background-watch*.js` are the live drift
-watcher. `shard-info.js` reads a collection's shard key and chunks from `config`, and
-`bson-peer.js` is the only place besides `migrator.js` that requires `mongodb` (lazily, for
+`background/spec.js` validates a file's `background` export and holds the pure tables (defaults,
+the state transitions, `_id` brackets, keysets); the two partitioners (`background/partition.js`
+by `_id`, `background/shard.js` by shard key) plan a pass and build each batch's query;
+`background/store.js` owns the state and partition documents and their leases;
+`background/engine.js` rewrites one batch and works one partition; `background/throttle.js`
+paces it; `background/job.js` (what one runs as), `background/coordinator.js` (`coordinate`),
+`background/lane.js` (`runSlice`) and `background/controls.js` (`control`, `repin`) are the flow;
+`background/sandbox.js` and `background/dry-run.js` preview without writing;
+`background/runner.js` drives lanes in-process; and `background/watch*.js` are the live drift
+watcher; `background/host.js` is the kit's side of all of it. `shard-info.js` reads a collection's shard key and chunks from `config`, and
+`background/bson-peer.js` is the only place besides `migrator.js` that requires `mongodb` (lazily, for
 `BSON`: a checkpoint's size, EJSON for a dry run, the Long/MinKey/MaxKey bounds of a shard-key
 range).
 
@@ -801,7 +832,7 @@ the design.
   key-sorted, JSON-safe shape (BSON number wrappers → numbers, `undefined` properties dropped,
   arrays kept in order), so `deepEqual` is a string comparison; `toWire` strips `undefined` from
   what converge sends, which a client with `ignoreUndefined: false` would otherwise store as `null`.
-- **collection-name.js** — `isCollectionName`, moved out of `config.js` so `core/collections.js`
+- **collection-name.js** — `isCollectionName`, moved out of `config.js` so `core/converge/collections.js`
   can use it without a require cycle (`config.js` re-exports it).
 - **template.js** — generates migration files (`createMigrationFile`) and config files
   (`createConfigFile`), including the secret-provider template. Owns filename stamping (timestamp vs
@@ -1208,8 +1239,8 @@ Storing the events is the application's job (`mq.kit.on('migration:log', …)` i
 process) — the adapter only mirrors them.
 
 ### 6.7 Declared collections (converge)
-Files: [collections.js](src/core/collections.js), [index-spec.js](src/core/index-spec.js),
-[converge-plan.js](src/core/converge-plan.js), [converge.js](src/core/converge.js).
+Files: [converge/collections.js](src/core/converge/collections.js), [converge/index-spec.js](src/core/converge/index-spec.js),
+[converge/plan.js](src/core/converge/plan.js), [converge/converge.js](src/core/converge/converge.js).
 
 **What it is.** Indexes, search indexes and validators declared as an end state (`collections`,
 `collectionsDir`) and brought there by `kit.converge()` — stateless: every run reads
@@ -1217,8 +1248,9 @@ Files: [collections.js](src/core/collections.js), [index-spec.js](src/core/index
 plans afresh, and the history it appends is never read back to decide anything. Migrations keep everything with an order and a
 history; this is for what only has a current value.
 
-**Pure planner, thin executor.** All decisions live in `converge-plan.js` / `index-spec.js`
-(table-tested, no database); `converge.js` reads, executes the steps in order and reports. Steps
+**Pure planner, thin executor.** All decisions live in `converge/plan.js` / `converge/index-spec.js`
+(table-tested, no database); `converge/converge.js` reads (`live.js`), executes the steps in order
+(`steps.js`) and reports (`report.js`). Steps
 per collection: create collection (with its validator) → validator `collMod` → search index
 creates, then updates (accepted at once, built in the background — so before the regular builds)
 → index creates → in-place `collMod` (TTL when both sides have one, `hidden`) → rebuilds (drop +
@@ -1250,7 +1282,7 @@ write. A rebuild whose create fails re-creates what it dropped from `restoreSpec
 and reports `restored`.
 
 **History, not state.** Converge never reads what it did before — but every real run that changed
-something or failed appends an entry to `convergeLogCollection` ([converge-log.js](src/core/converge-log.js)),
+something or failed appends an entry to `convergeLogCollection` ([converge/log.js](src/core/converge/log.js)),
 best-effort, with the run id, who and where, `requestedBy`/`reason`, and each row's `from`/`to`.
 The collection and its `startedAt` index are created by the first entry, never at connect.
 
@@ -1380,7 +1412,7 @@ state once per generation (`rolledGeneration` makes it idempotent after a crash)
 what is left** — zero completes it, anything left starts another generation over just that, and
 `maxPasses` passes that never drain it fail it ("an old release is still writing the old shape").
 Completion is decided by that count alone; partitions only spread the work. The state transitions
-are a pure table (`background-spec.js`).
+are a pure table (`background/spec.js`).
 
 **One batch.** Read through the version index (`READ_OPTIONS` — the transform sees plain JS
 values), transform a copy, `stampedDiff` it against what was read — `$set` only the top-level
@@ -1489,7 +1521,7 @@ MongoDB 8.0, two shards behind a mongos). What they established, and what follow
 
 ### 6.9 Document versioning and the versioning subpath
 
-Files: `src/core/versioning-spec.js`, `src/versioning/`. Entry point:
+Files: `src/core/converge/versioning-spec.js`, `src/versioning/`. Entry point:
 `@alexify/migronaut/versioning`.
 
 **One contract, two writers.** A collection's `versioning: { current, min?, field?, revision?,

@@ -1,11 +1,15 @@
 const { addAbortListener } = require('node:events');
 
-const { ConfigInvalidError, LockAlreadyHeldError, RunAbortedError } = require('../errors/index.js');
-const { jitter } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
-const { belowVersionFilter, versionOf } = require('../versioning/document.js');
-const { applyBatch, transactionOptions } = require('./background-engine.js');
-const { sleep } = require('./background-throttle.js');
+const {
+  ConfigInvalidError,
+  LockAlreadyHeldError,
+  RunAbortedError,
+} = require('../../errors/index.js');
+const { jitter } = require('../../utils/concurrency.js');
+const { errorText } = require('../../utils/error.js');
+const { belowVersionFilter, versionOf } = require('../../versioning/document.js');
+const { applyBatch, transactionOptions } = require('./engine.js');
+const { sleep } = require('./throttle.js');
 const {
   classifyStreamError,
   isEnding,
@@ -13,11 +17,12 @@ const {
   tokenDue,
   watchPipeline,
   watchView,
-} = require('./background-watch-plan.js');
-const { STATE_SUMMARY, control, jobFor } = require('./background.js');
-const { verify } = require('./background-drift.js');
-const { runWithLock } = require('./lock.js');
-const { READ_OPTIONS } = require('./server-info.js');
+} = require('./watch-plan.js');
+const { control } = require('./controls.js');
+const { STATE_SUMMARY, jobFor } = require('./job.js');
+const { verify } = require('./drift.js');
+const { runWithLock } = require('../lock.js');
+const { READ_OPTIONS } = require('../server-info.js');
 
 /** Why a follower or the watcher stopped — a typed abort reason, never a bare Error */
 const stopReason = (reason) => new RunAbortedError(reason, { context: { reason } });

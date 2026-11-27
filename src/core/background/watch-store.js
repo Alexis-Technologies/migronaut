@@ -1,6 +1,6 @@
 const os = require('node:os');
-const { backgroundCollectionNames } = require('./config.js');
-const { READ_OPTIONS } = require('./server-info.js');
+const { backgroundCollectionNames } = require('../config.js');
+const { READ_OPTIONS } = require('../server-info.js');
 
 /**
  * Where the live drift watcher keeps what outlives a process — one document

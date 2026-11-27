@@ -1,7 +1,7 @@
 const { addAbortListener } = require('node:events');
 
-const { errorText } = require('../utils/error.js');
-const { isUnauthorized } = require('./shard-info.js');
+const { errorText } = require('../../utils/error.js');
+const { isUnauthorized } = require('../shard-info.js');
 
 /**
  * Pacing a background migration: it rewrites a production collection while

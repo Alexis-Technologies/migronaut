@@ -1,8 +1,8 @@
 const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it } = require('node:test');
 const { Binary, Decimal128, Long, ObjectId } = require('mongodb');
-const { idRangePartitioner, sliceBracket } = require('../../src/core/background-partition.js');
-const { scopeFilter } = require('../../src/core/background-spec.js');
+const { idRangePartitioner, sliceBracket } = require('../../src/core/background/partition.js');
+const { scopeFilter } = require('../../src/core/background/spec.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
 let mongo;

@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it } = require('node:test');
-const { runSandbox } = require('../../src/core/background-sandbox.js');
+const { runSandbox } = require('../../src/core/background/sandbox.js');
 const { SandboxRefusedError, TransactionsUnsupportedError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 

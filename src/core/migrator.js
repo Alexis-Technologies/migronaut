@@ -1,6 +1,5 @@
 const { EventEmitter, addAbortListener } = require('node:events');
 const fs = require('node:fs/promises');
-const os = require('node:os');
 const path = require('node:path');
 // `mongodb` is required lazily inside connect(): loading the driver costs ~60ms
 // and pulls in ~150 modules, which `--help`, `--version`, `init` and `create`
@@ -15,7 +14,6 @@ const {
   IrreversibleMigrationError,
   LockAlreadyHeldError,
   MigrationFileNotFoundError,
-  MigrationInvalidExportError,
   MigrationInvalidNameError,
   MigrationLoadFailedError,
   MigronautError,
@@ -29,7 +27,6 @@ const { computeChecksum } = require('../utils/checksum.js');
 const { mapLimit } = require('../utils/concurrency.js');
 const { errorText, errorWithCause, isDriverError, serverErrorOf } = require('../utils/error.js');
 const { createIdGenerator } = require('../utils/id.js');
-const { jobFields } = require('../utils/job-ref.js');
 const { loadMigrationFile } = require('../utils/loader.js');
 const { resolveLogger } = require('../utils/logger.js');
 const { assertMigrationName } = require('../utils/migration-name.js');
@@ -41,61 +38,30 @@ const {
 } = require('../utils/template.js');
 const { safeUsername } = require('../utils/user.js');
 const { runAudit } = require('./audit.js');
-const {
-  control: controlBackground,
-  coordinate,
-  repin: repinBackgroundState,
-  runSlice,
-  tryUnblock,
-  waitForLanes,
-  waitingFor,
-} = require('./background.js');
-const { auditFindings } = require('./background-audit.js');
-const {
-  STREAMING_FRESH_MS,
-  drive,
-  hasRewritten,
-  irreversibleBackground,
-  partitionView,
-  runnable,
-  stateView,
-  unsatisfied,
-  watchRow,
-  withdraw,
-} = require('./background-kit.js');
-const { verify: verifyDrift } = require('./background-drift.js');
-const { assertSliceMs, resolveBackgroundSpec } = require('./background-spec.js');
-const { previewSample, previewSteps } = require('./background-dry-run.js');
-const { BackgroundStore } = require('./background-store.js');
-const { startWatch, watchOptions } = require('./background-watch.js');
-const { BackgroundWatchStore } = require('./background-watch-store.js');
+const { auditFindings } = require('./background/audit.js');
 const { runBaseline } = require('./baseline.js');
 const { Changelog } = require('./changelog.js');
-const { ConvergeLog } = require('./converge-log.js');
-const { resolveDefinitions } = require('./collections.js');
+const { resolveDefinitions } = require('./converge/collections.js');
 const { backgroundCollectionNames, loadConfig } = require('./config.js');
 const { buildContext } = require('./context.js');
-const { runConverge } = require('./converge.js');
-const { readServer } = require('./server-info.js');
-const { readChunks, readShardKey } = require('./shard-info.js');
+const { runConverge } = require('./converge/converge.js');
 
 const { runImport } = require('./import-runner.js');
 const { MigrationLock, runWithLock, toLockInfo } = require('./lock.js');
-const { MIGRATION_LOG_EVENT, backgroundLogs, createRunLog } = require('./migration-logger.js');
+const { MIGRATION_LOG_EVENT, createRunLog } = require('./migration-logger.js');
 const {
-  assertActorValid,
   assertBaselineOptions,
   assertConvergeOptions,
   assertDownOptions,
   assertDryRunOptions,
-  assertHistoryLimit,
   assertImportOptions,
-  assertJobValid,
   assertListOptions,
   assertRedoOptions,
   assertUpOptions,
 } = require('./options.js');
 const { RunRecorder } = require('./run-recorder.js');
+const { BackgroundHost } = require('./background/host.js');
+const { ConvergeHost } = require('./converge/host.js');
 const { runMigration } = require('./runner.js');
 const {
   blockedError,
@@ -229,8 +195,6 @@ class MigratorKit extends EventEmitter {
   #cwd;
   /** filepath → {mtimeMs, size, checksum} — spares repeat status()/audit() calls a full re-hash */
   #checksumCache = new Map();
-  /** The converge history store, created on first use */
-  #convergeLogStore;
   /**
    * Definitions an after-up converge resolved, kept only while `up()` is being
    * refused for a held lock: a caller polling for the lock retries `up()`
@@ -239,27 +203,14 @@ class MigratorKit extends EventEmitter {
    * poll that the module cache never frees. Cleared by any other outcome.
    */
   #upDefinitions;
-  /** The background migrations' store — made on first use (see #backgroundStore) */
-  #backgroundStoreInstance;
-  #watchStoreInstance;
-  /** Warnings about background migrations said once per kit (a missing index, no lag rights) */
-  #backgroundWarned = new Set();
-  /** The adaptive throttles of this process, per background migration and group */
-  #adaptiveCache = new Map();
-  /** Index keys per collection, read at most every few seconds — every slice asks */
-  #indexCache = new Map();
-  /** Shard keys per collection, reused the same way — a read of `config` through the mongos */
-  #shardKeyCache = new Map();
-  /** Waits for a lagging secondary in progress, per background migration — said once per process */
-  #lagWaits = new Map();
-  /** Declared collections, for background specs — resolved once unless migrations reload */
-  #backgroundDefinitions;
-  /** The server's topology, read once — transactional background migrations need it */
-  #topology;
   /** Migration modules read ahead of a run (requires, kind), by checksum */
   #moduleCache = new Map();
   /** The sequence's files, read once per run — see #sequenceFiles */
   #runFiles;
+  /** The background migrations of this kit (background/host.js) */
+  #background;
+  /** The declared collections' converge deps and history (converge/host.js) */
+  #converge;
 
   constructor(config = {}, options = {}) {
     // An async listener whose promise rejects (a subscriber's insert that
@@ -272,6 +223,56 @@ class MigratorKit extends EventEmitter {
     this.#progress = options.progress;
     this.#fallbackLogger = options.fallbackLogger;
     this.#cwd = options.cwd;
+    const adapter = this.#hostAdapter();
+    this.#background = new BackgroundHost(adapter);
+    this.#converge = new ConvergeHost(adapter);
+  }
+
+  /**
+   * What the hosts (background/host.js, converge/host.js) reach of this kit: its state through getters
+   * (read when used — the config loads, a run starts and ends), and the few
+   * private methods it runs on.
+   */
+  #hostAdapter() {
+    const kit = this;
+    return {
+      get config() {
+        return kit.#config;
+      },
+      get client() {
+        return kit.#client;
+      },
+      get logger() {
+        return kit.#logger;
+      },
+      get telemetry() {
+        return kit.#telemetry;
+      },
+      get runId() {
+        return kit.#runId;
+      },
+      get runLog() {
+        return kit.#runLog;
+      },
+      requireDb: () => kit.#requireDb(),
+      requireChangelog: () => kit.#requireChangelog(),
+      emit: (event, payload) => kit.#emit(event, payload),
+      deliver: (event, payload) => kit.#deliver(event, payload),
+      fields: (extra) => kit.#fields(extra),
+      logEmitter: () => kit.#logEmitter(),
+      newId: () => kit.#newId(),
+      filepath: (name) => kit.#filepath(name),
+      cachedChecksum: (filepath) => kit.#cachedChecksum(filepath),
+      ensureConfig: () => kit.#ensureConfig(),
+      listMigrationFiles: () => kit.#listMigrationFiles(),
+      resolveCollections: () => kit.#resolveCollections(),
+      bookkeepingNames: () => kit.#bookkeepingNames(),
+      peek: (name) => kit.#peek(name),
+      sequenceFiles: () => kit.#sequenceFiles(),
+      connect: () => kit.connect(),
+      assertNotAborted: (signal) => kit.#assertNotAborted(signal),
+      environment: () => kit.#environment(),
+    };
   }
 
   /**
@@ -566,18 +567,9 @@ class MigratorKit extends EventEmitter {
     this.#client = undefined;
     this.#db = undefined;
     this.#changelog = undefined;
-    // The background stores bind the Db they were made with, and the topology
-    // and definitions were read through it: a later connect() reads them anew.
-    this.#backgroundStoreInstance = undefined;
-    this.#watchStoreInstance = undefined;
-    this.#topology = undefined;
-    this.#backgroundDefinitions = undefined;
-    // What was learned or read about this deployment: the next connection may
-    // be another one.
-    this.#adaptiveCache.clear();
-    this.#indexCache.clear();
-    this.#shardKeyCache.clear();
-    this.#lagWaits.clear();
+    // The background stores bind the Db they were made with, and what was read
+    // through it: a later connect() reads them anew, maybe of another deployment.
+    this.#background.reset();
     this.#ownsClient = true;
     if (owned) await client.close();
   }
@@ -1105,8 +1097,8 @@ class MigratorKit extends EventEmitter {
     let migration = loaded;
     if (loaded.kind === 'background') {
       // Indexes cannot be created inside a transaction — the registration may run in one.
-      await this.#backgroundIndexes();
-      migration = await this.#asBackground(name, loaded, direction);
+      await this.#background.prepareIndexes();
+      migration = await this.#background.asBackground(name, loaded, direction);
     }
     const useTransaction = migration.useTransaction ?? config.useTransaction;
     span.set({ [ATTRIBUTES.MIGRATION_TRANSACTION]: useTransaction });
@@ -1284,11 +1276,11 @@ class MigratorKit extends EventEmitter {
             this.#assertNotAborted(signal, results);
             try {
               await runConverge(
-                this.#convergeDeps(lock),
+                this.#converge.deps(lock),
                 {
                   definitions,
                   trigger: 'up',
-                  search: this.#convergeSearchOptions(),
+                  search: this.#converge.searchOptions(),
                   ...pickActor(options),
                 },
                 signal,
@@ -1455,7 +1447,7 @@ class MigratorKit extends EventEmitter {
 
         // Before beforeEach: a migration that cannot run yet fires no hook and
         // leaves no failed trace.
-        const waiting = await this.#requiresGuard(name, signal);
+        const waiting = await this.#background.requiresGuard(name, signal);
         if (waiting.length > 0) {
           const list = waitingText(waiting);
           if ((options.onBackgroundPending ?? 'error') === 'stop') {
@@ -1508,7 +1500,7 @@ class MigratorKit extends EventEmitter {
         });
         appliedCount += 1;
         if (this.#config.backgroundInline && (await this.#peek(name))?.kind === 'background') {
-          await this.#runInline(name, signal);
+          await this.#background.runInline(name, signal);
         }
         return 'done';
       },
@@ -1825,7 +1817,7 @@ class MigratorKit extends EventEmitter {
       for (const record of records) {
         recordByName.set(record.name, record);
         // The refusal a real `down` of a one-way background migration meets.
-        if (record.kind === 'background') await this.#assertBackgroundRevertible(record.name);
+        if (record.kind === 'background') await this.#background.assertRevertible(record.name);
       }
       names = revertOrder(records, preserveOrder);
     }
@@ -1884,14 +1876,16 @@ class MigratorKit extends EventEmitter {
     const requires = loaded.requires ?? [];
     if (requires.length === 0) return;
     row.requires = requires;
-    const waiting = await this.#unsatisfied(requires, { reopen: false }).catch((error) => {
-      // A preview without its waitsFor is still a preview; the reason is not lost.
-      this.#logger.debug(
-        `Dry run: could not read what ${name} waits for — ${errorText(error)}`,
-        this.#fields({ migration: name, error: errorText(error) }),
-      );
-      return [];
-    });
+    const waiting = await this.#background
+      .pendingRequires(requires, { reopen: false })
+      .catch((error) => {
+        // A preview without its waitsFor is still a preview; the reason is not lost.
+        this.#logger.debug(
+          `Dry run: could not read what ${name} waits for — ${errorText(error)}`,
+          this.#fields({ migration: name, error: errorText(error) }),
+        );
+        return [];
+      });
     if (waiting.length > 0) row.waitsFor = migrationsOf(waiting);
   }
 
@@ -1941,7 +1935,7 @@ class MigratorKit extends EventEmitter {
       status: () => this.status(),
       definitions: () => this.#resolveCollections(),
       background: async () => {
-        const deps = this.#backgroundDeps();
+        const deps = this.#background.deps();
         return auditFindings({
           ...deps,
           checksumOf: (name) => computeChecksum(this.#filepath(name)),
@@ -1952,7 +1946,7 @@ class MigratorKit extends EventEmitter {
               .toArray(),
           // Only where drift is streamed: a watcher's record is not a finding otherwise.
           ...(this.#config.backgroundDrift !== 'poll'
-            ? { watchRows: () => this.#watchStore().status() }
+            ? { watchRows: () => this.#background.watchStore().status() }
             : {}),
         });
       },
@@ -2271,13 +2265,13 @@ class MigratorKit extends EventEmitter {
       if (definitions.length === 0) return emptyConverge(true);
       await this.connect();
       return runConverge(
-        this.#convergeDeps(),
+        this.#converge.deps(),
         {
           definitions,
           prune: options.prune,
           rebuildUnique: options.rebuildUnique,
           dryRun: true,
-          search: this.#convergeSearchOptions(),
+          search: this.#converge.searchOptions(),
         },
         undefined,
       );
@@ -2298,12 +2292,12 @@ class MigratorKit extends EventEmitter {
       return this.#withLock(options, { command: 'converge' }, async (signal, lock) => {
         if (options.ordered) await this.#assertNothingPending();
         return runConverge(
-          this.#convergeDeps(lock),
+          this.#converge.deps(lock),
           {
             definitions,
             prune: options.prune,
             rebuildUnique: options.rebuildUnique,
-            search: this.#convergeSearchOptions(options),
+            search: this.#converge.searchOptions(options),
             ...actor,
           },
           signal,
@@ -2356,91 +2350,74 @@ class MigratorKit extends EventEmitter {
     return names;
   }
 
-  // ─── Background migrations ──────────────────────────────────────────────────
+  // ─── Background migrations: the host (background/host.js) ──────────────────
 
-  /** The store of background migration state, over this kit's database */
-  #backgroundStore() {
-    this.#backgroundStoreInstance ??= new BackgroundStore(
-      this.#requireDb(),
-      this.#config.backgroundCollection,
-    );
-    return this.#backgroundStoreInstance;
+  watchBackground(options) {
+    return this.#background.watchBackground(options);
   }
 
-  /**
-   * A background migration file as the run loop sees a migration: its `up`
-   * registers the background migration (the documents are rewritten later,
-   * in partitions, without the migration lock); its `down` sets off the way
-   * back — or, when it has none, withdraws it while nothing was rewritten yet.
-   * Everything around them is the regular path: hooks, span, transaction,
-   * changelog (with `kind: 'background'`).
-   */
-  async #asBackground(name, loaded, direction) {
-    // Validated before it runs: an invalid file is reported as itself, not as
-    // a failed execution — and nothing is written. A down goes by the spec it
-    // was registered with: a definition file broken since must not block it.
-    const { spec } =
-      direction === 'down'
-        ? await this.#registeredSpec(name, loaded)
-        : await this.#backgroundSpec(name, loaded);
-    if (direction === 'up') await this.#assertRequiresAreBackground(name, loaded.requires ?? []);
-    const migration = {
-      kind: 'background',
-      ...(loaded.description !== undefined ? { description: loaded.description } : {}),
-      up: async (ctx) => {
-        migration.registered = await this.#registerBackground(name, loaded, spec, ctx.session);
-      },
-      down: async (ctx) => {
-        migration.registered = await this.#revertBackground(name, spec, ctx.session);
-      },
-    };
-    return migration;
+  backgroundWatchStatus(collection) {
+    return this.#background.backgroundWatchStatus(collection);
   }
 
-  /**
-   * The spec a registered background migration runs by — the one stored at
-   * its registration — with the file's functions. Not registered: the file's.
-   */
-  async #registeredSpec(name, loaded) {
-    const state = await this.#backgroundStore().get(name);
-    if (state?.spec === undefined) return this.#backgroundSpec(name, loaded);
-    const { fns } = await this.#backgroundSpec(name, loaded, { tolerant: true });
-    return { spec: state.spec, fns };
+  verifyBackground(options) {
+    return this.#background.verifyBackground(options);
   }
 
-  /**
-   * The spec of a background migration file, resolved against the
-   * collection's declared versioning (when it has one). `tolerant`: for a
-   * registered one, whose stored spec stands — a definition file that does
-   * not load is warned about and passed over (only its functions are used).
-   */
-  async #backgroundSpec(name, loaded, { tolerant = false } = {}) {
-    const raw = loaded.background;
-    let versioning = null;
-    const collection = raw?.collection;
-    if (typeof collection === 'string') {
-      if (this.#bookkeepingNames().includes(collection)) {
-        throw new MigrationInvalidExportError(
-          `Background migration ${name} targets "${collection}", one of migronaut's own collections`,
-          { context: { name, collection } },
-        );
-      }
-      const config = this.#config;
-      if (config.collections !== undefined || config.collectionsDir !== undefined) {
-        try {
-          versioning = await this.#versioningOf(collection, { strict: true });
-        } catch (error) {
-          if (!tolerant) throw error;
-          this.#warnOnce(
-            `definitions:${collection}`,
-            `⚠ The collection definitions do not load (${errorText(error)}) — ${name} goes by ` +
-              'the spec it was registered with',
-            { background: name },
-          );
-        }
-      }
-    }
-    return resolveBackgroundSpec(raw, { name, versioning });
+  driftMode() {
+    return this.#background.driftMode();
+  }
+
+  coordinateBackground(name, options) {
+    return this.#background.coordinateBackground(name, options);
+  }
+
+  runBackgroundSlice(name, options) {
+    return this.#background.runBackgroundSlice(name, options);
+  }
+
+  runBackground(name, options) {
+    return this.#background.runBackground(name, options);
+  }
+
+  backgroundStatus(name) {
+    return this.#background.backgroundStatus(name);
+  }
+
+  backgroundPartitions(name) {
+    return this.#background.backgroundPartitions(name);
+  }
+
+  runnableBackground() {
+    return this.#background.runnableBackground();
+  }
+
+  pauseBackground(name, options) {
+    return this.#background.pauseBackground(name, options);
+  }
+
+  resumeBackground(name, options) {
+    return this.#background.resumeBackground(name, options);
+  }
+
+  cancelBackground(name, options) {
+    return this.#background.cancelBackground(name, options);
+  }
+
+  retryBackground(name, options) {
+    return this.#background.retryBackground(name, options);
+  }
+
+  repinBackground(name, options) {
+    return this.#background.repinBackground(name, options);
+  }
+
+  dryRunBackground(name, options) {
+    return this.#background.dryRunBackground(name, options);
+  }
+
+  unlockBackground(name) {
+    return this.#background.unlockBackground(name);
   }
 
   /**
@@ -2454,365 +2431,6 @@ class MigratorKit extends EventEmitter {
     if (this.#runId === undefined) return new Set(await this.#listMigrationFiles());
     this.#runFiles ??= new Set(await this.#listMigrationFiles());
     return this.#runFiles;
-  }
-
-  /**
-   * What a file's `requires` names must be: background migration files of
-   * the sequence. The order is the loader's to check (each sorts before the
-   * file); whether they are done is the caller's.
-   */
-  async #assertRequiresAreBackground(name, requires) {
-    if (requires.length === 0) return;
-    const sequence = await this.#sequenceFiles();
-    for (const required of requires) {
-      if (!sequence.has(required)) {
-        throw new MigrationInvalidExportError(
-          `${name} requires ${required}, which is not a migration of the sequence`,
-          { context: { name, requires: required } },
-        );
-      }
-      // Through the module cache: this runs for every file that requires one.
-      const loaded =
-        (await this.#peek(required)) ??
-        (await loadMigrationFile(this.#filepath(required), {
-          reload: this.#config.reloadMigrations,
-        }));
-      if (loaded.kind !== 'background') {
-        throw new MigrationInvalidExportError(
-          `${name} requires ${required}, which is not a background migration — requires ` +
-            'waits for background migrations only (regular ones already run in order)',
-          { context: { name, requires: required } },
-        );
-      }
-    }
-  }
-
-  /** The required background migrations not done yet, in order */
-  #waitsFor(requires) {
-    return waitingFor(this.#backgroundDeps(), requires);
-  }
-
-  /** Register a background migration (again): `blocked` while what it requires is not done */
-  async #registerBackground(name, loaded, spec, session) {
-    const requires = loaded.requires ?? [];
-    const waitsFor = await this.#waitsFor(requires);
-    const status = waitsFor.length > 0 ? 'blocked' : 'pending';
-    await this.#backgroundStore().register(
-      name,
-      {
-        status,
-        mode: spec.mode,
-        direction: 'forward',
-        spec,
-        checksum: await computeChecksum(this.#filepath(name)),
-        requires,
-        waitsFor,
-        ...(spec.collection !== undefined ? { collection: spec.collection } : {}),
-        ...(loaded.description !== undefined ? { description: loaded.description } : {}),
-      },
-      { session },
-    );
-    return { status, direction: 'forward', ...(waitsFor.length > 0 ? { waitsFor } : {}) };
-  }
-
-  /** What a `down` of a background migration would refuse — for a preview to refuse it too */
-  async #assertBackgroundRevertible(name) {
-    const loaded = await this.#peek(name);
-    if (loaded === null || loaded.kind !== 'background') return;
-    const { spec } = await this.#registeredSpec(name, loaded);
-    if (spec.reversible) return;
-    if (await hasRewritten(this.#backgroundStore(), name, spec)) {
-      throw irreversibleBackground(name);
-    }
-  }
-
-  /**
-   * `down` of a background migration: with a `revert`, the forward one is
-   * replaced by the way back (registered to run like any other); without one,
-   * it is withdrawn while nothing has been rewritten (background-kit.js).
-   */
-  async #revertBackground(name, spec, session) {
-    const store = this.#backgroundStore();
-    if (spec.reversible) {
-      await store.register(
-        name,
-        {
-          status: 'pending',
-          mode: spec.mode,
-          direction: 'revert',
-          spec,
-          checksum: await computeChecksum(this.#filepath(name)),
-          requires: [],
-          waitsFor: [],
-          ...(spec.collection !== undefined ? { collection: spec.collection } : {}),
-        },
-        { session },
-      );
-      return { status: 'pending', direction: 'revert' };
-    }
-    return withdraw(this.#backgroundHost(), name, spec, session);
-  }
-
-  /** What background-kit.js runs with */
-  #backgroundHost() {
-    return {
-      store: this.#backgroundStore(),
-      deps: (owner, options) => this.#backgroundDeps(owner, options),
-      newId: () => this.#newId(),
-      logger: this.#logger,
-      emit: (event, payload) => this.#emit(event, payload),
-      registered: (name) => this.#registered(name),
-      status: (name) => this.backgroundStatus(name),
-    };
-  }
-
-  /**
-   * What background.js runs with — `owner` names a lane: its lease's owner, its
-   * events' runId. `job` is the queue job working the lane, when there is one
-   * (`{ id }` for a background queue's lane, `{ id, groupId? }` for a run that
-   * drives it inline): it goes on the lane's log lines and `migration:log`
-   * events.
-   */
-  #backgroundDeps(owner, { job, outsideRun = false } = {}) {
-    const config = this.#config;
-    const db = this.#requireDb();
-    const stamp = owner ? { runId: owner } : {};
-    // Work of no run — a verify tick, a control action — must not carry the
-    // id of whatever run this kit has in flight: in the queue one kit serves
-    // the migration worker and the background worker side by side.
-    const send = outsideRun
-      ? (event, payload) => this.#deliver(event, payload)
-      : (event, payload) => this.#emit(event, payload);
-    const lineStamp = job ? { ...stamp, ...jobFields(job) } : stamp;
-    return {
-      db,
-      client: this.#client,
-      store: this.#backgroundStore(),
-      logger: this.#logger,
-      // The lane's (or watcher's) run id, for ctx.background — `owner` itself
-      // is a function here and a string in the watcher's deps.
-      ...(owner ? { runId: owner } : {}),
-      // One counter per lane slice (or watcher): orders its migration:log events.
-      logs: backgroundLogs({ sink: this.#logger, emitter: this.#logEmitter() }),
-      ...(job ? { job } : {}),
-      fields: (extra) => ({ ...lineStamp, ...extra }),
-      emit: (event, payload) => send(event, { ...stamp, ...payload }),
-      lockFor: (name) =>
-        new MigrationLock(db, config.lockCollection, config.lockTTLSeconds, {
-          id: `background:${name}`,
-          label: 'background coordinator lock',
-        }),
-      load: (name, options) => this.#loadBackground(name, options),
-      ttlMs: config.lockTTLSeconds * 1000,
-      owner: () => owner,
-      warned: this.#backgroundWarned,
-      adaptiveCache: this.#adaptiveCache,
-      indexCache: this.#indexCache,
-      shardKeyCache: this.#shardKeyCache,
-      lagWaits: this.#lagWaits,
-      telemetry: this.#telemetry,
-      // The third wrap site: a span per lease held (slice) and per coordinator
-      // step — each opened only once the lease or the lock is held.
-      span: (kind, name, fn) =>
-        this.#telemetry.wrap(
-          kind === 'slice' ? SPANS.BACKGROUND_SLICE : SPANS.BACKGROUND_COORDINATE,
-          { [ATTRIBUTES.BACKGROUND_NAME]: name },
-          async (span) => {
-            const result = await fn();
-            span.set({ [ATTRIBUTES.BACKGROUND_OUTCOME]: result?.outcome ?? result?.next });
-            return result;
-          },
-        ),
-      onCompleted: (name) => this.#unblockDependents(name),
-      adoptedOf: (names) => this.#requireChangelog().getAdoptedNames(db, names),
-      topology: () => this.#serverTopology(db),
-      shardAware: config.backgroundShardAware,
-      shardKeyOf: (collection) => readShardKey(this.#client, db.databaseName, collection),
-      chunksOf: (collection, sharding) =>
-        readChunks(this.#client, db.databaseName, collection, sharding),
-      versioningOf: (collection) => this.#versioningOf(collection),
-    };
-  }
-
-  /**
-   * The server's topology, read once it is known. A `hello` that failed (an
-   * election, a blip) is not remembered as "not sharded": it is asked again.
-   */
-  async #serverTopology(db) {
-    if (this.#topology !== undefined) return this.#topology;
-    const { topology } = await readServer(db);
-    if (topology !== undefined) this.#topology = topology;
-    return topology;
-  }
-
-  /**
-   * A declared collection's versioning, or `undefined`. Definitions that do
-   * not load are converge's to report — `undefined` too, unless `strict`.
-   */
-  async #versioningOf(collection, { strict = false } = {}) {
-    const config = this.#config;
-    if (config.collections === undefined && config.collectionsDir === undefined) return undefined;
-    let definitions = null;
-    try {
-      definitions = config.reloadMigrations
-        ? await this.#resolveCollections()
-        : (this.#backgroundDefinitions ??= await this.#resolveCollections());
-    } catch (error) {
-      if (strict) throw error;
-      // Best-effort: no declared versioning to read, and the reason said at debug.
-      this.#logger.debug(
-        `Could not load the collection definitions: ${errorText(error)}`,
-        this.#fields({ collection, error: errorText(error) }),
-      );
-      return undefined;
-    }
-    for (const definition of definitions) {
-      if (definition.name === collection) return definition.versioning;
-    }
-    return undefined;
-  }
-
-  /** Say something about background migrations once per kit */
-  #warnOnce(id, message, fields) {
-    if (this.#backgroundWarned.has(id)) return;
-    this.#backgroundWarned.add(id);
-    this.#logger.warn(message, this.#fields(fields));
-  }
-
-  /**
-   * The live drift watcher: a change stream per collection with a completed
-   * background migration, one leader per collection across every process,
-   * upgrading each old-shape write moments after it lands. Resolves to
-   * `{ running, status(), stop() }` once it has started; on a standalone
-   * server (no change streams) it rejects with ConfigInvalidError.
-   * @experimental
-   */
-  async watchBackground(options = {}) {
-    // Checked before anything connects: a typo should not wait for a server.
-    watchOptions(options);
-    await this.#backgroundReady();
-    const db = this.#requireDb();
-    if ((await readServer(db)).topology === 'standalone') {
-      throw new ConfigInvalidError(
-        'The live drift watcher needs change streams — a replica set or a sharded cluster; ' +
-          "keep backgroundDrift: 'poll' on a standalone server",
-        { context: { key: 'backgroundDrift' } },
-      );
-    }
-    const config = this.#config;
-    const owner = this.#newId();
-    return startWatch(
-      {
-        ...this.#backgroundDeps(owner),
-        watchStore: this.#watchStore(),
-        watchLockFor: (collection) =>
-          new MigrationLock(db, config.lockCollection, config.lockTTLSeconds, {
-            id: `watch:${collection}`,
-            label: 'drift watcher lock',
-          }),
-        owner,
-        onDrift: config.backgroundOnDrift,
-      },
-      options,
-    );
-  }
-
-  /**
-   * What the live drift watchers recorded — one row per watched collection
-   * (or the one asked for, `null` when it has none): state, leader, counters,
-   * last event. Never the resume token.
-   * @experimental
-   */
-  async backgroundWatchStatus(collection) {
-    await this.#backgroundReady();
-    const rows = await this.#watchStore().status(collection);
-    if (collection !== undefined) return rows === null ? null : watchRow(rows);
-    const views = [];
-    for (const row of rows) views.push(watchRow(row));
-    return views;
-  }
-
-  #watchStore() {
-    this.#watchStoreInstance ??= new BackgroundWatchStore(
-      this.#requireDb(),
-      this.#config.backgroundCollection,
-    );
-    return this.#watchStoreInstance;
-  }
-
-  /**
-   * The drift watch, once: old-shape documents that appeared after a
-   * background migration completed are found with one indexed probe each,
-   * and reopen it (`onDrift: 'reopen'`, the `backgroundOnDrift` default) or
-   * are only reported (`'report'`). `collections` narrows it.
-   * @experimental
-   */
-  async verifyBackground(options = {}) {
-    await this.#backgroundReady();
-    const onDrift = options.onDrift ?? this.#config.backgroundOnDrift;
-    if (onDrift !== 'reopen' && onDrift !== 'report') {
-      throw new ConfigInvalidError("onDrift must be 'reopen' or 'report'", {
-        context: { onDrift },
-      });
-    }
-    // With `backgroundDrift: 'stream'` the poll is the safety net: it leaves
-    // alone a collection whose watcher is streaming and alive.
-    const streaming =
-      this.#config.backgroundDrift === 'stream' ? await this.#streamingCollections() : undefined;
-    return verifyDrift(this.#backgroundDeps(undefined, { outsideRun: true }), {
-      onDrift,
-      ...(options.collections !== undefined ? { collections: options.collections } : {}),
-      ...(streaming !== undefined ? { streaming } : {}),
-    });
-  }
-
-  /** Collections a live watcher leads right now — streaming, its record fresh */
-  async #streamingCollections() {
-    const fresh = Date.now() - STREAMING_FRESH_MS;
-    const names = [];
-    for (const row of await this.#watchStore().status()) {
-      if (row.state === 'streaming' && row.updatedAt?.getTime() > fresh) names.push(row._id);
-    }
-    return names;
-  }
-
-  /**
-   * How drift is watched (`backgroundDrift`): `'poll'`, `'stream'` or
-   * `'both'` — what a runner or a queue worker hosting this kit follows.
-   * Resolves the config; does not connect.
-   */
-  async driftMode() {
-    return (await this.#ensureConfig()).backgroundDrift;
-  }
-
-  /** A background migration file, loaded and resolved: `{ spec, fns, checksum }` */
-  async #loadBackground(name, { tolerant = false } = {}) {
-    assertMigrationName(name);
-    const filepath = this.#filepath(name);
-    // Once per version of the file: lanes ask on every slice, and a re-import
-    // per slice (under reloadMigrations) is a module the cache never frees.
-    // A file that cannot be read is loaded for its error.
-    const loaded =
-      (await this.#peek(name)) ??
-      (await loadMigrationFile(filepath, {
-        reload: this.#config.reloadMigrations,
-      }));
-    if (loaded.kind !== 'background') {
-      throw new MigrationInvalidExportError(`${name} is not a background migration`, {
-        context: { name },
-      });
-    }
-    const { spec, fns } = await this.#backgroundSpec(name, loaded, { tolerant });
-    return { spec, fns, checksum: await this.#cachedChecksum(filepath) };
-  }
-
-  /** After one completes: the blocked ones that required it, unblocked if nothing else holds them */
-  async #unblockDependents(name) {
-    const store = this.#backgroundStore();
-    const deps = this.#backgroundDeps();
-    for (const state of await store.list({ requires: name, status: 'blocked' })) {
-      await tryUnblock(deps, state);
-    }
   }
 
   /**
@@ -2838,384 +2456,8 @@ class MigratorKit extends EventEmitter {
     return loaded;
   }
 
-  /**
-   * The background migrations of `requires` not done yet:
-   * `[{ migration, status }]` — background-kit.js.
-   */
-  #unsatisfied(requires, options) {
-    return unsatisfied(this.#backgroundHost(), requires, options);
-  }
-
-  /**
-   * The background migrations a pending regular migration waits for — run
-   * first, under this run's lock, in inline mode. Empty when it may run.
-   */
-  async #requiresGuard(name, signal) {
-    let loaded = null;
-    try {
-      loaded = await this.#peek(name);
-    } catch {
-      // A file that does not load requires nothing that can be told. Its
-      // failure is #executeMigration's to report — inside the migration's
-      // span, after beforeEach, with a duration point — not this guard's,
-      // which runs before all of them.
-      return [];
-    }
-    if (loaded === null || loaded.kind === 'background') return [];
-    const requires = loaded.requires ?? [];
-    if (requires.length === 0) return [];
-    await this.#assertRequiresAreBackground(name, requires);
-    await this.#backgroundIndexes();
-    let waiting = await this.#unsatisfied(requires);
-    if (waiting.length > 0 && this.#config.backgroundInline) {
-      for (const entry of waiting) {
-        if (entry.status !== 'unregistered') await this.#runInline(entry.migration, signal);
-      }
-      waiting = await this.#unsatisfied(requires);
-    }
-    return waiting;
-  }
-
-  /**
-   * Inline mode: drive a background migration to the end right here, under
-   * the run's lock — what it requires first.
-   *
-   * @throws {BackgroundFailedError} when it fails; RunAbortedError on stop()
-   */
-  async #runInline(name, signal) {
-    const state = await this.#backgroundStore().get(name);
-    if (state === null) return;
-    for (const required of state.status === 'blocked' ? (state.waitsFor ?? []) : []) {
-      await this.#runInline(required, signal);
-    }
-    this.#logger.info(
-      `⧗ Running   ${name} inline`,
-      this.#fields({ background: name, inline: true }),
-    );
-    await this.#backgroundReady(name, { lanes: true });
-    // The lanes work for the run's queue job: their lines and events name it,
-    // with its group — which a background queue's own lanes never have.
-    const job = this.#runLog?.job;
-    const status = await drive(this.#backgroundHost(), name, {
-      signal,
-      concurrency: state.spec?.maxParallel ?? 1,
-      inline: true,
-      ...(job ? { job } : {}),
-    });
-    if (status.status === 'blocked') {
-      const waitsFor = [];
-      for (let i = 0; i < status.waitsFor.length; i++) {
-        waitsFor.push({ migration: status.waitsFor[i] });
-      }
-      throw new BackgroundPendingError(
-        `Background migration ${name} cannot run inline: it waits for ${status.waitsFor.join(', ')}`,
-        { context: { migration: name, waitsFor } },
-      );
-    }
-  }
-
-  /**
-   * Config and connection for a background method — no run, no migration
-   * lock. `lanes`: it claims partitions, and needs the slot indexes.
-   */
-  async #backgroundReady(name, { lanes = false } = {}) {
-    if (name !== undefined) assertMigrationName(name);
-    await this.#ensureConfig();
-    await this.connect();
-    await this.#backgroundIndexes({ lanes });
-  }
-
-  /**
-   * The background collections' indexes, created on first use — unless
-   * `ensureIndexes: false` (a user who cannot create indexes): then they are
-   * expected to exist, and only what claims partitions checks they do.
-   */
-  async #backgroundIndexes({ lanes = false } = {}) {
-    const store = this.#backgroundStore();
-    if (this.#config.ensureIndexes) await store.ensureIndexes();
-    else if (lanes) await store.assertIndexes();
-  }
-
-  /** The state, or NotAppliedError — a control action needs a registered background migration */
-  async #registered(name) {
-    const state = await this.#backgroundStore().get(name);
-    if (state === null) {
-      throw new NotAppliedError(`Background migration ${name} is not registered — run up first`, {
-        context: { migration: name },
-      });
-    }
-    return state;
-  }
-
-  /**
-   * One coordinator step for a background migration — see background.js.
-   * Reentrant: no run, no migration lock; serialized by its own lock.
-   * @experimental
-   */
-  async coordinateBackground(name, { signal, driver } = {}) {
-    await this.#backgroundReady(name);
-    return coordinate(this.#backgroundDeps(this.#newId()), name, {
-      signal,
-      ...(driver ? { driver } : {}),
-    });
-  }
-
-  /**
-   * One slice of one lane of a background migration: claim a partition and a
-   * slot, work it until `sliceMs` (the spec's by default) runs out, release.
-   * `job: { id }` names the queue job working the lane, for its log lines.
-   * @experimental
-   */
-  async runBackgroundSlice(name, { signal, sliceMs, job } = {}) {
-    if (sliceMs !== undefined) assertSliceMs(sliceMs);
-    // A lane's job has no group: `{ id }` only.
-    assertJobValid(job, { groupId: false });
-    await this.#backgroundReady(name, { lanes: true });
-    const owner = this.#newId();
-    return runSlice(this.#backgroundDeps(owner, job ? { job } : {}), name, {
-      signal,
-      sliceMs,
-      owner,
-    });
-  }
-
-  /**
-   * Drive a background migration from this process — the coordinator and up
-   * to `concurrency` lanes (at most its `maxParallel`) — until it is done
-   * (`untilDone`, the default) or for one round. Resolves to its status; a
-   * failed one throws BackgroundFailedError, a stop RunAbortedError (the
-   * background migration itself goes on from where it was).
-   * @experimental
-   */
-  async runBackground(name, { signal, sliceMs, untilDone = true, concurrency = 1 } = {}) {
-    await this.#backgroundReady(name, { lanes: true });
-    if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
-      throw new ConfigInvalidError('concurrency must be a positive integer', {
-        context: { concurrency },
-      });
-    }
-    if (sliceMs !== undefined) assertSliceMs(sliceMs);
-    return drive(this.#backgroundHost(), name, { signal, sliceMs, untilDone, concurrency });
-  }
-
-  /**
-   * The status of one background migration (`null` when not registered), or
-   * of every one when no name is given.
-   * @experimental
-   */
-  async backgroundStatus(name) {
-    await this.#backgroundReady(name);
-    const store = this.#backgroundStore();
-    if (name !== undefined) {
-      const state = await store.get(name);
-      return state === null ? null : stateView(store, state);
-    }
-    const views = [];
-    for (const state of await store.list()) views.push(await stateView(store, state));
-    return views;
-  }
-
-  /**
-   * The partitions of a background migration's latest generation — scope,
-   * cursor, counters and lease holder (never its token).
-   * @experimental
-   */
-  async backgroundPartitions(name) {
-    await this.#backgroundReady(name);
-    const state = await this.#registered(name);
-    const partitions = await this.#backgroundStore().partitions(name, {
-      generation: state.generation,
-    });
-    const views = [];
-    for (const partition of partitions) views.push(partitionView(partition));
-    return views;
-  }
-
-  /**
-   * The background migrations with work to do — blocked ones whose requires
-   * are met are unblocked on the way. `[{ migration, status }]`, oldest first.
-   * @experimental
-   */
-  async runnableBackground() {
-    await this.#backgroundReady();
-    return runnable(this.#backgroundHost());
-  }
-
-  /** A control action, after the checks every one shares */
-  async #controlBackground(name, action, options = {}) {
-    // Who and why go into the state's history: held to the changelog's limits.
-    assertActorValid(options);
-    await this.#backgroundReady(name);
-    await this.#registered(name);
-    const deps = this.#backgroundDeps(undefined, { outsideRun: true });
-    const result = await controlBackground(deps, name, action, options);
-    if (options.wait === true && (action === 'pause' || action === 'cancel')) {
-      result.stopped = await waitForLanes(deps, name, { signal: options.signal });
-    }
-    return result;
-  }
-
-  /** Pause a background migration; its lanes stop at the next batch. `wait` until they have. @experimental */
-  pauseBackground(name, options = {}) {
-    return this.#controlBackground(name, 'pause', options);
-  }
-
-  /** Resume a paused background migration. @experimental */
-  resumeBackground(name, options = {}) {
-    return this.#controlBackground(name, 'resume', options);
-  }
-
-  /** Cancel a background migration; `wait` until its lanes have stopped. @experimental */
-  cancelBackground(name, options = {}) {
-    return this.#controlBackground(name, 'cancel', options);
-  }
-
-  /**
-   * Retry a failed or cancelled background migration — the same generation,
-   * or `fromStart`; `repin` pins the file on disk first. A completed one is
-   * reopened over whatever is left.
-   * @experimental
-   */
-  async retryBackground(name, options = {}) {
-    if (options.repin === true) await this.repinBackground(name, options);
-    return this.#controlBackground(name, 'retry', options);
-  }
-
-  /**
-   * Pin the file on disk as the background migration's version — its
-   * checksum (in the changelog too, so a strict drift check agrees) and its
-   * spec. A change to what it matches or how it splits means a new plan.
-   * @experimental
-   */
-  async repinBackground(name, options = {}) {
-    assertActorValid(options);
-    await this.#backgroundReady(name);
-    await this.#registered(name);
-    const result = await repinBackgroundState(this.#backgroundDeps(), name, options);
-    await this.#requireChangelog().setChecksum(this.#requireDb(), name, result.checksum);
-    return result;
-  }
-
-  /**
-   * Dry-run a background migration — registered or not — with nothing
-   * written: on a sample (`sample` random documents, or the `first` n), its
-   * transformation alone; with `validate`, the real write path in a
-   * transaction that is always aborted. A step migration runs `steps` steps
-   * in that transaction instead.
-   * @experimental
-   */
-  async dryRunBackground(name, options = {}) {
-    await this.#ensureConfig();
-    await this.connect();
-    const loaded = await this.#loadBackground(name);
-    const db = this.#requireDb();
-    const deps = {
-      db,
-      client: this.#client,
-      logger: this.#logger,
-      forbidden: this.#bookkeepingNames(),
-      topology: () => this.#serverTopology(db),
-      // The sandbox refuses a sharded collection's distinct (a mongos cannot run it in a transaction).
-      shardKeyOf: (collection) => readShardKey(this.#client, db.databaseName, collection),
-    };
-    if (loaded.spec.mode === 'step' || options.steps !== undefined) {
-      if (loaded.spec.mode !== 'step') {
-        throw new ConfigInvalidError(
-          `${name} is declarative — dry-run it on a sample (sample, first), not by steps`,
-          { context: { migration: name } },
-        );
-      }
-      // From where the background migration is, unless asked to start over.
-      let checkpoint = null;
-      const state = await this.#backgroundStore().get(name);
-      if (state !== null && !options.fromStart) {
-        const partitions = await this.#backgroundStore().partitions(name, {
-          generation: state.generation,
-        });
-        checkpoint = partitions[0]?.cursor?.checkpoint ?? null;
-      }
-      return previewSteps(deps, name, loaded, { ...options, checkpoint });
-    }
-    return previewSample(deps, name, loaded, options);
-  }
-
-  /**
-   * Clear a background migration's coordinator lock and every partition
-   * lease — for a stuck one; live lanes are fenced off at their next write.
-   * @experimental
-   */
-  async unlockBackground(name) {
-    await this.#backgroundReady(name);
-    const deps = this.#backgroundDeps();
-    const lock = (await deps.lockFor(name).forceRelease()) !== null;
-    const leases = await deps.store.unlockAll(name);
-    // It fences every live lane: an operator's act, recorded like any control.
-    await deps.store.note(name, { action: 'unlock', lock, leases });
-    this.#emit('background:control', { migration: name, action: 'unlock', lock, leases });
-    this.#logger.warn(
-      `⚠ ${name}: unlocked — coordinator lock ${lock ? 'cleared' : 'not held'}, ${leases} ` +
-        'lease(s) dropped (their lanes stop at their next write)',
-      this.#fields({ background: name, lock, leases }),
-    );
-    return { lock, leases };
-  }
-
-  /** How converge treats search indexes: the config, and a call's own `waitForSearchIndexes` */
-  #convergeSearchOptions(options = {}) {
-    const config = this.#config;
-    return {
-      onUnavailable: config.onSearchUnavailable,
-      wait: options.waitForSearchIndexes ?? config.waitForSearchIndexes,
-      waitTimeoutMs: config.searchIndexWaitTimeoutMs,
-    };
-  }
-
-  /** What runConverge works with; `lock` (a run's) lets it give the lock up before waiting */
-  #convergeDeps(lock) {
-    const db = this.#requireDb();
-    return {
-      db,
-      ...(lock ? { releaseLock: () => lock.release() } : {}),
-      recordSearchWait: (waitedMs, outcome) => this.#telemetry.searchWaited({ waitedMs, outcome }),
-      logger: this.#logger,
-      fields: (extra) => this.#fields(extra),
-      emit: (event, payload) => this.#emit(event, payload),
-      assertNotAborted: (abortSignal) => this.#assertNotAborted(abortSignal),
-      // The history entry's who-and-where, like a changelog record's.
-      audit: () => ({
-        ...(this.#runId ? { runId: this.#runId } : {}),
-        executedBy: safeUsername(),
-        host: os.hostname(),
-        environment: this.#environment(),
-      }),
-      record: (entry) =>
-        this.#convergeLog().append(db, entry, { ensureIndex: this.#config.ensureIndexes }),
-      // Behind a mongos only: the shard key — so prune never drops its index,
-      // and the version index takes it as a prefix. An 8.0 `unsplittable`
-      // collection is not sharded; `undefined` when config may not be read.
-      shardKeyOf: async (name) => {
-        const sharding = await readShardKey(this.#client, db.databaseName, name);
-        return sharding === undefined ? undefined : (sharding?.key ?? null);
-      },
-    };
-  }
-
-  #convergeLog() {
-    this.#convergeLogStore ??= new ConvergeLog(this.#config.convergeLogCollection);
-    return this.#convergeLogStore;
-  }
-
-  /**
-   * The converge history, newest first: one entry per converge that changed
-   * something or failed — when, triggered how, by whom and why, and every
-   * index or validator it touched, with its before and after. Read-only.
-   */
-  async convergeHistory(options = {}) {
-    const { limit = 20 } = options;
-    assertHistoryLimit(limit);
-    await this.#ensureConfig();
-    await this.connect();
-    return this.#convergeLog().list(this.#requireDb(), limit);
+  convergeHistory(options) {
+    return this.#converge.history(options);
   }
 
   /**

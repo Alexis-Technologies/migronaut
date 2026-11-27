@@ -1,9 +1,9 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { processPartition } = require('../../src/core/background-engine.js');
-const { idRangePartitioner } = require('../../src/core/background-partition.js');
-const { MAX_STUCK, createShardPartitioner } = require('../../src/core/background-shard.js');
-const { resolveBackgroundSpec } = require('../../src/core/background-spec.js');
+const { processPartition } = require('../../src/core/background/engine.js');
+const { idRangePartitioner } = require('../../src/core/background/partition.js');
+const { MAX_STUCK, createShardPartitioner } = require('../../src/core/background/shard.js');
+const { resolveBackgroundSpec } = require('../../src/core/background/spec.js');
 
 const NAME = '0001-orders.js';
 

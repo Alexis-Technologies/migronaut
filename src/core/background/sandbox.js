@@ -3,9 +3,9 @@ const {
   RunAbortedError,
   SandboxRefusedError,
   TransactionsUnsupportedError,
-} = require('../errors/index.js');
-const { isPlainObject } = require('../utils/canonical.js');
-const { errorText, isTransientTransaction } = require('../utils/error.js');
+} = require('../../errors/index.js');
+const { isPlainObject } = require('../../utils/canonical.js');
+const { errorText, isTransientTransaction } = require('../../utils/error.js');
 const { toRelaxedEjson } = require('./bson-peer.js');
 
 /**

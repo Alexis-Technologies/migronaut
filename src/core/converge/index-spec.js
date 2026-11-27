@@ -1,4 +1,4 @@
-const { deepEqual, isPlainObject, regExpIssue, toWire } = require('../utils/canonical.js');
+const { deepEqual, isPlainObject, regExpIssue, toWire } = require('../../utils/canonical.js');
 
 /**
  * One declared index against one live index: validation, normalization, and

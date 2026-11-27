@@ -15,7 +15,7 @@ const DB = `migronaut_search_${process.pid}`;
  * Opt-in and manual: it needs Atlas Search, which a plain `pnpm test` cannot
  * assume, and CI does not run it. An environment-capability skip with a
  * reason, like the real-Redis suite; the coverage gate passes without it. Run
- * it after a change to search-index-spec.js, converge-search.js or the search
+ * it after a change to converge/search-index-spec.js, converge/search.js or the search
  * planner:
  *
  *   docker run --rm -d --name migronaut-atlas -p 27018:27017 -e DO_NOT_TRACK=1 \

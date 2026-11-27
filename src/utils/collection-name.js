@@ -5,7 +5,7 @@
  * config value can ever point a read or write at a system collection.
  *
  * Lives here rather than in config.js because the collection-definition
- * validator (core/collections.js) needs it too, and config.js requires that
+ * validator (core/converge/collections.js) needs it too, and config.js requires that
  * validator — keeping the predicate in config.js would make the two a cycle.
  */
 const isCollectionName = (value) => {

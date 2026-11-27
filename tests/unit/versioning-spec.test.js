@@ -7,7 +7,7 @@ const {
   shardedVersionIndexKey,
   versionFloorConflict,
   versionFloorToCheck,
-} = require('../../src/core/versioning-spec.js');
+} = require('../../src/core/converge/versioning-spec.js');
 const { resolveVersioning } = require('../../src/versioning/config.js');
 
 const versioning = resolveVersioning({ current: 2 });

@@ -1,12 +1,12 @@
 const { addAbortListener } = require('node:events');
 
-const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
-const { MAX_TIMER_MS, jitter } = require('../utils/concurrency.js');
-const { FATAL_SLICE_CODES, errorText } = require('../utils/error.js');
-const { sleep } = require('./background-throttle.js');
-const { assertSliceMs } = require('./background-spec.js');
-const { watchOptions } = require('./background-watch.js');
-const { MigratorKit } = require('./migrator.js');
+const { ConfigInvalidError, RunAbortedError } = require('../../errors/index.js');
+const { MAX_TIMER_MS, jitter } = require('../../utils/concurrency.js');
+const { FATAL_SLICE_CODES, errorText } = require('../../utils/error.js');
+const { sleep } = require('./throttle.js');
+const { assertSliceMs } = require('./spec.js');
+const { watchOptions } = require('./watch.js');
+const { MigratorKit } = require('../migrator.js');
 
 /**
  * The in-process runner: background migrations driven from inside the

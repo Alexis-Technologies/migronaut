@@ -1,12 +1,12 @@
-const { mapLimit } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
+const { mapLimit } = require('../../utils/concurrency.js');
+const { errorText } = require('../../utils/error.js');
 const {
   isSearchIndexReady,
   normalizeLiveSearchIndex,
   searchBuild,
   searchBuildState,
 } = require('./search-index-spec.js');
-const { INDEX_NOT_FOUND, NAMESPACE_NOT_FOUND } = require('./server-info.js');
+const { INDEX_NOT_FOUND, NAMESPACE_NOT_FOUND } = require('../server-info.js');
 
 /**
  * Atlas Search for converge: the commands that create, update, list and drop

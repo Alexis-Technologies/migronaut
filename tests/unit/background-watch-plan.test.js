@@ -8,8 +8,8 @@ const {
   watchView,
   tokenDue,
   watchPipeline,
-} = require('../../src/core/background-watch-plan.js');
-const { WATCH_DEFAULTS, watchOptions } = require('../../src/core/background-watch.js');
+} = require('../../src/core/background/watch-plan.js');
+const { WATCH_DEFAULTS, watchOptions } = require('../../src/core/background/watch.js');
 const { ConfigInvalidError } = require('../../src/errors/index.js');
 
 const state = (name, fields) => ({

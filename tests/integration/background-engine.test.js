@@ -7,11 +7,11 @@ const {
   matchOf,
   processPartition,
   readStepResult,
-} = require('../../src/core/background-engine.js');
-const { idRangePartitioner } = require('../../src/core/background-partition.js');
-const { resolveBackgroundSpec } = require('../../src/core/background-spec.js');
-const { BackgroundStore } = require('../../src/core/background-store.js');
-const { createAdaptive } = require('../../src/core/background-throttle.js');
+} = require('../../src/core/background/engine.js');
+const { idRangePartitioner } = require('../../src/core/background/partition.js');
+const { resolveBackgroundSpec } = require('../../src/core/background/spec.js');
+const { BackgroundStore } = require('../../src/core/background/store.js');
+const { createAdaptive } = require('../../src/core/background/throttle.js');
 const { BackgroundFailedError, LockLostError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { updateWithRevision } = require('../../versioning.js');

@@ -1,14 +1,14 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { ConfigInvalidError } = require('../errors/index.js');
-const { isPlainObject, toWire, unsendable } = require('../utils/canonical.js');
-const { isCollectionName } = require('../utils/collection-name.js');
-const { mapLimit } = require('../utils/concurrency.js');
-const { contextPath, errorText } = require('../utils/error.js');
-const { importUserFile, tsLoadMessageOrNull } = require('../utils/loader.js');
+const { ConfigInvalidError } = require('../../errors/index.js');
+const { isPlainObject, toWire, unsendable } = require('../../utils/canonical.js');
+const { isCollectionName } = require('../../utils/collection-name.js');
+const { mapLimit } = require('../../utils/concurrency.js');
+const { contextPath, errorText } = require('../../utils/error.js');
+const { importUserFile, tsLoadMessageOrNull } = require('../../utils/loader.js');
 const { indexIssues, normalizeDeclaredIndex, sameDeclaredSignature } = require('./index-spec.js');
 const { normalizeDeclaredSearchIndex, searchIndexIssues } = require('./search-index-spec.js');
-const { resolveVersioning, versioningIssues } = require('../versioning/config.js');
+const { resolveVersioning, versioningIssues } = require('../../versioning/config.js');
 const {
   isVersioningIndexKey,
   mergeVersioningValidator,

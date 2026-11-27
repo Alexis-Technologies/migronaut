@@ -12,7 +12,7 @@ const {
   sameDeclaredSignature,
   sameSignature,
   SEMANTIC_OPTIONS,
-} = require('../../src/core/index-spec.js');
+} = require('../../src/core/converge/index-spec.js');
 
 // What MongoDB 7.0 returns from listIndexes for these declarations — taken
 // from a real server, so a rule that disagrees with it fails here.

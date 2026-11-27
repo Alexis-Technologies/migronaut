@@ -1,5 +1,5 @@
 const { EXIT_CODES } = require('./cli/exit-codes.js');
-const { startBackgroundRunner } = require('./core/background-runner.js');
+const { startBackgroundRunner } = require('./core/background/runner.js');
 const { MigratorKit } = require('./core/migrator.js');
 const { pendingMigrations, runMigrations } = require('./core/run.js');
 const { createLogger } = require('./utils/logger.js');
