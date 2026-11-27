@@ -1847,6 +1847,24 @@ The high-impact ones for code changes:
 - **A typed `current` past the highest shape errors as "not assignable to type 'never'"** when it
   is written inline — the check works through a conditional type there; from an imported
   `as const` definition the same check names the two numbers.
+- **A 2.x environment variable is refused, not ignored.** `MIGRONAUT_LOCK_TTL` and
+  `MIGRONAUT_COLLECTION` became `MIGRONAUT_LOCK_TTL_SECONDS` and `MIGRONAUT_MIGRATIONS_COLLECTION`
+  in 3.0; still set, one is an issue of the run's `ConfigInvalidError` naming its new name — a lock
+  TTL quietly back at 60 s is what the env layer fails closed against.
+- **A migration export of the wrong kind, or a near miss of a known one, is refused.**
+  `useTransaction: 'true'` or `useTransactions` ran the migration without a transaction in 2.x;
+  refusing is the only reading that cannot be wrong. Exports that resemble nothing are left alone.
+- **The bookkeeping reads go to the primary**, majority-committed (`BOOKKEEPING_OPTIONS`), whatever
+  the client's read preference: a lock re-read after its own write, or the applied names, from a
+  lagging secondary means a second holder or a migration applied twice. It costs
+  `Changelog.getLastBatch` about 8 % in the bench.
+- **`disconnect()` refuses under a run in flight** (`ALX_ERR_RUN_IN_FLIGHT`) rather than wait or
+  close: closing the client under the run fails its lock release and leaves the lock to its TTL;
+  waiting would hide a shutdown order that is wrong. Stop the run, await it, then disconnect.
+- **A requested stop is no error in telemetry** — no ERROR status, no `error.type`, and
+  `migronaut.run.stopped = true` — while the CLI still exits with `ALX_ERR_RUN_ABORTED`'s code: a
+  rolling deploy is not an incident, but a script must still tell a stopped run from a finished
+  one.
 
 ## 9. Testing strategy
 
@@ -1978,7 +1996,7 @@ MIGRONAUT_TEST_SHARDED_URI="mongodb://root:root@127.0.0.1:27019/?authSource=admi
   hand-copied into the README's Benchmarks section before releases.
 - **Published artifact:** exactly what `files` in [package.json](package.json) lists —
   `index.js`, `index.d.ts`, `bullmq.js`, `bullmq.d.ts`, `versioning.js`, `versioning.d.ts`,
-  `migronaut.schema.json`, `bin`, `src`, `README.md`, `CHANGELOG.md`, `LICENSE`, `SECURITY.md`. The `exports` map exposes
+  `migronaut.schema.json`, `bin`, `src` (without the folders' `CLAUDE.md`, `!**/CLAUDE.md`), `README.md`, `CHANGELOG.md`, `LICENSE`, `SECURITY.md`. The `exports` map exposes
   three entry points (`.`, `./bullmq` and `./versioning`) and nothing else. `docs/`, `blog/`, `examples/` and this `ARCHITECTURE.md` live in the repo but are
   **never** shipped to npm.
 - **Release:** manual — bump `version` in `package.json` and the three spots a test holds to it,

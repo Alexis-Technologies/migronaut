@@ -568,6 +568,11 @@ describe('published package', () => {
     }
   });
 
+  it('should leave the folder notes for agents out of the tarball', () => {
+    // A folder's CLAUDE.md sits beside its code; `src` alone would publish it.
+    assert.ok(packageJson.files.includes('!**/CLAUDE.md'));
+  });
+
   it('should ship the license and the security policy beside the changelog', () => {
     for (const entry of ['README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md']) {
       assert.ok(packageJson.files.includes(entry), `${entry} must be in "files"`);

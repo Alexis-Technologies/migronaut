@@ -55,6 +55,8 @@ const jsonLd = {
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
+  // The notes for agents are no page of the site.
+  srcExclude: ['CLAUDE.md'],
   title: '@alexify/migronaut',
   titleTemplate: ':title — MongoDB migrations for Node.js',
   description: ogDescription,

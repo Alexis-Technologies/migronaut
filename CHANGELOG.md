@@ -7,12 +7,17 @@ are releases of the upstream `mongo-migrate-kit`, not of this package.
 
 ## [Unreleased]
 
-A major release for the error contract, and the move to alexiskills 1.2, the agent skills and
-conventions of the Alexis stack. Every error code starts with `ALX_ERR_` and every error class
-takes `(message, options = {})` as `Error` does (under **Changed (breaking)**; **Upgrading from
-2.x** lists each old and new name). Everything else keeps its behaviour — the same results,
-messages, events and exit numbers, on the same suites — but for two lookups keyed by input (under
-**Fixed**). The package now ships `LICENSE` and `SECURITY.md` beside the changelog.
+A major release: the error contract, the move to alexiskills 1.2 — the agent skills and
+conventions of the Alexis stack — and a review of the codebase against them. Every error code
+starts with `ALX_ERR_` and every error class takes `(message, options = {})` as `Error` does;
+four new codes name failures that left untyped or under the wrong one, two environment variables
+are renamed, and inputs that were quietly ignored or misread are refused (a migration export of
+the wrong kind, a duration past what a timer holds). All of it is under **Changed (breaking)**,
+and **Upgrading from 2.x** walks through each step. **Added** holds options that change nothing
+until used (`stop(…, { cause })`, `signal` on the run methods, `close({ timeoutMs })`), **Fixed**
+what the review found, and **Tooling** the codebase brought to the conventions — feature folders,
+names and comments — with no behaviour of its own. The package now ships `LICENSE` and
+`SECURITY.md` beside the changelog.
 
 ### Changed (breaking)
 
@@ -82,8 +87,8 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 - **A configuration that does not validate says every issue, in its message and at once.** An
   environment variable that does not parse joins the other issues in `context.issues`
   (`{ path: 'MIGRONAUT_STRICT', message: … }`) instead of throwing alone with `context.name` and
-  `context.value`, and the message lists them all: `Invalid configuration — MIGRONAUT_LOCK_TTL
-  must be a positive integer; dbName is required`, where a person read only "Invalid
+  `context.value`, and the message lists them all: `Invalid configuration —
+  MIGRONAUT_LOCK_TTL_SECONDS must be a positive integer; dbName is required`, where a person read only "Invalid
   configuration".
 - **`EXIT_CODES` is frozen, with no prototype.** The CLI reads the same object, so a consumer's
   write changed its exit codes for the whole process.
@@ -203,9 +208,12 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
   `Breaking changes` is `Changed (breaking)`, 2.0.0's `Fixed / hardened` is `Fixed`, 2.3.0's
   `Notes` close its `Added`, and the topics of 1.0.0 are groups of its `Added`. The content of the
   old entries is unchanged.
-- **CLAUDE.md says what migronaut adds to alexiskills**: "Conventions" (with the rules kept on
-  purpose and why), "Errors" (the error model and its `ALX_ERR_*` codes), "Skills"
-  and "Release process". CONTRIBUTING.md points to them.
+- **CLAUDE.md says what migronaut adds to alexiskills, split by where it bites**: the root holds
+  what spans the repository — "Conventions" (with the rules kept on purpose and why), "Errors"
+  (the error model and its `ALX_ERR_*` codes), "Skills", "Release process" — and a table of the
+  notes of eight folders (`src/core`, `src/core/background`, `src/core/converge`, `src/bullmq`,
+  `src/versioning`, `src/cli`, `tests`, `docs`), each rule in one of them. CONTRIBUTING.md points
+  to them; `files` leaves the folders' notes out of the package (`!**/CLAUDE.md`).
 
 ### Tooling
 
@@ -338,6 +346,24 @@ messages, events and exit numbers, on the same suites — but for two lookups ke
 7. Rename two environment variables: `MIGRONAUT_LOCK_TTL` is `MIGRONAUT_LOCK_TTL_SECONDS` and
    `MIGRONAUT_COLLECTION` is `MIGRONAUT_MIGRATIONS_COLLECTION`. A 2.x name still set fails the
    configuration with the new one named, so a deployment that missed it learns at its next run.
+8. Branch on the four new codes where a 2.x caller saw another: `ALX_ERR_MIGRATION_LOAD_FAILED`
+   (exit 35) for a file that does not load, which left untyped with exit 1;
+   `ALX_ERR_DATABASE_OPERATION_FAILED` (exit 36) for a driver error that ends a run;
+   `ALX_ERR_QUEUE_CLOSED` (exit 37) and `ALX_ERR_RUN_IN_FLIGHT` (exit 38), both
+   `ALX_ERR_CONFIG_INVALID` before. A queue job's progress says `ALX_ERR_UNKNOWN` where it said
+   `UNKNOWN`.
+9. Fix what is now refused rather than ignored: a migration export of the wrong kind
+   (`useTransaction: 'true'`, `timeoutMs: '5000'`) or a mistyped one (`useTransactions`,
+   `timeoutMS`), and a duration past the timer's ceiling (`lockTTLSeconds` above 2147483, a
+   `…Ms` above 2147483647).
+10. Stop a run before disconnecting its kit: `disconnect()` under a run in flight rejects with
+    `ALX_ERR_RUN_IN_FLIGHT` — `kit.stop()`, await the run, then `disconnect()`.
+11. Move dashboards and alerts: the run span's `migronaut.lock.acquire_ms` (milliseconds) is
+    `migronaut.lock.acquire.duration` (seconds), and a run stopped on request no longer counts as
+    an error (`migronaut.run.stopped = true` instead).
+12. Read `context.filepath` and `context.path` as relative to the working directory, and a
+    configuration's issues from `context.issues` — an environment variable that does not parse is
+    one of them now, with no `context.name` and `context.value` of its own.
 
 ## [2.5.0] - 2026-11-18
 
