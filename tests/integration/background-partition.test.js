@@ -164,7 +164,11 @@ describe('idRangePartitioner (integration)', () => {
   it('should scan a batch through the version index, bounded by its limit', async () => {
     await seed(Array.from({ length: 2000 }, () => new ObjectId()));
     const result = await plan();
-    const [{ scope }] = result.partitions;
+    // 2000 documents against a cap of 16 × 50 plan sample-first, from 80 random ids: a partition's
+    // real size strays from its estimate, and the first one held fewer than the limit about once
+    // in a hundred runs. The fullest holds at least 2000 / 16 = 125.
+    const { counts } = await coverage(result.partitions);
+    const { scope } = result.partitions[counts.indexOf(Math.max(...counts))];
     const query = idRangePartitioner.batchQuery(
       scope,
       { lastId: undefined },
