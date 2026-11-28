@@ -10,7 +10,7 @@ const {
 const { startTestMongo } = require('../helpers/mongo.js');
 const { failingMigration, insertMigration, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_run_test';
 const LOCK_COLLECTION = '_migronaut_locks';
 
@@ -26,19 +26,19 @@ beforeEach(async () => {
   await mongo.db.dropDatabase();
 });
 
-let project;
+let project = null;
 
 afterEach(() => {
   project?.cleanup();
 });
 
 /** Base config pointed at the test mongo + project dir, output silenced */
-function config() {
+const config = () => {
   return { uri: mongo.uri, dbName: DB, migrationsDir: project.dir, logger: null };
-}
+};
 
 /** Insert a fresh (non-stale) lock document so acquisition is blocked */
-async function holdLock() {
+const holdLock = async () => {
   await mongo.db.collection(LOCK_COLLECTION).insertOne({
     _id: 'migronaut_lock',
     lockedAt: new Date(),
@@ -47,7 +47,7 @@ async function holdLock() {
     executedBy: 'peer',
     owner: 'peer-token',
   });
-}
+};
 
 describe('runMigrations (programmatic entry point)', () => {
   it('should apply all pending migrations and report them', async () => {
@@ -110,7 +110,7 @@ describe('runMigrations (programmatic entry point)', () => {
 
     // Release the peer's lock once we have been refused at least once — a
     // timer alone races a slow connect, which would find the lock free.
-    let release;
+    let release = null;
     const summary = await runMigrations(config(), {
       onLockHeld: 'wait',
       lockPollIntervalMs: 40,
@@ -167,10 +167,31 @@ describe('runMigrations signal (integration)', () => {
       (error) => {
         assert.ok(error instanceof RunAbortedError);
         assert.strictEqual(error.context.reason, 'SIGTERM');
+        // The signal's reason itself, so a timeout is told from a shutdown.
+        assert.strictEqual(error.cause, 'SIGTERM');
+        assert.strictEqual(error.context.cause, 'SIGTERM');
         return true;
       },
     );
     assert.ok(Date.now() - started < 1500, 'the 2s poll sleep was cut short');
+    assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+  });
+
+  it('should carry a timed-out signal as the cause of the stopped run', async () => {
+    project = makeProject();
+    project.write(
+      '0001-slow.ts',
+      'export async function up() { await new Promise((resolve) => setTimeout(resolve, 400)); }\n' +
+        'export async function down() {}\n',
+    );
+    project.write('0002-a.ts', insertMigration('things', 'a'));
+    await assert.rejects(runMigrations(config(), { signal: AbortSignal.timeout(150) }), (error) => {
+      assert.strictEqual(error.code, 'ALX_ERR_RUN_ABORTED');
+      assert.strictEqual(error.cause?.name, 'TimeoutError');
+      assert.match(error.context.cause, /timed out|TimeoutError|aborted/i);
+      return true;
+    });
+    // The migration in flight finished; the next one never started.
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
   });
 
@@ -182,7 +203,10 @@ describe('runMigrations signal (integration)', () => {
       RunAbortedError,
     );
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
-    await assert.rejects(runMigrations(config(), { signal: 'stop' }), /AbortSignal/);
+    await assert.rejects(runMigrations(config(), { signal: 'stop' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /AbortSignal/,
+    });
   });
 
   it('should load collection definitions once while it waits for the lock', async () => {
@@ -201,7 +225,7 @@ describe('runMigrations signal (integration)', () => {
     await holdLock();
     // Freed after a few refusals, whatever the machine's speed.
     let refusals = 0;
-    let release;
+    let release = null;
     const summary = await runMigrations(
       {
         ...config(),

@@ -1,5 +1,5 @@
 const { MigronautError } = require('../errors/index.js');
-const { errorWithCause } = require('./error.js');
+const { formatErrorWithCause } = require('./error.js');
 const { redactWithin } = require('./redact.js');
 
 /**
@@ -26,7 +26,8 @@ const ATTRIBUTES = {
   RUN_REVERTED: 'migronaut.run.reverted',
   RUN_SKIPPED: 'migronaut.run.skipped',
   RUN_TOTAL: 'migronaut.run.total',
-  LOCK_ACQUIRE_MS: 'migronaut.lock.acquire_ms',
+  RUN_STOPPED: 'migronaut.run.stopped',
+  LOCK_ACQUIRE_DURATION: 'migronaut.lock.acquire.duration',
   LOCK_SKIPPED: 'migronaut.lock.skipped',
   LOCK_LOST_REASON: 'migronaut.lock.lost_reason',
   LOCK_WAIT_OUTCOME: 'migronaut.lock.wait.outcome',
@@ -78,13 +79,38 @@ const DURATION_BUCKETS_SECONDS = [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 9
 /** The longest span status message sent — a blocked run can list hundreds of files */
 const MAX_STATUS_MESSAGE_LENGTH = 1024;
 
+/** The parts of `telemetry` — anything else in it is a typo, mentioned at debug level */
+const TELEMETRY_KEYS = Object.freeze(['tracer', 'meter', 'attributes']);
+
+/** The types a static attribute's value may have */
+const ATTRIBUTE_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
+
+/** Static attributes are dimensions: a handful at most */
+const MAX_STATIC_ATTRIBUTES = 20;
+
+/** What a tracer must have to start a span — and a meter, to make its instruments */
+const TRACER_METHODS = ['startActiveSpan'];
+
+const METER_METHODS = ['createHistogram', 'createCounter'];
+
+/** A slice's document counters, and the `background.result` each is reported as */
+const DOCUMENT_RESULTS = [
+  { field: 'migrated', result: 'migrated' },
+  { field: 'skipped', result: 'skipped' },
+  { field: 'conflicts', result: 'conflict' },
+  { field: 'failed', result: 'failed' },
+];
+
+/** What the kit holds when there is no tracer: the same surface, doing nothing */
+const NOOP_SPAN = { set() {}, finish() {} };
+
 /**
  * Mark a promise an SDK handed back as handled. A tracer that wraps the work
  * (`return fn(span).finally(…)`) or an instrument that is async returns a
  * promise nobody here awaits — and when it rejects, an unhandled rejection
  * ends the process. The caller's own handlers are unaffected.
  */
-function quiet(value) {
+const markHandled = (value) => {
   if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
     try {
       if (typeof value.then === 'function') value.then(undefined, () => {});
@@ -93,36 +119,36 @@ function quiet(value) {
     }
   }
   return value;
-}
+};
 
 /**
  * The one guard every tracer, span and instrument call goes through: telemetry
  * must never break a migration run, so a throwing SDK is swallowed here — and
  * a rejecting one too, see {@link quiet}.
  */
-function safe(call) {
+const callSafely = (call) => {
   try {
-    return quiet(call());
+    return markHandled(call());
   } catch {
     return undefined;
   }
-}
+};
 
 /** `attributes` without its undefined values — an SDK warns about (or rejects) those */
-function defined(attributes) {
-  const result = {};
+const omitUndefined = (attributes) => {
+  const result = Object.create(null);
   if (!attributes) return result;
   for (const key of Object.keys(attributes)) {
     if (attributes[key] !== undefined) result[key] = attributes[key];
   }
   return result;
-}
+};
 
 /**
  * The low-cardinality failure class OpenTelemetry's `error.type` asks for: the
  * typed migronaut code when there is one, the error's class name otherwise.
  */
-function errorType(error) {
+const readErrorType = (error) => {
   // Never throws: it runs on the way out of a failed run, where a hostile
   // `name` getter would otherwise replace the run's own error.
   try {
@@ -132,7 +158,7 @@ function errorType(error) {
     // fall through
   }
   return '_OTHER';
-}
+};
 
 /**
  * The status message for a failed span. Redacted like every string that leaves
@@ -140,21 +166,16 @@ function errorType(error) {
  * with the wrapped cause, since "Migration up failed: X" alone says which
  * migration and not why.
  */
-function failureText(error) {
+const formatFailure = (error) => {
   // A span goes to a third-party backend: no data values, and a bounded size.
-  const { text, cut } = redactWithin(errorWithCause(error), MAX_STATUS_MESSAGE_LENGTH);
+  const { text, cut } = redactWithin(formatErrorWithCause(error), MAX_STATUS_MESSAGE_LENGTH);
   return cut || text.length > MAX_STATUS_MESSAGE_LENGTH
     ? `${text.slice(0, MAX_STATUS_MESSAGE_LENGTH - 1)}…`
     : text;
-}
+};
 
-/** The parts of `telemetry` — anything else in it is a typo, mentioned at debug level */
-const TELEMETRY_KEYS = Object.freeze(['tracer', 'meter', 'attributes']);
-
-/** The types a static attribute's value may have */
-const ATTRIBUTE_VALUE_TYPES = new Set(['string', 'number', 'boolean']);
-/** Static attributes are dimensions: a handful at most */
-const MAX_STATIC_ATTRIBUTES = 20;
+/** Neither undefined nor null: an option that was given */
+const isGiven = (value) => value !== undefined && value !== null;
 
 const hasMethods = (value, names) => {
   if (typeof value !== 'object' || value === null) return false;
@@ -172,22 +193,19 @@ const hasMethods = (value, names) => {
  * Lives here, next to the calls it vouches for: no other module knows an
  * OpenTelemetry method name.
  */
-function telemetryIssues(telemetry) {
+const checkTelemetry = (telemetry) => {
   if (telemetry === undefined || telemetry === null) return [];
   if (typeof telemetry !== 'object' || Array.isArray(telemetry)) {
     return [{ path: 'telemetry', message: 'must be an object' }];
   }
   const issues = [];
-  if (telemetry.tracer != null && !hasMethods(telemetry.tracer, ['startActiveSpan'])) {
+  if (isGiven(telemetry.tracer) && !hasMethods(telemetry.tracer, TRACER_METHODS)) {
     issues.push({
       path: 'telemetry.tracer',
       message: 'must be an OpenTelemetry Tracer (an object with startActiveSpan)',
     });
   }
-  if (
-    telemetry.meter != null &&
-    !hasMethods(telemetry.meter, ['createHistogram', 'createCounter'])
-  ) {
+  if (isGiven(telemetry.meter) && !hasMethods(telemetry.meter, METER_METHODS)) {
     issues.push({
       path: 'telemetry.meter',
       message: 'must be an OpenTelemetry Meter (an object with createHistogram and createCounter)',
@@ -217,18 +235,15 @@ function telemetryIssues(telemetry) {
     }
   }
   return issues;
-}
-
-/** What the kit holds when there is no tracer: the same surface, doing nothing */
-const NOOP_SPAN = { set() {}, finish() {} };
+};
 
 /** Wrap an SDK span so no call on it can throw into the run, and it ends once */
-function guardSpan(span) {
-  let ended = false;
+const guardSpan = (span) => {
+  let hasEnded = false;
   const set = (attributes) => {
-    const values = defined(attributes);
+    const values = omitUndefined(attributes);
     for (const key of Object.keys(values)) {
-      safe(() => span.setAttribute(key, values[key]));
+      callSafely(() => span.setAttribute(key, values[key]));
     }
   };
   return {
@@ -239,17 +254,19 @@ function guardSpan(span) {
      * instrumentation libraries (OK is the application's to claim).
      */
     finish(attributes, error) {
-      if (ended) return;
-      ended = true;
+      if (hasEnded) return;
+      hasEnded = true;
       set(attributes);
       if (error !== undefined) {
-        safe(() => span.setStatus({ code: SPAN_STATUS_ERROR, message: failureText(error) }));
-        safe(() => span.setAttribute(ATTRIBUTES.ERROR_TYPE, errorType(error)));
+        callSafely(() =>
+          span.setStatus({ code: SPAN_STATUS_ERROR, message: formatFailure(error) }),
+        );
+        callSafely(() => span.setAttribute(ATTRIBUTES.ERROR_TYPE, readErrorType(error)));
       }
-      safe(() => span.end());
+      callSafely(() => span.end());
     },
   };
-}
+};
 
 /**
  * Turn the `telemetry` config option into what the kit reports through. With
@@ -259,14 +276,14 @@ function guardSpan(span) {
  * (`trace.getTracer(…)`, `metrics.getMeter(…)`): migronaut asks them for a
  * span or an instrument and never looks at the SDK behind them.
  */
-function createTelemetry(telemetry, { dbName } = {}) {
+const createTelemetry = (telemetry, { dbName } = {}) => {
   const tracer = telemetry?.tracer ?? undefined;
   const meter = telemetry?.meter ?? undefined;
   // On every span and every metric point: which database the run was against
   // (one process can migrate many — one kit per tenant), plus the caller's own
   // low-cardinality dimensions. The caller's cannot overwrite migronaut's.
-  const base = defined({ ...telemetry?.attributes, [ATTRIBUTES.DB_NAMESPACE]: dbName });
-  const withBase = (attributes) => ({ ...base, ...defined(attributes) });
+  const base = omitUndefined({ ...telemetry?.attributes, [ATTRIBUTES.DB_NAMESPACE]: dbName });
+  const withBase = (attributes) => ({ ...base, ...omitUndefined(attributes) });
 
   /**
    * Run `fn(span)` with a new span as the active one, and leave ending it to
@@ -278,42 +295,42 @@ function createTelemetry(telemetry, { dbName } = {}) {
    * that calls back twice cannot run a migration twice. The result is taken
    * from `fn` itself rather than from what the tracer returns.
    */
-  function open(name, attributes, fn) {
-    if (!tracer) return fn(NOOP_SPAN);
-    let called = false;
-    let threw = false;
-    let result;
+  const open = (name, attributes, work) => {
+    if (!tracer) return work(NOOP_SPAN);
+    let isCalled = false;
+    let hasThrown = false;
+    let result = undefined;
     const run = (span) => {
-      if (called) return result;
-      called = true;
+      if (isCalled) return result;
+      isCalled = true;
       try {
-        result = fn(span);
+        result = work(span);
       } catch (error) {
-        threw = true;
+        hasThrown = true;
         result = error;
         throw error;
       }
       return result;
     };
     // Three arguments, always: an SDK picks the overload by argument count.
-    safe(() =>
-      tracer.startActiveSpan(name, { attributes: withBase(attributes) }, (span) =>
-        run(guardSpan(span)),
-      ),
-    );
+    callSafely(() => {
+      return tracer.startActiveSpan(name, { attributes: withBase(attributes) }, (span) => {
+        return run(guardSpan(span));
+      });
+    });
     // Through `run`, not `fn`: it marks the work as done, so a tracer that
     // calls back late finds nothing left to run.
-    if (!called) return run(NOOP_SPAN);
-    if (threw) throw result;
+    if (!isCalled) return run(NOOP_SPAN);
+    if (hasThrown) throw result;
     return result;
-  }
+  };
 
   /** `open`, plus ending the span when `fn` settles — failed when it rejects */
-  function wrap(name, attributes, fn) {
-    if (!tracer) return fn(NOOP_SPAN);
+  const wrap = (name, attributes, work) => {
+    if (!tracer) return work(NOOP_SPAN);
     return open(name, attributes, async (span) => {
       try {
-        const value = await fn(span);
+        const value = await work(span);
         span.finish();
         return value;
       } catch (error) {
@@ -321,20 +338,22 @@ function createTelemetry(telemetry, { dbName } = {}) {
         throw error;
       }
     });
-  }
+  };
 
-  const histogram = (name, description) =>
-    meter
-      ? safe(() =>
-          meter.createHistogram(name, {
+  const histogram = (name, description) => {
+    return meter
+      ? callSafely(() => {
+          return meter.createHistogram(name, {
             description,
             unit: 's',
             advice: { explicitBucketBoundaries: DURATION_BUCKETS_SECONDS },
-          }),
-        )
+          });
+        })
       : undefined;
-  const counter = (name, description, unit) =>
-    meter ? safe(() => meter.createCounter(name, { description, unit })) : undefined;
+  };
+  const counter = (name, description, unit) => {
+    return meter ? callSafely(() => meter.createCounter(name, { description, unit })) : undefined;
+  };
 
   const runDuration = histogram(METRICS.RUN_DURATION, 'Duration of a migration run');
   const migrationDuration = histogram(METRICS.MIGRATION_DURATION, 'Duration of one migration');
@@ -395,28 +414,29 @@ function createTelemetry(telemetry, { dbName } = {}) {
     'Time from an old-shape write to its upgrade by the live drift watcher',
   );
   const add = (instrument, value, attributes) => {
-    if (instrument && value > 0) safe(() => instrument.add(value, withBase(attributes)));
+    if (instrument && value > 0) callSafely(() => instrument.add(value, withBase(attributes)));
   };
 
   // Durations are measured in milliseconds everywhere in migronaut and
   // reported in seconds, the unit OpenTelemetry's conventions settle on.
   const record = (instrument, durationMs, attributes) => {
-    if (instrument) safe(() => instrument.record(durationMs / 1000, withBase(attributes)));
+    if (instrument) callSafely(() => instrument.record(durationMs / 1000, withBase(attributes)));
   };
   const increment = (instrument) => {
-    if (instrument) safe(() => instrument.add(1, withBase()));
+    if (instrument) callSafely(() => instrument.add(1, withBase()));
   };
-  const failure = (error) =>
-    error !== undefined ? { [ATTRIBUTES.ERROR_TYPE]: errorType(error) } : {};
+  const failure = (error) => {
+    return error !== undefined ? { [ATTRIBUTES.ERROR_TYPE]: readErrorType(error) } : {};
+  };
 
   return {
     open,
     wrap,
-    runEnded({ command, direction, durationMs, error }) {
+    runEnded({ command, direction, durationMs, error, stopped }) {
       record(runDuration, durationMs, {
         [ATTRIBUTES.RUN_COMMAND]: command,
         [ATTRIBUTES.RUN_DIRECTION]: direction,
-        ...failure(error),
+        ...(stopped ? { [ATTRIBUTES.RUN_STOPPED]: true } : failure(error)),
       });
     },
     migrationEnded({ direction, durationMs, error }) {
@@ -462,13 +482,9 @@ function createTelemetry(telemetry, { dbName } = {}) {
         [ATTRIBUTES.BACKGROUND_OUTCOME]: outcome,
         ...failure(error),
       });
-      for (const [key, result] of [
-        ['migrated', 'migrated'],
-        ['skipped', 'skipped'],
-        ['conflicts', 'conflict'],
-        ['failed', 'failed'],
-      ]) {
-        add(backgroundDocuments, counters[key] ?? 0, {
+      for (let i = 0; i < DOCUMENT_RESULTS.length; i++) {
+        const { field, result } = DOCUMENT_RESULTS[i];
+        add(backgroundDocuments, counters[field] ?? 0, {
           ...at,
           [ATTRIBUTES.BACKGROUND_RESULT]: result,
         });
@@ -502,19 +518,19 @@ function createTelemetry(telemetry, { dbName } = {}) {
       record(backgroundWatchDelay, delayMs, { [ATTRIBUTES.BACKGROUND_NAME]: name });
     },
   };
-}
+};
 
 module.exports = {
+  SPAN_STATUS_ERROR,
+  SPANS,
   ATTRIBUTES,
-  TELEMETRY_KEYS,
-  telemetryIssues,
+  METRICS,
   DURATION_BUCKETS_SECONDS,
   MAX_STATUS_MESSAGE_LENGTH,
-  METRICS,
+  TELEMETRY_KEYS,
   NOOP_SPAN,
-  SPANS,
-  SPAN_STATUS_ERROR,
+  readErrorType,
+  formatFailure,
+  checkTelemetry,
   createTelemetry,
-  errorType,
-  failureText,
 };

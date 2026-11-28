@@ -7,7 +7,7 @@ const repoRoot = path.join(__dirname, '..', '..');
 const read = (...parts) => readFileSync(path.join(repoRoot, ...parts), 'utf8');
 
 /** The event names `MigronautEvents` declares in index.d.ts — what a listener can subscribe to */
-function declaredEvents() {
+const declaredEvents = () => {
   const types = read('index.d.ts');
   const start = types.indexOf('export interface MigronautEvents {');
   assert.ok(start !== -1, 'index.d.ts declares MigronautEvents');
@@ -15,7 +15,7 @@ function declaredEvents() {
   const names = new Set();
   for (const match of body.matchAll(/^ {2}'([a-z:]+)':/gm)) names.add(match[1]);
   return names;
-}
+};
 
 /**
  * The events are documented by hand: the ordinary ones in the hooks guide's

@@ -4,7 +4,7 @@ const { ConfigInvalidError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_dry_run_test';
 const NAME = '0001-orders.js';
 
@@ -27,7 +27,7 @@ beforeEach(async () => {
 });
 
 const kits = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const kit of kits.splice(0)) await kit.disconnect();
@@ -35,12 +35,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const raw = () => mongo.db.collection('orders').find().sort({ _id: 1 }).toArray();
 
@@ -61,7 +61,7 @@ describe('dry runs of background migrations (integration)', () => {
 };
 `,
     );
-    const before = await raw();
+    const snapshot = await raw();
     const preview = await kit.dryRunBackground(NAME, { first: 3 });
     assert.deepStrictEqual(
       { method: preview.method, requested: preview.requested, found: preview.found },
@@ -80,7 +80,7 @@ describe('dry runs of background migrations (integration)', () => {
     const sample = await kit.dryRunBackground(NAME, { sample: 4 });
     assert.strictEqual(sample.method, 'sample');
     assert.strictEqual(sample.found, 4);
-    assert.deepStrictEqual(await raw(), before, 'nothing written');
+    assert.deepStrictEqual(await raw(), snapshot, 'nothing written');
     assert.strictEqual(await mongo.db.collection('_migronaut_background').countDocuments(), 0);
   });
 
@@ -106,7 +106,7 @@ describe('dry runs of background migrations (integration)', () => {
 };
 `,
     );
-    const before = await raw();
+    const snapshot = await raw();
     const preview = await kit.dryRunBackground(NAME, { first: 10, validate: true });
     assert.strictEqual(preview.validated, true);
     assert.strictEqual(preview.migrated, 8);
@@ -130,7 +130,7 @@ describe('dry runs of background migrations (integration)', () => {
       0,
       'side writes rolled back',
     );
-    assert.deepStrictEqual(await raw(), before, 'collection unchanged');
+    assert.deepStrictEqual(await raw(), snapshot, 'collection unchanged');
   });
 
   it('should refuse the wrong kind of dry run and a sample out of range', async () => {
@@ -140,10 +140,22 @@ describe('dry runs of background migrations (integration)', () => {
       `export const background = { collection: 'orders', from: 1, to: 2, migrate: (d) => d };\n`,
     );
     await assert.rejects(kit.dryRunBackground(NAME, { steps: 2 }), ConfigInvalidError);
-    await assert.rejects(kit.dryRunBackground(NAME, { sample: 0 }), /1 to 1000/);
-    await assert.rejects(kit.dryRunBackground(NAME, { sample: 2, first: 2 }), /not both/);
-    await assert.rejects(kit.dryRunBackground(NAME, { direction: 'revert' }), /no revert/);
-    await assert.rejects(kit.dryRunBackground('missing.js'), /not found/i);
+    await assert.rejects(kit.dryRunBackground(NAME, { sample: 0 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /1 to 1000/,
+    });
+    await assert.rejects(kit.dryRunBackground(NAME, { sample: 2, first: 2 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /not both/,
+    });
+    await assert.rejects(kit.dryRunBackground(NAME, { direction: 'revert' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /no revert/,
+    });
+    await assert.rejects(kit.dryRunBackground('missing.js'), {
+      code: 'ALX_ERR_MIGRATION_FILE_NOT_FOUND',
+      message: /not found/i,
+    });
   });
 });
 
@@ -176,7 +188,7 @@ describe('dry runs of step migrations (integration)', () => {
   it('should chain checkpoints over steps that see their own writes, leaving the collection as it was', async () => {
     const kit = kitWith();
     project.write(NAME, STEP);
-    const before = await raw();
+    const snapshot = await raw();
     const report = await kit.dryRunBackground(NAME, { steps: 3, maxDocuments: 50 });
     assert.strictEqual(report.mode, 'step');
     assert.strictEqual(report.ok, true, report.error);
@@ -200,7 +212,7 @@ describe('dry runs of step migrations (integration)', () => {
     assert.strictEqual(byKey.get('3').after.found, true);
     assert.strictEqual(byKey.get('200').after.upserted, true);
     assert.strictEqual(byKey.get('8').after.tail, true);
-    assert.deepStrictEqual(await raw(), before, 'byte for byte the same collection');
+    assert.deepStrictEqual(await raw(), snapshot, 'byte for byte the same collection');
     const done = await kit.dryRunBackground(NAME, { steps: 10 });
     assert.strictEqual(done.stoppedBy, 'done');
     assert.strictEqual(done.steps.length, 5);
@@ -259,8 +271,14 @@ describe('dry runs of step migrations (integration)', () => {
     );
     const slow = await kit.dryRunBackground(NAME, { deadlineMs: 100 });
     assert.strictEqual(slow.stoppedBy, 'deadline');
-    await assert.rejects(kit.dryRunBackground(NAME, { steps: 51 }), /1 to 50/);
-    await assert.rejects(kit.dryRunBackground(NAME, { validate: true }), /by steps/);
+    await assert.rejects(kit.dryRunBackground(NAME, { steps: 51 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /1 to 50/,
+    });
+    await assert.rejects(kit.dryRunBackground(NAME, { validate: true }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /by steps/,
+    });
   });
 
   it('should report a validated document the deadline stopped as failed, and go on', async () => {
@@ -284,10 +302,10 @@ describe('dry runs of step migrations (integration)', () => {
     assert.strictEqual(slow.validation, 'failed');
     assert.match(slow.error, /deadline/);
     assert.strictEqual(preview.documents.find((row) => row._id === 2).validation, 'ok');
-    await assert.rejects(
-      kit.dryRunBackground(NAME, { first: 3, validate: true, deadlineMs: 0 }),
-      /deadlineMs/,
-    );
+    await assert.rejects(kit.dryRunBackground(NAME, { first: 3, validate: true, deadlineMs: 0 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /deadlineMs/,
+    });
   });
 
   it('should hold stages added to a cursor, and $graphLookup, to the pipeline rules', async () => {

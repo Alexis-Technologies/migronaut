@@ -1,11 +1,11 @@
 const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it } = require('node:test');
 const { Binary, Decimal128, Long, ObjectId } = require('mongodb');
-const { idRangePartitioner, sliceBracket } = require('../../src/core/background-partition.js');
-const { scopeFilter } = require('../../src/core/background-spec.js');
+const { idRangePartitioner, sliceBracket } = require('../../src/core/background/partition.js');
+const { buildScopeFilter } = require('../../src/core/background/spec.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_partition_test';
 
 before(async () => {
@@ -31,12 +31,12 @@ const settings = (overrides = {}) => ({
 const MATCH = { __v: 1 };
 const HINT = { __v: 1, _id: 1 };
 
-async function seed(ids, extra = {}) {
+const seed = async (ids, extra = {}) => {
   const docs = ids.map((id, i) => ({ _id: id, __v: 1, i, ...extra }));
   await mongo.db.collection('things').insertMany(docs);
   await mongo.db.collection('things').createIndex(HINT);
   return docs;
-}
+};
 
 const plan = (overrides = {}) =>
   idRangePartitioner.plan({
@@ -49,15 +49,17 @@ const plan = (overrides = {}) =>
   });
 
 /** How many documents each partition's scope matches — and their sum */
-async function coverage(partitions) {
+const coverage = async (partitions) => {
   const counts = [];
   for (const { scope } of partitions) {
     counts.push(
-      await mongo.db.collection('things').countDocuments({ $and: [MATCH, scopeFilter(scope)] }),
+      await mongo.db
+        .collection('things')
+        .countDocuments({ $and: [MATCH, buildScopeFilter(scope)] }),
     );
   }
   return { counts, total: counts.reduce((sum, count) => sum + count, 0) };
-}
+};
 
 describe('idRangePartitioner (integration)', () => {
   it('should split ObjectIds into disjoint ranges that cover every document once', async () => {
@@ -147,7 +149,7 @@ describe('idRangePartitioner (integration)', () => {
       mode: { skip: 1 },
       data: { failCommands: ['aggregate'], errorCode: 50 },
     });
-    let result;
+    let result = null;
     try {
       result = await plan();
     } finally {
@@ -162,7 +164,11 @@ describe('idRangePartitioner (integration)', () => {
   it('should scan a batch through the version index, bounded by its limit', async () => {
     await seed(Array.from({ length: 2000 }, () => new ObjectId()));
     const result = await plan();
-    const [{ scope }] = result.partitions;
+    // 2000 documents against a cap of 16 × 50 plan sample-first, from 80 random ids: a partition's
+    // real size strays from its estimate, and the first one held fewer than the limit about once
+    // in a hundred runs. The fullest holds at least 2000 / 16 = 125.
+    const { counts } = await coverage(result.partitions);
+    const { scope } = result.partitions[counts.indexOf(Math.max(...counts))];
     const query = idRangePartitioner.batchQuery(
       scope,
       { lastId: undefined },
@@ -202,7 +208,7 @@ describe('sliceBracket', () => {
     assert.deepStrictEqual(sliceBracket('number', [1], 4), [
       { scope: { kind: 'id-range', bracket: 'number' }, count: 1 },
     ]);
-    assert.deepStrictEqual(idRangePartitioner.writeFilter({ _id: 1 }), {});
+    assert.strictEqual(idRangePartitioner.writeFilter({ _id: 1 }), null);
     assert.strictEqual(idRangePartitioner.checkTransform({}, {}), null);
     assert.strictEqual(idRangePartitioner.stale(), false);
   });

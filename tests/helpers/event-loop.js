@@ -1,25 +1,30 @@
 /**
- * Hold the event loop open until the returned function is called.
- *
- * Needed by the handful of unit tests whose awaited promise can only settle
- * from an `unref()`ed timer — the migration timeout in `runner.js` and the lock
- * heartbeat/deadline in `lock.js`. Those `unref()` calls are deliberate: neither
- * timer should be the reason a process stays alive. In production that costs
- * nothing, because an open MongoClient keeps its own sockets ref'd for the whole
- * run. In these tests the driver is a plain mock object, so the unref'ed timer
- * is the *only* pending handle: the loop drains, and Node's test runner cancels
- * the test with "Promise resolution is still pending but the event loop has
- * already resolved" — taking the rest of the file's suite with it.
- *
- * Node 24 happens to keep the loop alive here and Node 22 does not, so without
- * this the suite passes locally and fails on the engines floor.
- *
- * @returns {() => void} releases the loop; safe to call more than once
+ * One real turn of the loop: every promise callback queued so far runs. Tests
+ * that mock `setTimeout`/`setInterval` leave `setImmediate` real for this.
  */
-function keepEventLoopAlive() {
-  // A long ref'd timer is enough: any ref'd handle stops the loop draining.
-  const handle = setTimeout(() => {}, 60_000);
-  return () => clearTimeout(handle);
-}
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-module.exports = { keepEventLoopAlive };
+/**
+ * Drive mocked timers forward in `stepMs` steps, flushing between them so an
+ * async timer callback (a lock renewal awaiting its mock database) settles
+ * before the next tick — until `promise` settles, or `maxMs` of mocked time
+ * passed. Returns (or rejects with) what `promise` did.
+ */
+const settleWithTimers = async (timers, promise, { stepMs = 10, maxMs = 10_000 } = {}) => {
+  let isSettled = false;
+  const tracked = promise.finally(() => {
+    isSettled = true;
+  });
+  // Handled at the end; a rejection meanwhile is not an unhandled one.
+  tracked.catch(() => undefined);
+  for (let elapsed = 0; elapsed <= maxMs; elapsed += stepMs) {
+    // Set by the promise, between two ticks.
+    if (isSettled) return tracked;
+    timers.tick(stepMs);
+    await flush();
+  }
+  if (isSettled) return tracked;
+  throw new Error(`still pending after ${maxMs} ms of mocked time`);
+};
+
+module.exports = { flush, settleWithTimers };

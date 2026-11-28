@@ -9,7 +9,7 @@ const { ConfigInvalidError, MigrationInvalidNameError } = require('../../src/err
  * server selection instead of throwing, so these tests double as proof that the
  * validation happens up front.
  */
-function guardedKit() {
+const guardedKit = () => {
   return new MigratorKit({
     // serverSelectionTimeoutMS keeps the one test that *does* reach the driver
     // from waiting out the 30s default.
@@ -18,7 +18,7 @@ function guardedKit() {
     migrationsDir: '/tmp/migronaut-guards-does-not-exist',
     logger: null,
   });
-}
+};
 
 describe('MigratorKit filename guards', () => {
   // A non-string filename would flow into changelog.getByName -> findOne({ name })
@@ -214,14 +214,17 @@ describe('MigratorKit.generateId', () => {
   it('should reject what an unusable generator returns, every time it is asked', async () => {
     const kit = kitWith({ generateId: () => '' });
     await assert.rejects(kit.generateId(), ConfigInvalidError);
-    await assert.rejects(kit.generateId(), /non-empty string/);
+    await assert.rejects(kit.generateId(), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /non-empty string/,
+    });
   });
 
   it('should reject an async generator', async () => {
-    await assert.rejects(
-      kitWith({ generateId: async () => 'late' }).generateId(),
-      /must be synchronous/,
-    );
+    await assert.rejects(kitWith({ generateId: async () => 'late' }).generateId(), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /must be synchronous/,
+    });
   });
 });
 
@@ -279,14 +282,14 @@ describe('MigratorKit converge guards', () => {
       assert.match(error.message, /converge must be a boolean/);
       return true;
     });
-    await assert.rejects(
-      guardedKit().up('0001-a.js', { converge: true }),
-      /converge cannot follow a single-file up/,
-    );
-    await assert.rejects(
-      guardedKit().up(undefined, { converge: true, to: '0001-a.js' }),
-      /converge cannot follow up --to/,
-    );
+    await assert.rejects(guardedKit().up('0001-a.js', { converge: true }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /converge cannot follow a single-file up/,
+    });
+    await assert.rejects(guardedKit().up(undefined, { converge: true, to: '0001-a.js' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /converge cannot follow up --to/,
+    });
   });
 
   it('should report whether a bulk up converges, without connecting', async () => {
@@ -335,7 +338,7 @@ describe('MigratorKit config resolution', () => {
 
 describe('MigratorKit event listeners', () => {
   /** A logger that keeps its debug lines */
-  function recorder() {
+  const recorder = () => {
     const lines = [];
     const noop = () => {};
     return {
@@ -347,7 +350,7 @@ describe('MigratorKit event listeners', () => {
         error: noop,
       },
     };
-  }
+  };
 
   it('should contain an async listener that rejects instead of leaving an unhandled rejection', async () => {
     const { lines, logger } = recorder();

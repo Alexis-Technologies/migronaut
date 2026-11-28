@@ -29,10 +29,10 @@ const TEST_ARGS = ['--setParameter', 'enableTestCommands=1'];
  * `dedicated: true` forces a private server — for files that kill child
  * processes mid-run or otherwise want nothing shared.
  */
-async function startTestMongo(dbName = 'migronaut_test', options = {}) {
+const startTestMongo = async (dbName = 'migronaut_test', options = {}) => {
   const sharedUri = options.dedicated ? undefined : process.env.MIGRONAUT_TEST_MONGO_URI;
-  let replSet;
-  let uri;
+  let replSet = null;
+  let uri = null;
   if (sharedUri) {
     uri = sharedUri;
   } else {
@@ -55,6 +55,6 @@ async function startTestMongo(dbName = 'migronaut_test', options = {}) {
       await replSet?.stop();
     },
   };
-}
+};
 
 module.exports = { TEST_ARGS, startTestMongo };

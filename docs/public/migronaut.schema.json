@@ -49,6 +49,7 @@
     "lockTTLSeconds": {
       "type": "integer",
       "minimum": 1,
+      "maximum": 2147483,
       "default": 60,
       "description": "Seconds before a lock is considered stale and reclaimable"
     },
@@ -136,6 +137,7 @@
     "timeoutMs": {
       "type": "integer",
       "minimum": 1,
+      "maximum": 2147483647,
       "description": "Abort the run when a single migration exceeds this many milliseconds"
     },
     "reloadMigrations": {
@@ -180,6 +182,7 @@
     "searchIndexWaitTimeoutMs": {
       "type": "integer",
       "minimum": 1,
+      "maximum": 2147483647,
       "default": 600000,
       "description": "How long waitForSearchIndexes waits, in milliseconds, before the converge fails (the build goes on)"
     },

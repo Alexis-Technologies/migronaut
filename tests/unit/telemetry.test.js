@@ -10,13 +10,14 @@ const {
   SPANS,
   SPAN_STATUS_ERROR,
   createTelemetry,
-  errorType,
-  failureText,
+  readErrorType,
+  formatFailure,
 } = require('../../src/utils/telemetry.js');
 const { parentIdOf, startMetrics, startTracing } = require('../helpers/otel.js');
+const { flush } = require('../helpers/event-loop.js');
 
 /** A tracer double that records what it was asked for and runs the callback inline */
-function fakeTracer() {
+const fakeTracer = () => {
   const spans = [];
   const calls = [];
   return {
@@ -44,10 +45,10 @@ function fakeTracer() {
       return fn(span);
     },
   };
-}
+};
 
 /** A meter double: every instrument remembers how it was created and what it recorded */
-function fakeMeter() {
+const fakeMeter = () => {
   const instruments = {};
   const make = (kind) => (name, options) => {
     const instrument = {
@@ -69,7 +70,7 @@ function fakeMeter() {
     createHistogram: make('histogram'),
     createCounter: make('counter'),
   };
-}
+};
 
 describe('createTelemetry — switched off', () => {
   it('should run the work with a no-op span when there is nothing to report to', async () => {
@@ -139,7 +140,7 @@ describe('open', () => {
 
   it('should leave ending the span to the caller', () => {
     const tracer = fakeTracer();
-    let held;
+    let held = null;
     createTelemetry({ tracer }).open(SPANS.RUN, {}, (span) => {
       held = span;
     });
@@ -151,7 +152,7 @@ describe('open', () => {
 
   it('should end a span once, however often it is finished', () => {
     const tracer = fakeTracer();
-    let held;
+    let held = null;
     createTelemetry({ tracer }).open(SPANS.RUN, {}, (span) => {
       held = span;
     });
@@ -179,7 +180,7 @@ describe('open', () => {
       message: 'Invalid configuration',
     });
     assert.strictEqual(SPAN_STATUS_ERROR, 2);
-    assert.strictEqual(tracer.spans[0].attributes['error.type'], 'CONFIG_INVALID');
+    assert.strictEqual(tracer.spans[0].attributes['error.type'], 'ALX_ERR_CONFIG_INVALID');
   });
 
   it('should set attributes on a span that is still open', () => {
@@ -258,7 +259,7 @@ describe('open — a tracer that misbehaves', () => {
   });
 
   it('should not run the work again for a tracer that calls back late', () => {
-    let late;
+    let late = null;
     const tracer = {
       startActiveSpan(_name, _options, fn) {
         late = () => fn({});
@@ -364,8 +365,7 @@ describe('wrap', () => {
   it('should fail the span and rethrow when the work rejects', async () => {
     const tracer = fakeTracer();
     const boom = new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
-      name: '0001-a.js',
-      cause: 'E11000 duplicate key',
+      context: { name: '0001-a.js', cause: 'E11000 duplicate key' },
     });
     await assert.rejects(
       createTelemetry({ tracer }).wrap(SPANS.MIGRATION, {}, async () => {
@@ -378,7 +378,10 @@ describe('wrap', () => {
       code: 2,
       message: 'Migration up failed: 0001-a.js — E11000 duplicate key',
     });
-    assert.strictEqual(tracer.spans[0].attributes['error.type'], 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(
+      tracer.spans[0].attributes['error.type'],
+      'ALX_ERR_MIGRATION_EXECUTION_FAILED',
+    );
   });
 
   it('should not leave an unhandled rejection behind a tracer that wraps the work', async () => {
@@ -397,7 +400,7 @@ describe('wrap', () => {
         }),
         /migration failed/,
       );
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await flush();
     } finally {
       process.off('unhandledRejection', onUnhandled);
     }
@@ -417,18 +420,18 @@ describe('wrap', () => {
   });
 });
 
-describe('errorType', () => {
+describe('readErrorType', () => {
   it('should be the typed code of a migronaut error', () => {
-    assert.strictEqual(errorType(new ConfigInvalidError('x')), 'CONFIG_INVALID');
+    assert.strictEqual(readErrorType(new ConfigInvalidError('x')), 'ALX_ERR_CONFIG_INVALID');
   });
 
   it('should be the class name of any other error', () => {
-    assert.strictEqual(errorType(new RangeError('x')), 'RangeError');
+    assert.strictEqual(readErrorType(new RangeError('x')), 'RangeError');
   });
 
   it('should fall back to _OTHER for a thrown value with no usable name', () => {
     for (const value of ['a string', 42, null, undefined, {}, { name: '' }, { name: 7 }]) {
-      assert.strictEqual(errorType(value), '_OTHER');
+      assert.strictEqual(readErrorType(value), '_OTHER');
     }
   });
 
@@ -438,9 +441,9 @@ describe('errorType', () => {
         throw new Error('gotcha');
       },
     };
-    assert.strictEqual(errorType(hostile), '_OTHER');
+    assert.strictEqual(readErrorType(hostile), '_OTHER');
     assert.strictEqual(
-      errorType(
+      readErrorType(
         new Proxy(
           {},
           {
@@ -455,50 +458,54 @@ describe('errorType', () => {
   });
 });
 
-describe('failureText — what a tracing backend receives', () => {
+describe('formatFailure — what a tracing backend receives', () => {
   it('should mask the values a duplicate-key error quotes', () => {
     const error = new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
-      cause: 'E11000 duplicate key error index: email_1 dup key: { email: "alice@example.com" }',
+      context: {
+        cause: 'E11000 duplicate key error index: email_1 dup key: { email: "alice@example.com" }',
+      },
     });
     assert.strictEqual(
-      failureText(error),
+      formatFailure(error),
       'Migration up failed: 0001-a.js — E11000 duplicate key error index: email_1 dup key: ' +
         '{ <redacted> }',
     );
   });
 
   it('should bound the message', () => {
-    const text = failureText(new Error('x'.repeat(5000)));
+    const text = formatFailure(new Error('x'.repeat(5000)));
     assert.strictEqual(text.length, MAX_STATUS_MESSAGE_LENGTH);
     assert.ok(text.endsWith('…'));
   });
 });
 
-describe('failureText', () => {
+describe('formatFailure', () => {
   it('should mask URI credentials — a driver message can echo the connection string', () => {
-    const text = failureText(new Error('connect failed: mongodb://app:hunter2@db.internal/app'));
+    const text = formatFailure(new Error('connect failed: mongodb://app:hunter2@db.internal/app'));
     assert.strictEqual(text, 'connect failed: mongodb://app:****@db.internal/app');
   });
 
   it('should append the wrapped cause, redacted too', () => {
     const error = new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
-      cause: 'bad auth mongodb://app:hunter2@db.internal/app',
+      context: { cause: 'bad auth mongodb://app:hunter2@db.internal/app' },
     });
     assert.strictEqual(
-      failureText(error),
+      formatFailure(error),
       'Migration up failed: 0001-a.js — bad auth mongodb://app:****@db.internal/app',
     );
   });
 
   it('should ignore a cause that is not a string, or not on a migronaut error', () => {
     assert.strictEqual(
-      failureText(new ConfigInvalidError('Invalid configuration', { cause: { nested: true } })),
+      formatFailure(
+        new ConfigInvalidError('Invalid configuration', { context: { cause: { nested: true } } }),
+      ),
       'Invalid configuration',
     );
     const plain = new Error('plain');
     plain.context = { cause: 'not ours' };
-    assert.strictEqual(failureText(plain), 'plain');
-    assert.strictEqual(failureText('thrown string'), 'thrown string');
+    assert.strictEqual(formatFailure(plain), 'plain');
+    assert.strictEqual(formatFailure('thrown string'), 'thrown string');
   });
 });
 
@@ -614,7 +621,7 @@ describe('metrics', () => {
       // redo has no single direction — the attribute is absent, not undefined.
       {
         value: 0.02,
-        attributes: { 'migronaut.run.command': 'redo', 'error.type': 'CONFIG_INVALID' },
+        attributes: { 'migronaut.run.command': 'redo', 'error.type': 'ALX_ERR_CONFIG_INVALID' },
       },
     ]);
   });
@@ -680,7 +687,7 @@ describe('metrics', () => {
       });
       telemetry.runEnded({ command: 'up', durationMs: 5 });
       telemetry.lockRefused();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await flush();
     } finally {
       process.off('unhandledRejection', onUnhandled);
     }
@@ -716,7 +723,7 @@ describe('metrics', () => {
 });
 
 describe('createTelemetry — against the real OpenTelemetry SDK', () => {
-  let tracing;
+  let tracing = null;
 
   before(() => {
     tracing = startTracing();
@@ -728,7 +735,7 @@ describe('createTelemetry — against the real OpenTelemetry SDK', () => {
 
   it('should nest a migration span under the run span that is active around it', async () => {
     const telemetry = createTelemetry({ tracer: tracing.tracer });
-    let run;
+    let run = null;
     await telemetry.open(SPANS.RUN, { [ATTRIBUTES.RUN_COMMAND]: 'up' }, async (span) => {
       run = span;
       await telemetry.wrap(SPANS.MIGRATION, { [ATTRIBUTES.MIGRATION_NAME]: '0001-a.js' }, () =>
@@ -755,9 +762,10 @@ describe('createTelemetry — against the real OpenTelemetry SDK', () => {
     await assert.rejects(
       telemetry.wrap(SPANS.MIGRATION, {}, async () => {
         throw new MigrationExecutionFailedError('Migration up failed: 0002-b.js', {
-          cause: 'mongodb://app:hunter2@db/app refused',
+          context: { cause: 'mongodb://app:hunter2@db/app refused' },
         });
       }),
+      { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' },
     );
     const [span] = tracing.named('migronaut.migration');
     assert.strictEqual(span.status.code, 2);
@@ -765,7 +773,7 @@ describe('createTelemetry — against the real OpenTelemetry SDK', () => {
       span.status.message,
       'Migration up failed: 0002-b.js — mongodb://app:****@db/app refused',
     );
-    assert.strictEqual(span.attributes['error.type'], 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(span.attributes['error.type'], 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
     // No exception event: the redacted status message is the whole record.
     assert.deepStrictEqual(span.events, []);
   });

@@ -1,7 +1,7 @@
 const { MigratorKit } = require('../core/migrator.js');
-const { ConfigInvalidError, MigronautError, RunAbortedError } = require('../errors/index.js');
-const { settledWithin } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
+const { ConfigInvalidError, RunAbortedError } = require('../errors/index.js');
+const { MAX_TIMER_MS, jitter, settleWithin, waitAtMost } = require('../utils/concurrency.js');
+const { FATAL_SLICE_CODES, readCode, formatError } = require('../utils/error.js');
 const { redactOutbound } = require('../utils/redact.js');
 const {
   JOB_NAMES,
@@ -15,10 +15,10 @@ const {
   UNRECOVERABLE_ERROR_NAME,
   assertUserlandLogRows,
   isRetryableError,
-  jobRefOf,
+  toJobRef,
   prepareErrorForQueue,
-  userlandOverflowRow,
-  userlandRow,
+  formatOverflowRow,
+  formatUserlandRow,
 } = require('./processor.js');
 const {
   DEFAULT_STALL_MS,
@@ -60,21 +60,6 @@ const MAX_INLINE_STEPS = 5;
 /** The longest slice a caller may ask for — the kit's limit, mirrored (a unit test pins it) */
 const MAX_SLICE_MS = 3_600_000;
 
-/**
- * The error that tells BullMQ a job was moved (delayed, waiting for its
- * children) — a typed one, renamed: BullMQ matches the name, and the adapter
- * cannot import its classes.
- */
-const moved = (name) => {
-  const error = new RunAbortedError(`Moved: ${name}`, { reason: name, moved: true });
-  error.name = name;
-  return error;
-};
-
-/**
- * Validate the background processor's options. Pure, like the migration
- * processor's: nothing is constructed.
- */
 /** Every option createBackgroundProcessor takes — a typo is refused, not ignored */
 const PROCESSOR_KEYS = new Set([
   'kit',
@@ -90,13 +75,30 @@ const PROCESSOR_KEYS = new Set([
   'userlandLogRows',
 ]);
 
-function resolveBackgroundProcessorOptions(options) {
+/**
+ * The error that tells BullMQ a job was moved (delayed, waiting for its
+ * children) — a typed one, renamed: BullMQ matches the name, and the adapter
+ * cannot import its classes.
+ */
+const createMovedError = (name) => {
+  const error = new RunAbortedError(`Moved: ${name}`, { context: { reason: name, moved: true } });
+  error.name = name;
+  return error;
+};
+
+/**
+ * Validate the background processor's options. Pure, like the migration
+ * processor's: nothing is constructed.
+ */
+const resolveBackgroundProcessorOptions = (options) => {
   if (!isObjectLike(options)) {
     throw new ConfigInvalidError('createBackgroundProcessor options must be an object');
   }
   for (const key of Object.keys(options)) {
     if (!PROCESSOR_KEYS.has(key)) {
-      throw new ConfigInvalidError(`createBackgroundProcessor: "${key}" is not an option`, { key });
+      throw new ConfigInvalidError(`createBackgroundProcessor: "${key}" is not an option`, {
+        context: { key },
+      });
     }
   }
   const {
@@ -123,46 +125,50 @@ function resolveBackgroundProcessorOptions(options) {
     );
   }
   // The kit's own range for a caller's slice (background-spec's assertSliceMs).
-  if (
-    sliceMs !== undefined &&
-    (!Number.isSafeInteger(sliceMs) || sliceMs < 1 || sliceMs > MAX_SLICE_MS)
-  ) {
+  const isSliceMs = Number.isSafeInteger(sliceMs) && sliceMs >= 1 && sliceMs <= MAX_SLICE_MS;
+  if (sliceMs !== undefined && !isSliceMs) {
     throw new ConfigInvalidError(`sliceMs must be an integer from 1 to ${MAX_SLICE_MS}`, {
-      sliceMs,
+      context: { sliceMs },
     });
   }
   if (children !== 'auto' && children !== false) {
-    throw new ConfigInvalidError("children must be 'auto' or false", { children });
+    throw new ConfigInvalidError("children must be 'auto' or false", { context: { children } });
   }
-  if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10) {
-    throw new ConfigInvalidError('pollIntervalMs must be an integer ≥ 10', { pollIntervalMs });
+  const isBadPoll =
+    !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10 || pollIntervalMs > MAX_TIMER_MS;
+  if (isBadPoll) {
+    throw new ConfigInvalidError(`pollIntervalMs must be an integer from 10 to ${MAX_TIMER_MS}`, {
+      context: { pollIntervalMs },
+    });
   }
-  if (!Number.isSafeInteger(stallMs) || stallMs < 1000) {
-    throw new ConfigInvalidError('stallMs must be an integer of at least 1000', { stallMs });
+  if (!Number.isSafeInteger(stallMs) || stallMs < 1000 || stallMs > MAX_TIMER_MS) {
+    throw new ConfigInvalidError(`stallMs must be an integer from 1000 to ${MAX_TIMER_MS}`, {
+      context: { stallMs },
+    });
   }
   if (!Number.isSafeInteger(maxLaneRetries) || maxLaneRetries < 0 || maxLaneRetries > 100) {
     throw new ConfigInvalidError('maxLaneRetries must be an integer from 0 to 100', {
-      maxLaneRetries,
+      context: { maxLaneRetries },
     });
   }
   assertBackgroundJobOptions(jobOptions);
   assertUserlandLogRows(userlandLogRows);
   return { sliceMs, children, pollIntervalMs, stallMs, maxLaneRetries, userlandLogRows };
-}
+};
 
 /**
  * Build the function a BullMQ Worker on the background queue runs. Declared
  * with exactly three parameters, so BullMQ hands it the cancellation signal.
  */
-function createBackgroundProcessor(options = {}, internals = {}) {
+const createBackgroundProcessor = (options = {}, internals = {}) => {
   const settings = resolveBackgroundProcessorOptions(options);
   const writeWaitMs = internals.writeWaitMs ?? JOB_WRITE_WAIT_MS;
   const { kit: injectedKit, config, kitOptions, queue, jobOptions } = options;
-  const ownsKit = injectedKit === undefined;
+  const isKitOwned = injectedKit === undefined;
   const kit = injectedKit ?? new MigratorKit(config ?? {}, kitOptions);
   const shutdownController = new AbortController();
   const inFlight = new Set();
-  let warnedUnmovable = false;
+  let hasWarnedUnmovable = false;
   /**
    * The lanes working a slice in this process, by job id — lanes run side by
    * side, so a `migration:log` event's `jobId` is what says whose log it goes
@@ -176,16 +182,16 @@ function createBackgroundProcessor(options = {}, internals = {}) {
    * waited for longer than `writeWaitMs` — with Redis away it would not
    * settle at all, and a lane must not hold its lease for a log row.
    */
-  async function write(action) {
-    let pending;
+  const write = async (action) => {
+    let pending = null;
     try {
       pending = Promise.resolve(action());
     } catch {
       // Redis is the job's problem, not the background migration's.
       return;
     }
-    await settledWithin(pending, writeWaitMs);
-  }
+    await settleWithin(pending, writeWaitMs);
+  };
 
   /** A log row on the job */
   const log = (job, row) => write(() => job.log?.(redactOutbound(row)));
@@ -198,11 +204,11 @@ function createBackgroundProcessor(options = {}, internals = {}) {
    * then moved to delayed — which BullMQ learns from the error's name. Outside
    * a Worker (no token) there is nothing to move: the outcome is returned.
    */
-  async function later(ctx, delayMs, result, data) {
+  const later = async (ctx, delayMs, result, data) => {
     const { job, token } = ctx;
     if (typeof job.moveToDelayed !== 'function' || typeof token !== 'string') {
-      if (!warnedUnmovable) {
-        warnedUnmovable = true;
+      if (!hasWarnedUnmovable) {
+        hasWarnedUnmovable = true;
         kit.logger.warn(
           '⚠ Background jobs run outside a BullMQ Worker (no token to move them with): a ' +
             'coordinator takes one step and a lane one slice per job, and the rest waits for ' +
@@ -214,33 +220,33 @@ function createBackgroundProcessor(options = {}, internals = {}) {
     }
     if (data !== undefined) await job.updateData(data);
     await job.moveToDelayed(Date.now() + Math.max(0, delayMs), token);
-    throw moved(DELAYED_ERROR_NAME);
-  }
+    throw createMovedError(DELAYED_ERROR_NAME);
+  };
 
   /** A row on a lane's job, tracked so the slice's end can wait for it */
-  function laneLog(lane, row) {
+  const laneLog = (lane, row) => {
     const pending = log(lane.job, row);
     lane.writes.add(pending);
     pending.finally(() => lane.writes.delete(pending));
-  }
+  };
 
   /**
    * A lane's userland lines, into its own job's log — never allowed to fail
    * it. A line with a group is a lane a migration job drives inline: its job
    * is on the other queue, whatever its id.
    */
-  function onUserland(event) {
+  const onUserland = (event) => {
     if (event?.kind !== 'background' || event.jobId === undefined) return;
     if (event.groupId !== undefined) return;
     const lane = lanes.get(event.jobId);
     if (lane === undefined) return;
     if (lane.rows < settings.userlandLogRows) {
       lane.rows += 1;
-      laneLog(lane, userlandRow(event));
+      laneLog(lane, formatUserlandRow(event));
     } else {
       lane.dropped += 1;
     }
-  }
+  };
   if (typeof kit.on === 'function') kit.on('migration:log', onUserland);
 
   /**
@@ -248,66 +254,63 @@ function createBackgroundProcessor(options = {}, internals = {}) {
    * events, and its userland lines reach the job's log until the slice ends —
    * drained before the job moves on, so none lands after it.
    */
-  async function asLane(job, fn) {
-    const ref = jobRefOf(job);
-    if (ref === undefined) {
+  const asLane = async (job, work) => {
+    const jobRef = toJobRef(job);
+    if (jobRef === null) {
       kit.logger.debug(
         `Lane job ${job?.id} has no id a slice can carry — its lines name no job`,
         {},
       );
-      return fn(undefined);
+      return work(null);
     }
     const lane = { job, writes: new Set(), rows: 0, dropped: 0 };
-    lanes.set(ref.id, lane);
+    lanes.set(jobRef.id, lane);
     try {
-      return await fn(ref);
+      return await work(jobRef);
     } finally {
-      if (lanes.get(ref.id) === lane) lanes.delete(ref.id);
+      if (lanes.get(jobRef.id) === lane) lanes.delete(jobRef.id);
       if (lane.dropped > 0) {
-        laneLog(lane, userlandOverflowRow(lane.dropped, settings.userlandLogRows));
+        laneLog(lane, formatOverflowRow(lane.dropped, settings.userlandLogRows));
       }
       // Each write is bounded on its own (`write`), so this drain is too.
-      await Promise.allSettled([...lane.writes]);
+      await Promise.allSettled(lane.writes);
     }
-  }
+  };
 
   /** Heal from MongoDB: a coordinator for every background migration with work to do */
-  async function heal(reason) {
+  const heal = async (reason) => {
     try {
       return await enqueueBackground(queue, kit, {
         stallMs: settings.stallMs,
         ...(jobOptions !== undefined ? { jobOptions } : {}),
       });
     } catch (error) {
-      kit.logger.warn(`⚠ Background heal (${reason}) failed: ${errorText(error)}`, {
-        error: errorText(error),
+      kit.logger.warn(`⚠ Background heal (${reason}) failed: ${formatError(error)}`, {
+        error: formatError(error),
       });
       return { jobs: [] };
     }
-  }
+  };
 
   /** Whether this coordinator can spawn its lanes as children and wait for them */
-  function childrenFor(ctx) {
-    return (
-      settings.children !== false &&
-      typeof parentQueueOf(ctx.job) === 'string' &&
-      typeof ctx.job.moveToWaitingChildren === 'function' &&
-      typeof ctx.token === 'string'
-    );
-  }
+  const childrenFor = (ctx) => {
+    if (settings.children === false || typeof ctx.token !== 'string') return false;
+    const canWait = typeof ctx.job.moveToWaitingChildren === 'function';
+    return canWait && typeof parentQueueOf(ctx.job) === 'string';
+  };
 
   /**
    * Where a coordinator job lives, for its lanes' `parent` — the job's own
    * queue, which is the one a lane must wake, whatever `queue` this
    * processor was handed to add the lanes to.
    */
-  function parentQueueOf(job) {
+  const parentQueueOf = (job) => {
     return typeof job.queueQualifiedName === 'string'
       ? job.queueQualifiedName
       : queue.qualifiedName;
-  }
+  };
 
-  async function runCoordinator(ctx, data) {
+  const runCoordinator = async (ctx, data) => {
     const { job } = ctx;
     const name = data.migration;
     const base = { kind: JOB_NAMES.BACKGROUND, migration: name };
@@ -324,7 +327,7 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       if (shutdownController.signal.aborted) return later(ctx, 0, withRound(base), keep());
       const answer = await kit.coordinateBackground(name, {
         signal: ctx.abort,
-        driver: { kind: 'bullmq', ref: String(job.id), ...(round !== undefined ? { round } : {}) },
+        driver: { kind: 'bullmq', ref: `${job.id}`, ...(round !== undefined ? { round } : {}) },
       });
       if (answer.round !== undefined) round = answer.round;
       await progress(job, { status: answer.next, ...(round !== undefined ? { round } : {}) });
@@ -338,7 +341,7 @@ function createBackgroundProcessor(options = {}, internals = {}) {
         await log(job, `↷ ${name}: superseded by a newer coordinator`);
         kit.logger.info(`↷ Background coordinator of ${name} superseded by a newer one`, {
           background: name,
-          job: String(job.id),
+          job: `${job.id}`,
         });
         return withRound({ ...base, status: 'superseded' });
       }
@@ -371,14 +374,16 @@ function createBackgroundProcessor(options = {}, internals = {}) {
         answer,
         round,
         spawn,
-        parent: { id: String(job.id), queue: parentQueueOf(job) },
+        parent: { id: `${job.id}`, queue: parentQueueOf(job) },
       });
-      if (await job.moveToWaitingChildren(ctx.token)) throw moved(WAITING_CHILDREN_ERROR_NAME);
+      if (await job.moveToWaitingChildren(ctx.token)) {
+        throw createMovedError(WAITING_CHILDREN_ERROR_NAME);
+      }
       // Every lane finished before this job could wait for them: look again now.
     }
-  }
+  };
 
-  async function addLanes(ctx, { name, answer, round, spawn, parent }) {
+  const addLanes = async (ctx, { name, answer, round, spawn, parent }) => {
     const specs = [];
     for (let lane = 0; lane < answer.lanes; lane++) {
       specs.push(
@@ -399,22 +404,22 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       ctx.job,
       `⇉ ${name}: ${specs.length} lane(s) for generation ${answer.generation} (round ${round})`,
     );
-  }
+  };
 
-  async function runLane(ctx, data) {
+  const runLane = async (ctx, data) => {
     const { job } = ctx;
     const name = data.migration;
     const base = { kind: JOB_NAMES.BACKGROUND_LANE, migration: name };
     if (shutdownController.signal.aborted) return later(ctx, 0, { ...base, outcome: 'stopped' });
-    let slice;
+    let slice = null;
     try {
-      slice = await asLane(job, (ref) =>
-        kit.runBackgroundSlice(name, {
+      slice = await asLane(job, (jobRef) => {
+        return kit.runBackgroundSlice(name, {
           signal: ctx.abort,
           ...(settings.sliceMs !== undefined ? { sliceMs: settings.sliceMs } : {}),
-          ...(ref ? { job: ref } : {}),
-        }),
-      );
+          ...(jobRef ? { job: jobRef } : {}),
+        });
+      });
     } catch (error) {
       if (shutdownController.signal.aborted) {
         return later(ctx, 0, { ...base, outcome: 'stopped' });
@@ -422,8 +427,9 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       // The failure is already counted on its partition, in MongoDB — which
       // fails the partition after `maxSliceFailures`; this lane only backs off.
       const retry = data.retry + 1;
-      const message = errorText(error);
-      if (retry > settings.maxLaneRetries) {
+      const message = formatError(error);
+      // A failure no retry fixes gives up at once, as the kit's own lane does.
+      if (retry > settings.maxLaneRetries || FATAL_SLICE_CODES.has(readCode(error))) {
         kit.logger.warn(`⚠ Background lane of ${name} gave up: ${message}`, {
           background: name,
           error: message,
@@ -432,7 +438,7 @@ function createBackgroundProcessor(options = {}, internals = {}) {
         return {
           ...base,
           outcome: 'gave-up',
-          ...(error instanceof MigronautError ? { code: error.code } : {}),
+          ...(readCode(error) === undefined ? {} : { code: readCode(error) }),
         };
       }
       await log(job, `⚠ slice failed (${message}) — retry ${retry}`);
@@ -440,14 +446,14 @@ function createBackgroundProcessor(options = {}, internals = {}) {
         `⚠ Background lane of ${name}: a slice failed (${message}) — retry ${retry}`,
         {
           background: name,
-          job: String(job.id),
+          job: `${job.id}`,
           retry,
           error: message,
         },
       );
       return later(
         ctx,
-        Math.min(MAX_LANE_BACKOFF_MS, 1000 * 2 ** (retry - 1)),
+        jitter(Math.min(MAX_LANE_BACKOFF_MS, 1000 * 2 ** (retry - 1))),
         { ...base, outcome: 'retry' },
         { ...job.data, retry },
       );
@@ -470,9 +476,9 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       default:
         return { ...base, outcome: slice.outcome, counters: slice.counters };
     }
-  }
+  };
 
-  async function runVerify() {
+  const runVerify = async () => {
     const result = await kit.verifyBackground();
     const healed = await heal('verify');
     return {
@@ -482,9 +488,9 @@ function createBackgroundProcessor(options = {}, internals = {}) {
       drift: result.drift,
       enqueued: healed.jobs.length,
     };
-  }
+  };
 
-  async function handle(job, token, signal) {
+  const handle = async (job, token, signal) => {
     const signals = [shutdownController.signal];
     if (signal) signals.push(signal);
     const ctx = { job, token, abort: AbortSignal.any(signals) };
@@ -497,10 +503,10 @@ function createBackgroundProcessor(options = {}, internals = {}) {
     if (data.kind === JOB_NAMES.BACKGROUND) return runCoordinator(ctx, data);
     if (data.kind === JOB_NAMES.BACKGROUND_LANE) return runLane(ctx, data);
     return runVerify();
-  }
+  };
 
   // Three declared parameters, on purpose — see the factory's doc comment.
-  async function processor(job, token, signal) {
+  const processor = async (job, token, signal) => {
     const run = handle(job, token, signal);
     inFlight.add(run);
     try {
@@ -515,13 +521,13 @@ function createBackgroundProcessor(options = {}, internals = {}) {
         prepareErrorForQueue(error);
         // On the job itself, as a migration job says it: someone reading the
         // queue's dashboard sees why without the worker's log.
-        await log(job, `✖ ${errorText(error)}`);
+        await log(job, `✖ ${formatError(error)}`);
       }
       throw error;
     } finally {
       inFlight.delete(run);
     }
-  }
+  };
 
   /**
    * Stop: a lane stops at its next batch boundary, checkpoints, releases its
@@ -530,16 +536,35 @@ function createBackgroundProcessor(options = {}, internals = {}) {
    */
   processor.shutdown = (reason = 'Background worker shutting down') => {
     if (!shutdownController.signal.aborted) {
-      shutdownController.abort(new RunAbortedError(reason, { reason }));
+      shutdownController.abort(new RunAbortedError(reason, { context: { reason } }));
     }
   };
 
-  /** Shut down, let the jobs in flight settle, disconnect a kit the processor created */
-  processor.close = async () => {
+  /**
+   * Shut down, let the jobs in flight settle, disconnect a kit the processor
+   * created. `timeoutMs` bounds the wait: lanes still at work then are left to
+   * end on their own (their leases expire), and the kit is disconnected once
+   * they do.
+   */
+  processor.close = async (closeOptions = {}) => {
     processor.shutdown();
-    await Promise.allSettled([...inFlight]);
-    if (typeof kit.off === 'function') kit.off('migration:log', onUserland);
-    if (ownsKit) await kit.disconnect();
+    const draining = Promise.allSettled(inFlight);
+    const settled = await waitAtMost(draining, closeOptions.timeoutMs);
+    const finish = async () => {
+      if (typeof kit.off === 'function') kit.off('migration:log', onUserland);
+      if (isKitOwned) await kit.disconnect();
+    };
+    if (settled) return finish();
+    kit.logger.warn(
+      `⚠ Background processor: jobs still running after ${closeOptions.timeoutMs}ms`,
+      {
+        timeoutMs: closeOptions.timeoutMs,
+      },
+    );
+    draining.then(finish).catch((error) => {
+      kit.logger.debug(`Background processor: could not disconnect — ${formatError(error)}`);
+    });
+    return undefined;
   };
 
   /** Heal from MongoDB now — what a worker does when it starts */
@@ -547,11 +572,11 @@ function createBackgroundProcessor(options = {}, internals = {}) {
 
   Object.defineProperty(processor, 'kit', { value: kit, enumerable: true });
   return processor;
-}
+};
 
 module.exports = {
   BACKGROUND_PROCESSOR_DEFAULTS: DEFAULTS,
   MAX_SLICE_MS,
-  createBackgroundProcessor,
   resolveBackgroundProcessorOptions,
+  createBackgroundProcessor,
 };

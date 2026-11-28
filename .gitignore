@@ -126,6 +126,10 @@ dist
 docs/.vitepress/dist
 docs/.vitepress/cache
 /.claude/launch.json
+# The alexiskills skills: a symlink into node_modules that `prepare` makes (CLAUDE.md, Skills).
+.claude/skills
+# Worktrees of agent sessions.
+.claude/worktrees
 
 # The runnable examples install on their own (not workspace members) — their
 # lockfiles are not part of this repository.

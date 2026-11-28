@@ -9,8 +9,9 @@ const {
   TransactionsUnsupportedError,
 } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
-let mongo;
+let mongo = null;
 const COLLECTION = 'tx_items';
 
 before(async () => {
@@ -25,9 +26,9 @@ beforeEach(async () => {
   await mongo.db.collection(COLLECTION).deleteMany({});
 });
 
-function context() {
+const context = () => {
   return buildContext(mongo.client, mongo.db);
-}
+};
 
 describe('runMigration transactions (integration)', () => {
   it('should commit the transaction on success when useTransaction=true', async () => {
@@ -88,7 +89,7 @@ describe('runMigration transactions (integration)', () => {
   it('should record a non-negative duration', async () => {
     const migration = {
       up: async () => {
-        await new Promise((resolve) => setTimeout(resolve, 5));
+        await sleep(5);
       },
       down: async () => undefined,
     };
@@ -180,8 +181,8 @@ describe('runMigration transactions (integration)', () => {
 });
 
 describe('runMigration on a standalone server (integration)', () => {
-  let standalone;
-  let client;
+  let standalone = null;
+  let client = null;
 
   before(async () => {
     standalone = await MongoMemoryServer.create();
@@ -193,7 +194,7 @@ describe('runMigration on a standalone server (integration)', () => {
     await standalone?.stop();
   });
 
-  it('should refuse a transaction as TRANSACTIONS_UNSUPPORTED, in the server’s words', async () => {
+  it('should refuse a transaction as ALX_ERR_TRANSACTIONS_UNSUPPORTED, in the server’s words', async () => {
     const db = client.db('migronaut_tx_standalone');
     const migration = {
       up: async (ctx) => {

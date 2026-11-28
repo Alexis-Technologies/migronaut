@@ -74,10 +74,16 @@ up, even from a different project's env file.
 | `generateId()` | `Promise<string>` | A new id in the kit's configured format — the [`generateId`](/guide/configuration#custom-id-format) option, else a random UUID. Does not connect. |
 | `lockInfo()` | `Promise<LockInfo \| null>` | Inspect the current lock holder, if any. |
 | `forceUnlock()` | `Promise<LockInfo \| null>` | Force-release the lock; returns who held it. |
-| `stop(reason?)` | `void` | Ask an in-flight run to stop cleanly after the current migration. |
+| `stop(reason?, { cause? })` | `void` | Ask an in-flight run to stop cleanly after the current migration; `cause` becomes the `RunAbortedError`'s `cause`. |
 
 `up`/`down`/`redo` return a [`RunResult[]`](#runresult); `status`/`list`/`dryRun` return
 [`StatusRow[]`](#statusrow).
+
+The run methods — `up`, `down`, `redo`, `baseline`, `import`, `converge` — take a `signal` too:
+aborting it stops the run as `stop()` does, after the migration in flight, and the run rejects
+with a `RunAbortedError` whose `cause` is the signal's `reason`. One kit runs one thing at a time:
+a second run, or `disconnect()`, while one is in flight rejects with `RunInFlightError`
+(`ALX_ERR_RUN_IN_FLIGHT`) — stop the run and await it before you disconnect.
 
 `up`, `down`, `redo` and `converge` take `requestedBy` (≤ 128 characters) and `reason` (≤ 512):
 who asked for the run, and why. They are stamped on what the run writes — `requestedBy` /
@@ -173,7 +179,7 @@ A search index builds in the background: `result.search.notReady` lists the decl
 building, updating or failed — which does not count against `inSync`.
 
 A conflicting plan, a step that fails, or a `waitForSearchIndexes` that gives up rejects with
-`ConvergeFailedError` (`CONVERGE_FAILED`, `context.phase`: `plan`, `replan`, `apply` or `wait`),
+`ConvergeFailedError` (`ALX_ERR_CONVERGE_FAILED`, `context.phase`: `plan`, `replan`, `apply` or `wait`),
 whose `context.converge` is the result so far. `up(undefined, { converge: true })` converges after
 the migrations under the same lock — what `convergeAfterUp` does for every bulk `up`; `up` still
 returns its migration rows, and the converge outcome arrives as the `converge:end` event.
@@ -341,8 +347,8 @@ const migrator = new MigratorKit({ logger: createLogger(process.stdout, 'debug')
 ### `EXIT_CODES`
 
 The CLI's exit-code map, so a wrapper script can mirror its semantics without hardcoding numbers.
-One entry per error code, plus `PENDING_MIGRATIONS` (from `status --check`), `AUDIT_FAILED` and
-`COLLECTIONS_DRIFT` (from `converge --check`).
+One entry per error code, plus `ALX_ERR_PENDING_MIGRATIONS` (from `status --check`), `ALX_ERR_AUDIT_FAILED` and
+`ALX_ERR_COLLECTIONS_DRIFT` (from `converge --check`).
 See the [exit-code table](/reference/cli#exit-codes).
 
 ## Document versioning
@@ -432,7 +438,9 @@ All public types are exported from the package — `MigronautConfig`, `Migration
 
 ## Errors
 
-Every error extends `MigronautError`, which carries a typed `code` and an optional `context`:
+Every error extends `MigronautError`, which carries a typed `code` and a `context` (`{}` when
+there is nothing to add), plus `cause` when it wraps another error. Each class is constructed
+as `Error` is, `new LockLostError(message, { cause, context })`:
 
 ```ts
 import { MigronautError } from '@alexify/migronaut';

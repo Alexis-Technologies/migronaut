@@ -1,9 +1,373 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-Release headings carry the publish date (`## vX.Y.Z — YYYY-MM-DD`).
+All notable changes to this project are documented in this file. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). Tags `v1.1.0`, `v1.2.3` and `v1.3.0`
+are releases of the upstream `mongo-migrate-kit`, not of this package.
 
-## v2.5.0 — 2026-11-18
+## [Unreleased]
+
+## [3.0.0] - 2026-11-28
+
+A major release: the error contract, the move to alexiskills 1.2 — the agent skills and
+conventions of the Alexis stack — and a review of the codebase against them. Every error code
+starts with `ALX_ERR_` and every error class takes `(message, options = {})` as `Error` does;
+four new codes name failures that left untyped or under the wrong one, two environment variables
+are renamed, and inputs that were quietly ignored or misread are refused (a migration export of
+the wrong kind, a duration past what a timer holds). All of it is under **Changed (breaking)**,
+and **Upgrading from 2.x** walks through each step. **Added** holds options that change nothing
+until used (`stop(…, { cause })`, `signal` on the run methods, `close({ timeoutMs })`), **Fixed**
+what the review found, and **Tooling** the codebase brought to the conventions — feature folders,
+names and comments — with no behaviour of its own. The package now ships `LICENSE` and
+`SECURITY.md` beside the changelog.
+
+### Changed (breaking)
+
+- **Every error code starts with `ALX_ERR_`**, as alexiskills asks of every string code:
+  `LOCK_ALREADY_HELD` is `ALX_ERR_LOCK_ALREADY_HELD`, the three CLI conditions included
+  (`ALX_ERR_PENDING_MIGRATIONS`, `ALX_ERR_AUDIT_FAILED`, `ALX_ERR_COLLECTIONS_DRIFT`). That is
+  `error.code`, the `MigronautErrorCode` union, the keys of `EXIT_CODES` (the numbers are the
+  same), the CLI's `✖ CODE:` line and `--json` `error.code`, the `code` of a `migration:error` or
+  `run:end` event, and the code a queue job reports. The class names do not change.
+- **Every error class takes `(message, options = {})`, as `Error` does.** `options.cause` is the
+  wrapped error and `options.context` the data about the failure; each subclass sets its own
+  `code`, and only `MigronautError` itself reads one from the options.
+  `new LockLostError(message, context, { cause })` is now
+  `new LockLostError(message, { cause, context })`, and `new MigronautError(code, message, …)` is
+  `new MigronautError(message, { code, … })`. The 338 constructions in `src/` and `bin/` follow
+  it, the 18 that wrap an error as `{ cause: error, context: { …, cause: errorText(error) } }`.
+- **`context` is on every error**, `{}` when nothing was given (it was absent), and `cause` only
+  when one was given, as before. A failure without context of its own now also carries the rows a
+  stopped run applied before it in `context.results` (and `partial` under `--json`), like every
+  other failure.
+- **The types follow.** `MigronautErrorOptions` holds `cause` and `context`; `MigronautError.context`
+  is no longer optional; each class's `code` is its literal (`LockLostError['code']` is
+  `'ALX_ERR_LOCK_LOST'`), so two classes are no longer assignable to each other.
+- **`ALX_ERR_LOCK_RELEASE_FAILED` keeps the driver's reason in `context.cause`**, as every other
+  wrap site does, instead of `context.error` — the field every reader of a wrapped error looks in
+  (`formatErrorWithCause`, the queue's failure reason).
+- **A migration file that does not load is `ALX_ERR_MIGRATION_LOAD_FAILED`** (exit 35), with what
+  the loader threw as its `cause` — a syntax error, a throw at module scope, an import that does
+  not resolve, a file that cannot be read. It left raw, with no code: `--json` lost the rows a run
+  applied before it, the exit code was 1 and a queue job reported `UNKNOWN`. A file that cannot be
+  read for another reason than its absence (EACCES) is no longer `ALX_ERR_MIGRATION_FILE_NOT_FOUND`.
+- **A driver error that ends a run is `ALX_ERR_DATABASE_OPERATION_FAILED`** (exit 36): a changelog
+  read, the lock, a background migration's indexes — after the connection was made.
+  `context.serverCode` is the server's code, `cause` the driver's error, and the rows applied
+  before it travel in `context.results` like every other failure's. It is in `RETRYABLE_CODES`.
+- **A migration export that is present but not of its kind is refused** —
+  `useTransaction: 'true'`, `timeoutMs: '5000'`, a `description` that is not a string — as is a
+  known export mistyped (`useTransactions`, `timeoutMS`, `require`), with the name it meant: both
+  were ignored, and the migration ran without the transaction or the timeout it asked for. Exports
+  that resemble none are left to the module.
+- **Durations that end in a timer have a ceiling**: `lockTTLSeconds` at most 2147483,
+  `timeoutMs` (the config's and a migration's) and `searchIndexWaitTimeoutMs` at most
+  2147483647, as are the background runner's `pollIntervalMs`, `verifyIntervalMs` and
+  `stop({ timeoutMs })`, the background processor's `pollIntervalMs` and `stallMs`, and a queue
+  group's `wait({ timeoutMs })`. Above it Node fires a timer
+  after 1 ms: a 30-day lock TTL lost the lock right after taking it, a long timeout timed out at
+  once. `migronaut.schema.json` says so too.
+- **A closed migration queue is `ALX_ERR_QUEUE_CLOSED`** (exit 37) and a second run on a kit
+  with one in flight `ALX_ERR_RUN_IN_FLIGHT` (exit 38, retryable), where both were
+  `ALX_ERR_CONFIG_INVALID`: a producer that met a closing queue during a deploy read it as bad
+  input, never to be retried.
+- **A failed queue job of an error that is not migronaut's reports `code: 'ALX_ERR_UNKNOWN'`**
+  in its progress, where it said `'UNKNOWN'` — the one string code without the prefix.
+- **An error's context names a file relative to the working directory** (`context.filepath`,
+  `context.path`): an absolute path named the user's home directory in every log line and `--json`
+  document that quoted it.
+- **A lost lock that stops the run is said at `error`** (under `onLockLost: 'warn'` it stays a
+  warning), as is a queue job BullMQ gave up on (every migration job — it has one attempt); both
+  were warnings. A job with attempts left is still a warning.
+- **`disconnect()` under a run in flight rejects with `ALX_ERR_RUN_IN_FLIGHT`**: it closed the
+  client under the run, whose lock release then failed and left the lock to its TTL.
+- **The run span's `migronaut.lock.acquire_ms` is `migronaut.lock.acquire.duration`, in
+  seconds**, as every duration migronaut reports (the unit is no part of an attribute's name).
+- **A run stopped on request is no error in telemetry**: its span ends without the ERROR status and
+  its `migronaut.run.duration` point without `error.type`, both with `migronaut.run.stopped = true`
+  — every rolling deploy was an error-rate spike.
+- **A configuration that does not validate says every issue, in its message and at once.** An
+  environment variable that does not parse joins the other issues in `context.issues`
+  (`{ path: 'MIGRONAUT_STRICT', message: … }`) instead of throwing alone with `context.name` and
+  `context.value`, and the message lists them all: `Invalid configuration —
+  MIGRONAUT_LOCK_TTL_SECONDS must be a positive integer; dbName is required`, where a person read only "Invalid
+  configuration".
+- **`EXIT_CODES` is frozen, with no prototype.** The CLI reads the same object, so a consumer's
+  write changed its exit codes for the whole process.
+- **Two environment variables say their unit and their collection**: `MIGRONAUT_LOCK_TTL_SECONDS`
+  (was `MIGRONAUT_LOCK_TTL`) and `MIGRONAUT_MIGRATIONS_COLLECTION` (was `MIGRONAUT_COLLECTION`,
+  beside `MIGRONAUT_LOCK_COLLECTION`). Every scalar key is now `MIGRONAUT_` and its name, but
+  `dbName` (`MIGRONAUT_DB`). A 2.x name is refused with its new one, never ignored: a lock TTL
+  quietly back at its default is what the env layer fails closed against.
+
+### Added
+
+- **`stop(reason, { cause })`**: what stopped a run becomes the `RunAbortedError`'s `cause` —
+  `runMigrations` and the queue processor pass their abort signal's `reason`, so an
+  `AbortSignal.timeout` is told from a shutdown.
+- **`logger: false`** silences migronaut as `null` does; it did so by accident and was not typed.
+- **`signal` on the run methods** — `up`, `down`, `redo`, `baseline`, `import`, `converge` — and
+  on a queue group's `wait()`: a run stops as `stop()` stops it, with the signal's reason as the
+  cause; a wait stops waiting (the jobs go on) with what finished in `context.finished`.
+  `runMigrations` hands its own signal to `up` this way.
+- **`close({ timeoutMs })` on both queue processors**: a job still running then is left to end on
+  its own, and a kit the processor created is disconnected once it does.
+
+### Changed
+
+- **The converge comparison is two to four times faster**: `canonicalize()` and `toWire()` — run on
+  every plan, replan, verify and settle read — define a property only for a `__proto__` key and
+  assign every other (`canonicalize` of an index 430 k → 1.1 M ops/s, `toWire` of a validator
+  580 k → 2.5 M on an M3 Max). The background engine builds each document's write without
+  spreads, one result shape and one job shape for every document, and the `_id` partitioner's
+  write filter is `null`, not a fresh `{}` per document. The bench's rows did not move.
+- **An unknown config key is a warning**, where it was a debug line: a mistyped safety option
+  (`useTransactions`) runs with its default.
+- **`LICENSE` and `SECURITY.md` ship in the package.** `files` lists them next to `README.md` and
+  `CHANGELOG.md` (npm added `LICENSE` on its own before; the security policy is new in the
+  tarball).
+
+### Fixed
+
+- **Every listener of a kit event gets it**, each called on its own: one that threw kept every
+  listener after it from the event — the queue processor's among them, which reads the run id
+  from `run:start`, so the job's userland log rows were dropped.
+- **The changelog and the locks are read and written on the primary, majority-committed**,
+  whatever the client prefers. With `readPreference=secondaryPreferred`, the read-back after taking
+  a lock could see the document before the write (the run refused as held, the lock left to no one
+  until its TTL), and the applied set could lag — an applied migration ran again.
+- **The pool's `PoolRequestedRetry` label is a transient search-index error again**: driver 7
+  spells it so, and only the older `PoolRequstedRetry` was recognized.
+- **A migration queue takes its listeners off a Queue it was handed** when it closes, and
+  `runMigrations` off the kit it handed `onKit`: each kept the adapter and its kit alive.
+- **`allow` refuses a permission named after an `Object.prototype` key** (`toString`).
+- **Causes are kept**: an aborted lock wait carries the signal's reason as its `cause`, a lock lost
+  to its deadline the last failed renewal, a queue group's `wait()` the error BullMQ threw.
+- **Every deliberate swallow leaves a debug line**: a failed close on the way out, a dry run that
+  could not read what a migration waits for, a partition that could not be marked failed, the
+  drift watcher's last resume token, a session the background engine could not end.
+- **The queue adapter tells errors by their code**, not their class: a kit from another copy of
+  the package (a monorepo's duplicate) made every typed failure an unknown, retryable one — a held
+  lock failed its job instead of waiting, and a shutdown never put a job back.
+- **A background migration's lease slot clash is read from the server's `keyPattern`**, the
+  message only where a server does not name the key; and its `lastError` goes through the driver
+  error's own text, as its partition's does.
+- **`MigrationQueue.close()` says every failure after the first** at `warn`; they were dropped.
+- **Every backoff is jittered** — the kit's lanes, the drift watcher, the queue's lanes — so the
+  pods a failover failed together do not all come back at once; a failure no retry fixes
+  (`ALX_ERR_MIGRATION_LOAD_FAILED`, a changed checksum, an invalid file or config) gives up a
+  queue lane at once and holds the in-process runner at its longest backoff, where both went on
+  retrying it on the usual schedule. An unknown commit result is retried after a pause too.
+- **A failure, or a stop, ends a bounded fan-out**: `up --strict` no longer hashes every other
+  applied file after the first checksum mismatch, and `stop()` cuts the pass short.
+- **Every operation of a lock is bounded on the server by its TTL** (`maxTimeMS`): before the lock
+  is held, nothing else bounded a stalled one.
+- **A verify tick or a control action no longer carries the id of the run in flight** on its
+  events, as it did on a queue whose kit served both workers.
+- **`init` writes the config file exclusively, and `--force` atomically**: no window between the
+  check and the write in which another `init` lands, and a crash during `--force` no longer leaves
+  a half-written config where the old one was.
+- **A `.env`, a JSON config and a custom template are read through one descriptor**, regular files
+  of at most 1 MB: a FIFO named like one no longer hangs the run, and a JSON config has the cap
+  the other two had.
+- **The drift watcher loads a file that would not load once per refresh**, not once per write
+  of a busy collection (each with a warning and a reopening write).
+- **An error that escapes the CLI stops the run in flight.** After an unhandled rejection (a
+  migration's write no one awaited) the rest is no longer applied on top of it; after an uncaught
+  exception the run is stopped and given up to 10 s to release its lock before the exit, where the
+  CLI exited at once and left the lock to its TTL. A failed write to stdout sets exit code 1.
+- **Lookup tables keyed by input have no prototype.** A log level named after an
+  `Object.prototype` key (`createLogger(stream, 'toString')`) falls back to `info` instead of
+  silencing every method, and a text index field named `__proto__` keeps its weight in the
+  converge comparison, where it read as changed on every run.
+
+### Security
+
+- **The resolved-config debug line shows the keys migronaut knows only**: an unknown key — ignored
+  anyway — could hold a secret its redaction cannot tell by its shape (`apiKey`).
+- **The secret-manager config scaffold no longer falls back to a production secret name**: with
+  `MONGO_SECRET_ID` unset it fetched `prod/myapp/mongo`; it now refuses to start.
+- **A failed migration's `context.cause` masks URI credentials**, through `formatError` as at every
+  other wrap site: `ALX_ERR_MIGRATION_EXECUTION_FAILED` (the changelog-write case included) and
+  `ALX_ERR_TRANSACTIONS_UNSUPPORTED` kept the thrown message raw for a caller of the API; the CLI,
+  the changelog's failure trace and the spans redacted it on their own.
+
+### Documentation
+
+- **The comments in `src/` say why; the `.d.ts` files document the API.** 69 JSDoc blocks of
+  `src/` that repeated the declarations or restated their own names are gone or cut to what the
+  `.d.ts` does not say (the error classes, `MigratorKit`, `MigrationQueue`, the CLI's command
+  registrations); the guidance and examples of `runMigrations` and `pendingMigrations` moved to
+  `index.d.ts`, where an editor shows them. 14 banners and 23 comment lines over 100 columns went
+  with them.
+- **The public methods say what they throw**: `@throws` with the code on the kit's run methods,
+  `connect`, `import`, `baseline` and `converge`, and on the queue's `enqueueUp`, `enqueueDown`
+  and `startWorker`.
+- **The collections guide sets `onSearchUnavailable` per environment** through
+  `MIGRONAUT_ON_SEARCH_UNAVAILABLE`, not by branching on `NODE_ENV`.
+- **The CHANGELOG follows Keep a Changelog.** `## [X.Y.Z] - YYYY-MM-DD` headings under an
+  `[Unreleased]` section, a link block for every release, and the headings of the format:
+  `Breaking changes` is `Changed (breaking)`, 2.0.0's `Fixed / hardened` is `Fixed`, 2.3.0's
+  `Notes` close its `Added`, and the topics of 1.0.0 are groups of its `Added`. The content of the
+  old entries is unchanged.
+- **CLAUDE.md says what migronaut adds to alexiskills, split by where it bites**: the root holds
+  what spans the repository — "Conventions" (with the rules kept on purpose and why), "Errors"
+  (the error model and its `ALX_ERR_*` codes), "Skills", "Release process" — and a table of the
+  notes of eight folders (`src/core`, `src/core/background`, `src/core/converge`, `src/bullmq`,
+  `src/versioning`, `src/cli`, `tests`, `docs`), each rule in one of them. CONTRIBUTING.md points
+  to them; `files` leaves the folders' notes out of the package (`!**/CLAUDE.md`).
+
+### Tooling
+
+- **`CONFIG_KEYS` is the one source of the enum values and bounds** the schema lists: a test holds
+  `migronaut.schema.json` (and its served copy) to them, and the env table parses the same lists.
+- **The skills come from `@alexify/metaskills` 1.2.0**, a devDependency, linked into
+  `.claude/skills` by `prepare` (`alexiskills claude`) in place of the six skills of
+  metarhia/metaskills 1.0.5 the repository kept. 1.1.1 changed the App profile only; 1.1.2 allows
+  `for...of` and `for...in` over a plain object in library code (the `Object.keys` loops stay) and
+  asks a loop that replaces an array method on a caller's array to skip its holes, as the method
+  did; 1.2.0 gives every error class the signature of `Error`.
+- **The lint of alexiskills 1.1**: the `correctness` and `suspicious` categories as errors,
+  `eqeqeq` with `null` included, `func-style: expression`, `max-depth` 4, `no-nested-ternary`,
+  `no-console`, `no-undef`, `getter-return`; in `src/` the array iteration methods,
+  `Object.entries` / `Object.values`, a `let` without a value and an `err` local are errors, and
+  a function over 80 lines warns. `pnpm run lint` refuses a stale disable directive. Unit tests
+  hold what the lint cannot: no `Array#find` / `Array#filter` (MongoDB's `find` and `filter` share
+  the names) and no array destructuring in `src/` and `bin/`.
+- **`src/` and `bin/` follow the Library profile of `js-conventions`.** The 727 function
+  declarations (672 at module level) are `const` arrows, none moved; 65 array iteration methods are
+  loops in one pass (the two that walk a caller's array, `toWire` over a declared value and the
+  versioning runtime's `onInsert` over `insertMany` documents, leave its holes as `map` did; the
+  rest walk constants, the kit's own arrays or what MongoDB returned, or run after a validation
+  that refuses a hole), 128 array destructurings read by index, 47 `Object.entries` / `Object.values`
+  walk `Object.keys`, 9 loose comparisons with `null` are strict, the 107 `let`s without a value
+  start with one or became `const`s, 53 `String()` calls are template literals, 25 nested ternaries
+  are `if`s, helpers or tables, 29 call-then-returns are `return void`, 18 `new Array(n)` are built
+  with `push`, and 29 data arrays spread into arguments are loops. The exceptions, each with its
+  reason, are in CLAUDE.md.
+- **The rest of `js-conventions` in `src/` and `bin/`.** A field, a reset or a lookup that holds
+  no reference is `null` (a scalar stays `undefined`; a MongoDB document, a JSON row and an event
+  payload still leave the key out); a module is its requires (built-ins apart), its constants,
+  its functions, its classes and a `module.exports` in the order it defines them; a signature fits
+  one line, an arrow body that does not is a block, a wrapped condition is a named boolean, a
+  choice among values is a table (`ACTION_COLORS`, `BUILD_DETAILS`, `STOPPED_OUTCOMES`), a fact
+  named twice is one constant (`ACTOR_FIELDS`, the server's error codes in `utils/error.js`), a
+  helper written twice is one (`assertCount`, `pushAll`, `isVersionAtLeast`), and private
+  helpers that never read `this` are module functions. The tests, the bench, the scripts and the
+  example start every `let` with a value and call a caught error `error`.
+- **Names say their role, their unit and their verb** (`js-conventions`): the 322 module-level
+  functions named by a noun are verbs (`formatError` was `errorText`, `loadJob` was `jobFor`,
+  `checkDefinition` was `definitionIssues` — `checkX` returns issues, `assertX` throws), 141
+  booleans and ownership fields carry `is`, `has`, `can` or `should`, durations carry `Ms` or
+  `Seconds`, and `msg`, `fn`, `opts`, `ext`, `dir`, `d`/`l` are words. A class and an instance no
+  longer share a name (`bullmq.Queue` splits into `QueueClass` and `queueInstance` where it
+  arrives). The public names are unchanged.
+- **Tests are `describe` and `it('should …')`.** The 60 titles that did not start with `should`
+  keep their meaning in a `describe` of the method or the tag they named; the helpers of the tests,
+  the bench and the scripts are `const` arrows too.
+- **Tests hold the docs and the release to the code**: the tables of
+  `docs/reference/error-codes.md` and of the exit codes in `docs/reference/cli.md`, the four
+  places that name the version (`package.json`, the CHANGELOG, ARCHITECTURE.md and the docs nav),
+  and a link for every CHANGELOG release.
+- **Unit tests drive the clock instead of waiting on it.** The lock's heartbeat and deadline, a
+  duck-typed lease and the runner's timeout run under `t.mock.timers` (`settleWithTimers` ticks
+  and flushes; `lock.test.js` went from ~400 ms to ~60 ms), short settle waits are one turn of
+  the loop, 45 hand-written sleeps are `node:timers/promises`, and the seven polling helpers of
+  the suites are one `waitFor` (`tests/helpers/wait-for.js`) whose timeout says what it waited
+  for. 137 assertions that took any error, or matched only its message, check its code.
+- **The engines floor runs the tests it exists for**: CI's 22.18.0 unit job also runs the type
+  stripping and ESM interop integration files, and the interop test type-checks the package root
+  under `nodenext` too, as it did the subpaths.
+- **`pnpm run test:optin`** runs the Redis, Atlas Search and sharded suites, and fails, rather than
+  skips, when a variable is missing — the release gate names it.
+- **Coverage gates statements too, over `bin/` as well as `src/`.** The lint's disable
+  directives in the tests are `oxlint-disable`, and its ignore list is the four patterns it can
+  meet.
+- **`pnpm run bench` reports a median and its spread**: seven windows per scenario after a warmup,
+  the CPU-bound scenarios in a process each, the loader cold and cached, `up()` first and cached,
+  and the environment with the numbers; `--json` prints a document to diff.
+- **CI's `ci-success` fails on a skipped job** too, not only on a failed or cancelled one.
+- **No `release` script.** The maintainer runs `pnpm publish` itself (`prepublishOnly` still
+  gates it), as the `npm-publish` skill of alexiskills 1.2 asks: its steps are the release.
+
+### Upgrading from 2.x
+
+1. Match the new codes: `error.code`, the `EXIT_CODES` keys, `--json` `error.code` and the
+   event payloads. The exit numbers did not change, so a script that branches on `$?` keeps
+   working.
+
+   | 2.x | 3.0 |
+   | --- | --- |
+   | `PENDING_MIGRATIONS` | `ALX_ERR_PENDING_MIGRATIONS` |
+   | `LOCK_ALREADY_HELD` | `ALX_ERR_LOCK_ALREADY_HELD` |
+   | `CHECKSUM_MISMATCH` | `ALX_ERR_CHECKSUM_MISMATCH` |
+   | `CONNECTION_FAILED` | `ALX_ERR_CONNECTION_FAILED` |
+   | `CONFIG_INVALID` | `ALX_ERR_CONFIG_INVALID` |
+   | `MIGRATION_EXECUTION_FAILED` | `ALX_ERR_MIGRATION_EXECUTION_FAILED` |
+   | `MIGRATION_FILE_NOT_FOUND` | `ALX_ERR_MIGRATION_FILE_NOT_FOUND` |
+   | `NOT_APPLIED` | `ALX_ERR_NOT_APPLIED` |
+   | `LOCK_LOST` | `ALX_ERR_LOCK_LOST` |
+   | `RUN_ABORTED` | `ALX_ERR_RUN_ABORTED` |
+   | `HOOK_FAILED` | `ALX_ERR_HOOK_FAILED` |
+   | `MIGRATION_IRREVERSIBLE` | `ALX_ERR_MIGRATION_IRREVERSIBLE` |
+   | `MIGRATION_TIMEOUT` | `ALX_ERR_MIGRATION_TIMEOUT` |
+   | `TRANSACTIONS_UNSUPPORTED` | `ALX_ERR_TRANSACTIONS_UNSUPPORTED` |
+   | `CONFIG_FILE_EXISTS` | `ALX_ERR_CONFIG_FILE_EXISTS` |
+   | `IMPORT_TARGET_NOT_EMPTY` | `ALX_ERR_IMPORT_TARGET_NOT_EMPTY` |
+   | `MIGRATION_FILE_EXISTS` | `ALX_ERR_MIGRATION_FILE_EXISTS` |
+   | `MIGRATION_INVALID_NAME` | `ALX_ERR_MIGRATION_INVALID_NAME` |
+   | `MIGRATION_INVALID_EXPORT` | `ALX_ERR_MIGRATION_INVALID_EXPORT` |
+   | `LOCK_RELEASE_FAILED` | `ALX_ERR_LOCK_RELEASE_FAILED` |
+   | `AUDIT_FAILED` | `ALX_ERR_AUDIT_FAILED` |
+   | `MIGRATION_OUT_OF_ORDER` | `ALX_ERR_MIGRATION_OUT_OF_ORDER` |
+   | `MIGRATION_BLOCKED` | `ALX_ERR_MIGRATION_BLOCKED` |
+   | `QUEUE_JOB_INVALID` | `ALX_ERR_QUEUE_JOB_INVALID` |
+   | `QUEUE_JOB_FAILED` | `ALX_ERR_QUEUE_JOB_FAILED` |
+   | `CONVERGE_FAILED` | `ALX_ERR_CONVERGE_FAILED` |
+   | `COLLECTIONS_DRIFT` | `ALX_ERR_COLLECTIONS_DRIFT` |
+   | `REVISION_CONFLICT` | `ALX_ERR_REVISION_CONFLICT` |
+   | `SHAPE_VERSION_UNSUPPORTED` | `ALX_ERR_SHAPE_VERSION_UNSUPPORTED` |
+   | `BACKGROUND_PENDING` | `ALX_ERR_BACKGROUND_PENDING` |
+   | `BACKGROUND_FAILED` | `ALX_ERR_BACKGROUND_FAILED` |
+   | `BACKGROUND_CONFLICT` | `ALX_ERR_BACKGROUND_CONFLICT` |
+   | `SANDBOX_REFUSED` | `ALX_ERR_SANDBOX_REFUSED` |
+
+2. Upgrade the queue's producers and workers together: the code a job reports, and the codes the
+   adapter decides retries by, are the new names. What 2.x already wrote — a `code` in a stored
+   job or a log line — keeps the old one; migronaut reads none of it back.
+3. Code that constructs a migronaut error — a test double, a subclass of your own — passes one
+   options object: `new ChecksumMismatchError(message, { context: { name } })`,
+   `new HookFailedError(message, { cause: error, context: { hook } })`, and for the base class
+   `new MigronautError(message, { code: 'ALX_ERR_CONFIG_INVALID' })`. A subclass of your own calls
+   `super(message, options)`.
+4. Code that tests `error.context === undefined` reads `Object.keys(error.context).length === 0`;
+   `error.context?.x` keeps working.
+5. A reader of `ALX_ERR_LOCK_RELEASE_FAILED` takes the reason from `context.cause`, not
+   `context.error`.
+6. Catching, `instanceof`, the class names and the shape of the `--json` document are unchanged.
+7. Rename two environment variables: `MIGRONAUT_LOCK_TTL` is `MIGRONAUT_LOCK_TTL_SECONDS` and
+   `MIGRONAUT_COLLECTION` is `MIGRONAUT_MIGRATIONS_COLLECTION`. A 2.x name still set fails the
+   configuration with the new one named, so a deployment that missed it learns at its next run.
+8. Branch on the four new codes where a 2.x caller saw another: `ALX_ERR_MIGRATION_LOAD_FAILED`
+   (exit 35) for a file that does not load, which left untyped with exit 1;
+   `ALX_ERR_DATABASE_OPERATION_FAILED` (exit 36) for a driver error that ends a run;
+   `ALX_ERR_QUEUE_CLOSED` (exit 37) and `ALX_ERR_RUN_IN_FLIGHT` (exit 38), both
+   `ALX_ERR_CONFIG_INVALID` before. A queue job's progress says `ALX_ERR_UNKNOWN` where it said
+   `UNKNOWN`.
+9. Fix what is now refused rather than ignored: a migration export of the wrong kind
+   (`useTransaction: 'true'`, `timeoutMs: '5000'`) or a mistyped one (`useTransactions`,
+   `timeoutMS`), and a duration past the timer's ceiling (`lockTTLSeconds` above 2147483, a
+   `…Ms` above 2147483647).
+10. Stop a run before disconnecting its kit: `disconnect()` under a run in flight rejects with
+    `ALX_ERR_RUN_IN_FLIGHT` — `kit.stop()`, await the run, then `disconnect()`.
+11. Move dashboards and alerts: the run span's `migronaut.lock.acquire_ms` (milliseconds) is
+    `migronaut.lock.acquire.duration` (seconds), and a run stopped on request no longer counts as
+    an error (`migronaut.run.stopped = true` instead).
+12. Read `context.filepath` and `context.path` as relative to the working directory, and a
+    configuration's issues from `context.issues` — an environment variable that does not parse is
+    one of them now, with no `context.name` and `context.value` of its own.
+
+## [2.5.0] - 2026-11-18
 
 A hardening release: what a review of the whole codebase found — security, resilience and
 observability fixes across the core, background migrations, declared collections and the queue
@@ -133,7 +497,7 @@ new fields on converge, queue and background results are experimental, like the 
   call outside `utils/telemetry.js` — and the existing ones cover `versioning.d.ts`, `ioredis` and
   subpath imports.
 
-## v2.4.0 — 2026-10-07
+## [2.4.0] - 2026-10-07
 
 Migration logs for the application's users. Additive: a migration that never touches the new
 context fields, and a kit with no `migration:log` listener, behave as before. Everything new is
@@ -216,7 +580,7 @@ experimental — its shape may still change in a minor release (named here).
   versioning, background migrations, OpenTelemetry, migration logs — with a diagram of how the parts
   fit together.
 
-## v2.3.0 — 2026-10-06
+## [2.3.0] - 2026-10-06
 
 Document versioning and background migrations. Additive: nothing changes for a project that
 declares no `versioning` and writes no `background` file. Everything new is experimental — its
@@ -288,6 +652,23 @@ shape may still change in a minor release (named here).
   `runnableBackground()` now returns: live leases, last progress, coordinator), `previous` on a
   background status (the registration a re-registration replaced), `plan.atLeast`.
 
+Limits of what 2.3 adds:
+
+- A typed `current` past the highest declared shape is a compile error. Written inline it reads
+  "Type 'number' is not assignable to type 'never'"; from an imported `as const` definition, it
+  names the two versions ("Type '3' is not assignable to type '2'").
+- The shard-aware mode needs `clusterMonitor` (it reads `config.collections` and
+  `config.chunks`); without it, a sharded collection is partitioned by `_id`.
+- Fail-closed limits: `maxDocumentErrors` is at most 1000 (the ids a state keeps); a revision
+  guard refuses an `_id` given as an operator; a background `filter` may not run server-side
+  JavaScript; `create --background`'s placeholder collection (`'TODO'`) is refused by `up`;
+  `watchBackground`, `enqueueBackground` and `createBackgroundProcessor` refuse options they do
+  not know.
+- A lane stopped by its process (a shutdown, a deploy) is not a failed slice, and
+  `maxSliceFailures` counts failed slices in a row. `down` of a one-way background migration pauses
+  it and waits for its lanes before it decides; a `step` migration counts as having rewritten
+  documents once one step was checkpointed.
+
 ### Changed
 
 For code written against 2.2 — the queue adapter's types and results, and two type-level details:
@@ -306,24 +687,7 @@ For code written against 2.2 — the queue adapter's types and results, and two 
 - **Background metric names** (experimental): `migronaut.background.throttled`,
   `migronaut.background.drift.detected`, `migronaut.background.transaction.retried`.
 
-### Notes
-
-- A typed `current` past the highest declared shape is a compile error. Written inline it reads
-  "Type 'number' is not assignable to type 'never'"; from an imported `as const` definition, it
-  names the two versions ("Type '3' is not assignable to type '2'").
-- The shard-aware mode needs `clusterMonitor` (it reads `config.collections` and
-  `config.chunks`); without it, a sharded collection is partitioned by `_id`.
-- Fail-closed limits: `maxDocumentErrors` is at most 1000 (the ids a state keeps); a revision
-  guard refuses an `_id` given as an operator; a background `filter` may not run server-side
-  JavaScript; `create --background`'s placeholder collection (`'TODO'`) is refused by `up`;
-  `watchBackground`, `enqueueBackground` and `createBackgroundProcessor` refuse options they do
-  not know.
-- A lane stopped by its process (a shutdown, a deploy) is not a failed slice, and
-  `maxSliceFailures` counts failed slices in a row. `down` of a one-way background migration pauses
-  it and waits for its lanes before it decides; a `step` migration counts as having rewritten
-  documents once one step was checkpointed.
-
-## v2.2.0 — 2026-10-05
+## [2.2.0] - 2026-10-05
 
 Atlas Search and Vector Search indexes in declared collections. Additive: a definition without
 `searchIndexes` behaves exactly as in 2.1 — converge never even asks the server about Search for
@@ -439,7 +803,7 @@ it.
 - `src/core/converge.js` is split: `converge-search-run.js` (the search half of a run) and
   `server-info.js` (read options, read pace, server version, not-found codes).
 
-## v2.1.0 — 2026-10-04
+## [2.1.0] - 2026-10-04
 
 Migrations as a queue, ids in your own format, OpenTelemetry, and declared collections. Additive:
 nothing changes for anyone who uses none of them, with the narrow exceptions listed under
@@ -759,14 +1123,14 @@ nothing changes for anyone who uses none of them, with the narrow exceptions lis
   against the real `bullmq` package when `MIGRONAUT_TEST_REDIS_URL` is set, which CI now does
   (a Redis service on the `test` job). `bullmq` and `ioredis` are devDependencies for that only.
 
-## v2.0.0 — 2026-08-30
+## [2.0.0] - 2026-08-30
 
 A major bump for three narrow contract changes (below); everything else is
 additive. Upgrading is a no-op for the most commonly scripted surface:
 `pendingMigrations()` / `list('pending')` still report a file as `pending`
 even when a failed attempt was recorded for it.
 
-### Breaking changes
+### Changed (breaking)
 
 - **`unlock --json` now requires `--yes`.** Previously `--json` alone
   force-released the lock; it now refuses with `CONFIG_INVALID` (exit 6), because
@@ -831,7 +1195,7 @@ even when a failed attempt was recorded for it.
   warn lines carry `runId`; import interruptions report progress and that a `--force` re-run
   resumes idempotently.
 
-### Fixed / hardened
+### Fixed
 
 - URI redaction now masks query-string secrets (`tlsCertificateKeyFilePassword`, `proxyPassword`,
   `sslKeyPassword`, secret `authMechanismProperties` values) and empty-username passwords —
@@ -846,11 +1210,13 @@ even when a failed attempt was recorded for it.
   instead of full records; a warn/error-only injected logger keeps its output instead of being
   silenced entirely.
 
-## v1.0.0 — 2026-07-28
+## [1.0.0] - 2026-07-28
 
 Initial release. Requires **Node.js ≥ 22.18**.
 
-### Core
+### Added
+
+**Core**
 
 - `MigratorKit` orchestration: `up`, `down`, `redo`, `dryRun`, `status`, `list`, `audit`,
   `create`, `init`, `import`, `lockInfo`, `forceUnlock`
@@ -881,7 +1247,7 @@ Initial release. Requires **Node.js ≥ 22.18**.
 - Lifecycle hooks: `beforeAll`, `afterAll`, `beforeEach`, `afterEach`, `onError`
 - Append-only audit trail in `_migronaut_migrations` — reverts are never deleted
 
-### Step controls & automation
+**Step controls & automation**
 
 - **`migronaut up --step`** — apply each pending file as its own sequential batch, so a later
   `down` can peel migrations off one at a time
@@ -910,7 +1276,7 @@ Initial release. Requires **Node.js ≥ 22.18**.
   info (pid / host / user / since) and a confirmation prompt (`--yes` to skip)
 - **`migronaut up <file> --force --yes`** — confirm a forced re-run non-interactively
 
-### Zero dependencies
+**Zero dependencies**
 
 - **No runtime dependencies at all** — `package.json` has no `dependencies` key; only `mongodb`
   (required) and `mongoose` (optional) as peers
@@ -924,7 +1290,7 @@ Initial release. Requires **Node.js ≥ 22.18**.
   instance directly as `logger`; a `component: 'migronaut'` child binding is applied once and a
   throwing logger can never break a migration run
 
-### Import from `migrate-mongo`
+**Import from `migrate-mongo`**
 
 - **`migronaut import`** — read an existing `migrate-mongo` `changelog` and record that history in
   the migronaut changelog, so `migronaut up` runs only what is new. One-time and forward-only; the
@@ -933,7 +1299,7 @@ Initial release. Requires **Node.js ≥ 22.18**.
 - **Forward-only safety** — imported records are tagged `origin: 'migrate-mongo'`; `migronaut
   down`/`redo` refuse them up front with a clear reason, so the changelog is never corrupted
 
-### Hardening
+**Hardening**
 
 - **Path-traversal protection** — migration names are validated as bare filenames confined to the
   migrations directory, so a crafted name can't load or read a file outside it
@@ -970,3 +1336,13 @@ Initial release. Requires **Node.js ≥ 22.18**.
   programmatic API overview, an FAQ, and a migrate-mongo migration guide
 - Requires **Node.js ≥ 22.18** — `.ts` migrations run natively (built-in type stripping) with no
   loader or build step; `.js` migrations likewise
+
+[unreleased]: https://github.com/Alexis-Technologies/migronaut/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.5.0...v3.0.0
+[2.5.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.4.0...v2.5.0
+[2.4.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.3.0...v2.4.0
+[2.3.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.2.0...v2.3.0
+[2.2.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.1.0...v2.2.0
+[2.1.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.0.0...v2.1.0
+[2.0.0]: https://github.com/Alexis-Technologies/migronaut/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/Alexis-Technologies/migronaut/releases/tag/v1.0.0

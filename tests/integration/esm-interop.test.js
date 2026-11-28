@@ -23,14 +23,14 @@ const repoRoot = path.join(__dirname, '..', '..');
  * TypeScript 7 closed its `exports` map, so `typescript/bin/tsc` no longer
  * resolves as a module path.
  */
-function typescriptEntry() {
+const typescriptEntry = () => {
   const manifest = require.resolve('typescript/package.json');
   const { bin } = require(manifest);
   return path.join(path.dirname(manifest), typeof bin === 'string' ? bin : bin.tsc);
-}
+};
 
 describe('ESM consumer interop (integration)', () => {
-  let dir;
+  let dir = null;
 
   before(() => {
     dir = mkdtempSync(path.join(tmpdir(), 'migronaut-esm-'));
@@ -56,7 +56,7 @@ if (typeof MigratorKit !== 'function') throw new Error('MigratorKit is not a fun
 if (typeof runMigrations !== 'function') throw new Error('runMigrations is not a function');
 if (typeof pendingMigrations !== 'function') throw new Error('pendingMigrations missing');
 if (typeof createLogger !== 'function') throw new Error('createLogger missing');
-if (typeof EXIT_CODES.LOCK_ALREADY_HELD !== 'number') throw new Error('EXIT_CODES missing');
+if (typeof EXIT_CODES.ALX_ERR_LOCK_ALREADY_HELD !== 'number') throw new Error('EXIT_CODES missing');
 if (!(new OutOfOrderMigrationError('x') instanceof MigronautError)) {
   throw new Error('error hierarchy broken through ESM interop');
 }
@@ -73,6 +73,42 @@ console.log('esm-interop-ok');
   it('should import named exports from an .mjs consumer', async () => {
     const { stdout } = await run(process.execPath, [path.join(dir, 'consumer.mjs')]);
     assert.match(stdout, /esm-interop-ok/);
+  });
+
+  describe('the package root', () => {
+    const tsc = typescriptEntry();
+
+    before(() => {
+      writeFileSync(
+        path.join(dir, 'root-types.mts'),
+        `import type { MigrationSummary, MigronautConfig } from '@alexify/migronaut';
+import { MigratorKit, MigronautError, runMigrations } from '@alexify/migronaut';
+
+export const config: Partial<MigronautConfig> = { uri: 'mongodb://localhost', dbName: 'app' };
+export const kit: MigratorKit = new MigratorKit(config);
+export const run: (input?: Partial<MigronautConfig>) => Promise<MigrationSummary> = runMigrations;
+export const isOurs = (error: unknown): boolean => error instanceof MigronautError;
+`,
+      );
+    });
+
+    it('should resolve its types for a nodenext consumer through the exports map', async () => {
+      await run(
+        process.execPath,
+        [
+          tsc,
+          '--noEmit',
+          '--strict',
+          '--module',
+          'nodenext',
+          '--moduleResolution',
+          'nodenext',
+          '--skipLibCheck',
+          path.join(dir, 'root-types.mts'),
+        ],
+        { cwd: dir },
+      );
+    });
   });
 
   describe('the ./bullmq subpath', () => {
@@ -104,7 +140,7 @@ if (typeof adapter.createMigrationQueue !== 'function') throw new Error('subpath
 
 // The exports map is closed: only what it lists is reachable, so an internal
 // module can be moved without breaking anyone who reached past the entry point.
-let code;
+let code = null;
 try {
   require('@alexify/migronaut/src/bullmq/index.js');
 } catch (error) {

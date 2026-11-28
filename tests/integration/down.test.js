@@ -10,7 +10,7 @@ const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 const { makeRecord } = require('../helpers/records.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_down_test';
 
 before(async () => {
@@ -25,18 +25,18 @@ beforeEach(async () => {
   await mongo.db.dropDatabase();
 });
 
-let project;
-let migrator;
+let project = null;
+let migrator = null;
 
 afterEach(async () => {
   await migrator?.disconnect();
   project?.cleanup();
 });
 
-function setup() {
+const setup = () => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir);
-}
+};
 
 describe('MigratorKit.down (integration)', () => {
   it('should refuse a path-traversing name even from a crafted applied record', async () => {

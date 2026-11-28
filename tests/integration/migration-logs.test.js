@@ -4,8 +4,9 @@ const { MongoClient } = require('mongodb');
 const { MigrationTimeoutError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_migration_logs_test';
 
 before(async () => {
@@ -16,7 +17,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 const kits = [];
 
 beforeEach(async () => {
@@ -29,33 +30,33 @@ afterEach(async () => {
   project?.cleanup();
 });
 
-function migrator(overrides = {}) {
+const migrator = (overrides = {}) => {
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 /** A logger that keeps every line it is given */
-function recordingLogger() {
+const recordingLogger = () => {
   const lines = [];
   const at = (level) => (msg, fields) => lines.push({ level, msg, fields });
   return {
     lines,
     logger: { debug: at('debug'), info: at('info'), warn: at('warn'), error: at('error') },
   };
-}
+};
 
 /** Everything a kit emits as migration:log, and its run ids */
-function listen(kit) {
+const listen = (kit) => {
   const events = [];
   const runs = [];
   kit.on('migration:log', (event) => events.push(event));
   kit.on('run:start', (event) => runs.push(event.runId));
   return { events, runs };
-}
+};
 
 /** A migration that logs a line for its users and an operational one, then inserts */
-function loggingMigration(value) {
+const loggingMigration = (value) => {
   return `export async function up({ db, logger, run }) {
   logger.debug('starting ${value}');
   logger.info('inserting', { userland: true, value: '${value}', frozen: Object.isFrozen(run) });
@@ -66,7 +67,7 @@ export async function down({ db, logger }) {
   await db.collection('things').deleteMany({ marker: '${value}' });
 }
 `;
-}
+};
 
 describe('userland migration logs (integration)', () => {
   it('should emit one event per userland call, correlated with the run and the changelog', async () => {
@@ -131,7 +132,7 @@ export async function down() {}
     );
     const kit = migrator();
     const { events } = listen(kit);
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     assert.strictEqual(events.length, 1);
     assert.strictEqual(events[0].level, 'error');
     assert.deepStrictEqual(events[0].data, { step: 'insert' });
@@ -147,8 +148,8 @@ export async function down() {}
   await users.insertOne({ email: 'a@b.c' });
   try {
     await users.insertOne({ email: 'a@b.c' });
-  } catch (err) {
-    logger.error('duplicate skipped', { userland: true, err });
+  } catch (error) {
+    logger.error('duplicate skipped', { userland: true, err: error });
   }
 }
 export async function down() {}
@@ -158,15 +159,15 @@ export async function down() {}
     const { events } = listen(kit);
     await kit.up();
     assert.strictEqual(events.length, 1);
-    const { err } = events[0].data;
-    assert.strictEqual(err.name, 'MongoServerError');
-    assert.strictEqual(err.code, 11000);
-    assert.match(err.message, /dup key: \{ <redacted> \}/);
+    const logged = events[0].data.err;
+    assert.strictEqual(logged.name, 'MongoServerError');
+    assert.strictEqual(logged.code, 11000);
+    assert.match(logged.message, /dup key: \{ <redacted> \}/);
     assert.ok(!JSON.stringify(events[0]).includes('a@b.c'));
     // What a subscriber stores is the same document.
     await mongo.db.collection('migration_logs').insertOne({ ...events[0] });
     const stored = await mongo.db.collection('migration_logs').findOne();
-    assert.deepStrictEqual(stored.data.err, err);
+    assert.deepStrictEqual(stored.data.err, logged);
   });
 
   it('should keep correlating a call a timed-out body makes after the run ended', async () => {
@@ -183,7 +184,7 @@ export async function down() {}
     const kit = migrator();
     const { events, runs } = listen(kit);
     await assert.rejects(kit.up(), MigrationTimeoutError);
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await sleep(400);
     assert.strictEqual(events.length, 1);
     assert.strictEqual(events[0].msg, 'late');
     assert.strictEqual(events[0].runId, runs[0]);

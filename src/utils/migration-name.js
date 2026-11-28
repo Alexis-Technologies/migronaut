@@ -1,5 +1,8 @@
 const { MigrationInvalidNameError } = require('../errors/index.js');
 
+/** The directory itself and its parent: names, but never a file's */
+const DOT_NAMES = new Set(['.', '..']);
+
 /**
  * Whether `name` is a bare filename: a non-empty string with no path
  * separator, no NUL byte, and not `.`/`..`. The single definition of the rule
@@ -7,27 +10,20 @@ const { MigrationInvalidNameError } = require('../errors/index.js');
  * by the kit's path resolution and by anything that accepts a name from
  * outside the process (a queue job's payload).
  */
-function isBareFilename(name) {
-  return (
-    typeof name === 'string' &&
-    name.length > 0 &&
-    name !== '.' &&
-    name !== '..' &&
-    !name.includes('/') &&
-    !name.includes('\\') &&
-    !name.includes('\0')
-  );
-}
+const isBareFilename = (name) => {
+  if (typeof name !== 'string' || name.length === 0 || DOT_NAMES.has(name)) return false;
+  return !name.includes('/') && !name.includes('\\') && !name.includes('\0');
+};
 
 /** Throw MigrationInvalidNameError unless `name` is a bare filename */
-function assertMigrationName(name, context = {}) {
+const assertMigrationName = (name, context = {}) => {
   if (!isBareFilename(name)) {
     throw new MigrationInvalidNameError(
       'Invalid migration name — must be a bare filename with no path segments',
-      { name, ...context },
+      { context: { name, ...context } },
     );
   }
-}
+};
 
 /**
  * Why a file's `requires` export is not valid: an array of bare migration
@@ -36,14 +32,15 @@ function assertMigrationName(name, context = {}) {
  * backwards can never close a cycle — the whole "is it a DAG?" question,
  * answered by the name. Returns `{ path, message }` issues.
  */
-function requiresIssues(requires, name) {
+const checkRequires = (requires, name) => {
   if (requires === undefined) return [];
   if (!Array.isArray(requires)) {
     return [{ path: 'requires', message: 'must be an array of migration file names' }];
   }
   const issues = [];
   const seen = new Set();
-  for (const [position, required] of requires.entries()) {
+  for (let position = 0; position < requires.length; position++) {
+    const required = requires[position];
     const path = `requires[${position}]`;
     if (!isBareFilename(required)) {
       issues.push({ path, message: 'must be a bare migration file name' });
@@ -59,6 +56,6 @@ function requiresIssues(requires, name) {
     }
   }
   return issues;
-}
+};
 
-module.exports = { assertMigrationName, isBareFilename, requiresIssues };
+module.exports = { isBareFilename, assertMigrationName, checkRequires };

@@ -11,25 +11,27 @@ const {
   fakeBullmq,
 } = require('../helpers/fake-bullmq.js');
 const { stubKit } = require('../helpers/stub-kit.js');
+const { setTimeout: sleep } = require('node:timers/promises');
+const { flush } = require('../helpers/event-loop.js');
 
 /** A connection token that would notice being closed — the adapter never owns it */
-function spiedConnection() {
+const spiedConnection = () => {
   const connection = createFakeConnection();
   connection.quit = mock.fn();
   connection.disconnect = mock.fn();
   connection.close = mock.fn();
   return connection;
-}
+};
 
-function make(overrides = {}) {
+const make = (overrides = {}) => {
   const connection = overrides.connection ?? spiedConnection();
   const kit = overrides.kit ?? stubKit();
   const mq = createMigrationQueue({ bullmq: fakeBullmq(), connection, kit, ...overrides });
   return { mq, kit, connection };
-}
+};
 
 /** Capture what the kit's logger is told */
-function recordingLogger(kit) {
+const recordingLogger = (kit) => {
   const lines = [];
   const record = (level) => (msg, fields) => lines.push({ level, msg, fields });
   kit.logger = {
@@ -39,7 +41,7 @@ function recordingLogger(kit) {
     error: record('error'),
   };
   return lines;
-}
+};
 
 const pendingRows = (...files) =>
   files.map((file) => ({ file, status: 'pending', appliedAt: null }));
@@ -95,7 +97,7 @@ describe('MigrationQueue.close — force on top of a close that hangs', () => {
     const worker = await mq.startWorker();
     // A job that will not end, or a Redis that is away: the graceful close
     // never returns.
-    let release;
+    let release = null;
     worker.close = () =>
       new Promise((resolve) => {
         release = resolve;
@@ -200,6 +202,11 @@ describe('createMigrationQueue', () => {
       const { mq } = make({ kit, bullmq: { ...fakeBullmq(), telemetry } });
       const group = await mq.enqueueUp();
       await mq.startWorker();
+      // A timeout a Node timer would fire at once is refused.
+      await assert.rejects(group.wait({ timeoutMs: 2 ** 31 }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /at most 2147483647/,
+      });
       // Waiting is what builds it.
       await group.wait({ timeoutMs: 2000 });
       assert.ok(mq.queueEvents instanceof FakeQueueEvents);
@@ -343,6 +350,16 @@ describe('createMigrationQueue', () => {
       assert.strictEqual(queue.closed, false);
     });
 
+    it('should take its listeners off a Queue instance it was handed, on close', async () => {
+      const connection = createFakeConnection();
+      const queue = new FakeQueue('tenant-a', { connection });
+      const before = queue.listenerCount('error');
+      const mq = createMigrationQueue({ bullmq: { Queue: queue }, kit: stubKit() });
+      assert.strictEqual(queue.listenerCount('error'), before + 1);
+      await mq.close();
+      assert.strictEqual(queue.listenerCount('error'), before);
+    });
+
     it('should use a QueueEvents instance as-is and never close it', async () => {
       const connection = createFakeConnection();
       const queueEvents = new FakeQueueEvents('migronaut', { connection });
@@ -379,8 +396,14 @@ describe('createMigrationQueue', () => {
           kit: stubKit(),
           ...options,
         });
-      assert.throws(() => build({ queueName: 'tenant-b' }), /on queue "tenant-a", not "tenant-b"/);
-      assert.throws(() => build({ prefix: 'other' }), /uses prefix "acme", not "other"/);
+      assert.throws(() => build({ queueName: 'tenant-b' }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /on queue "tenant-a", not "tenant-b"/,
+      });
+      assert.throws(() => build({ prefix: 'other' }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /uses prefix "acme", not "other"/,
+      });
       assert.throws(
         () =>
           createMigrationQueue({
@@ -392,7 +415,7 @@ describe('createMigrationQueue', () => {
             connection,
             kit: stubKit(),
           }),
-        /QueueEvents is on queue "tenant-b"/,
+        { code: 'ALX_ERR_CONFIG_INVALID', message: /QueueEvents is on queue "tenant-b"/ },
       );
     });
 
@@ -461,7 +484,10 @@ describe('createMigrationQueue', () => {
     it('should need the Worker class', async () => {
       const { Queue } = fakeBullmq();
       const { mq } = make({ bullmq: { Queue } });
-      await assert.rejects(mq.startWorker(), /needs the Worker class/);
+      await assert.rejects(mq.startWorker(), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /needs the Worker class/,
+      });
       await mq.close();
     });
 
@@ -491,14 +517,17 @@ describe('createMigrationQueue', () => {
       worker.emit(
         'failed',
         { id: 7, data: { groupId: 'g-1', migration: '0002-b.js', direction: 'up' } },
-        new MigrationBlockedError('blocked', { runId: 'run-2' }),
+        new MigrationBlockedError('blocked', { context: { runId: 'run-2' } }),
       );
       worker.emit('failed', undefined, new Error('job vanished'));
       worker.emit('stalled', '7', 'active');
+      // A job BullMQ will run again is a warning; one it gave up on (every
+      // migration job — one attempt) an error.
+      worker.emit('failed', { id: 8, attemptsMade: 1, opts: { attempts: 3 } }, new Error('later'));
 
       assert.deepStrictEqual(
         lines.map((line) => line.level),
-        ['error', 'warn', 'warn', 'warn'],
+        ['error', 'error', 'error', 'warn', 'warn'],
       );
       assert.ok(!lines[0].msg.includes('secret'));
       assert.deepStrictEqual(lines[1].fields, {
@@ -508,7 +537,7 @@ describe('createMigrationQueue', () => {
         migration: '0002-b.js',
         direction: 'up',
         runId: 'run-2',
-        code: 'MIGRATION_BLOCKED',
+        code: 'ALX_ERR_MIGRATION_BLOCKED',
         error: 'blocked',
       });
       assert.deepStrictEqual(lines[2].fields, { queue: 'migronaut', error: 'job vanished' });
@@ -572,13 +601,30 @@ describe('createMigrationQueue', () => {
 
     it("should refuse at enqueue what its own workers' policy would refuse", async () => {
       const { mq, kit } = make();
-      await assert.rejects(mq.enqueueUp('0003-c.js', { force: true }), /allow\.force/);
-      await assert.rejects(mq.enqueueUp('0003-c.js', { ordered: false }), /allow\.unordered/);
-      await assert.rejects(mq.enqueueConverge({ ordered: false }), /allow\.unordered/);
+      await assert.rejects(mq.enqueueUp('0003-c.js', { force: true }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /allow\.force/,
+      });
+      await assert.rejects(mq.enqueueUp('0003-c.js', { ordered: false }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /allow\.unordered/,
+      });
+      await assert.rejects(mq.enqueueConverge({ ordered: false }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /allow\.unordered/,
+      });
       assert.strictEqual(kit.dryRun.mock.callCount(), 0, 'refused before planning');
       const strict = make({ allow: { down: false } });
-      await assert.rejects(strict.mq.enqueueDown(), /allow\.down/);
+      await assert.rejects(strict.mq.enqueueDown(), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /allow\.down/,
+      });
       assert.throws(() => make({ allow: { everything: true } }), ConfigInvalidError);
+      // A name every object answers to is not a permission.
+      assert.throws(() => make({ allow: { toString: true } }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /allow\.toString/,
+      });
       await mq.close();
       await strict.mq.close();
     });
@@ -719,7 +765,10 @@ describe('createMigrationQueue', () => {
       const { Queue, Worker } = fakeBullmq();
       const { mq } = make({ kit: kitWithPending(), bullmq: { Queue, Worker } });
       const group = await mq.enqueueUp();
-      await assert.rejects(group.wait(), /needs QueueEvents/);
+      await assert.rejects(group.wait(), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /needs QueueEvents/,
+      });
       await mq.close();
     });
 
@@ -808,8 +857,14 @@ describe('createMigrationQueue', () => {
       OldQueue.prototype.upsertJobScheduler = undefined;
       OldQueue.prototype.removeJobScheduler = undefined;
       const { mq } = make({ bullmq: { Queue: OldQueue } });
-      await assert.rejects(mq.schedule({ every: 1000 }), /BullMQ 5\.16/);
-      await assert.rejects(mq.unschedule(), /BullMQ 5\.16/);
+      await assert.rejects(mq.schedule({ every: 1000 }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /BullMQ 5\.16/,
+      });
+      await assert.rejects(mq.unschedule(), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /BullMQ 5\.16/,
+      });
       await assert.rejects(mq.unschedule('a:b'), ConfigInvalidError);
       await mq.close();
     });
@@ -859,10 +914,13 @@ describe('createMigrationQueue', () => {
       await mq.close();
       assert.strictEqual(closeWorker.mock.callCount(), 1);
       assert.strictEqual(mq.queue.closed, true);
-      await assert.rejects(mq.enqueueUp(), /closed/);
-      await assert.rejects(mq.enqueueDown(), /closed/);
-      await assert.rejects(mq.startWorker(), /closed/);
-      await assert.rejects(mq.schedule({ every: 1000 }), /closed/);
+      await assert.rejects(mq.enqueueUp(), { code: 'ALX_ERR_QUEUE_CLOSED', message: /closed/ });
+      await assert.rejects(mq.enqueueDown(), { code: 'ALX_ERR_QUEUE_CLOSED', message: /closed/ });
+      await assert.rejects(mq.startWorker(), { code: 'ALX_ERR_QUEUE_CLOSED', message: /closed/ });
+      await assert.rejects(mq.schedule({ every: 1000 }), {
+        code: 'ALX_ERR_QUEUE_CLOSED',
+        message: /closed/,
+      });
       // Nothing reopens a connection that close() already let go of.
       for (const call of [
         () => mq.status(),
@@ -874,7 +932,7 @@ describe('createMigrationQueue', () => {
         () => mq.resume(),
         () => mq.unschedule(),
       ]) {
-        await assert.rejects(call(), /closed/);
+        await assert.rejects(call(), { code: 'ALX_ERR_QUEUE_CLOSED', message: /closed/ });
       }
     });
 
@@ -892,8 +950,8 @@ describe('createMigrationQueue', () => {
         connection: spiedConnection(),
         config: { uri: 'mongodb://127.0.0.1:1/never', dbName: 'never', logger: null },
       });
-      let release;
-      let started;
+      let release = null;
+      let started = null;
       const running = new Promise((resolve) => (started = resolve));
       mock.method(mq.kit, 'connect', async () => {});
       mock.method(mq.kit, 'dryRun', async () => pendingRows('0001-a.js'));
@@ -914,7 +972,7 @@ describe('createMigrationQueue', () => {
       await mq.close({ force: true });
       assert.strictEqual(disconnect.mock.callCount(), 0, 'the running migration keeps its client');
       release();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await flush();
       assert.strictEqual(disconnect.mock.callCount(), 1);
     });
 
@@ -932,7 +990,7 @@ describe('createMigrationQueue', () => {
       const { mq } = make();
       const starting = mq.startWorker();
       await mq.close();
-      await assert.rejects(starting, /closed/);
+      await assert.rejects(starting, { code: 'ALX_ERR_QUEUE_CLOSED', message: /closed/ });
       assert.strictEqual(mq.worker, undefined);
     });
 
@@ -955,7 +1013,9 @@ describe('createMigrationQueue', () => {
       const kit = stubKit({
         dryRun: mock.fn(async () => pendingRows('0001-a.js')),
         up: mock.fn(async () => {
-          throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+          throw new LockAlreadyHeldError('held', {
+            context: { holder: { lockedAt: new Date(0) } },
+          });
         }),
       });
       const { mq } = make({
@@ -968,7 +1028,7 @@ describe('createMigrationQueue', () => {
         failed = true;
       });
       const group = await mq.enqueueUp();
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await sleep(20);
       await mq.close();
       // Not failed for good — back at the head, for the next worker.
       assert.strictEqual(failed, false);

@@ -59,7 +59,7 @@ your migrations, so hooks have full database access. Its `run` and `logger` are 
 its position in the run. `summary` is `{ success, applied, direction }`.
 
 A hook that throws fails the run with a
-[`HOOK_FAILED`](/reference/error-codes) error — it is never swallowed, and never
+[`ALX_ERR_HOOK_FAILED`](/reference/error-codes) error — it is never swallowed, and never
 surfaces as an untyped `Error`.
 
 ## Execution order
@@ -128,7 +128,7 @@ the failure's [error code](/reference/error-codes) (absent for an error that is 
 
 A run that never got the lock is a run that ended, too: a caller that waits for the lock
 (`runMigrations` with `onLockHeld: 'wait'`, a queue job) retries the whole run, so every refusal
-emits `run:start` and a `run:end` with `success: false` and `code: 'LOCK_ALREADY_HELD'`. An alert on
+emits `run:start` and a `run:end` with `success: false` and `code: 'ALX_ERR_LOCK_ALREADY_HELD'`. An alert on
 failed runs should leave that code out.
 
 `runId` is the same value on every event of a run, on the lock document, and on

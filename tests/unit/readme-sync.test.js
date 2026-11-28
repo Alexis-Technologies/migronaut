@@ -6,7 +6,7 @@ const { describe, it } = require('node:test');
 const repoRoot = path.join(__dirname, '..', '..');
 
 /** Command names as registered in src/cli/commands/ (the source of truth) */
-function registeredCommandNames() {
+const registeredCommandNames = () => {
   const dir = path.join(repoRoot, 'src', 'cli', 'commands');
   const names = [];
   for (const file of readdirSync(dir)) {
@@ -15,7 +15,7 @@ function registeredCommandNames() {
     if (match) names.push(match[1]);
   }
   return names.sort();
-}
+};
 
 // The README's command table has drifted behind the registered commands twice
 // (audit and lock were missing). This pins the two surfaces together: a new

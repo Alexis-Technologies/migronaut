@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { failingMigration, insertMigration, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const repoRoot = path.join(__dirname, '..', '..');
 const binPath = path.join(repoRoot, 'bin', 'migronaut.js');
@@ -35,7 +36,7 @@ const baseEnv = Object.fromEntries(
  * ~30 of these tests to that file's contents. Tests that want the repo config
  * pass `repoRoot` explicitly — that coupling is then the point of the test.
  */
-function runCli(args, env = {}, cwd = project?.dir ?? repoRoot, input) {
+const runCli = (args, env = {}, cwd = project?.dir ?? repoRoot, input) => {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binPath, ...args], {
       cwd,
@@ -56,13 +57,13 @@ function runCli(args, env = {}, cwd = project?.dir ?? repoRoot, input) {
     }
     child.stdin.end();
   });
-}
+};
 
 /** True when `text` contains any ANSI escape sequence */
 const ESC = String.fromCharCode(27);
 const hasAnsi = (text) => text.includes(`${ESC}[`);
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_cli_test';
 
 before(async () => {
@@ -73,7 +74,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();
@@ -84,9 +85,9 @@ afterEach(() => {
   project?.cleanup();
 });
 
-function baseArgs(extra) {
+const baseArgs = (extra) => {
   return ['--uri', mongo.uri, '--db', DB, '--dir', project.dir, ...extra];
-}
+};
 
 describe('migronaut CLI (integration)', () => {
   it('should exit 0 when up succeeds', async () => {
@@ -99,19 +100,19 @@ describe('migronaut CLI (integration)', () => {
   it('should exit with the migration-failure code when a migration fails', async () => {
     project.write('0001-bad.ts', failingMigration());
     const result = await runCli(baseArgs(['up']));
-    // 7 = MIGRATION_EXECUTION_FAILED — CI can tell this apart from a config or
+    // 7 = ALX_ERR_MIGRATION_EXECUTION_FAILED — CI can tell this apart from a config or
     // connection problem instead of seeing an undifferentiated 1.
     assert.strictEqual(result.code, 7);
   });
 
   it('should map error codes to distinct exit codes', async () => {
-    // CONFIG_INVALID: --steps and --batch are mutually exclusive.
+    // ALX_ERR_CONFIG_INVALID: --steps and --batch are mutually exclusive.
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await runCli(baseArgs(['up']));
     const conflict = await runCli(baseArgs(['down', '--steps', '1', '--batch', '1']));
     assert.strictEqual(conflict.code, 6);
 
-    // CONNECTION_FAILED against a port nothing is listening on.
+    // ALX_ERR_CONNECTION_FAILED against a port nothing is listening on.
     const unreachable = await runCli([
       '--uri',
       'mongodb://127.0.0.1:1/x?serverSelectionTimeoutMS=200',
@@ -130,7 +131,7 @@ describe('migronaut CLI (integration)', () => {
     const result = await runCli(baseArgs(['up', '--json']));
     assert.strictEqual(result.code, 7);
     const parsed = JSON.parse(result.stdout);
-    assert.strictEqual(parsed.error.code, 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(parsed.error.code, 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
     // The migration that did land is reported, so a pipeline knows where it got to.
     assert.deepStrictEqual(
       parsed.partial.map((r) => [r.file, r.status]),
@@ -141,6 +142,24 @@ describe('migronaut CLI (integration)', () => {
     );
     // And the cause is no longer swallowed.
     assert.match(parsed.error.context.cause, /intentional failure/);
+  });
+
+  it('should keep the partial rows and a code in --json when a later file fails to load', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    project.write('0003-broken.js', 'module.exports = {\n');
+    const result = await runCli(baseArgs(['up', '--json']));
+    assert.strictEqual(result.code, 35);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.error.code, 'ALX_ERR_MIGRATION_LOAD_FAILED');
+    assert.deepStrictEqual(
+      parsed.partial.map((row) => [row.file, row.status]),
+      [
+        ['0001-a.ts', 'applied'],
+        ['0002-b.ts', 'applied'],
+      ],
+    );
+    assert.match(parsed.error.context.cause, /Unexpected end of input|SyntaxError/);
   });
 
   it('should print the underlying cause only with --verbose', async () => {
@@ -161,7 +180,7 @@ describe('migronaut CLI (integration)', () => {
     project.write('0002-bad.ts', failingMigration());
     const bad = await runCli(baseArgs(['up', '--quiet']));
     assert.strictEqual(bad.code, 7);
-    assert.match(bad.stderr, /MIGRATION_EXECUTION_FAILED/);
+    assert.match(bad.stderr, /ALX_ERR_MIGRATION_EXECUTION_FAILED/);
   });
 
   it('should emit no ANSI escapes with --no-color, even under FORCE_COLOR', async () => {
@@ -208,7 +227,7 @@ describe('migronaut CLI (integration)', () => {
     );
     project.write('0001-a.ts', insertMigration('things', 'a'));
     const withEnv = await runCli(['--dir', project.dir, 'status'], {}, project.dir);
-    // 5 = CONNECTION_FAILED: the unreachable URI from .env was used.
+    // 5 = ALX_ERR_CONNECTION_FAILED: the unreachable URI from .env was used.
     assert.strictEqual(withEnv.code, 5, 'the .env should have taken effect');
 
     const noEnv = await runCli(baseArgs(['status', '--no-env']), {}, project.dir);
@@ -228,7 +247,7 @@ describe('migronaut CLI (integration)', () => {
       'audit',
       '--json',
     ]);
-    // 22 = AUDIT_FAILED — "a check failed" is distinguishable from a crash.
+    // 22 = ALX_ERR_AUDIT_FAILED — "a check failed" is distinguishable from a crash.
     assert.strictEqual(result.code, 22);
     const report = JSON.parse(result.stdout);
     assert.strictEqual(report.ok, false);
@@ -284,7 +303,7 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
   });
 
-  it('should reject a standalone up --force with no file as CONFIG_INVALID', async () => {
+  it('should reject a standalone up --force with no file as ALX_ERR_CONFIG_INVALID', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     const result = await runCli(baseArgs(['up', '--force']), {}, repoRoot, '');
     // Preflight failures use the same typed envelope as everything else.
@@ -302,13 +321,13 @@ describe('migronaut CLI (integration)', () => {
     const result = await runCli(baseArgs(['up', '0001-a.ts', '--force', '--json']));
     assert.strictEqual(result.code, 6);
     const parsed = JSON.parse(result.stdout);
-    assert.strictEqual(parsed.error.code, 'CONFIG_INVALID');
+    assert.strictEqual(parsed.error.code, 'ALX_ERR_CONFIG_INVALID');
     assert.ok(parsed.error.message.includes('--yes'));
     // Migration was NOT re-run.
     assert.strictEqual(await mongo.db.collection('things').countDocuments(), 1);
   });
 
-  it('should fail with CONFIG_INVALID when --force confirmation meets a closed stdin', async () => {
+  it('should fail with ALX_ERR_CONFIG_INVALID when --force confirmation meets a closed stdin', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await runCli(baseArgs(['up']));
 
@@ -355,7 +374,7 @@ describe('migronaut CLI (integration)', () => {
     await runCli(baseArgs(['up']));
     const result = await runCli(baseArgs(['down', '--steps', '1', '--batch', '1']));
     assert.strictEqual(result.code, 6);
-    assert.ok(result.stderr.includes('CONFIG_INVALID'));
+    assert.ok(result.stderr.includes('ALX_ERR_CONFIG_INVALID'));
   });
 
   it('should resolve an async function config file (simulating a fetched secret)', async () => {
@@ -411,7 +430,7 @@ describe('migronaut CLI (integration)', () => {
     assert.strictEqual(record.runId, row.runId);
   });
 
-  it('should reject a generateId that is not a function as CONFIG_INVALID', async () => {
+  it('should reject a generateId that is not a function as ALX_ERR_CONFIG_INVALID', async () => {
     // All a JSON config can say — the name of a format, which is not a generator.
     project.write('0001-a.ts', insertMigration('things', 'a'));
     writeFileSync(
@@ -421,7 +440,7 @@ describe('migronaut CLI (integration)', () => {
     const result = await runCli(baseArgs(['up', '--json']), {}, project.dir);
     assert.strictEqual(result.code, 6);
     const parsed = JSON.parse(result.stdout);
-    assert.strictEqual(parsed.error.code, 'CONFIG_INVALID');
+    assert.strictEqual(parsed.error.code, 'ALX_ERR_CONFIG_INVALID');
     assert.deepStrictEqual(parsed.error.context.issues, [
       { path: 'generateId', message: 'must be a function' },
     ]);
@@ -469,7 +488,7 @@ describe('migronaut CLI (integration)', () => {
     ]);
   });
 
-  it('should reject a telemetry that is not an object as CONFIG_INVALID', async () => {
+  it('should reject a telemetry that is not an object as ALX_ERR_CONFIG_INVALID', async () => {
     // All a JSON config can say — and a tracer is not something JSON can hold.
     project.write('0001-a.ts', insertMigration('things', 'a'));
     writeFileSync(
@@ -479,7 +498,7 @@ describe('migronaut CLI (integration)', () => {
     const result = await runCli(baseArgs(['up', '--json']), {}, project.dir);
     assert.strictEqual(result.code, 6);
     const parsed = JSON.parse(result.stdout);
-    assert.strictEqual(parsed.error.code, 'CONFIG_INVALID');
+    assert.strictEqual(parsed.error.code, 'ALX_ERR_CONFIG_INVALID');
     assert.deepStrictEqual(parsed.error.context.issues, [
       { path: 'telemetry', message: 'must be an object' },
     ]);
@@ -588,7 +607,7 @@ describe('migronaut CLI (integration)', () => {
     assert.ok(contents.includes("import type { MigronautConfig } from '@alexify/migronaut'"));
   });
 
-  it('should reject init --format json --secret-provider as CONFIG_INVALID', async () => {
+  it('should reject init --format json --secret-provider as ALX_ERR_CONFIG_INVALID', async () => {
     const result = await runCli(['init', '--format', 'json', '--secret-provider'], {}, project.dir);
     // Preflight failures use the same typed envelope as everything else.
     assert.strictEqual(result.code, 6);
@@ -616,10 +635,10 @@ describe('migronaut CLI (integration)', () => {
   it('should exit 16 when init finds an existing config without --force', async () => {
     await runCli(['init'], {}, project.dir);
     const result = await runCli(['init'], {}, project.dir);
-    // 16 = CONFIG_FILE_EXISTS: a provisioning script re-running init can tell
+    // 16 = ALX_ERR_CONFIG_FILE_EXISTS: a provisioning script re-running init can tell
     // "already initialized" from "init crashed" without parsing stderr.
     assert.strictEqual(result.code, 16);
-    assert.ok(result.stderr.includes('CONFIG_FILE_EXISTS'));
+    assert.ok(result.stderr.includes('ALX_ERR_CONFIG_FILE_EXISTS'));
   });
 
   it('should generate a correctly named file and default to .js with no config or flag', async () => {
@@ -697,7 +716,7 @@ describe('migronaut CLI (integration)', () => {
     const result = await runCli(baseArgs(['up', '--json']));
     assert.strictEqual(result.code, 7);
     const parsed = JSON.parse(result.stdout);
-    assert.strictEqual(parsed.error.code, 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(parsed.error.code, 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
   });
 
   // ── status --check (feature 2) ───────────────────────────────────────────
@@ -783,7 +802,7 @@ describe('migronaut CLI (integration)', () => {
     const result = await runCli(['--json', 'unlock', '--yes=false']);
     assert.strictEqual(result.code, 6);
     assert.deepStrictEqual(JSON.parse(result.stdout), {
-      error: { code: 'CONFIG_INVALID', message: "option '--yes' does not take a value" },
+      error: { code: 'ALX_ERR_CONFIG_INVALID', message: "option '--yes' does not take a value" },
     });
   });
 
@@ -835,7 +854,7 @@ describe('migronaut CLI (integration)', () => {
     const result = await runCli(baseArgs(['unlock', '--json']));
     assert.strictEqual(result.code, 6);
     const parsed = JSON.parse(result.stdout);
-    assert.strictEqual(parsed.error.code, 'CONFIG_INVALID');
+    assert.strictEqual(parsed.error.code, 'ALX_ERR_CONFIG_INVALID');
     assert.match(parsed.error.message, /--yes/);
     assert.strictEqual(await mongo.db.collection('_migronaut_locks').countDocuments(), 1);
   });
@@ -1084,7 +1103,7 @@ describe('migronaut CLI — quiet mode and output safety (integration)', () => {
     // Errors must survive --quiet.
     const failing = await runCli(baseArgs(['down', '0009-missing.ts', '--quiet']));
     assert.strictEqual(failing.code, 9);
-    assert.ok(failing.stderr.includes('NOT_APPLIED'));
+    assert.ok(failing.stderr.includes('ALX_ERR_NOT_APPLIED'));
   });
 
   it('should never print connection credentials in any output channel', async () => {
@@ -1156,7 +1175,7 @@ describe('baseline CLI (integration)', () => {
     const result = await runCli(baseArgs(['baseline', '--json']));
     assert.strictEqual(result.code, 6);
     const parsed = JSON.parse(result.stdout);
-    assert.strictEqual(parsed.error.code, 'CONFIG_INVALID');
+    assert.strictEqual(parsed.error.code, 'ALX_ERR_CONFIG_INVALID');
     assert.match(parsed.error.message, /--yes/);
     assert.strictEqual(await mongo.db.collection('_migronaut_migrations').countDocuments(), 0);
   });
@@ -1188,12 +1207,12 @@ describe('converge CLI (integration)', () => {
   const USERS = { name: 'users', indexes: [{ key: { email: 1 } }] };
 
   /** A migronaut.config.json in the project dir — `collections` has no flag or env var */
-  function declare(collections, extra = {}) {
+  const declare = (collections, extra = {}) => {
     writeFileSync(
       path.join(project.dir, 'migronaut.config.json'),
       JSON.stringify({ collections, ...extra }),
     );
-  }
+  };
   const indexNames = async (collection) =>
     (await mongo.db.collection(collection).listIndexes().toArray())
       .map((index) => index.name)
@@ -1282,7 +1301,7 @@ describe('converge CLI (integration)', () => {
     const json = await runCli(baseArgs(['converge', '--json']));
     assert.strictEqual(json.code, 6);
     const refused = JSON.parse(json.stdout);
-    assert.strictEqual(refused.error.code, 'CONFIG_INVALID');
+    assert.strictEqual(refused.error.code, 'ALX_ERR_CONFIG_INVALID');
     assert.deepStrictEqual(
       refused.error.context.destructive.map((action) => [action.name, action.action]),
       [['email_1', 'recreate']],
@@ -1383,7 +1402,7 @@ describe('converge CLI (integration)', () => {
     const result = await runCli(baseArgs(['converge', '--json']));
     assert.strictEqual(result.code, 27);
     const parsed = JSON.parse(result.stdout);
-    assert.strictEqual(parsed.error.code, 'CONVERGE_FAILED');
+    assert.strictEqual(parsed.error.code, 'ALX_ERR_CONVERGE_FAILED');
     assert.strictEqual(parsed.error.context.mongoCode, 11000);
     assert.strictEqual(parsed.error.context.converge.collections[0].actions[0].status, 'failed');
     assert.ok(!('partial' in parsed));
@@ -1431,7 +1450,7 @@ describe('converge CLI (integration)', () => {
     await prompted;
     child.kill('SIGTERM');
     // Give the handler a moment, then answer yes: the stop must still win.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sleep(200);
     child.stdin.end('y\n');
     assert.strictEqual(await exited, 11);
     assert.strictEqual((await mongo.db.collection('users').indexes())[1].unique, undefined);
@@ -1477,7 +1496,7 @@ describe('converge CLI (integration)', () => {
       const result = await runCli(baseArgs(['up', '--json']), CONVERGE_ON);
       assert.strictEqual(result.code, 27);
       const parsed = JSON.parse(result.stdout);
-      assert.strictEqual(parsed.error.code, 'CONVERGE_FAILED');
+      assert.strictEqual(parsed.error.code, 'ALX_ERR_CONVERGE_FAILED');
       assert.deepStrictEqual(
         parsed.partial.map((row) => row.file),
         ['0001-a.ts', '0002-b.ts'],

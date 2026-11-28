@@ -1,61 +1,66 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { Decimal128, Double, Int32, Long, ObjectId, Timestamp } = require('mongodb');
-const { canonical, deepEqual, isPlainObject, toWire } = require('../../src/utils/canonical.js');
+const {
+  canonicalize,
+  isDeepEqual,
+  isPlainObject,
+  toWire,
+} = require('../../src/utils/canonical.js');
 
-describe('canonical / deepEqual', () => {
+describe('canonical / isDeepEqual', () => {
   it('should ignore object key order but not array order', () => {
-    assert.ok(deepEqual({ a: 1, b: { c: 2, d: 3 } }, { b: { d: 3, c: 2 }, a: 1 }));
-    assert.ok(!deepEqual({ required: ['a', 'b'] }, { required: ['b', 'a'] }));
+    assert.ok(isDeepEqual({ a: 1, b: { c: 2, d: 3 } }, { b: { d: 3, c: 2 }, a: 1 }));
+    assert.ok(!isDeepEqual({ required: ['a', 'b'] }, { required: ['b', 'a'] }));
   });
 
   it('should drop undefined properties, like a client with ignoreUndefined', () => {
-    assert.ok(deepEqual({ a: 1, b: undefined }, { a: 1 }));
+    assert.ok(isDeepEqual({ a: 1, b: undefined }, { a: 1 }));
     // …but an undefined array slot is what BSON stores as null.
-    assert.deepStrictEqual(canonical([undefined]), [null]);
+    assert.deepStrictEqual(canonicalize([undefined]), [null]);
   });
 
   it('should treat BSON number wrappers as the plain numbers they stand for', () => {
-    assert.ok(deepEqual({ n: new Int32(5) }, { n: 5 }));
-    assert.ok(deepEqual({ n: new Double(1.5) }, { n: 1.5 }));
-    assert.ok(deepEqual({ n: Long.fromNumber(7) }, { n: 7 }));
-    assert.ok(deepEqual({ n: 7n }, { n: 7 }));
-    assert.ok(deepEqual(-0, 0));
+    assert.ok(isDeepEqual({ n: new Int32(5) }, { n: 5 }));
+    assert.ok(isDeepEqual({ n: new Double(1.5) }, { n: 1.5 }));
+    assert.ok(isDeepEqual({ n: Long.fromNumber(7) }, { n: 7 }));
+    assert.ok(isDeepEqual({ n: 7n }, { n: 7 }));
+    assert.ok(isDeepEqual(-0, 0));
   });
 
   it('should keep a Long or BigInt beyond the safe range exact', () => {
     const big = Long.fromString('9007199254740993');
-    assert.deepStrictEqual(canonical(big), { $long: '9007199254740993' });
-    assert.deepStrictEqual(canonical(9007199254740993n), { $long: '9007199254740993' });
-    assert.ok(!deepEqual(big, Long.fromString('9007199254740994')));
+    assert.deepStrictEqual(canonicalize(big), { $long: '9007199254740993' });
+    assert.deepStrictEqual(canonicalize(9007199254740993n), { $long: '9007199254740993' });
+    assert.ok(!isDeepEqual(big, Long.fromString('9007199254740994')));
   });
 
   it('should tag non-finite numbers instead of collapsing them to null', () => {
-    assert.deepStrictEqual(canonical(Number.NaN), { $number: 'NaN' });
-    assert.deepStrictEqual(canonical(Number.POSITIVE_INFINITY), { $number: 'Infinity' });
-    assert.deepStrictEqual(canonical(Number.NEGATIVE_INFINITY), { $number: '-Infinity' });
+    assert.deepStrictEqual(canonicalize(Number.NaN), { $number: 'NaN' });
+    assert.deepStrictEqual(canonicalize(Number.POSITIVE_INFINITY), { $number: 'Infinity' });
+    assert.deepStrictEqual(canonicalize(Number.NEGATIVE_INFINITY), { $number: '-Infinity' });
   });
 
   it('should compare dates, regular expressions and ObjectIds by value', () => {
-    assert.ok(deepEqual(new Date('2026-01-01T00:00:00Z'), new Date(Date.UTC(2026, 0, 1))));
-    assert.deepStrictEqual(canonical(new Date('nope')), { $date: 'invalid' });
+    assert.ok(isDeepEqual(new Date('2026-01-01T00:00:00Z'), new Date(Date.UTC(2026, 0, 1))));
+    assert.deepStrictEqual(canonicalize(new Date('nope')), { $date: 'invalid' });
     // Flags in another order, built at runtime: the formatter sorts a literal's.
     const flags = ['m', 'i'].join('');
-    assert.ok(deepEqual(new RegExp('^a', flags), /^a/im));
-    assert.ok(!deepEqual(/^a/i, /^a/));
+    assert.ok(isDeepEqual(new RegExp('^a', flags), /^a/im));
+    assert.ok(!isDeepEqual(/^a/i, /^a/));
     const id = new ObjectId();
-    assert.ok(deepEqual({ id }, { id: new ObjectId(id.toHexString()) }));
+    assert.ok(isDeepEqual({ id }, { id: new ObjectId(id.toHexString()) }));
   });
 
   it('should tag the remaining BSON values by type', () => {
-    assert.deepStrictEqual(canonical(Decimal128.fromString('1.10')), { $decimal: '1.10' });
-    const ts = canonical(new Timestamp({ t: 1, i: 2 }));
+    assert.deepStrictEqual(canonicalize(Decimal128.fromString('1.10')), { $decimal: '1.10' });
+    const ts = canonicalize(new Timestamp({ t: 1, i: 2 }));
     assert.strictEqual(ts.$bson, 'Timestamp');
   });
 
   it('should read a Map like an object and refuse to equate class instances', () => {
     assert.ok(
-      deepEqual(
+      isDeepEqual(
         new Map([
           ['b', 1],
           ['a', 2],
@@ -64,9 +69,9 @@ describe('canonical / deepEqual', () => {
       ),
     );
     class Thing {}
-    assert.deepStrictEqual(canonical(new Thing()), { $opaque: 'object' });
+    assert.deepStrictEqual(canonicalize(new Thing()), { $opaque: 'object' });
     assert.deepStrictEqual(
-      canonical(() => 1),
+      canonicalize(() => 1),
       { $opaque: 'function' },
     );
   });
@@ -85,6 +90,18 @@ describe('toWire', () => {
     assert.strictEqual(toWire(map), map);
     assert.strictEqual(toWire(5), 5);
   });
+
+  it('should leave the holes of a sparse array where they were', () => {
+    const declared = [{ a: undefined, b: 1 }];
+    declared[2] = 'c';
+    declared.length = 4;
+    const wire = toWire(declared);
+    assert.strictEqual(wire.length, 4);
+    assert.ok(!(1 in wire) && !(3 in wire), 'a hole is not turned into undefined');
+    assert.deepStrictEqual(Object.keys(wire), ['0', '2']);
+    assert.deepStrictEqual(wire[0], { b: 1 });
+    assert.ok(isDeepEqual(wire, declared));
+  });
 });
 
 describe('isPlainObject', () => {
@@ -99,27 +116,27 @@ describe('isPlainObject', () => {
 
 describe('canonical — what survives the trip to the server', () => {
   const { BSONRegExp } = require('mongodb');
-  const { regExpIssue } = require('../../src/utils/canonical.js');
+  const { checkRegExp } = require('../../src/utils/canonical.js');
 
   it('should compare a RegExp by the options the driver stores', () => {
     // i and m as they are; the driver writes g as dotAll (s), and reads s back as g.
-    assert.ok(deepEqual(/x/i, /x/i));
-    assert.ok(deepEqual(new BSONRegExp('x', 's'), /x/g));
-    assert.ok(!deepEqual(/x/i, /x/m));
+    assert.ok(isDeepEqual(/x/i, /x/i));
+    assert.ok(isDeepEqual(new BSONRegExp('x', 's'), /x/g));
+    assert.ok(!isDeepEqual(/x/i, /x/m));
   });
 
   it('should refuse RegExp flags the driver changes or drops, and accept the rest', () => {
-    assert.strictEqual(regExpIssue({ a: /x/i, b: [/y/m] }), null);
-    assert.strictEqual(regExpIssue({ a: new BSONRegExp('x', 'sx') }), null);
+    assert.strictEqual(checkRegExp({ a: /x/i, b: [/y/m] }), null);
+    assert.strictEqual(checkRegExp({ a: new BSONRegExp('x', 'sx') }), null);
     for (const regExp of [/x/g, /x/s, /x/u, /x/y]) {
-      assert.match(regExpIssue({ $and: [{ a: regExp }] }), /cannot be stored as written/);
+      assert.match(checkRegExp({ $and: [{ a: regExp }] }), /cannot be stored as written/);
     }
   });
 
   it('should keep a __proto__ key a key — in comparison and on the wire', () => {
     const declared = JSON.parse('{"__proto__": {"a": 1}, "b": 2}');
-    assert.deepStrictEqual(Object.keys(canonical(declared)), ['__proto__', 'b']);
-    assert.ok(!deepEqual(declared, { b: 2 }), 'the key is not silently lost');
+    assert.deepStrictEqual(Object.keys(canonicalize(declared)), ['__proto__', 'b']);
+    assert.ok(!isDeepEqual(declared, { b: 2 }), 'the key is not silently lost');
     const wire = toWire(declared);
     assert.deepStrictEqual(Object.keys(wire), ['__proto__', 'b']);
     assert.strictEqual(Object.getPrototypeOf(wire), Object.prototype);

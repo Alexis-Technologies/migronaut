@@ -1,7 +1,6 @@
 const { defineCommand } = require('../shared.js');
 
-/** Register the `down` command */
-function registerDown(program) {
+const registerDown = (program) => {
   defineCommand(program, {
     name: 'down',
     description:
@@ -15,18 +14,19 @@ function registerDown(program) {
     ],
     lockable: true,
     mutating: true,
-    run: (migrator, opts, [file]) =>
-      migrator.down(file, {
-        noLock: opts.noLock,
+    run: (migrator, flags, positionals) => {
+      return migrator.down(positionals[0], {
+        noLock: flags.noLock,
         // `!== undefined`, not truthiness: `--batch 0` is a mistake worth
         // reporting, not one to silently drop. Core validates the value.
-        ...(opts.batch !== undefined ? { batch: Number(opts.batch) } : {}),
-        ...(opts.steps !== undefined ? { steps: Number(opts.steps) } : {}),
-        ...(opts.to ? { to: opts.to } : {}),
-        ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
-      }),
+        ...(flags.batch !== undefined ? { batch: Number(flags.batch) } : {}),
+        ...(flags.steps !== undefined ? { steps: Number(flags.steps) } : {}),
+        ...(flags.to ? { to: flags.to } : {}),
+        ...(flags.reason !== undefined ? { reason: flags.reason } : {}),
+      });
+    },
     // No render: core logs every ↩ Reverted line itself.
   });
-}
+};
 
 module.exports = { registerDown };

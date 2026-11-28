@@ -1,23 +1,19 @@
 const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it } = require('node:test');
 const { ObjectId } = require('mongodb');
-const {
-  control,
-  coordinate,
-  finalize,
-  jobFor,
-  repin,
-  runSlice,
-  waitForLanes,
-} = require('../../src/core/background.js');
-const { matchHash, resolveBackgroundSpec } = require('../../src/core/background-spec.js');
-const { BackgroundStore } = require('../../src/core/background-store.js');
+const { applyControl, repin, waitForLanes } = require('../../src/core/background/controls.js');
+const { coordinate, finalize } = require('../../src/core/background/coordinator.js');
+const { loadJob } = require('../../src/core/background/job.js');
+const { runSlice } = require('../../src/core/background/lane.js');
+const { matchHash, resolveBackgroundSpec } = require('../../src/core/background/spec.js');
+const { BackgroundStore } = require('../../src/core/background/store.js');
 const { MigrationLock } = require('../../src/core/lock.js');
 const { BackgroundConflictError, ChecksumMismatchError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { startTestMongo } = require('../helpers/mongo.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_coordinator_test';
 const NAME = '0001-orders.js';
 
@@ -37,7 +33,7 @@ beforeEach(async () => {
 const moveAddress = ({ address, ...doc }) => ({ ...doc, shipping: { address } });
 
 /** What the kit injects, over in-memory "files" */
-function makeDeps(files) {
+const makeDeps = (files) => {
   const events = [];
   const store = new BackgroundStore(mongo.db, '_migronaut_background');
   const deps = {
@@ -57,7 +53,7 @@ function makeDeps(files) {
     load: async (name) => {
       const file = files[name];
       if (file === undefined) {
-        throw Object.assign(new Error('gone'), { code: 'MIGRATION_FILE_NOT_FOUND' });
+        throw Object.assign(new Error('gone'), { code: 'ALX_ERR_MIGRATION_FILE_NOT_FOUND' });
       }
       const { spec, fns } = resolveBackgroundSpec(file.background, { name });
       return { spec, fns, checksum: file.checksum ?? 'c1' };
@@ -67,9 +63,9 @@ function makeDeps(files) {
     adaptiveCache: new Map(),
   };
   return deps;
-}
+};
 
-async function register(deps, name, status = 'pending') {
+const register = async (deps, name, status = 'pending') => {
   await deps.store.ensureIndexes();
   const { spec } = await deps.load(name);
   return deps.store.register(name, {
@@ -81,10 +77,10 @@ async function register(deps, name, status = 'pending') {
     requires: deps.files[name].requires ?? [],
     waitsFor: [],
   });
-}
+};
 
 /** Drive a background migration the way a runtime would, until the coordinator is done */
-async function drive(deps, name, { lanes = 2, maxSteps = 50, tolerate = false } = {}) {
+const drive = async (deps, name, { lanes = 2, maxSteps = 50, tolerate = false } = {}) => {
   for (let step = 0; step < maxSteps; step++) {
     const answer = await coordinate(deps, name);
     if (answer.next === 'done') return answer;
@@ -92,7 +88,7 @@ async function drive(deps, name, { lanes = 2, maxSteps = 50, tolerate = false } 
       await Promise.all(
         Array.from({ length: lanes }, async () => {
           for (;;) {
-            let slice;
+            let slice = null;
             try {
               slice = await runSlice(deps, name, { sliceMs: 60_000 });
             } catch (error) {
@@ -109,9 +105,9 @@ async function drive(deps, name, { lanes = 2, maxSteps = 50, tolerate = false } 
     }
   }
   throw new Error('did not finish');
-}
+};
 
-async function seed(count, extra = () => ({})) {
+const seed = async (count, extra = () => ({})) => {
   const docs = Array.from({ length: count }, (_, i) => ({
     _id: new ObjectId(),
     __v: 1,
@@ -121,7 +117,7 @@ async function seed(count, extra = () => ({})) {
   }));
   await mongo.db.collection('orders').insertMany(docs);
   return docs;
-}
+};
 
 describe('background coordinator (integration)', () => {
   it('should plan, run lanes in parallel and complete', async () => {
@@ -255,17 +251,17 @@ describe('background coordinator (integration)', () => {
     const deps = makeDeps(files);
     await register(deps, NAME);
     assert.strictEqual((await coordinate(deps, NAME)).next, 'process');
-    assert.deepStrictEqual(await control(deps, NAME, 'pause', { requestedBy: 'ops' }), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'pause', { requestedBy: 'ops' }), {
       applied: 'changed',
       status: 'paused',
     });
     assert.strictEqual((await runSlice(deps, NAME)).outcome, 'paused');
     assert.strictEqual((await coordinate(deps, NAME)).next, 'done');
-    assert.deepStrictEqual(await control(deps, NAME, 'pause'), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'pause'), {
       applied: 'unchanged',
       status: 'paused',
     });
-    assert.deepStrictEqual(await control(deps, NAME, 'resume'), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'resume'), {
       applied: 'changed',
       status: 'running',
     });
@@ -274,31 +270,34 @@ describe('background coordinator (integration)', () => {
     // A lane gets halfway, then the migration is cancelled and retried.
     const slice = await runSlice(deps, NAME, { sliceMs: 1 });
     assert.ok(['yielded', 'exhausted'].includes(slice.outcome));
-    assert.deepStrictEqual(await control(deps, NAME, 'cancel'), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'cancel'), {
       applied: 'changed',
       status: 'cancelled',
     });
     assert.strictEqual((await runSlice(deps, NAME)).outcome, 'cancelled');
-    await assert.rejects(control(deps, NAME, 'pause'), BackgroundConflictError);
-    const before = await deps.store.get(NAME);
-    assert.deepStrictEqual(await control(deps, NAME, 'retry'), {
+    await assert.rejects(applyControl(deps, NAME, 'pause'), BackgroundConflictError);
+    const paused = await deps.store.get(NAME);
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'retry'), {
       applied: 'changed',
       status: 'pending',
     });
     assert.strictEqual((await drive(deps, NAME)).status, 'completed');
-    const after = await deps.store.get(NAME);
-    assert.strictEqual(after.generation, before.generation, 'the same generation went on');
+    const retried = await deps.store.get(NAME);
+    assert.strictEqual(retried.generation, paused.generation, 'the same generation went on');
     assert.strictEqual(await mongo.db.collection('orders').countDocuments({ __v: 1 }), 0);
 
     // A completed one retried is reopened, over whatever is left.
     await mongo.db.collection('orders').updateMany({}, { $set: { __v: 1 } });
-    assert.deepStrictEqual(await control(deps, NAME, 'retry', { fromStart: true }), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'retry', { fromStart: true }), {
       applied: 'changed',
       status: 'running',
     });
     assert.strictEqual((await drive(deps, NAME)).status, 'completed');
     assert.strictEqual((await deps.store.get(NAME)).reopened, 1);
-    await assert.rejects(control(deps, 'nope.js', 'pause'), /not registered/);
+    await assert.rejects(applyControl(deps, 'nope.js', 'pause'), {
+      code: 'ALX_ERR_BACKGROUND_CONFLICT',
+      message: /not registered/,
+    });
   });
 
   it('should retry from the start with a fresh plan and no bad ids', async () => {
@@ -323,9 +322,9 @@ describe('background coordinator (integration)', () => {
     files[NAME].background.maxDocumentErrors = 5;
     files[NAME].checksum = 'c2';
     assert.strictEqual((await runSlice(deps, NAME)).outcome, 'failed');
-    await assert.rejects(jobFor(deps, NAME, await deps.store.get(NAME)), ChecksumMismatchError);
+    await assert.rejects(loadJob(deps, NAME, await deps.store.get(NAME)), ChecksumMismatchError);
     await repin(deps, NAME);
-    assert.deepStrictEqual(await control(deps, NAME, 'retry', { fromStart: true }), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'retry', { fromStart: true }), {
       applied: 'changed',
       status: 'pending',
     });
@@ -380,7 +379,7 @@ describe('background coordinator (integration)', () => {
     };
 
     /** The kit's deps as behind a mongos: a shard key that reads, chunks that do not */
-    function shardedDeps() {
+    const shardedDeps = () => {
       return Object.assign(makeDeps({ [NAME]: { background } }), {
         shardAware: 'auto',
         topology: async () => 'sharded',
@@ -388,18 +387,18 @@ describe('background coordinator (integration)', () => {
         chunksOf: async () => undefined,
         indexCache: new Map(),
       });
-    }
+    };
 
     const seedRegions = () => seed(600, (i) => ({ region: `r${i % 7}` }));
 
     /** Nothing failed on the way: no partition counted a slice, the state is not failed */
-    async function assertNothingFailed(deps) {
+    const assertNothingFailed = async (deps) => {
       for (const partition of await deps.store.partitions(NAME)) {
         assert.strictEqual(partition.failures ?? 0, 0);
         assert.notStrictEqual(partition.status, 'failed');
       }
       assert.notStrictEqual((await deps.store.get(NAME)).status, 'failed');
-    }
+    };
 
     it('should re-split the pass once the shard-aware index appears, as its warning asks', async () => {
       await seedRegions();
@@ -562,7 +561,7 @@ describe('background coordinator (integration)', () => {
     await coordinate(deps, NAME);
     while ((await runSlice(deps, NAME)).outcome === 'yielded');
     const state = await deps.store.get(NAME);
-    const job = await jobFor(deps, NAME, state);
+    const job = await loadJob(deps, NAME, state);
     // Finalize twice — as after a crash between the roll-up and the cleanup.
     await finalize(deps, job, state);
     await deps.store.set(NAME, { status: 'running' });
@@ -594,7 +593,7 @@ describe('background coordinator (integration)', () => {
       const batches = deps.events.length;
       const slice = runSlice(deps, NAME, { signal: controller.signal, sliceMs: 600_000 });
       while (!deps.events.slice(batches).some(([event]) => event === 'background:batch')) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await sleep(10);
       }
       controller.abort(new Error('deploy'));
       assert.strictEqual((await slice).outcome, 'stopped', `round ${round}`);
@@ -651,7 +650,7 @@ describe('background coordinator (integration)', () => {
     await register(deps, NAME);
     assert.strictEqual((await drive(deps, NAME, { tolerate: true })).status, 'failed');
     broken = false;
-    assert.deepStrictEqual(await control(deps, NAME, 'retry'), {
+    assert.deepStrictEqual(await applyControl(deps, NAME, 'retry'), {
       applied: 'changed',
       status: 'pending',
     });

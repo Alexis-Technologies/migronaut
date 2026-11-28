@@ -5,8 +5,10 @@ const { startBackgroundRunner } = require('../../index.js');
 const { ConfigInvalidError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
+const { waitFor } = require('../helpers/wait-for.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_watch_test';
 const NAME = '0001-orders.js';
 const WATCH = '_migronaut_background_watch';
@@ -26,7 +28,7 @@ beforeEach(async () => {
 
 const kits = [];
 const watchers = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const watcher of watchers.splice(0)) await watcher.stop();
@@ -35,12 +37,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const spec = ({ from = 1, to = 2, extra = '' } = {}) => `export const background = {
   collection: 'orders',
@@ -55,18 +57,10 @@ const spec = ({ from = 1, to = 2, extra = '' } = {}) => `export const background
 const FAST = { refreshMs: 200, checkpointMs: 50, leaderRetryMs: 100 };
 
 /** Wait for `check` to hold, polling */
-async function until(what, check, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await check();
-    if (value) return value;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-}
+const until = (what, check, timeoutMs = 10_000) => waitFor(what, check, { timeoutMs });
 
 /** A completed background migration v1 → v2 over a few documents, and a watcher on it */
-async function watched(overrides = {}, watchOptions = {}) {
+const watched = async (overrides = {}, watchOptions = {}) => {
   await mongo.db.collection('orders').insertMany([{ __v: 1, __rev: 0, n: 1 }]);
   const kit = kitWith(overrides);
   project.write(NAME, spec());
@@ -80,7 +74,7 @@ async function watched(overrides = {}, watchOptions = {}) {
   watchers.push(watcher);
   await until('the stream', () => states.includes('streaming'));
   return { kit, watcher, states, drift };
-}
+};
 
 const orders = () => mongo.db.collection('orders');
 
@@ -113,7 +107,7 @@ describe('live drift watcher (integration)', () => {
     const { watcher } = await watched();
     const doc = await orders().findOne({});
     await orders().updateOne({ _id: doc._id }, { $set: { other: 1 } });
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await sleep(300);
     assert.strictEqual(watcher.status()[0].counters.events, 0, 'an update off the version');
     await orders().updateOne({ _id: doc._id }, { $set: { __v: 1 } });
     await until('the downgrade undone', () => orders().findOne({ _id: doc._id, __v: 2, __rev: 2 }));
@@ -277,7 +271,7 @@ describe('live drift watcher (integration)', () => {
     const { kit, states } = await watched({}, { maxLagMs: 1 });
     await until('the shedding', async () => {
       await orders().insertOne({ __v: 1, __rev: 0 });
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await sleep(100);
       return states.includes('overloaded');
     });
     assert.strictEqual((await kit.backgroundStatus(NAME)).status, 'running', 'reopened');
@@ -345,7 +339,7 @@ describe('live drift watcher (integration)', () => {
       pollIntervalMs: 50,
       verifyIntervalMs: false,
     });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sleep(200);
     assert.strictEqual(quiet.watcher, undefined, "'poll' mode hosts none");
     await quiet.stop();
     assert.throws(() => startBackgroundRunner({ kit, watch: 'yes' }), ConfigInvalidError);
@@ -369,7 +363,7 @@ describe('live drift watcher (integration)', () => {
 });
 
 describe('live drift watcher on a standalone server (integration)', () => {
-  let standalone;
+  let standalone = null;
 
   before(async () => {
     standalone = await MongoMemoryServer.create();

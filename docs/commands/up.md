@@ -68,7 +68,7 @@ command is a no-op rather than an error. Running the same `--to` twice is safe.
 
 `--to` names a point in the sequence, so it can't be combined with `[file]`, `--steps` or `--batch` —
 those are different ways of choosing the same thing. Doing so exits with a validation error before
-connecting. An unknown filename exits with `MIGRATION_FILE_NOT_FOUND` (code `8`).
+connecting. An unknown filename exits with `ALX_ERR_MIGRATION_FILE_NOT_FOUND` (code `8`).
 
 ::: tip Round trip
 [`down --to <file>`](/commands/down#roll-back-to-a-point) is the exact inverse: it reverts back to

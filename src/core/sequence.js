@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+
 const { MigrationBlockedError, MigrationFileNotFoundError } = require('../errors/index.js');
 
 /**
@@ -13,18 +14,27 @@ const { MigrationBlockedError, MigrationFileNotFoundError } = require('../errors
 /** Declaration files sit next to TypeScript migrations and are never one */
 const DECLARATION_SUFFIXES = ['.d.ts', '.d.mts', '.d.cts'];
 
+/** Whether `file` ends with one of `suffixes` */
+const endsWithAny = (file, suffixes) => {
+  for (let i = 0; i < suffixes.length; i++) {
+    if (file.endsWith(suffixes[i])) return true;
+  }
+  return false;
+};
+
 /** Whether a symlink in `dir` leads to a regular file — a broken one leads nowhere */
-const linksToFile = (dir, name) =>
-  fs.stat(path.join(dir, name)).then(
+const linksToFile = (directory, name) => {
+  return fs.stat(path.join(directory, name)).then(
     (stat) => stat.isFile(),
     () => false,
   );
+};
 
 /** The migration files in `dir`, sorted ascending — empty when the directory does not exist */
-async function listMigrationFiles(dir, extensions) {
-  let entries;
+const listMigrationFiles = async (directory, extensions) => {
+  let entries = [];
   try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
+    entries = await fs.readdir(directory, { withFileTypes: true });
   } catch (error) {
     if (error.code === 'ENOENT') return [];
     throw error;
@@ -36,24 +46,19 @@ async function listMigrationFiles(dir, extensions) {
     // the whole run with MigrationInvalidExportError.
     const file = entry.name;
     if (file.startsWith('.')) continue;
-    if (DECLARATION_SUFFIXES.some((suffix) => file.endsWith(suffix))) continue;
-    let named = false;
-    for (const ext of extensions) {
-      if (file.endsWith(ext)) {
-        named = true;
-        break;
-      }
-    }
-    if (!named) continue;
+    if (endsWithAny(file, DECLARATION_SUFFIXES)) continue;
+    if (!endsWithAny(file, extensions)) continue;
     // A symlink to a file is a migration like any other — `up <name>` runs it
     // (the loader follows the link), so a bulk run and `status` must see it
     // too, not skip it without a word. What it leads to decides; that is
     // asked only of an entry named like a migration.
-    const isFile = entry.isFile() || (entry.isSymbolicLink() && (await linksToFile(dir, file)));
+    const isFile =
+      entry.isFile() || (entry.isSymbolicLink() && (await linksToFile(directory, file)));
     if (isFile) matches.push(file);
   }
-  return matches.sort();
-}
+  matches.sort();
+  return matches;
+};
 
 /**
  * The files of `sequence` with no applied name — all of them, or only those
@@ -61,14 +66,14 @@ async function listMigrationFiles(dir, extensions) {
  * trace counts, so a migration that failed stops the line exactly like one
  * that never ran.
  */
-function pendingIn(sequence, appliedNames, before) {
+const selectPending = (sequence, appliedNames, before) => {
   const pending = [];
   for (const file of sequence) {
     if (before !== undefined && file >= before) break;
     if (!appliedNames.has(file)) pending.push(file);
   }
   return pending;
-}
+};
 
 /**
  * Keep only the pending migrations up to and including `to`.
@@ -78,9 +83,9 @@ function pendingIn(sequence, appliedNames, before) {
  * what makes `up --to X` idempotent — running it twice is a no-op rather
  * than an error.
  */
-function truncateAtTarget(pending, allFiles, to) {
+const truncateAtTarget = (pending, allFiles, to) => {
   if (!allFiles.includes(to)) {
-    throw new MigrationFileNotFoundError('Migration file not found', { to });
+    throw new MigrationFileNotFoundError('Migration file not found', { context: { to } });
   }
   const kept = [];
   for (const file of pending) {
@@ -88,34 +93,34 @@ function truncateAtTarget(pending, allFiles, to) {
     kept.push(file);
   }
   return kept;
-}
+};
 
 /** The name that sorts last — '' for none */
-function newestOf(names) {
+const findNewest = (names) => {
   let newest = '';
   for (const name of names) {
     if (name > newest) newest = name;
   }
   return newest;
-}
+};
 
 /**
  * Out-of-order arrivals among `targets`: pending files that sort before the
  * newest applied name — migrations merged late from a parallel branch, which
  * will run after migrations authored later. `null` when there are none.
  */
-function lateArrivals(targets, appliedNames) {
+const findLateArrivals = (targets, appliedNames) => {
   if (targets.length === 0 || appliedNames.size === 0) return null;
-  const newestApplied = newestOf(appliedNames);
+  const newestApplied = findNewest(appliedNames);
   const late = [];
   for (const target of targets) {
     if (!appliedNames.has(target) && target < newestApplied) late.push(target);
   }
   return late.length > 0 ? { late, newestApplied } : null;
-}
+};
 
 /** The names of the records to revert, newest first unless already in revert order */
-function revertOrder(records, preserveOrder) {
+const revertOrder = (records, preserveOrder) => {
   const names = [];
   for (const record of records) names.push(record.name);
   if (!preserveOrder) {
@@ -123,27 +128,27 @@ function revertOrder(records, preserveOrder) {
     names.reverse();
   }
   return names;
-}
+};
 
 /**
  * The refusal of an ordered step: "`subject` is blocked: N `what`: a, b".
  * `context` carries `blockedBy` (and `failed`, the blockers with a failed
  * trace — a stopped line rather than one still on its way).
  */
-function blockedError(subject, what, context) {
+const createBlockedError = (subject, what, context) => {
   const { blockedBy } = context;
   return new MigrationBlockedError(
     `${subject} is blocked: ${blockedBy.length} ${what}: ${blockedBy.join(', ')}`,
-    context,
+    { context },
   );
-}
+};
 
 module.exports = {
-  blockedError,
-  lateArrivals,
   listMigrationFiles,
-  newestOf,
-  pendingIn,
-  revertOrder,
+  selectPending,
   truncateAtTarget,
+  findNewest,
+  findLateArrivals,
+  revertOrder,
+  createBlockedError,
 };

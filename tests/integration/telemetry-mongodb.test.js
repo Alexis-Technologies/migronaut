@@ -14,8 +14,8 @@ const { after, afterEach, before, beforeEach, describe, it } = require('node:tes
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
-let project;
+let mongo = null;
+let project = null;
 const DB = 'migronaut_telemetry_mongodb_test';
 
 before(async () => {

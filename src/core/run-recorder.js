@@ -1,5 +1,5 @@
 const { LockAlreadyHeldError, MigronautError } = require('../errors/index.js');
-const { errorText } = require('../utils/error.js');
+const { formatError } = require('../utils/error.js');
 const { ATTRIBUTES } = require('../utils/telemetry.js');
 
 /**
@@ -25,11 +25,11 @@ class RunRecorder {
   #fields;
   #startedAt;
   /** What the lock reported when it was acquired — the run span's lock attributes */
-  #acquired;
+  #acquired = null;
   /** The first reason the lock was lost */
   #lostReason;
   /** Set once the lock is held and the run span is open */
-  #span;
+  #span = null;
 
   constructor({ info, runId, job = {}, telemetry, emit, logger, fields }) {
     this.#info = info;
@@ -74,7 +74,9 @@ class RunRecorder {
       [ATTRIBUTES.RUN_DIRECTION]: this.#info.direction,
       [ATTRIBUTES.JOB_ID]: this.#job.jobId,
       [ATTRIBUTES.JOB_GROUP_ID]: this.#job.groupId,
-      [ATTRIBUTES.LOCK_ACQUIRE_MS]: this.#acquired?.acquireMs,
+      // Seconds, as every duration migronaut reports; the unit is the metadata's.
+      [ATTRIBUTES.LOCK_ACQUIRE_DURATION]:
+        typeof this.#acquired?.acquireMs === 'number' ? this.#acquired.acquireMs / 1000 : undefined,
       [ATTRIBUTES.LOCK_SKIPPED]: this.#acquired?.skipped,
     };
   }
@@ -89,14 +91,13 @@ class RunRecorder {
     // without reconstructing it from per-migration events. On the failure
     // path the partial rows live on the error's context — exactly the case
     // where "how far did it get?" is the question, so they count too.
-    const rows = Array.isArray(result)
-      ? result
-      : failure instanceof MigronautError && Array.isArray(failure.context?.results)
-        ? failure.context.results
-        : null;
-    const { summary, skipped } = countRows(rows);
+    const { summary, skipped } = countRows(pickRows(result, failure));
     const durationMs = Date.now() - this.#startedAt;
     const telemetry = this.#telemetry;
+    // A run stopped on request — stop(), a signal, a shutdown that puts the
+    // job back — ended as asked: no error status, or every rolling deploy is
+    // an error-rate spike. `migronaut.run.stopped` says it instead.
+    const isStopped = failure?.code === 'ALX_ERR_RUN_ABORTED';
     if (this.#span) {
       this.#span.finish(
         {
@@ -104,11 +105,12 @@ class RunRecorder {
           [ATTRIBUTES.RUN_REVERTED]: summary.reverted,
           [ATTRIBUTES.RUN_SKIPPED]: skipped,
           [ATTRIBUTES.RUN_TOTAL]: summary.total,
+          [ATTRIBUTES.RUN_STOPPED]: isStopped ? true : undefined,
           [ATTRIBUTES.LOCK_LOST_REASON]: this.#lostReason,
         },
-        failure,
+        isStopped ? undefined : failure,
       );
-      telemetry.runEnded({ ...this.#info, durationMs, error: failure });
+      telemetry.runEnded({ ...this.#info, durationMs, error: failure, stopped: isStopped });
     } else if (failure instanceof LockAlreadyHeldError) {
       // Never held the lock, so there is no run to time — only a refusal to
       // count. Any other failure this early (an unreachable database) is the
@@ -121,11 +123,11 @@ class RunRecorder {
       durationMs,
       ...summary,
       // A raw Error here would hand subscribers an unredacted driver message
-      // (which can echo the credentialed URI) — errorText is the same
+      // (which can echo the credentialed URI) — formatError is the same
       // chokepoint every log line and result row already goes through.
-      ...(failure ? { error: errorText(failure) } : {}),
+      ...(failure ? { error: formatError(failure) } : {}),
       // And its typed code: a caller waiting for the lock retries the whole
-      // run, so every refusal ends one as LOCK_ALREADY_HELD — a subscriber
+      // run, so every refusal ends one as ALX_ERR_LOCK_ALREADY_HELD — a subscriber
       // that alerts on failed runs needs to tell those from a migration that
       // threw, without parsing the text.
       ...(failure instanceof MigronautError ? { code: failure.code } : {}),
@@ -147,11 +149,22 @@ class RunRecorder {
 }
 
 /**
+ * The run's rows: its result, or the partial rows a failure carries — `null` when neither has any
+ */
+const pickRows = (result, failure) => {
+  if (Array.isArray(result)) return result;
+  if (failure instanceof MigronautError && Array.isArray(failure.context?.results)) {
+    return failure.context.results;
+  }
+  return null;
+};
+
+/**
  * `{ summary: { applied, reverted, total }, skipped }` of a run's rows, in one
  * pass — `summary` is empty when the run produced no rows (a converge, a
  * failure before the first migration).
  */
-function countRows(rows) {
+const countRows = (rows) => {
   if (!rows) return { summary: {}, skipped: undefined };
   let applied = 0;
   let reverted = 0;
@@ -162,6 +175,6 @@ function countRows(rows) {
     else if (row.status === 'skipped') skipped += 1;
   }
   return { summary: { applied, reverted, total: rows.length }, skipped };
-}
+};
 
 module.exports = { RunRecorder };

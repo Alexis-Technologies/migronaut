@@ -5,7 +5,7 @@ const { BackgroundPendingError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_requires_test';
 
 before(async () => {
@@ -25,7 +25,7 @@ beforeEach(async () => {
 });
 
 const kits = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const kit of kits.splice(0)) await kit.disconnect();
@@ -33,12 +33,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const V2 = `export const background = {
   collection: 'orders',
@@ -77,7 +77,7 @@ describe('requires — a migration waits for background migrations (integration)
     project.write('0002-contract.js', CONTRACT);
     await assert.rejects(kit.up(), (error) => {
       assert.ok(error instanceof BackgroundPendingError);
-      assert.strictEqual(error.code, 'BACKGROUND_PENDING');
+      assert.strictEqual(error.code, 'ALX_ERR_BACKGROUND_PENDING');
       assert.deepStrictEqual(error.context.waitsFor, [
         { migration: '0001-orders-v2.js', status: 'pending' },
       ]);

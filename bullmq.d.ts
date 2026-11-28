@@ -444,9 +444,9 @@ export interface MigrationJobProgress {
   searchIndexes?: number;
   /**
    * `failed` only — the typed error code, so nobody has to parse
-   * `failedReason`; `'UNKNOWN'` for an error that is not migronaut's.
+   * `failedReason`; `'ALX_ERR_UNKNOWN'` for an error that is not migronaut's.
    */
-  code?: MigronautErrorCode | 'UNKNOWN';
+  code?: MigronautErrorCode | 'ALX_ERR_UNKNOWN';
   /**
    * `completed` and `failed` — the run's correlation id, matching the changelog
    * record and the kit's events. A failed job has no return value, so this is
@@ -689,6 +689,12 @@ export interface EnqueueDownOptions {
 export interface WaitOptions {
   /** One budget (ms) for the whole group. Default: no limit */
   timeoutMs?: number;
+  /**
+   * Stop waiting when it aborts — the jobs go on: the wait rejects with a
+   * `RunAbortedError` whose `cause` is the signal's `reason` and whose
+   * `context.finished` lists the jobs that finished before it.
+   */
+  signal?: AbortSignal;
   /** A QueueEvents instance to listen on, when the facade was not given one */
   queueEvents?: BullMQQueueEventsLike;
 }
@@ -826,7 +832,7 @@ export interface MigrationJobView {
  * What a worker accepts from a job's payload beyond "apply what is pending, in
  * order". Anything that can write to Redis can enqueue, so the requests that
  * go further are opt-in; a job asking for one that is off fails as
- * `QUEUE_JOB_INVALID` (`context.permission`) before anything runs.
+ * `ALX_ERR_QUEUE_JOB_INVALID` (`context.permission`) before anything runs.
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
 export interface MigrationJobPermissions {
@@ -905,8 +911,12 @@ export interface MigrationProcessor {
    * job put back must not be fetched again by the same worker.
    */
   shutdown(reason?: string): void;
-  /** `shutdown()`, let the job in flight settle, disconnect a kit the processor created */
-  close(): Promise<void>;
+  /**
+   * `shutdown()`, let the job in flight settle, disconnect a kit the processor
+   * created. `timeoutMs` bounds the wait: a job still running then is left to
+   * end on its own, and the kit is disconnected once it does.
+   */
+  close(options?: { timeoutMs?: number }): Promise<void>;
 }
 
 /**
@@ -967,8 +977,13 @@ export interface BackgroundProcessor {
    * comes back. Irreversible.
    */
   shutdown(reason?: string): void;
-  /** `shutdown()`, let the jobs in flight settle, disconnect a kit the processor created */
-  close(): Promise<void>;
+  /**
+   * `shutdown()`, let the jobs in flight settle, disconnect a kit the processor
+   * created. `timeoutMs` bounds the wait: lanes still at work then are left to
+   * end on their own (their leases expire), and the kit is disconnected once
+   * they do.
+   */
+  close(options?: { timeoutMs?: number }): Promise<void>;
   /** A coordinator for every background migration with work to do — what a worker does at start */
   heal(): Promise<BackgroundEnqueueResult>;
 }
@@ -1074,6 +1089,7 @@ export function waitForGroup(options: {
   /** The group's converge job, waited for last */
   converge?: { id: string };
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<GroupWaitResult>;
 
 // ─── Facade ────────────────────────────────────────────────────────────────────
@@ -1246,12 +1262,17 @@ export class MigrationQueue<
   /**
    * Enqueue pending migrations — all, up to `options.to`, or the one
    * `filename` — as one job each, under a single shared batch.
+   * @throws {QueueClosedError} ALX_ERR_QUEUE_CLOSED — the queue is closed or closing
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — bad options, or a permission `allow` withholds
+   * @throws {MigrationBlockedError} ALX_ERR_MIGRATION_BLOCKED — an `ordered` single file out of sequence
    */
   enqueueUp(filename?: string, options?: EnqueueUpOptions): Promise<MigrationGroup>;
   /**
    * Enqueue a rollback — the last batch, `options.batch`, the last
    * `options.steps`, everything after `options.to`, or the one `filename` —
    * newest applied first.
+   * @throws {QueueClosedError} ALX_ERR_QUEUE_CLOSED — the queue is closed or closing
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — bad options, or a permission `allow` withholds
    */
   enqueueDown(filename?: string, options?: EnqueueDownOptions): Promise<MigrationGroup>;
   /**
@@ -1301,6 +1322,8 @@ export class MigrationQueue<
    * MongoDB first, so an unreachable database fails here rather than on the
    * first job. Calling it again resolves the same worker — or, after a start
    * that failed, tries again.
+   * @throws {QueueClosedError} ALX_ERR_QUEUE_CLOSED — the queue is closed or closing
+   * @throws {ConnectionFailedError} ALX_ERR_CONNECTION_FAILED — MongoDB could not be reached
    */
   startWorker(options?: StartWorkerOptions): Promise<W>;
   /**
@@ -1337,7 +1360,8 @@ export class MigrationQueue<
    * `force` skips waiting for the job in flight — whose migration body, if
    * running, keeps its connection: a kit this object created is disconnected
    * once it settles. Injected instances, the Redis connection and an injected
-   * kit are left open. Idempotent.
+   * kit are left open. Idempotent. Every step is attempted; the first
+   * failure is what it rejects with, and the others are warned about.
    */
   close(options?: { force?: boolean }): Promise<void>;
 }

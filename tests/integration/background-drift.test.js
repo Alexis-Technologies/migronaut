@@ -4,7 +4,7 @@ const { ObjectId } = require('mongodb');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_drift_test';
 
 before(async () => {
@@ -24,7 +24,7 @@ beforeEach(async () => {
 });
 
 const kits = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const kit of kits.splice(0)) await kit.disconnect();
@@ -32,12 +32,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const step = (from, to, extra = '') => `export const background = {
   collection: 'orders',
@@ -92,7 +92,10 @@ describe('drift watch (integration)', () => {
       (await kit.verifyBackground({ onDrift: 'reopen' })).drift[0].action,
       'reopened',
     );
-    await assert.rejects(kit.verifyBackground({ onDrift: 'ignore' }), /onDrift/);
+    await assert.rejects(kit.verifyBackground({ onDrift: 'ignore' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /onDrift/,
+    });
   });
 
   it('should let a chain v1 → v2 → v3 converge on its own', async () => {
@@ -192,7 +195,9 @@ describe('audit — background migrations (integration)', () => {
     await mongo.db.collection('things').insertOne({ a: 1 });
     await kit.up();
     await kit.runBackground('0001-v2.js');
-    await assert.rejects(kit.runBackground('0002-broken.js'));
+    await assert.rejects(kit.runBackground('0002-broken.js'), {
+      code: 'ALX_ERR_BACKGROUND_FAILED',
+    });
     await orders().insertOne({ __v: 1, __rev: 0 });
     const failing = await checkOf(kit);
     assert.strictEqual(failing.status, 'fail');

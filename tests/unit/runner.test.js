@@ -6,9 +6,9 @@ const {
   MigrationTimeoutError,
   TransactionsUnsupportedError,
 } = require('../../src/errors/index.js');
-const { keepEventLoopAlive } = require('../helpers/event-loop.js');
+const { flush, settleWithTimers } = require('../helpers/event-loop.js');
 
-function makeContext() {
+const makeContext = () => {
   // withTransaction is the driver's retry-aware wrapper: it runs the body,
   // commits on success and aborts on throw. The stub mirrors that contract.
   const session = {
@@ -29,7 +29,7 @@ function makeContext() {
   const client = { startSession: mock.fn(() => session) };
   const context = { client, db: {} };
   return { context, session };
-}
+};
 
 describe('runMigration', () => {
   it('should run up without a transaction when useTransaction is false', async () => {
@@ -200,41 +200,36 @@ describe('runMigration', () => {
     assert.match(warn.mock.calls[0].arguments[0], /onError hook failed/);
   });
 
-  it('should not surface an unhandledRejection when a timed-out body later rejects', async () => {
+  it('should not surface an unhandledRejection when a timed-out body later rejects', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     const { context, session } = makeContext();
     const unhandled = [];
     const onUnhandled = (reason) => unhandled.push(reason);
     process.on('unhandledRejection', onUnhandled);
-    // `up` never settles on its own and the context is a mock, so the unref'ed
-    // timeout timer is the only pending handle — see tests/helpers/event-loop.js.
-    const release = keepEventLoopAlive();
     try {
-      let rejectLater;
+      let rejectLater = null;
       const migration = {
         up: mock.fn(() => new Promise((_resolve, reject) => (rejectLater = reject))),
         down: mock.fn(),
       };
-      await assert.rejects(
-        runMigration({
-          name: 'slow.ts',
-          migration,
-          direction: 'up',
-          context,
-          useTransaction: true,
-          timeoutMs: 20,
-        }),
-        MigrationTimeoutError,
-      );
+      const run = runMigration({
+        name: 'slow.ts',
+        migration,
+        direction: 'up',
+        context,
+        useTransaction: true,
+        timeoutMs: 20,
+      });
+      await assert.rejects(settleWithTimers(t.mock.timers, run), MigrationTimeoutError);
       // The session is already ended (finally block) while the body still
       // runs — its late rejection mirrors the MongoExpiredSessionError case
       // and must be swallowed, not escalated to the process.
       assert.strictEqual(session.endSession.mock.callCount(), 1);
       rejectLater(new Error('post-timeout failure'));
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
+      await flush();
+      await flush();
       assert.deepStrictEqual(unhandled, []);
     } finally {
-      release();
       process.off('unhandledRejection', onUnhandled);
     }
   });
@@ -242,7 +237,7 @@ describe('runMigration', () => {
   it('should wrap a non-Error throw in MigrationExecutionFailedError', async () => {
     const { context } = makeContext();
     const migration = {
-      // eslint-disable-next-line prefer-promise-reject-errors -- intentionally tests the non-Error-throw wrapping path
+      // oxlint-disable-next-line prefer-promise-reject-errors -- intentionally tests the non-Error-throw wrapping path
       up: mock.fn(() => Promise.reject('string failure')),
       down: mock.fn(() => Promise.resolve(undefined)),
     };
@@ -284,7 +279,7 @@ describe('a standalone server refusing a transaction', () => {
     ['as the driver threw it up to 6.x', plain],
     ['wrapped, as driver 7 throws it', wrapped],
   ]) {
-    it(`should be TRANSACTIONS_UNSUPPORTED, in the server’s words — ${label}`, async () => {
+    it(`should be ALX_ERR_TRANSACTIONS_UNSUPPORTED, in the server’s words — ${label}`, async () => {
       const { context } = makeContext();
       const refusal = make();
       const migration = { up: () => Promise.reject(refusal), down: async () => undefined };
@@ -363,15 +358,17 @@ describe('runMigration — changelog-write phase (non-transactional)', () => {
         hooks: { onError },
         onSuccess: () => Promise.reject(new Error('boom')),
       }),
+      { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' },
     );
     assert.strictEqual(onError.mock.callCount(), 0);
   });
 });
 
 describe('runMigration — timeout aborts ctx.signal', () => {
-  it('should abort the context signal when the timeout fires', async () => {
+  it('should abort the context signal when the timeout fires', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     const { context } = makeContext();
-    let observedSignal;
+    let observedSignal = null;
     const migration = {
       // A cooperative body: parks forever unless the signal tells it to stop.
       up: (ctx) => {
@@ -382,24 +379,15 @@ describe('runMigration — timeout aborts ctx.signal', () => {
       },
       down: () => Promise.resolve(undefined),
     };
-    // `up` never settles on its own and the context is a mock, so the unref'ed
-    // timeout timer is the only pending handle — see tests/helpers/event-loop.js.
-    const release = keepEventLoopAlive();
-    try {
-      await assert.rejects(
-        runMigration({
-          name: 'slow.ts',
-          migration,
-          direction: 'up',
-          context,
-          useTransaction: false,
-          timeoutMs: 20,
-        }),
-        MigrationTimeoutError,
-      );
-    } finally {
-      release();
-    }
+    const run = runMigration({
+      name: 'slow.ts',
+      migration,
+      direction: 'up',
+      context,
+      useTransaction: false,
+      timeoutMs: 20,
+    });
+    await assert.rejects(settleWithTimers(t.mock.timers, run), MigrationTimeoutError);
     assert.ok(observedSignal.aborted, 'ctx.signal must be aborted on timeout');
     assert.ok(observedSignal.reason instanceof MigrationTimeoutError);
   });
@@ -407,7 +395,7 @@ describe('runMigration — timeout aborts ctx.signal', () => {
   it('should compose the run signal with the timeout signal', async () => {
     const { context } = makeContext();
     const runController = new AbortController();
-    let observedSignal;
+    let observedSignal = null;
     const migration = {
       up: (ctx) => {
         observedSignal = ctx.signal;
@@ -455,7 +443,7 @@ describe('runMigration — failure timing', () => {
 
 describe('runMigration — onError always gets a whole context', () => {
   it('should hand it a first attempt’s context when the session would not start', async () => {
-    let failedWith;
+    let failedWith = null;
     await assert.rejects(
       runMigration({
         name: 'a.ts',
@@ -490,7 +478,7 @@ describe('runMigration — onError always gets a whole context', () => {
 
 describe('runMigration — a context per attempt', () => {
   /** A session whose withTransaction runs the body twice, as the driver does after a transient error */
-  function retryingContext() {
+  const retryingContext = () => {
     const session = {
       withTransaction: mock.fn(async (body) => {
         try {
@@ -503,7 +491,7 @@ describe('runMigration — a context per attempt', () => {
       endSession: mock.fn(() => Promise.resolve(undefined)),
     };
     return { context: { client: { startSession: () => session }, db: {} }, session };
-  }
+  };
 
   it('should add what attemptContext returns, and count one attempt without a transaction', async () => {
     const { context } = makeContext();
@@ -555,7 +543,7 @@ describe('runMigration — a context per attempt', () => {
 
   it('should hand onError the context of the attempt that failed last', async () => {
     const { context } = retryingContext();
-    let failedWith;
+    let failedWith = null;
     await assert.rejects(
       runMigration({
         name: 'a.ts',

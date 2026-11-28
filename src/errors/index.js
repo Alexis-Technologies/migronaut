@@ -1,50 +1,50 @@
 /**
- * Base error for all migronaut failures. Carries a typed `code`, an optional
- * `context`, and — when the failure wraps another error — that error as
- * `cause`.
+ * Every class takes `(message, options = {})`, as `Error` does: `options.cause` is the error it
+ * wraps and `options.context` plain, JSON-safe data about the failure. Only this base class reads
+ * `options.code` — each subclass sets its own. `options` goes to `Error` whole, so `cause` is set
+ * only when given.
  *
- * The cause is a real Error, not a string, so `err.cause.stack` still points
- * into the user's own migration. Wrap sites additionally keep the *message* in
- * `context.cause`, because that is what survives JSON serialization for
- * `--json` consumers.
+ * Every instance has `code` and `context` (`{}` when nothing was given), so
+ * code that reads an error never asks whether the field exists, and
+ * `context.results` can be attached to any of them.
+ *
+ * The cause is a real Error, not a string, so `error.cause.stack` still points
+ * into the user's own migration. Wrap sites additionally keep its redacted
+ * message in `context.cause`, because that is what survives JSON
+ * serialization for `--json` consumers.
  */
 class MigronautError extends Error {
-  constructor(code, message, context, options) {
-    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
+  constructor(message, options = {}) {
+    const { code, context = {} } = options;
+    super(message, options);
     this.name = 'MigronautError';
     this.code = code;
-    if (context !== undefined) {
-      this.context = context;
-    }
-    Error.captureStackTrace(this, this.constructor);
+    this.context = context;
   }
 }
 
-/** Thrown when a lock is already held by another process within its TTL */
 class LockAlreadyHeldError extends MigronautError {
-  constructor(message, context, options) {
-    super('LOCK_ALREADY_HELD', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'LockAlreadyHeldError';
+    this.code = 'ALX_ERR_LOCK_ALREADY_HELD';
   }
 }
 
-/** Thrown when releasing a lock fails */
 class LockReleaseFailedError extends MigronautError {
-  constructor(message, context, options) {
-    super('LOCK_RELEASE_FAILED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'LockReleaseFailedError';
+    this.code = 'ALX_ERR_LOCK_RELEASE_FAILED';
   }
 }
 
-/**
- * Thrown when the lock is lost while migrations are still running — another
- * process reclaimed it, or the heartbeat could not reach the database. The run
- * stops rather than risk two processes migrating the same database at once.
- */
+/** The run stops rather than risk two processes migrating the same database at once. */
 class LockLostError extends MigronautError {
-  constructor(message, context, options) {
-    super('LOCK_LOST', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'LockLostError';
+    this.code = 'ALX_ERR_LOCK_LOST';
   }
 }
 
@@ -53,141 +53,166 @@ class LockLostError extends MigronautError {
  * SIGINT/SIGTERM. Migrations already applied are listed in `context.results`.
  */
 class RunAbortedError extends MigronautError {
-  constructor(message, context, options) {
-    super('RUN_ABORTED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'RunAbortedError';
+    this.code = 'ALX_ERR_RUN_ABORTED';
   }
 }
 
-/** Thrown when a user-supplied lifecycle hook throws */
+/**
+ * Thrown when a run is asked of a MigratorKit that already has one in flight, or when it is
+ * disconnected under one: one instance runs one thing at a time, and a second run would clobber the
+ * first one's state.
+ */
+class RunInFlightError extends MigronautError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'RunInFlightError';
+    this.code = 'ALX_ERR_RUN_IN_FLIGHT';
+  }
+}
+
 class HookFailedError extends MigronautError {
-  constructor(message, context, options) {
-    super('HOOK_FAILED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'HookFailedError';
+    this.code = 'ALX_ERR_HOOK_FAILED';
   }
 }
 
 /** Thrown when `migronaut create` would overwrite an existing migration file */
 class MigrationFileExistsError extends MigronautError {
-  constructor(message, context, options) {
-    super('MIGRATION_FILE_EXISTS', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'MigrationFileExistsError';
+    this.code = 'ALX_ERR_MIGRATION_FILE_EXISTS';
   }
 }
 
-/** Thrown when a file's checksum differs from the one recorded at apply time */
 class ChecksumMismatchError extends MigronautError {
-  constructor(message, context, options) {
-    super('CHECKSUM_MISMATCH', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'ChecksumMismatchError';
+    this.code = 'ALX_ERR_CHECKSUM_MISMATCH';
   }
 }
 
-/** Thrown when a referenced migration file does not exist on disk */
 class MigrationFileNotFoundError extends MigronautError {
-  constructor(message, context, options) {
-    super('MIGRATION_FILE_NOT_FOUND', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'MigrationFileNotFoundError';
+    this.code = 'ALX_ERR_MIGRATION_FILE_NOT_FOUND';
   }
 }
 
-/**
- * Thrown when a migration name is not a plain filename — e.g. it contains a
- * path separator or `..`, which would let a target escape the migrations
- * directory (path traversal) when joined into a filesystem path.
- */
 class MigrationInvalidNameError extends MigronautError {
-  constructor(message, context, options) {
-    super('MIGRATION_INVALID_NAME', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'MigrationInvalidNameError';
+    this.code = 'ALX_ERR_MIGRATION_INVALID_NAME';
   }
 }
 
-/** Thrown when a migration file does not export valid up()/down() functions */
 class MigrationInvalidExportError extends MigronautError {
-  constructor(message, context, options) {
-    super('MIGRATION_INVALID_EXPORT', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'MigrationInvalidExportError';
+    this.code = 'ALX_ERR_MIGRATION_INVALID_EXPORT';
   }
 }
 
-/** Thrown when a migration's up() or down() throws during execution */
+class MigrationLoadFailedError extends MigronautError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'MigrationLoadFailedError';
+    this.code = 'ALX_ERR_MIGRATION_LOAD_FAILED';
+  }
+}
+
 class MigrationExecutionFailedError extends MigronautError {
-  constructor(message, context, options) {
-    super('MIGRATION_EXECUTION_FAILED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'MigrationExecutionFailedError';
+    this.code = 'ALX_ERR_MIGRATION_EXECUTION_FAILED';
   }
 }
 
 /**
- * Thrown when a migration exceeds its `timeoutMs`. Best-effort: the migration's
- * own work cannot be cancelled, but the run stops instead of hanging, letting
- * the lock's TTL expire so other instances are not blocked forever.
+ * Best-effort: the migration's own work cannot be cancelled, but the run stops instead of hanging,
+ * letting the lock's TTL expire so other instances are not blocked forever.
  */
 class MigrationTimeoutError extends MigronautError {
-  constructor(message, context, options) {
-    super('MIGRATION_TIMEOUT', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'MigrationTimeoutError';
+    this.code = 'ALX_ERR_MIGRATION_TIMEOUT';
   }
 }
 
-/**
- * Thrown when `useTransaction` is on but the deployment cannot run
- * transactions (a standalone server — they need a replica set or mongos).
- * A dedicated code, because the driver's own error blames the migration.
- */
+/** A dedicated code, because the driver's own error blames the migration. */
 class TransactionsUnsupportedError extends MigronautError {
-  constructor(message, context, options) {
-    super('TRANSACTIONS_UNSUPPORTED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'TransactionsUnsupportedError';
+    this.code = 'ALX_ERR_TRANSACTIONS_UNSUPPORTED';
   }
 }
 
-/** Thrown when the merged configuration fails validation */
 class ConfigInvalidError extends MigronautError {
-  constructor(message, context, options) {
-    super('CONFIG_INVALID', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'ConfigInvalidError';
+    this.code = 'ALX_ERR_CONFIG_INVALID';
   }
 }
 
-/** Thrown when creating a config file that already exists without `--force` */
 class ConfigFileExistsError extends MigronautError {
-  constructor(message, context, options) {
-    super('CONFIG_FILE_EXISTS', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'ConfigFileExistsError';
+    this.code = 'ALX_ERR_CONFIG_FILE_EXISTS';
   }
 }
 
-/** Thrown when connecting to MongoDB fails */
 class ConnectionFailedError extends MigronautError {
-  constructor(message, context, options) {
-    super('CONNECTION_FAILED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'ConnectionFailedError';
+    this.code = 'ALX_ERR_CONNECTION_FAILED';
   }
 }
 
-/** Thrown when attempting to revert a migration that was never applied */
+/** `cause` is the driver's error, `context.serverCode` the server's code when it gave one. */
+class DatabaseOperationFailedError extends MigronautError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'DatabaseOperationFailedError';
+    this.code = 'ALX_ERR_DATABASE_OPERATION_FAILED';
+  }
+}
+
 class NotAppliedError extends MigronautError {
-  constructor(message, context, options) {
-    super('NOT_APPLIED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'NotAppliedError';
+    this.code = 'ALX_ERR_NOT_APPLIED';
   }
 }
 
-/** Thrown when `migronaut import` targets a non-empty changelog without `--force` */
 class ImportTargetNotEmptyError extends MigronautError {
-  constructor(message, context, options) {
-    super('IMPORT_TARGET_NOT_EMPTY', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'ImportTargetNotEmptyError';
+    this.code = 'ALX_ERR_IMPORT_TARGET_NOT_EMPTY';
   }
 }
 
-/** Thrown when attempting to roll back a forward-only (imported or baselined) migration */
 class IrreversibleMigrationError extends MigronautError {
-  constructor(message, context, options) {
-    super('MIGRATION_IRREVERSIBLE', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'IrreversibleMigrationError';
+    this.code = 'ALX_ERR_MIGRATION_IRREVERSIBLE';
   }
 }
 
@@ -198,9 +223,10 @@ class IrreversibleMigrationError extends MigronautError {
  * environments with different effective apply orders.
  */
 class OutOfOrderMigrationError extends MigronautError {
-  constructor(message, context, options) {
-    super('MIGRATION_OUT_OF_ORDER', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'OutOfOrderMigrationError';
+    this.code = 'ALX_ERR_MIGRATION_OUT_OF_ORDER';
   }
 }
 
@@ -210,9 +236,10 @@ class OutOfOrderMigrationError extends MigronautError {
  * is still applied (`down`). `context.blockedBy` names what must go first.
  */
 class MigrationBlockedError extends MigronautError {
-  constructor(message, context, options) {
-    super('MIGRATION_BLOCKED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'MigrationBlockedError';
+    this.code = 'ALX_ERR_MIGRATION_BLOCKED';
   }
 }
 
@@ -222,9 +249,18 @@ class MigrationBlockedError extends MigronautError {
  * mistake of the process that reads it.
  */
 class QueueJobInvalidError extends MigronautError {
-  constructor(message, context, options) {
-    super('QUEUE_JOB_INVALID', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'QueueJobInvalidError';
+    this.code = 'ALX_ERR_QUEUE_JOB_INVALID';
+  }
+}
+
+class QueueClosedError extends MigronautError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'QueueClosedError';
+    this.code = 'ALX_ERR_QUEUE_CLOSED';
   }
 }
 
@@ -235,9 +271,10 @@ class QueueJobInvalidError extends MigronautError {
  * lists the jobs that finished before it.
  */
 class QueueJobFailedError extends MigronautError {
-  constructor(message, context, options) {
-    super('QUEUE_JOB_FAILED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'QueueJobFailedError';
+    this.code = 'ALX_ERR_QUEUE_JOB_FAILED';
   }
 }
 
@@ -254,9 +291,10 @@ class QueueJobFailedError extends MigronautError {
  * behind it.
  */
 class ConvergeFailedError extends MigronautError {
-  constructor(message, context, options) {
-    super('CONVERGE_FAILED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'ConvergeFailedError';
+    this.code = 'ALX_ERR_CONVERGE_FAILED';
   }
 }
 
@@ -269,9 +307,10 @@ class ConvergeFailedError extends MigronautError {
  * revision the caller held. The filter is never copied in — it may carry PII.
  */
 class RevisionConflictError extends MigronautError {
-  constructor(message, context, options) {
-    super('REVISION_CONFLICT', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'RevisionConflictError';
+    this.code = 'ALX_ERR_REVISION_CONFLICT';
   }
 }
 
@@ -283,9 +322,10 @@ class RevisionConflictError extends MigronautError {
  * not a document).
  */
 class ShapeVersionError extends MigronautError {
-  constructor(message, context, options) {
-    super('SHAPE_VERSION_UNSUPPORTED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'ShapeVersionError';
+    this.code = 'ALX_ERR_SHAPE_VERSION_UNSUPPORTED';
   }
 }
 
@@ -296,9 +336,10 @@ class ShapeVersionError extends MigronautError {
  * waits for, with their status.
  */
 class BackgroundPendingError extends MigronautError {
-  constructor(message, context, options) {
-    super('BACKGROUND_PENDING', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'BackgroundPendingError';
+    this.code = 'ALX_ERR_BACKGROUND_PENDING';
   }
 }
 
@@ -309,9 +350,10 @@ class BackgroundPendingError extends MigronautError {
  * `context.lastError` says what happened last.
  */
 class BackgroundFailedError extends MigronautError {
-  constructor(message, context, options) {
-    super('BACKGROUND_FAILED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'BackgroundFailedError';
+    this.code = 'ALX_ERR_BACKGROUND_FAILED';
   }
 }
 
@@ -322,9 +364,10 @@ class BackgroundFailedError extends MigronautError {
  * `context.action` what was asked.
  */
 class BackgroundConflictError extends MigronautError {
-  constructor(message, context, options) {
-    super('BACKGROUND_CONFLICT', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'BackgroundConflictError';
+    this.code = 'ALX_ERR_BACKGROUND_CONFLICT';
   }
 }
 
@@ -336,9 +379,10 @@ class BackgroundConflictError extends MigronautError {
  * every refusal even when the step caught the error itself.
  */
 class SandboxRefusedError extends MigronautError {
-  constructor(message, context, options) {
-    super('SANDBOX_REFUSED', message, context, options);
+  constructor(message, options = {}) {
+    super(message, options);
     this.name = 'SandboxRefusedError';
+    this.code = 'ALX_ERR_SANDBOX_REFUSED';
   }
 }
 
@@ -348,24 +392,28 @@ module.exports = {
   LockReleaseFailedError,
   LockLostError,
   RunAbortedError,
+  RunInFlightError,
   HookFailedError,
+  MigrationFileExistsError,
   ChecksumMismatchError,
   MigrationFileNotFoundError,
-  MigrationFileExistsError,
   MigrationInvalidNameError,
   MigrationInvalidExportError,
+  MigrationLoadFailedError,
   MigrationExecutionFailedError,
   MigrationTimeoutError,
   TransactionsUnsupportedError,
   ConfigInvalidError,
   ConfigFileExistsError,
   ConnectionFailedError,
+  DatabaseOperationFailedError,
   NotAppliedError,
   ImportTargetNotEmptyError,
   IrreversibleMigrationError,
   OutOfOrderMigrationError,
   MigrationBlockedError,
   QueueJobInvalidError,
+  QueueClosedError,
   QueueJobFailedError,
   ConvergeFailedError,
   RevisionConflictError,

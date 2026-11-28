@@ -19,18 +19,18 @@ const TEST_ARGS = ['--setParameter', 'enableTestCommands=1'];
  * `startTestMongo(db, { dedicated: true })`.
  */
 
-let replSet;
+let replSet = null;
 
-async function globalSetup() {
+const globalSetup = async () => {
   // Local runs and CI must test the same server version — CI's explicit
   // MONGOMS_VERSION still wins.
   process.env.MONGOMS_VERSION ??= '7.0.14';
   replSet = await MongoMemoryReplSet.create({ replSet: { count: 1, args: TEST_ARGS } });
   process.env.MIGRONAUT_TEST_MONGO_URI = replSet.getUri();
-}
+};
 
-async function globalTeardown() {
+const globalTeardown = async () => {
   await replSet?.stop();
-}
+};
 
 module.exports = { globalSetup, globalTeardown };

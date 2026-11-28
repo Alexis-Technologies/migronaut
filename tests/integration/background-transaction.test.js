@@ -7,7 +7,7 @@ const { updateWithRevision } = require('../../versioning.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_transaction_test';
 const NAME = '0001-orders.js';
 
@@ -27,7 +27,7 @@ beforeEach(async () => {
 });
 
 const kits = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const kit of kits.splice(0)) await kit.disconnect();
@@ -36,12 +36,12 @@ afterEach(async () => {
   for (const key of ['__txnHook']) delete globalThis[key];
 });
 
-function kitWith(uri = mongo.uri, dbName = DB, overrides = {}) {
+const kitWith = (uri = mongo.uri, dbName = DB, overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(uri, dbName, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const TRANSACTIONAL = `export const background = {
   collection: 'orders',
@@ -60,13 +60,13 @@ const TRANSACTIONAL = `export const background = {
 };
 `;
 
-async function seed(count) {
+const seed = async (count) => {
   await mongo.db
     .collection('orders')
     .insertMany(
       Array.from({ length: count }, (_, i) => ({ __v: 1, __rev: 0, address: `A${i}`, i })),
     );
-}
+};
 
 const transient = () =>
   Object.assign(new Error('injected transient error'), {
@@ -262,8 +262,8 @@ describe('transactional background migrations (integration)', () => {
 });
 
 describe('transactional background migrations on a standalone server (integration)', () => {
-  let standalone;
-  let client;
+  let standalone = null;
+  let client = null;
 
   before(async () => {
     standalone = await MongoMemoryServer.create();
@@ -276,7 +276,7 @@ describe('transactional background migrations on a standalone server (integratio
     await standalone.stop();
   });
 
-  it('should fail with TRANSACTIONS_UNSUPPORTED, writing nothing', async () => {
+  it('should fail with ALX_ERR_TRANSACTIONS_UNSUPPORTED, writing nothing', async () => {
     const db = client.db('standalone_bg');
     await db.collection('orders').insertMany([{ __v: 1, address: 'x' }]);
     const kit = kitWith(standalone.getUri(), 'standalone_bg');

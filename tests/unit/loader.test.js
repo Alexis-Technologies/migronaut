@@ -13,13 +13,14 @@ const { describe, it } = require('node:test');
 const {
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
+  MigrationLoadFailedError,
 } = require('../../src/errors/index.js');
 const {
   importMigrationModule,
   loadMigrationFile,
   resolveMigrationExports,
-  tsLoadErrorOrNull,
-  tsLoadMessageOrNull,
+  toTsLoadError,
+  explainTsLoad,
 } = require('../../src/utils/loader.js');
 
 const here = __dirname;
@@ -63,11 +64,62 @@ describe('loadMigrationFile', () => {
     );
   });
 
-  it('should rethrow a non-TypeScript import failure unchanged', async () => {
-    await assert.rejects(
-      loadMigrationFile(path.join(fixtures, 'throws-on-import.cjs')),
-      /boom at import time/,
+  it('should type a non-TypeScript import failure, the original as its cause', async () => {
+    const file = path.join(fixtures, 'throws-on-import.cjs');
+    await assert.rejects(loadMigrationFile(file), (error) => {
+      assert.ok(error instanceof MigrationLoadFailedError);
+      assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_LOAD_FAILED');
+      assert.match(error.cause.message, /boom at import time/);
+      assert.match(error.context.cause, /boom at import time/);
+      // Relative to the working directory: an absolute path names the user's home.
+      assert.strictEqual(error.context.filepath, path.relative(process.cwd(), file));
+      return true;
+    });
+  });
+});
+
+describe('resolveMigrationExports', () => {
+  const up = async () => undefined;
+  const down = async () => undefined;
+
+  it('should refuse an optional export that is present but not of its kind', () => {
+    const cases = [
+      [{ useTransaction: 'true' }, /useTransaction must be a boolean/],
+      [{ timeoutMs: '5000' }, /timeoutMs must be a positive integer/],
+      [{ timeoutMs: 0 }, /timeoutMs must be a positive integer/],
+      [{ timeoutMs: 2 ** 31 }, /at most 2147483647/],
+      [{ description: 1 }, /description must be a string/],
+    ];
+    for (const [extra, message] of cases) {
+      assert.throws(() => resolveMigrationExports({ up, down, ...extra }, 'x.js'), {
+        code: 'ALX_ERR_MIGRATION_INVALID_EXPORT',
+        message,
+      });
+    }
+  });
+
+  it('should refuse a known export mistyped, and name the one it meant', () => {
+    const cases = [
+      ['useTransactions', 'useTransaction'],
+      ['timeoutMS', 'timeoutMs'],
+      ['require', 'requires'],
+      ['Description', 'description'],
+    ];
+    for (const [typo, meant] of cases) {
+      assert.throws(() => resolveMigrationExports({ up, down, [typo]: true }, 'x.js'), {
+        code: 'ALX_ERR_MIGRATION_INVALID_EXPORT',
+        message: `Unknown export '${typo}' — did you mean '${meant}'?`,
+      });
+    }
+  });
+
+  it('should leave the module its own helpers, and an export left undefined', () => {
+    const migration = resolveMigrationExports(
+      { up, down, seedUsers: () => undefined, timeoutMs: undefined },
+      'x.js',
     );
+    assert.strictEqual(migration.up, up);
+    assert.strictEqual(migration.timeoutMs, undefined);
   });
 });
 
@@ -143,72 +195,61 @@ describe('loadMigrationFile — reload', () => {
   });
 });
 
-describe('tsLoadErrorOrNull', () => {
+describe('toTsLoadError', () => {
   const unknownExt = {
     code: 'ERR_UNKNOWN_FILE_EXTENSION',
     message: 'Unknown file extension ".ts"',
   };
 
   it('should map an unknown-extension failure on a .ts file to a clear error', () => {
-    const result = tsLoadErrorOrNull('/migrations/0001-x.ts', unknownExt);
+    const result = toTsLoadError('/migrations/0001-x.ts', unknownExt);
     assert.ok(result instanceof MigrationInvalidExportError);
     assert.ok(result.message.includes('TypeScript'));
   });
 
   it('should also handle .mts and .cts files', () => {
-    assert.ok(
-      tsLoadErrorOrNull('/m/0001-x.mts', unknownExt) instanceof MigrationInvalidExportError,
-    );
-    assert.ok(
-      tsLoadErrorOrNull('/m/0001-x.cts', unknownExt) instanceof MigrationInvalidExportError,
-    );
+    assert.ok(toTsLoadError('/m/0001-x.mts', unknownExt) instanceof MigrationInvalidExportError);
+    assert.ok(toTsLoadError('/m/0001-x.cts', unknownExt) instanceof MigrationInvalidExportError);
   });
 
   it('should return null for a .js file (not a TypeScript problem)', () => {
-    assert.strictEqual(tsLoadErrorOrNull('/migrations/0001-x.js', unknownExt), null);
+    assert.strictEqual(toTsLoadError('/migrations/0001-x.js', unknownExt), null);
   });
 
   it('should return null when the error is unrelated to the file extension', () => {
-    assert.strictEqual(tsLoadErrorOrNull('/migrations/0001-x.ts', new Error('boom')), null);
+    assert.strictEqual(toTsLoadError('/migrations/0001-x.ts', new Error('boom')), null);
   });
 
   it('should return null when the error is not an object', () => {
-    assert.strictEqual(tsLoadErrorOrNull('/migrations/0001-x.ts', 'a string error'), null);
-    assert.strictEqual(tsLoadErrorOrNull('/migrations/0001-x.ts', null), null);
+    assert.strictEqual(toTsLoadError('/migrations/0001-x.ts', 'a string error'), null);
+    assert.strictEqual(toTsLoadError('/migrations/0001-x.ts', null), null);
   });
 
   it('should detect the failure via the error message on an Error instance', () => {
-    const err = new Error('Unknown file extension ".ts" for /x.ts');
-    const result = tsLoadErrorOrNull('/migrations/0001-x.ts', err);
+    const error = new Error('Unknown file extension ".ts" for /x.ts');
+    const result = toTsLoadError('/migrations/0001-x.ts', error);
     assert.ok(result instanceof MigrationInvalidExportError);
-    assert.strictEqual(result.context?.cause, err.message);
+    assert.strictEqual(result.context?.cause, error.message);
   });
 });
 
-describe('tsLoadMessageOrNull', () => {
+describe('explainTsLoad', () => {
   it('should name what the file is', () => {
-    const message = tsLoadMessageOrNull(
+    const message = explainTsLoad(
       '/collections/users.ts',
       { code: 'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX' },
       'collection definition',
     );
     assert.match(message, /^Cannot load TypeScript collection definition "users\.ts"/);
     assert.match(
-      tsLoadMessageOrNull(
-        '/c/x.mts',
-        { code: 'ERR_UNKNOWN_FILE_EXTENSION' },
-        'collection definition',
-      ),
+      explainTsLoad('/c/x.mts', { code: 'ERR_UNKNOWN_FILE_EXTENSION' }, 'collection definition'),
       /author the collection definition as \.js/,
     );
   });
 
   it('should stay silent for anything that is not a TypeScript load failure', () => {
-    assert.strictEqual(
-      tsLoadMessageOrNull('/c/x.js', { code: 'ERR_UNKNOWN_FILE_EXTENSION' }, 'x'),
-      null,
-    );
-    assert.strictEqual(tsLoadMessageOrNull('/c/x.ts', new Error('boom'), 'x'), null);
+    assert.strictEqual(explainTsLoad('/c/x.js', { code: 'ERR_UNKNOWN_FILE_EXTENSION' }, 'x'), null);
+    assert.strictEqual(explainTsLoad('/c/x.ts', new Error('boom'), 'x'), null);
   });
 });
 
@@ -225,7 +266,7 @@ describe('loadMigrationFile — background migrations and requires', () => {
   it('should refuse a background file that also exports up or down', async () => {
     await assert.rejects(
       loadMigrationFile(path.join(fixtures, '0101-background-with-up.cjs'), {}),
-      /exports no up\(\) or down\(\)/,
+      { code: 'ALX_ERR_MIGRATION_INVALID_EXPORT', message: /exports no up\(\) or down\(\)/ },
     );
   });
 
@@ -235,7 +276,7 @@ describe('loadMigrationFile — background migrations and requires', () => {
     await assert.rejects(
       loadMigrationFile(path.join(fixtures, '0102-requires-later.cjs')),
       (error) =>
-        error.code === 'MIGRATION_INVALID_EXPORT' &&
+        error.code === 'ALX_ERR_MIGRATION_INVALID_EXPORT' &&
         /must name an earlier migration/.test(error.message),
     );
   });

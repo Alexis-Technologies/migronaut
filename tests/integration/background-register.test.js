@@ -2,7 +2,7 @@ const { mkdirSync, writeFileSync } = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
-const { BackgroundStore } = require('../../src/core/background-store.js');
+const { BackgroundStore } = require('../../src/core/background/store.js');
 const {
   IrreversibleMigrationError,
   MigrationInvalidExportError,
@@ -10,7 +10,7 @@ const {
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_register_test';
 
 before(async () => {
@@ -26,7 +26,7 @@ beforeEach(async () => {
 });
 
 const kits = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const kit of kits.splice(0)) await kit.disconnect();
@@ -34,12 +34,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const store = () => new BackgroundStore(mongo.db, '_migronaut_background');
 
@@ -134,14 +134,20 @@ export const background = { collection: 'orders', from: 1, to: 2, migrate: (doc)
   it('should refuse an invalid spec, and one that targets a migronaut collection', async () => {
     const kit = kitWith();
     project.write('0001-bad.js', `export const background = { collection: 'orders', from: 1 };\n`);
-    await assert.rejects(kit.up(), /Invalid background migration 0001-bad\.js/);
+    await assert.rejects(kit.up(), {
+      code: 'ALX_ERR_MIGRATION_INVALID_EXPORT',
+      message: /Invalid background migration 0001-bad\.js/,
+    });
     // Rewritten in place: a fresh import, past the ESM cache.
     const other = kitWith({ reloadMigrations: true });
     project.write(
       '0001-bad.js',
       `export const background = { collection: '_migronaut_locks', from: 1, to: 2, migrate: (d) => d };\n`,
     );
-    await assert.rejects(other.up(), /one of migronaut's own collections/);
+    await assert.rejects(other.up(), {
+      code: 'ALX_ERR_MIGRATION_INVALID_EXPORT',
+      message: /one of migronaut's own collections/,
+    });
   });
 
   it('should take the field names and the version check from the declared collection', async () => {
@@ -157,7 +163,7 @@ export const background = { collection: 'orders', from: 1, to: 2, migrate: (doc)
     );
     await assert.rejects(
       kitWith({ collections: [{ name: 'orders', versioning: { current: 2 } }] }).up(),
-      /raise current first/,
+      { code: 'ALX_ERR_MIGRATION_INVALID_EXPORT', message: /raise current first/ },
     );
   });
 
@@ -278,10 +284,10 @@ export const background = { collection: 'orders', from: 1, to: 2, migrate: (doc)
 
   it('should refuse a template for a background migration in the kit too, not only the CLI', async () => {
     const kit = kitWith();
-    await assert.rejects(
-      kit.create('orders v2', { background: true, template: 'custom.js' }),
-      /do not combine/,
-    );
+    await assert.rejects(kit.create('orders v2', { background: true, template: 'custom.js' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /do not combine/,
+    });
   });
 
   it('should refuse a file with both background and up/down', async () => {
@@ -293,6 +299,9 @@ export async function down() {}
 export const background = { collection: 'orders', from: 1, to: 2, migrate: (d) => d };
 `,
     );
-    await assert.rejects(kit.up(), /exports no up\(\) or down\(\)/);
+    await assert.rejects(kit.up(), {
+      code: 'ALX_ERR_MIGRATION_INVALID_EXPORT',
+      message: /exports no up\(\) or down\(\)/,
+    });
   });
 });

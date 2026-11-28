@@ -26,7 +26,7 @@ class OnDemandReader extends MetricReader {
  * own, so registering here cannot leak into another test file — call `stop()`
  * in `after` all the same.
  */
-function startTracing() {
+const startTracing = () => {
   const exporter = new InMemorySpanExporter();
   const provider = new NodeTracerProvider({
     spanProcessors: [new SimpleSpanProcessor(exporter)],
@@ -46,7 +46,7 @@ function startTracing() {
       propagation.disable();
     },
   };
-}
+};
 
 /** Span id of a finished span's parent, or undefined for a root span */
 const parentIdOf = (span) => span.parentSpanContext?.spanId;
@@ -55,7 +55,7 @@ const parentIdOf = (span) => span.parentSpanContext?.spanId;
  * A real meter with a fresh provider, so one test's data points never show up
  * in another's. `collect()` resolves `{ [instrument name]: dataPoints[] }`.
  */
-function startMetrics() {
+const startMetrics = () => {
   const reader = new OnDemandReader();
   const provider = new MeterProvider({ readers: [reader] });
   return {
@@ -72,6 +72,6 @@ function startMetrics() {
     },
     stop: () => provider.shutdown(),
   };
-}
+};
 
 module.exports = { parentIdOf, startMetrics, startTracing };

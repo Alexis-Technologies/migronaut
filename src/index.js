@@ -1,5 +1,5 @@
 const { EXIT_CODES } = require('./cli/exit-codes.js');
-const { startBackgroundRunner } = require('./core/background-runner.js');
+const { startBackgroundRunner } = require('./core/background/runner.js');
 const { MigratorKit } = require('./core/migrator.js');
 const { pendingMigrations, runMigrations } = require('./core/run.js');
 const { createLogger } = require('./utils/logger.js');
@@ -12,6 +12,7 @@ const {
   ConfigInvalidError,
   ConnectionFailedError,
   ConvergeFailedError,
+  DatabaseOperationFailedError,
   HookFailedError,
   ImportTargetNotEmptyError,
   IrreversibleMigrationError,
@@ -24,15 +25,18 @@ const {
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
   MigrationInvalidNameError,
+  MigrationLoadFailedError,
   MigrationTimeoutError,
   TransactionsUnsupportedError,
   MigronautError,
   NotAppliedError,
   OutOfOrderMigrationError,
+  QueueClosedError,
   QueueJobFailedError,
   QueueJobInvalidError,
   RevisionConflictError,
   RunAbortedError,
+  RunInFlightError,
   SandboxRefusedError,
   ShapeVersionError,
 } = require('./errors/index.js');
@@ -65,6 +69,7 @@ module.exports = {
   ConfigInvalidError,
   ConnectionFailedError,
   ConvergeFailedError,
+  DatabaseOperationFailedError,
   HookFailedError,
   ImportTargetNotEmptyError,
   IrreversibleMigrationError,
@@ -77,15 +82,18 @@ module.exports = {
   MigrationFileNotFoundError,
   MigrationInvalidExportError,
   MigrationInvalidNameError,
+  MigrationLoadFailedError,
   MigrationTimeoutError,
   TransactionsUnsupportedError,
   MigronautError,
   NotAppliedError,
   OutOfOrderMigrationError,
+  QueueClosedError,
   QueueJobFailedError,
   QueueJobInvalidError,
   RevisionConflictError,
   RunAbortedError,
+  RunInFlightError,
   SandboxRefusedError,
   ShapeVersionError,
 };

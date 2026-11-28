@@ -5,6 +5,17 @@
  * application's repository layer pays for nothing else (pinned by a test).
  */
 
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+const PIPELINE_FIELD_STAGES = new Set(['$set', '$addFields']);
+
+const PIPELINE_WHOLE_STAGES = new Set(['$project', '$replaceRoot', '$replaceWith']);
+
+const LOGICAL = new Set(['$and', '$or', '$nor']);
+
+/** `"$__rev"` or `"$__rev.x"` inside a serialized `$expr` — not `"$__revision"` */
+const references = new Map();
+
 const isPlainObject = (value) => {
   if (value === null || typeof value !== 'object') return false;
   const proto = Object.getPrototypeOf(value);
@@ -12,26 +23,25 @@ const isPlainObject = (value) => {
 };
 
 /** A BSON value class from the driver (`Int32`, `Long`, `ObjectId`, …) */
-const bsonType = (value) =>
-  value !== null && typeof value === 'object' && typeof value._bsontype === 'string'
+const readBsonType = (value) => {
+  return value !== null && typeof value === 'object' && typeof value._bsontype === 'string'
     ? value._bsontype
     : undefined;
-
-const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+};
 
 /**
  * A non-negative safe integer from whatever the driver handed back — a plain
  * number, a `bigint` (`useBigInt64`), an `Int32`, a `Double` or a `Long`
  * (`promoteValues: false`) — or `null` when the value is not one.
  */
-function toCount(value) {
+const toCount = (value) => {
   if (typeof value === 'number') {
     return Number.isSafeInteger(value) && value >= 0 ? value : null;
   }
   if (typeof value === 'bigint') {
     return value >= 0n && value <= MAX_SAFE ? Number(value) : null;
   }
-  const type = bsonType(value);
+  const type = readBsonType(value);
   if (type === 'Int32' || type === 'Double') return toCount(Number(value.valueOf()));
   if (type === 'Long') {
     if (value.isNegative()) return null;
@@ -39,23 +49,24 @@ function toCount(value) {
     return Number.isSafeInteger(number) ? number : null;
   }
   return null;
-}
+};
 
-const bytesEqual = (a, b) => {
+const isEqualBytes = (a, b) => {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 };
 
-const binaryBytes = (value) =>
-  value.buffer.subarray(0, typeof value.position === 'number' ? value.position : undefined);
+const readBinaryBytes = (value) => {
+  return value.buffer.subarray(0, typeof value.position === 'number' ? value.position : undefined);
+};
 
 /**
  * Two BSON values of the same class. `undefined` means "cannot tell" — the
  * caller then treats them as different, which costs one rewritten field and
  * never loses a change.
  */
-function sameBsonValue(type, a, b) {
+const isSameBsonValue = (type, a, b) => {
   switch (type) {
     case 'ObjectId':
     case 'ObjectID':
@@ -67,30 +78,26 @@ function sameBsonValue(type, a, b) {
     case 'Double':
       return Object.is(Number(a.valueOf()), Number(b.valueOf()));
     case 'Decimal128':
-      return bytesEqual(a.bytes, b.bytes);
+      return isEqualBytes(a.bytes, b.bytes);
     case 'Binary':
     case 'UUID':
-      return a.sub_type === b.sub_type && bytesEqual(binaryBytes(a), binaryBytes(b));
+      return a.sub_type === b.sub_type && isEqualBytes(readBinaryBytes(a), readBinaryBytes(b));
     case 'BSONRegExp':
       return a.pattern === b.pattern && a.options === b.options;
     case 'BSONSymbol':
-      return String(a.valueOf()) === String(b.valueOf());
+      return `${a.valueOf()}` === `${b.valueOf()}`;
     case 'MinKey':
     case 'MaxKey':
       return true;
     case 'Code':
-      return a.code === b.code && sameValue(a.scope ?? null, b.scope ?? null);
+      return a.code === b.code && isSameValue(a.scope ?? null, b.scope ?? null);
     case 'DBRef':
-      return (
-        a.collection === b.collection &&
-        a.db === b.db &&
-        sameValue(a.oid, b.oid) &&
-        sameValue(a.fields ?? {}, b.fields ?? {})
-      );
+      if (a.collection !== b.collection || a.db !== b.db) return false;
+      return isSameValue(a.oid, b.oid) && isSameValue(a.fields ?? {}, b.fields ?? {});
     default:
       return undefined;
   }
-}
+};
 
 /**
  * Whether two document values would serialize to the same BSON. Key order
@@ -101,19 +108,19 @@ function sameBsonValue(type, a, b) {
  * "different": a spurious difference rewrites one field, a spurious sameness
  * would drop a change.
  */
-function sameValue(a, b) {
+const isSameValue = (a, b) => {
   if (a === b) return a !== 0 || Object.is(a, b);
   if (typeof a !== typeof b) return false;
   if (typeof a === 'number') return Number.isNaN(a) && Number.isNaN(b);
   if (a === null || b === null || typeof a !== 'object') return false;
-  const typeA = bsonType(a);
-  const typeB = bsonType(b);
+  const typeA = readBsonType(a);
+  const typeB = readBsonType(b);
   if (typeA !== undefined || typeB !== undefined) {
-    return typeA === typeB && sameBsonValue(typeA, a, b) === true;
+    return typeA === typeB && isSameBsonValue(typeA, a, b) === true;
   }
   if (Array.isArray(a)) {
     if (!Array.isArray(b) || a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) if (!sameValue(a[i], b[i])) return false;
+    for (let i = 0; i < a.length; i++) if (!isSameValue(a[i], b[i])) return false;
     return true;
   }
   if (Array.isArray(b)) return false;
@@ -122,7 +129,7 @@ function sameValue(a, b) {
     return b instanceof RegExp && a.source === b.source && a.flags === b.flags;
   }
   if (ArrayBuffer.isView(a)) {
-    return ArrayBuffer.isView(b) && a.constructor === b.constructor && bytesEqual(a, b);
+    return ArrayBuffer.isView(b) && a.constructor === b.constructor && isEqualBytes(a, b);
   }
   if (!isPlainObject(a) || !isPlainObject(b)) return false;
   const keysA = Object.keys(a);
@@ -130,10 +137,10 @@ function sameValue(a, b) {
   if (keysA.length !== keysB.length) return false;
   for (let i = 0; i < keysA.length; i++) {
     const key = keysA[i];
-    if (key !== keysB[i] || !sameValue(a[key], b[key])) return false;
+    if (key !== keysB[i] || !isSameValue(a[key], b[key])) return false;
   }
   return true;
-}
+};
 
 /**
  * A copy a transformation may mutate freely: plain objects and arrays are
@@ -141,10 +148,10 @@ function sameValue(a, b) {
  * classes included, which a structured clone would strip of their prototype
  * — is shared.
  */
-function cloneDocument(value) {
+const cloneDocument = (value) => {
   if (Array.isArray(value)) {
-    const out = new Array(value.length);
-    for (let i = 0; i < value.length; i++) out[i] = cloneDocument(value[i]);
+    const out = [];
+    for (let i = 0; i < value.length; i++) out.push(cloneDocument(value[i]));
     return out;
   }
   if (value instanceof Date) return new Date(value.getTime());
@@ -152,14 +159,14 @@ function cloneDocument(value) {
   const out = {};
   for (const key of Object.keys(value)) setOwn(out, key, cloneDocument(value[key]));
   return out;
-}
+};
 
 /**
  * `target[key] = value` as an own, enumerable property — `__proto__` too,
  * which a plain assignment would turn into the object's prototype (a stored
  * field of that name is data, as the BSON parser reads it).
  */
-function setOwn(target, key, value) {
+const setOwn = (target, key, value) => {
   if (key === '__proto__') {
     Object.defineProperty(target, key, {
       value,
@@ -170,77 +177,90 @@ function setOwn(target, key, value) {
   } else {
     target[key] = value;
   }
-}
+};
 
 /**
  * A collection definition as a module may hand it over: an ES-module
  * namespace (`import * as orders`, or `require` of an ES module) carries it
  * as its `default`.
  */
-function unwrapDefinition(value) {
-  return isPlainObject(value?.default) ? value.default : value;
-}
+const unwrapDefinition = (value) => (isPlainObject(value?.default) ? value.default : value);
 
 /** `a.b.c` → `a`; `$[]`-style paths keep their first segment too */
-const topField = (path) => {
+const readTopField = (path) => {
   const dot = path.indexOf('.');
   return dot === -1 ? path : path.slice(0, dot);
 };
 
-const PIPELINE_FIELD_STAGES = new Set(['$set', '$addFields']);
-const PIPELINE_WHOLE_STAGES = new Set(['$project', '$replaceRoot', '$replaceWith']);
+/** The top field of every string path in `paths` */
+const addTopFields = (fields, paths) => {
+  for (let i = 0; i < paths.length; i++) {
+    if (typeof paths[i] === 'string') fields.add(readTopField(paths[i]));
+  }
+};
+
+/**
+ * The fields one pipeline stage names, into `fields` — and whether it may
+ * rewrite the entire document.
+ */
+const collectStageFields = (fields, stage) => {
+  let isWhole = false;
+  const operators = Object.keys(stage);
+  for (let i = 0; i < operators.length; i++) {
+    const operator = operators[i];
+    const spec = stage[operator];
+    if (PIPELINE_FIELD_STAGES.has(operator) && isPlainObject(spec)) {
+      addTopFields(fields, Object.keys(spec));
+    } else if (operator === '$unset') {
+      addTopFields(fields, Array.isArray(spec) ? spec : [spec]);
+    } else if (PIPELINE_WHOLE_STAGES.has(operator)) {
+      isWhole = true;
+      if (operator === '$project' && isPlainObject(spec)) addTopFields(fields, Object.keys(spec));
+    }
+  }
+  return isWhole;
+};
 
 /**
  * The top-level fields an update writes: `{ fields, whole }`, where `whole`
  * means it may rewrite the entire document (a replacement, or a pipeline that
  * projects or replaces the root) and `fields` lists the ones it names.
  */
-function touchedFields(update) {
+const collectTouchedFields = (update) => {
   const fields = new Set();
   if (Array.isArray(update)) {
-    let whole = false;
-    for (const stage of update) {
-      if (!isPlainObject(stage)) continue;
-      for (const [operator, spec] of Object.entries(stage)) {
-        if (PIPELINE_FIELD_STAGES.has(operator) && isPlainObject(spec)) {
-          for (const key of Object.keys(spec)) fields.add(topField(key));
-        } else if (operator === '$unset') {
-          for (const key of Array.isArray(spec) ? spec : [spec]) {
-            if (typeof key === 'string') fields.add(topField(key));
-          }
-        } else if (PIPELINE_WHOLE_STAGES.has(operator)) {
-          whole = true;
-          if (operator === '$project' && isPlainObject(spec)) {
-            for (const key of Object.keys(spec)) fields.add(topField(key));
-          }
-        }
-      }
+    let isWhole = false;
+    for (let i = 0; i < update.length; i++) {
+      const stage = update[i];
+      if (isPlainObject(stage) && collectStageFields(fields, stage)) isWhole = true;
     }
-    return { fields, whole };
+    return { fields, whole: isWhole };
   }
   if (!isPlainObject(update)) return { fields, whole: false };
   // One walk: a key without `$` makes it a replacement document, whose own
   // keys are then the fields; operator specs name theirs.
   const plain = new Set();
-  for (const [key, spec] of Object.entries(update)) {
+  const keys = Object.keys(update);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const spec = update[key];
     if (!key.startsWith('$')) {
       plain.add(key);
       continue;
     }
     if (!isPlainObject(spec)) continue;
-    for (const [path, value] of Object.entries(spec)) {
-      fields.add(topField(path));
-      if (key === '$rename' && typeof value === 'string') fields.add(topField(value));
+    const paths = Object.keys(spec);
+    for (let j = 0; j < paths.length; j++) {
+      const path = paths[j];
+      const value = spec[path];
+      fields.add(readTopField(path));
+      if (key === '$rename' && typeof value === 'string') fields.add(readTopField(value));
     }
   }
   return plain.size > 0 ? { fields: plain, whole: true } : { fields, whole: false };
-}
+};
 
-const LOGICAL = new Set(['$and', '$or', '$nor']);
-
-/** `"$__rev"` or `"$__rev.x"` inside a serialized `$expr` — not `"$__revision"` */
-const references = new Map();
-function fieldReference(field) {
+const getReferencePattern = (field) => {
   // Built once per field: every guarded write asks.
   let pattern = references.get(field);
   if (pattern === undefined) {
@@ -248,32 +268,35 @@ function fieldReference(field) {
     references.set(field, pattern);
   }
   return pattern;
-}
+};
 
 /** Whether a query filter constrains `field` (at the top level, or through `$and`/`$or`/`$nor`) */
-function filterTouches(filter, field) {
+const filterTouches = (filter, field) => {
   if (!isPlainObject(filter)) return false;
-  for (const [key, value] of Object.entries(filter)) {
+  const keys = Object.keys(filter);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const value = filter[key];
     if (LOGICAL.has(key) && Array.isArray(value)) {
-      for (const branch of value) if (filterTouches(branch, field)) return true;
+      for (let j = 0; j < value.length; j++) if (filterTouches(value[j], field)) return true;
     } else if (key === '$expr') {
-      if (fieldReference(field).test(JSON.stringify(value ?? null))) return true;
-    } else if (!key.startsWith('$') && topField(key) === field) {
+      if (getReferencePattern(field).test(JSON.stringify(value ?? null))) return true;
+    } else if (!key.startsWith('$') && readTopField(key) === field) {
       return true;
     }
   }
   return false;
-}
+};
 
 module.exports = {
-  bsonType,
-  cloneDocument,
-  filterTouches,
   isPlainObject,
-  sameValue,
-  setOwn,
+  readBsonType,
   toCount,
-  topField,
-  touchedFields,
+  isSameValue,
+  cloneDocument,
+  setOwn,
   unwrapDefinition,
+  readTopField,
+  collectTouchedFields,
+  filterTouches,
 };

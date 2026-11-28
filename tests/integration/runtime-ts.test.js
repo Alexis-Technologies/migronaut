@@ -15,7 +15,7 @@ const repoRoot = path.join(__dirname, '..', '..');
 const bin = path.join(repoRoot, 'bin', 'migronaut.js');
 
 /** Run the CLI under the current (plain) Node */
-function runBin(args, cwd) {
+const runBin = (args, cwd) => {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [bin, ...args], { cwd, env: { ...process.env } });
     let stdout = '';
@@ -29,7 +29,7 @@ function runBin(args, cwd) {
     child.on('error', reject);
     child.on('close', (code) => resolve({ code: code ?? 0, stdout, stderr }));
   });
-}
+};
 
 const tsMigration = `import type { MigrationContext } from '@alexify/migronaut';
 export async function up({ db }: MigrationContext): Promise<void> {
@@ -40,7 +40,7 @@ export async function down({ db }: MigrationContext): Promise<void> {
 }
 `;
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_runtime_test';
 
 before(async () => {
@@ -53,7 +53,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();
@@ -64,9 +64,9 @@ afterEach(() => {
   project?.cleanup();
 });
 
-function args(extra) {
+const args = (extra) => {
   return ['--uri', mongo.uri, '--db', DB, '--dir', project.dir, ...extra];
-}
+};
 
 describe('shipped CLI under plain node (no build, no loader)', () => {
   it('should apply a .js migration', async () => {

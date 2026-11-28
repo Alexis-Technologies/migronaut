@@ -1,10 +1,10 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { planFingerprint } = require('../../src/core/converge.js');
-const { ConvergeLog } = require('../../src/core/converge-log.js');
+const { planFingerprint } = require('../../src/core/converge/converge.js');
+const { ConvergeLog } = require('../../src/core/converge/log.js');
 
 /** A database with one collection that keeps its documents in memory, newest last */
-function fakeDb() {
+const fakeDb = () => {
   const docs = [];
   const indexes = [];
   let nextId = 1;
@@ -40,11 +40,11 @@ function fakeDb() {
     },
   };
   return { docs, indexes, db: { collection: () => collection } };
-}
+};
 
 let clock = 0;
 /** A history entry as converge.js builds it — each one later than the last */
-function entry(overrides = {}) {
+const entry = (overrides = {}) => {
   clock += 1000;
   return {
     trigger: 'converge',
@@ -57,7 +57,7 @@ function entry(overrides = {}) {
     actions: [],
     ...overrides,
   };
-}
+};
 
 describe('ConvergeLog', () => {
   it('should create its index with the first entry, once', async () => {

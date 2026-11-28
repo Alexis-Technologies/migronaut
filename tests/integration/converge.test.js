@@ -11,7 +11,7 @@ const {
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_converge_test';
 
 before(async () => {
@@ -27,7 +27,7 @@ beforeEach(async () => {
 });
 
 const kits = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const kit of kits.splice(0)) await kit.disconnect();
@@ -35,12 +35,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}, kitOptions = {}) {
+const kitWith = (overrides = {}, kitOptions = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides, kitOptions);
   kits.push(kit);
   return kit;
-}
+};
 
 const indexesOf = async (collection) =>
   (await mongo.db.collection(collection).listIndexes().toArray()).filter(
@@ -57,14 +57,14 @@ const rows = (result) =>
   );
 
 /** Converge, then prove the database is at a fixed point: a second plan finds nothing */
-async function convergeToFixedPoint(collections, options = {}) {
+const convergeToFixedPoint = async (collections, options = {}) => {
   const result = await kitWith({ collections }).converge(options);
   assert.strictEqual(result.inSync, true, JSON.stringify(result.unstable));
   const replan = await kitWith({ collections }).converge({ ...options, dryRun: true });
   assert.strictEqual(replan.changed, 0, JSON.stringify(rows(replan)));
   assert.strictEqual(replan.inSync, true);
   return result;
-}
+};
 
 describe('converge (integration) — every kind of index reaches a fixed point', () => {
   const kinds = [
@@ -597,7 +597,7 @@ describe('converge (integration) — the run', () => {
     });
     kit.once('converge:action', () => kit.stop('enough'));
     await assert.rejects(kit.converge(), (error) => {
-      assert.strictEqual(error.code, 'RUN_ABORTED');
+      assert.strictEqual(error.code, 'ALX_ERR_RUN_ABORTED');
       const statuses = error.context.converge.collections[0].actions.map((action) => action.status);
       assert.deepStrictEqual(statuses, ['applied', 'skipped', 'skipped', 'skipped']);
       return true;

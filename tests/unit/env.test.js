@@ -6,7 +6,7 @@ const { afterEach, beforeEach, describe, it } = require('node:test');
 const { applyEnvFile } = require('../../src/utils/env.js');
 
 describe('applyEnvFile', () => {
-  let tmp;
+  let tmp = null;
 
   beforeEach(() => {
     tmp = mkdtempSync(path.join(tmpdir(), 'migronaut-env-'));
@@ -91,7 +91,7 @@ describe('applyEnvFile', () => {
     const file = path.join(tmp, 'huge.env');
     writeFileSync(file, `BIG=${'x'.repeat(1024 * 1024 + 1)}\n`);
     await assert.rejects(applyEnvFile(file, {}), (error) => {
-      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
       return true;
     });
   });
@@ -100,7 +100,7 @@ describe('applyEnvFile', () => {
     // A directory (like /dev/zero, a device that reports size 0) is not a
     // .env candidate; reading it would fail confusingly or hang.
     await assert.rejects(applyEnvFile(tmp, {}), (error) => {
-      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
       return true;
     });
   });

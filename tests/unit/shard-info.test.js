@@ -1,11 +1,12 @@
 const assert = require('node:assert/strict');
 const { describe, it, mock } = require('node:test');
-const { isUnauthorized, readChunks, readShardKey } = require('../../src/core/shard-info.js');
+const { readChunks, readShardKey } = require('../../src/core/shard-info.js');
+const { isUnauthorized } = require('../../src/utils/error.js');
 
 const unauthorized = () => Object.assign(new Error('not authorized on config'), { code: 13 });
 
 /** A client whose `config` collections answer what a test scripts */
-function fakeClient({ entry, chunks = {}, error } = {}) {
+const fakeClient = ({ entry, chunks = {}, error } = {}) => {
   const calls = [];
   const client = {
     calls,
@@ -34,7 +35,7 @@ function fakeClient({ entry, chunks = {}, error } = {}) {
     },
   };
   return client;
-}
+};
 
 describe('readShardKey', () => {
   it('should read a sharded collection from config.collections', async () => {
@@ -92,6 +93,9 @@ describe('readChunks', () => {
       await readChunks(fakeClient({ error: unauthorized() }), 'a', 'b', sharding),
       undefined,
     );
-    await assert.rejects(readChunks(fakeClient({ error: new Error('down') }), 'a', 'b', sharding));
+    await assert.rejects(
+      readChunks(fakeClient({ error: new Error('down') }), 'a', 'b', sharding),
+      /down/,
+    );
   });
 });

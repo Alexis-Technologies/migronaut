@@ -11,8 +11,9 @@ const {
 const { retryOnConflict, updateWithRevision } = require('../../versioning.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_kit_test';
 const NAME = '0001-orders.js';
 const childPath = path.join(__dirname, '..', 'helpers', 'background-child.js');
@@ -31,7 +32,7 @@ beforeEach(async () => {
 });
 
 const kits = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const kit of kits.splice(0)) await kit.disconnect();
@@ -39,12 +40,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const spec = (body) => `export const background = {
   collection: 'orders',
@@ -55,13 +56,13 @@ const spec = (body) => `export const background = {
 };
 `;
 
-async function seed(count) {
+const seed = async (count) => {
   const batch = [];
   for (let i = 0; i < count; i++) batch.push({ __v: 1, __rev: 0, address: `A${i}`, i });
   for (let i = 0; i < batch.length; i += 5000) {
     await mongo.db.collection('orders').insertMany(batch.slice(i, i + 5000));
   }
-}
+};
 
 const partitions = () => mongo.db.collection('_migronaut_background_partitions');
 
@@ -95,7 +96,7 @@ describe('background migrations through the kit (integration)', () => {
       while (sampling.on) {
         const leased = await partitions().countDocuments({ lease: { $exists: true } });
         sampled = Math.max(sampled, leased);
-        await new Promise((resolve) => setTimeout(resolve, 2));
+        await sleep(2);
       }
     })();
     const [a, b] = await Promise.all([
@@ -383,7 +384,7 @@ export async function down() {}
     });
     project.write(NAME, spec(`migrate: (doc) => ({ ...doc, email: 'taken@example.com' }),`));
     await kit.up();
-    let thrown;
+    let thrown = null;
     await kit.runBackground(NAME).catch((error) => {
       thrown = error;
     });
@@ -413,8 +414,14 @@ export async function down() {}
   it('should refuse a slice length that would never make progress', async () => {
     const kit = kitWith();
     for (const sliceMs of [0, -1, Number.NaN, '1000', 3_600_001]) {
-      await assert.rejects(kit.runBackground(NAME, { sliceMs }), /sliceMs/);
-      await assert.rejects(kit.runBackgroundSlice(NAME, { sliceMs }), /sliceMs/);
+      await assert.rejects(kit.runBackground(NAME, { sliceMs }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /sliceMs/,
+      });
+      await assert.rejects(kit.runBackgroundSlice(NAME, { sliceMs }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /sliceMs/,
+      });
     }
   });
 

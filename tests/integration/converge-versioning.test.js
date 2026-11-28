@@ -4,7 +4,7 @@ const { ConvergeFailedError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_converge_versioning_test';
 
 before(async () => {
@@ -20,7 +20,7 @@ beforeEach(async () => {
 });
 
 const kits = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const kit of kits.splice(0)) await kit.disconnect();
@@ -28,12 +28,12 @@ afterEach(async () => {
   project = undefined;
 });
 
-function kitWith(overrides = {}) {
+const kitWith = (overrides = {}) => {
   project ??= makeProject();
   const kit = makeMigrator(mongo.uri, DB, project.dir, overrides);
   kits.push(kit);
   return kit;
-}
+};
 
 const rows = (result) =>
   result.collections.flatMap((collection) =>
@@ -50,16 +50,16 @@ const indexNames = async (collection) =>
     .sort();
 
 /** Converge, then prove the database is at a fixed point: a second plan finds nothing */
-async function convergeToFixedPoint(collections, options = {}) {
+const convergeToFixedPoint = async (collections, options = {}) => {
   const result = await kitWith({ collections }).converge(options);
   assert.strictEqual(result.inSync, true, JSON.stringify(result.unstable));
   const replan = await kitWith({ collections }).converge({ ...options, dryRun: true });
   assert.strictEqual(replan.changed, 0, JSON.stringify(rows(replan)));
   return result;
-}
+};
 
 /** Whether the server accepts `doc` into `collection` */
-async function accepts(collection, doc) {
+const accepts = async (collection, doc) => {
   try {
     await mongo.db.collection(collection).insertOne(doc);
     return true;
@@ -67,7 +67,7 @@ async function accepts(collection, doc) {
     if (error.code === 121) return false;
     throw error;
   }
-}
+};
 
 describe('converge (integration) — versioning', () => {
   it('should reach a fixed point with a validator synthesized for versioning alone', async () => {

@@ -12,7 +12,7 @@ const ALL_INDEXES = [
 ];
 
 /** Deps for a fully healthy setup — override per case */
-function makeDeps(overrides = {}) {
+const makeDeps = (overrides = {}) => {
   const config = {
     dbName: 'app',
     migrationsCollection: '_migronaut_migrations',
@@ -35,7 +35,7 @@ function makeDeps(overrides = {}) {
     inspectLock: overrides.inspectLock ?? (async () => null),
     status: overrides.status ?? (async () => []),
   };
-}
+};
 
 const check = (report, name) => report.checks.find((entry) => entry.name === name);
 
@@ -72,7 +72,7 @@ describe('runAudit (mocked deps)', () => {
     );
     assert.strictEqual(report.ok, false);
     assert.strictEqual(check(report, 'connection').status, 'fail');
-    // Redacted through errorText — a driver message echoing the URI must not
+    // Redacted through formatError — a driver message echoing the URI must not
     // leak the password into the report.
     assert.ok(!check(report, 'connection').detail.includes('secret'));
   });
@@ -263,7 +263,13 @@ describe('runAudit — Atlas Search', () => {
     }));
 
   /** Healthy deps whose database also answers the search probe */
-  function searchDeps({ definitions, listed = {}, listError, config = {}, version = [8, 0, 4] }) {
+  const searchDeps = ({
+    definitions,
+    listed = {},
+    listError,
+    config = {},
+    version = [8, 0, 4],
+  }) => {
     const deps = makeDeps({ config });
     const base = deps.getDb();
     const db = {
@@ -285,7 +291,7 @@ describe('runAudit — Atlas Search', () => {
       }),
     };
     return { ...deps, getDb: () => db, definitions };
-  }
+  };
 
   it('should record nothing when no definition declares search indexes', async () => {
     for (const definitions of [

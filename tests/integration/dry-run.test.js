@@ -4,7 +4,7 @@ const { ConfigInvalidError, IrreversibleMigrationError } = require('../../src/er
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_dryrun_test';
 
 before(async () => {
@@ -19,18 +19,18 @@ beforeEach(async () => {
   await mongo.db.dropDatabase();
 });
 
-let project;
-let migrator;
+let project = null;
+let migrator = null;
 
 afterEach(async () => {
   await migrator?.disconnect();
   project?.cleanup();
 });
 
-function setup() {
+const setup = () => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir);
-}
+};
 
 describe('MigratorKit.dryRun (integration)', () => {
   it('should list pending migrations for up without touching the DB', async () => {
@@ -116,10 +116,10 @@ describe('MigratorKit.dryRun (integration)', () => {
     setup();
     project.write('0001-a.ts', insertMigration('things', 'a'));
     await migrator.up();
-    const before = await mongo.db.collection('things').countDocuments();
+    const countBefore = await mongo.db.collection('things').countDocuments();
     await migrator.dryRun('up');
     await migrator.dryRun('down');
-    const after = await mongo.db.collection('things').countDocuments();
-    assert.strictEqual(after, before);
+    const countAfter = await mongo.db.collection('things').countDocuments();
+    assert.strictEqual(countAfter, countBefore);
   });
 });

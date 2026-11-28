@@ -4,27 +4,31 @@ const errors = require('../../src/errors/index.js');
 const { HookFailedError, MigronautError, NotAppliedError } = errors;
 
 describe('MigronautError', () => {
-  it('should set code, message and context', () => {
-    const err = new MigronautError('CONFIG_INVALID', 'Bad config', { field: 'uri' });
-    assert.strictEqual(err.code, 'CONFIG_INVALID');
-    assert.strictEqual(err.message, 'Bad config');
-    assert.deepStrictEqual(err.context, { field: 'uri' });
-    assert.strictEqual(err.name, 'MigronautError');
+  it('should set message, code and context from the options', () => {
+    const error = new MigronautError('Bad config', {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      context: { field: 'uri' },
+    });
+    assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
+    assert.strictEqual(error.message, 'Bad config');
+    assert.deepStrictEqual(error.context, { field: 'uri' });
+    assert.strictEqual(error.name, 'MigronautError');
   });
 
   it('should be an instance of Error', () => {
-    const err = new MigronautError('CONFIG_INVALID', 'Bad config');
-    assert.ok(err instanceof Error);
+    const error = new MigronautError('Bad config', { code: 'ALX_ERR_CONFIG_INVALID' });
+    assert.ok(error instanceof Error);
   });
 
-  it('should leave context undefined when not provided', () => {
-    const err = new MigronautError('CONFIG_INVALID', 'Bad config');
-    assert.strictEqual(err.context, undefined);
+  it('should give every instance a context, empty when none is given', () => {
+    const error = new MigronautError('Bad config', { code: 'ALX_ERR_CONFIG_INVALID' });
+    assert.ok(Object.hasOwn(error, 'context'));
+    assert.deepStrictEqual(error.context, {});
   });
 
   it('should capture a stack trace', () => {
-    const err = new MigronautError('CONFIG_INVALID', 'Bad config');
-    assert.notStrictEqual(err.stack, undefined);
+    const error = new MigronautError('Bad config', { code: 'ALX_ERR_CONFIG_INVALID' });
+    assert.notStrictEqual(error.stack, undefined);
   });
 });
 
@@ -47,25 +51,36 @@ describe('domain error classes', () => {
   });
 
   for (const [name, Ctor] of subclasses) {
-    it(`${name} should carry a typed code and extend MigronautError`, () => {
-      const err = new Ctor('Something happened', { detail: 1 });
-      assert.ok(err instanceof MigronautError);
-      assert.ok(err instanceof Error);
-      assert.strictEqual(typeof err.code, 'string');
-      assert.match(err.code, /^[A-Z_]+$/);
-      assert.strictEqual(err.name, name);
-      assert.strictEqual(err.message, 'Something happened');
-      assert.deepStrictEqual(err.context, { detail: 1 });
-    });
+    describe(name, () => {
+      it('should carry a typed code and extend MigronautError', () => {
+        const error = new Ctor('Something happened', { context: { detail: 1 } });
+        assert.ok(error instanceof MigronautError);
+        assert.ok(error instanceof Error);
+        assert.strictEqual(typeof error.code, 'string');
+        assert.match(error.code, /^ALX_ERR_[A-Z_]+$/);
+        assert.strictEqual(error.name, name);
+        assert.strictEqual(error.message, 'Something happened');
+        assert.deepStrictEqual(error.context, { detail: 1 });
+      });
 
-    it(`${name} should be catchable as MigronautError with its code`, () => {
-      const expected = new Ctor('probe').code;
-      try {
-        throw new Ctor('boom');
-      } catch (e) {
-        assert.ok(e instanceof MigronautError);
-        assert.strictEqual(e.code, expected);
-      }
+      it('should keep its own code over one given in the options', () => {
+        const expected = new Ctor('probe').code;
+        assert.strictEqual(new Ctor('probe', { code: 'ALX_ERR_CONFIG_INVALID' }).code, expected);
+      });
+
+      it('should give an empty context when none is given', () => {
+        assert.deepStrictEqual(new Ctor('probe').context, {});
+      });
+
+      it('should be catchable as MigronautError with its code', () => {
+        const expected = new Ctor('probe').code;
+        try {
+          throw new Ctor('boom');
+        } catch (e) {
+          assert.ok(e instanceof MigronautError);
+          assert.strictEqual(e.code, expected);
+        }
+      });
     });
   }
 });
@@ -73,7 +88,8 @@ describe('domain error classes', () => {
 describe('error cause chaining', () => {
   it('should keep the original Error (and its stack) as cause', () => {
     const root = new Error('the real reason');
-    const wrapped = new MigronautError('CONFIG_INVALID', 'Invalid configuration', undefined, {
+    const wrapped = new MigronautError('Invalid configuration', {
+      code: 'ALX_ERR_CONFIG_INVALID',
       cause: root,
     });
     assert.strictEqual(wrapped.cause, root);
@@ -81,21 +97,20 @@ describe('error cause chaining', () => {
     assert.match(wrapped.cause.stack, /the real reason/);
   });
 
-  it('should leave cause undefined when none is given', () => {
-    assert.strictEqual(new NotAppliedError('nope').cause, undefined);
+  it('should not set cause when none is given', () => {
+    const error = new NotAppliedError('nope', { context: { filename: 'a.js' } });
+    assert.ok(!Object.hasOwn(error, 'cause'));
+    assert.strictEqual(error.cause, undefined);
   });
 
   it('should chain the cause through a subclass', () => {
     const root = new TypeError('bad input');
-    const err = new HookFailedError(
-      'The beforeAll hook failed',
-      { hook: 'beforeAll' },
-      {
-        cause: root,
-      },
-    );
-    assert.strictEqual(err.cause, root);
-    assert.strictEqual(err.context.hook, 'beforeAll');
-    assert.strictEqual(err.code, 'HOOK_FAILED');
+    const error = new HookFailedError('The beforeAll hook failed', {
+      cause: root,
+      context: { hook: 'beforeAll' },
+    });
+    assert.strictEqual(error.cause, root);
+    assert.strictEqual(error.context.hook, 'beforeAll');
+    assert.strictEqual(error.code, 'ALX_ERR_HOOK_FAILED');
   });
 });

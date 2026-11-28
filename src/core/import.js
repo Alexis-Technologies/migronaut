@@ -8,19 +8,13 @@ const { mapLimit } = require('../utils/concurrency.js');
 const CHECKSUM_CONCURRENCY = 16;
 
 /** Returns true when a value looks like a usable migrate-mongo changelog doc */
-function isMigrateMongoDoc(value) {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof value.fileName === 'string' &&
-    value.fileName.length > 0
-  );
-}
+const isMigrateMongoDoc = (value) => {
+  if (typeof value !== 'object' || value === null) return false;
+  return typeof value.fileName === 'string' && value.fileName.length > 0;
+};
 
 /** Apply-order sort key for a doc — its run timestamp, falling back to apply time */
-function orderKey(doc) {
-  return doc.migrationBlock ?? new Date(doc.appliedAt).getTime();
-}
+const orderKey = (doc) => doc.migrationBlock ?? new Date(doc.appliedAt).getTime();
 
 /**
  * Map migrate-mongo changelog docs into migronaut MigrationRecords.
@@ -32,18 +26,18 @@ function orderKey(doc) {
  * are forward-only (migronaut refuses to `down` them), so a shared batch would only
  * produce confusing duplicate batch ids with no rollback benefit.
  */
-async function mapMigrateMongoDocs(docs, options) {
+const mapMigrateMongoDocs = async (docs, options) => {
   const offset = options.batchOffset ?? 0;
-  const sorted = [...docs].sort((a, b) => {
+  const sorted = docs.toSorted((a, b) => {
     const delta = orderKey(a) - orderKey(b);
     return delta !== 0 ? delta : a.fileName.localeCompare(b.fileName);
   });
 
   // Independent per-doc disk reads — resolved concurrently, but bounded:
   // mapLimit preserves input order exactly like Promise.all would.
-  const resolutions = await mapLimit(sorted, CHECKSUM_CONCURRENCY, (doc) =>
-    options.resolveChecksum(doc.fileName, doc.fileHash),
-  );
+  const resolutions = await mapLimit(sorted, CHECKSUM_CONCURRENCY, (doc) => {
+    return options.resolveChecksum(doc.fileName, doc.fileHash);
+  });
 
   const records = [];
   for (let index = 0; index < sorted.length; index++) {
@@ -62,6 +56,6 @@ async function mapMigrateMongoDocs(docs, options) {
     });
   }
   return records;
-}
+};
 
 module.exports = { isMigrateMongoDoc, mapMigrateMongoDocs };

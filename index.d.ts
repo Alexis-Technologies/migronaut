@@ -474,9 +474,10 @@ export type IdGenerator = () => string;
 /**
  * Every **scalar** option below is also settable from the environment as
  * `MIGRONAUT_<SCREAMING_SNAKE>` (`migrationsDir` → `MIGRONAUT_MIGRATIONS_DIR`,
- * with `dbName` → `MIGRONAUT_DB`, `migrationsCollection` → `MIGRONAUT_COLLECTION`
- * and `lockTTLSeconds` → `MIGRONAUT_LOCK_TTL` as the shortened exceptions), which
- * is what makes a config file genuinely optional. Env vars outrank the config
+ * `lockTTLSeconds` → `MIGRONAUT_LOCK_TTL_SECONDS`, with `dbName` → `MIGRONAUT_DB`
+ * as the one shortened exception), which is what makes a config file genuinely
+ * optional. `MIGRONAUT_COLLECTION` and `MIGRONAUT_LOCK_TTL`, the 2.x names, are
+ * refused with the new one. Env vars outrank the config
  * file and are outranked by CLI flags. A value that does not parse is rejected
  * with a {@link ConfigInvalidError} naming the variable — never coerced.
  *
@@ -668,8 +669,8 @@ export interface MigronautConfig {
   /** Mongoose instance — required only if your migrations use Mongoose models */
   mongoose?: MongooseLike;
   hooks?: MigrationHooks;
-  /** Custom logger — set to null to silence all output (useful in tests) */
-  logger?: MigronautLogger | null;
+  /** Custom logger — `null` or `false` silences all output (useful in tests) */
+  logger?: MigronautLogger | null | false;
   /**
    * Your own identifier format (ULID, CUID, UUIDv7, …) for every id migronaut
    * mints: the run id — stamped on changelog records, events and log lines,
@@ -914,6 +915,12 @@ export type CollectionDefinitionFile = Omit<CollectionDefinition, 'name'> & { na
  * @experimental New in 2.1 — the shape may still change in a minor release (named in the CHANGELOG).
  */
 export interface ConvergeOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Plan without writing: no lock, no events. The result's rows are `'planned'` */
   dryRun?: boolean;
   /** Drop undeclared indexes in collections whose definition does not set `prune` */
@@ -1500,36 +1507,40 @@ export interface LockInfo {
 // ─── Error Codes ──────────────────────────────────────────────────────────────
 
 export type MigronautErrorCode =
-  | 'LOCK_ALREADY_HELD'
-  | 'LOCK_RELEASE_FAILED'
-  | 'LOCK_LOST'
-  | 'RUN_ABORTED'
-  | 'HOOK_FAILED'
-  | 'CHECKSUM_MISMATCH'
-  | 'MIGRATION_FILE_NOT_FOUND'
-  | 'MIGRATION_FILE_EXISTS'
-  | 'MIGRATION_INVALID_NAME'
-  | 'MIGRATION_INVALID_EXPORT'
-  | 'MIGRATION_EXECUTION_FAILED'
-  | 'MIGRATION_TIMEOUT'
-  | 'TRANSACTIONS_UNSUPPORTED'
-  | 'CONFIG_INVALID'
-  | 'CONFIG_FILE_EXISTS'
-  | 'CONNECTION_FAILED'
-  | 'NOT_APPLIED'
-  | 'IMPORT_TARGET_NOT_EMPTY'
-  | 'MIGRATION_IRREVERSIBLE'
-  | 'MIGRATION_OUT_OF_ORDER'
-  | 'MIGRATION_BLOCKED'
-  | 'QUEUE_JOB_INVALID'
-  | 'QUEUE_JOB_FAILED'
-  | 'CONVERGE_FAILED'
-  | 'REVISION_CONFLICT'
-  | 'SHAPE_VERSION_UNSUPPORTED'
-  | 'BACKGROUND_PENDING'
-  | 'BACKGROUND_FAILED'
-  | 'BACKGROUND_CONFLICT'
-  | 'SANDBOX_REFUSED';
+  | 'ALX_ERR_LOCK_ALREADY_HELD'
+  | 'ALX_ERR_LOCK_RELEASE_FAILED'
+  | 'ALX_ERR_LOCK_LOST'
+  | 'ALX_ERR_RUN_ABORTED'
+  | 'ALX_ERR_RUN_IN_FLIGHT'
+  | 'ALX_ERR_HOOK_FAILED'
+  | 'ALX_ERR_CHECKSUM_MISMATCH'
+  | 'ALX_ERR_MIGRATION_FILE_NOT_FOUND'
+  | 'ALX_ERR_MIGRATION_FILE_EXISTS'
+  | 'ALX_ERR_MIGRATION_INVALID_NAME'
+  | 'ALX_ERR_MIGRATION_INVALID_EXPORT'
+  | 'ALX_ERR_MIGRATION_LOAD_FAILED'
+  | 'ALX_ERR_MIGRATION_EXECUTION_FAILED'
+  | 'ALX_ERR_MIGRATION_TIMEOUT'
+  | 'ALX_ERR_TRANSACTIONS_UNSUPPORTED'
+  | 'ALX_ERR_CONFIG_INVALID'
+  | 'ALX_ERR_CONFIG_FILE_EXISTS'
+  | 'ALX_ERR_CONNECTION_FAILED'
+  | 'ALX_ERR_DATABASE_OPERATION_FAILED'
+  | 'ALX_ERR_NOT_APPLIED'
+  | 'ALX_ERR_IMPORT_TARGET_NOT_EMPTY'
+  | 'ALX_ERR_MIGRATION_IRREVERSIBLE'
+  | 'ALX_ERR_MIGRATION_OUT_OF_ORDER'
+  | 'ALX_ERR_MIGRATION_BLOCKED'
+  | 'ALX_ERR_QUEUE_JOB_INVALID'
+  | 'ALX_ERR_QUEUE_CLOSED'
+  | 'ALX_ERR_QUEUE_JOB_FAILED'
+  | 'ALX_ERR_CONVERGE_FAILED'
+  | 'ALX_ERR_REVISION_CONFLICT'
+  | 'ALX_ERR_SHAPE_VERSION_UNSUPPORTED'
+  | 'ALX_ERR_BACKGROUND_PENDING'
+  | 'ALX_ERR_BACKGROUND_FAILED'
+  | 'ALX_ERR_BACKGROUND_CONFLICT'
+  | 'ALX_ERR_SANDBOX_REFUSED';
 
 // ─── Config file format ─────────────────────────────────────────────────────────
 
@@ -1540,6 +1551,12 @@ export type ConfigFormat = 'ts' | 'js' | 'json';
 
 /** Options for {@link MigratorKit.up} */
 export interface UpOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Skip lock acquisition (dev only) */
   noLock?: boolean;
   /**
@@ -1630,6 +1647,12 @@ export interface JobRef {
 
 /** Options for {@link MigratorKit.down} */
 export interface DownOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Skip lock acquisition (dev only) */
   noLock?: boolean;
   /** Revert a specific batch number instead of the last batch */
@@ -1691,8 +1714,8 @@ export interface MigrationEvent extends MigronautEventBase {
   error?: string;
   /**
    * The typed code of that failure (on `migration:error` only) — to tell a
-   * timeout (`MIGRATION_TIMEOUT`) from a body that threw
-   * (`MIGRATION_EXECUTION_FAILED`) without reading `error`. Absent for an
+   * timeout (`ALX_ERR_MIGRATION_TIMEOUT`) from a body that threw
+   * (`ALX_ERR_MIGRATION_EXECUTION_FAILED`) without reading `error`. Absent for an
    * error that is not a {@link MigronautError}.
    * New in 2.5
    */
@@ -1726,7 +1749,7 @@ export interface RunEndEvent extends MigronautEventBase {
   /**
    * The typed code of the failure. A caller that waits for the lock
    * (`runMigrations` with `onLockHeld: 'wait'`, a queue job) retries the whole
-   * run, so every refusal ends one as `LOCK_ALREADY_HELD`: filter on it to
+   * run, so every refusal ends one as `ALX_ERR_LOCK_ALREADY_HELD`: filter on it to
    * tell those from a run that failed. Absent for an error that is not a
    * {@link MigronautError}.
    * New in 2.5
@@ -1993,6 +2016,12 @@ export interface StatusOptions {
 
 /** Options for {@link MigratorKit.redo} */
 export interface RedoOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Skip lock acquisition (dev only) */
   noLock?: boolean;
   /** Who asked — stamped on the revert and on the re-apply */
@@ -2039,6 +2068,12 @@ export interface InitOptions {
 
 /** Options for {@link MigratorKit.baseline} */
 export interface BaselineOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Baseline pending files up to and including this one, instead of all */
   to?: string;
   /** Skip lock acquisition (dev only) */
@@ -2057,6 +2092,12 @@ export interface BaselineSummary {
 
 /** Options for {@link MigratorKit.import} */
 export interface ImportOptions {
+  /**
+   * Stop the run as {@link MigratorKit.stop} does when it aborts: the
+   * migration in flight finishes, the rest are skipped, and the call rejects
+   * with a `RunAbortedError` whose `cause` is the signal's `reason`.
+   */
+  signal?: AbortSignal;
   /** Source collection to read. Default: `changelog` (migrate-mongo's default) */
   from?: string;
   /** Target collection to write. Default: the config's `migrationsCollection` */
@@ -2107,14 +2148,21 @@ export interface MigratorKitOptions {
 export class MigratorKit extends EventEmitter {
   constructor(config?: Partial<MigronautConfig>, options?: MigratorKitOptions);
 
-  /** Connect to MongoDB and ensure changelog indexes exist */
+  /**
+   * Connect to MongoDB and ensure changelog indexes exist.
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — the configuration does not validate
+   * @throws {ConnectionFailedError} ALX_ERR_CONNECTION_FAILED — MongoDB could not be reached, or its indexes not created
+   */
   connect(): Promise<void>;
   /**
    * The resolved logger — silent when config sets `logger: null`. Meaningful
    * after `connect()` (before it, a config file's logger is not loaded yet).
    */
   readonly logger: MigronautLogger;
-  /** Disconnect from MongoDB */
+  /**
+   * Disconnect from MongoDB. Rejects with {@link RunInFlightError} while a run
+   * is in flight: closing the client under it would fail its lock release.
+   */
   disconnect(): Promise<void>;
   /**
    * Inspect the current migration lock without modifying it. Returns the holder,
@@ -2140,14 +2188,53 @@ export class MigratorKit extends EventEmitter {
    * its own ids to match. Resolves the config; does not connect.
    */
   generateId(): Promise<string>;
-  /** Run all pending migrations, or a specific named file */
+  /**
+   * Run all pending migrations, or a specific named file. A failure carries
+   * the rows applied before it in `context.results`.
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — bad options or configuration
+   * @throws {ConnectionFailedError} ALX_ERR_CONNECTION_FAILED — MongoDB could not be reached
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
+   * @throws {LockLostError} ALX_ERR_LOCK_LOST — the lock was lost mid-run
+   * @throws {RunAbortedError} ALX_ERR_RUN_ABORTED — `stop()` or the `signal` stopped it
+   * @throws {RunInFlightError} ALX_ERR_RUN_IN_FLIGHT — this kit already has a run in flight
+   * @throws {DatabaseOperationFailedError} ALX_ERR_DATABASE_OPERATION_FAILED — a changelog or lock operation failed
+   * @throws {MigrationExecutionFailedError} ALX_ERR_MIGRATION_EXECUTION_FAILED — a migration threw
+   * @throws {MigrationLoadFailedError} ALX_ERR_MIGRATION_LOAD_FAILED — a migration file did not load
+   * @throws {MigrationInvalidExportError} ALX_ERR_MIGRATION_INVALID_EXPORT — a file exports no valid migration
+   * @throws {MigrationTimeoutError} ALX_ERR_MIGRATION_TIMEOUT — a migration outlived its `timeoutMs`
+   * @throws {ChecksumMismatchError} ALX_ERR_CHECKSUM_MISMATCH — an applied file changed, under `strict`
+   * @throws {OutOfOrderMigrationError} ALX_ERR_MIGRATION_OUT_OF_ORDER — under `onOutOfOrder: 'error'`
+   * @throws {MigrationBlockedError} ALX_ERR_MIGRATION_BLOCKED — an `ordered` single file out of sequence
+   * @throws {BackgroundPendingError} ALX_ERR_BACKGROUND_PENDING — a required background migration is not done
+   * @throws {HookFailedError} ALX_ERR_HOOK_FAILED — a lifecycle hook threw
+   */
   up(filename?: string, options?: UpOptions): Promise<RunResult[]>;
-  /** Rollback the last batch, a specific batch, a specific file, or the last N steps */
+  /**
+   * Rollback the last batch, a specific batch, a specific file, or the last N steps.
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — bad options or configuration
+   * @throws {ConnectionFailedError} ALX_ERR_CONNECTION_FAILED — MongoDB could not be reached
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
+   * @throws {LockLostError} ALX_ERR_LOCK_LOST — the lock was lost mid-run
+   * @throws {RunAbortedError} ALX_ERR_RUN_ABORTED — `stop()` or the `signal` stopped it
+   * @throws {RunInFlightError} ALX_ERR_RUN_IN_FLIGHT — this kit already has a run in flight
+   * @throws {DatabaseOperationFailedError} ALX_ERR_DATABASE_OPERATION_FAILED — a changelog or lock operation failed
+   * @throws {MigrationExecutionFailedError} ALX_ERR_MIGRATION_EXECUTION_FAILED — a `down()` threw
+   * @throws {NotAppliedError} ALX_ERR_NOT_APPLIED — the named migration is not applied
+   * @throws {IrreversibleMigrationError} ALX_ERR_MIGRATION_IRREVERSIBLE — an imported or baselined record
+   * @throws {MigrationBlockedError} ALX_ERR_MIGRATION_BLOCKED — an `ordered` single file out of sequence
+   */
   down(filename?: string, options?: DownOptions): Promise<RunResult[]>;
   /**
    * Rollback then re-apply: the last applied migration, or a specific file.
    * Both directions run under a single lock, so no other process can slip in
-   * while the migration is reverted.
+   * while the migration is reverted. Throws what `down` and `up` throw.
+   * @throws {ConfigInvalidError} ALX_ERR_CONFIG_INVALID — bad options or configuration
+   * @throws {ConnectionFailedError} ALX_ERR_CONNECTION_FAILED — MongoDB could not be reached
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
+   * @throws {LockLostError} ALX_ERR_LOCK_LOST — the lock was lost mid-run
+   * @throws {RunAbortedError} ALX_ERR_RUN_ABORTED — `stop()` or the `signal` stopped it
+   * @throws {RunInFlightError} ALX_ERR_RUN_IN_FLIGHT — this kit already has a run in flight
+   * @throws {DatabaseOperationFailedError} ALX_ERR_DATABASE_OPERATION_FAILED — a changelog or lock operation failed
    */
   redo(filename?: string, options?: RedoOptions): Promise<RunResult[]>;
   on<E extends keyof MigronautEvents>(event: E, listener: MigronautEvents[E]): this;
@@ -2160,9 +2247,10 @@ export class MigratorKit extends EventEmitter {
    * `context.results` lists what was applied. A stop that arrives while config
    * is loading or the connection is opening is remembered and applied as soon
    * as the run reaches its lock; a pending stop is cleared when a run ends, so
-   * it can never abort a later, unrelated run.
+   * it can never abort a later, unrelated run. `options.cause` — what
+   * stopped it, an abort signal's `reason` say — becomes the error's `cause`.
    */
-  stop(reason?: string): void;
+  stop(reason?: string, options?: { cause?: unknown }): void;
   /** Preview what would run — never writes to the database */
   dryRun(
     direction: 'up' | 'down',
@@ -2192,6 +2280,9 @@ export class MigratorKit extends EventEmitter {
   /**
    * Adopt an existing migrate-mongo `changelog` collection by mapping its
    * records into our schema and writing them to `migrationsCollection`.
+   *
+   * @throws {ImportTargetNotEmptyError} ALX_ERR_IMPORT_TARGET_NOT_EMPTY — the target holds records, without `force`
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
    */
   import(options?: ImportOptions): Promise<ImportResult>;
   /**
@@ -2200,6 +2291,9 @@ export class MigratorKit extends EventEmitter {
    * `origin: 'baseline'` — without executing anything. Forward-only:
    * `down`/`redo` refuse baselined records. Idempotent: already-applied names
    * are skipped, so a partial baseline can simply be re-run.
+   *
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
+   * @throws {MigrationFileNotFoundError} ALX_ERR_MIGRATION_FILE_NOT_FOUND — `to` names no file
    */
   baseline(options?: BaselineOptions): Promise<BaselineSummary>;
   /**
@@ -2209,6 +2303,10 @@ export class MigratorKit extends EventEmitter {
    * history ({@link MigratorKit.convergeHistory}), which no run reads back. A
    * real run holds the migration lock; a plan with a conflict is refused before
    * any write, and a failed step throws {@link ConvergeFailedError}. Experimental.
+   *
+   * @throws {ConvergeFailedError} ALX_ERR_CONVERGE_FAILED — a conflict, a failed step, a search wait that gave up
+   * @throws {LockAlreadyHeldError} ALX_ERR_LOCK_ALREADY_HELD — another run holds the lock
+   * @throws {RunAbortedError} ALX_ERR_RUN_ABORTED — `stop()` or the `signal` stopped it
    */
   converge(options?: ConvergeOptions): Promise<ConvergeResult>;
   /**
@@ -2821,7 +2919,32 @@ export interface MigrationSummary {
  * Run all pending migrations and return a summary — the blessed one-call entry
  * point for application startup, deploy hooks, serverless cold starts, and test
  * setup. Always disconnects in a `finally`, so a failure never leaks a MongoDB
- * connection.
+ * connection. Migration errors propagate unchanged (with their typed `code`), so
+ * a broken migration aborts the boot sequence instead of starting the app
+ * against a half-migrated database.
+ *
+ * For multi-instance deploys, set `onLockHeld: 'wait'` so instances that lose
+ * the race to acquire the lock block until the migrating peer finishes, then
+ * confirm there is nothing left to apply. Pass a `signal` (wired to SIGTERM)
+ * so a pod being shut down stops waiting — and stops between migrations if it
+ * already holds the lock — instead of taking the lock just before SIGKILL.
+ *
+ * Several kits against several databases in one process: pass `envFile: false`
+ * and supply `uri`/`dbName` directly. Loading a `.env` writes the shared
+ * `process.env` (without overriding), so two kits with different env files
+ * would otherwise leak `MIGRONAUT_*` values into each other's config.
+ *
+ * @throws {MigronautError} ALX_ERR_* — whatever stopped the run, its code kept
+ * @example
+ * ```js
+ * const { runMigrations } = require('@alexify/migronaut');
+ *
+ * const { applied, upToDate } = await runMigrations(
+ *   { uri: process.env.MIGRONAUT_URI, dbName: 'my_app' },
+ *   { onLockHeld: 'wait' },
+ * );
+ * if (!upToDate) console.log(`Applied ${applied.length} migration(s)`);
+ * ```
  */
 export function runMigrations(
   config?: Partial<MigronautConfig>,
@@ -2831,6 +2954,18 @@ export function runMigrations(
 /**
  * Return the migrations that have not yet been applied — a connection-managed
  * readiness probe. Opens its own connection and always disconnects in a `finally`.
+ * Use it to fail a deploy or health check when the database is behind, without
+ * running anything.
+ *
+ * @example
+ * ```js
+ * const { pendingMigrations } = require('@alexify/migronaut');
+ *
+ * const pending = await pendingMigrations({ uri, dbName: 'my_app' });
+ * if (pending.length > 0) {
+ *   throw new Error(`Database is behind by ${pending.length} migration(s)`);
+ * }
+ * ```
  */
 export function pendingMigrations(
   config?: Partial<MigronautConfig>,
@@ -2839,14 +2974,17 @@ export function pendingMigrations(
 
 /**
  * The CLI's exit-code map: one entry per {@link MigronautErrorCode}, plus three
- * CLI-condition codes with no error class — `PENDING_MIGRATIONS` (from
- * `status --check`), `AUDIT_FAILED` and `COLLECTIONS_DRIFT` (from
+ * CLI-condition codes with no error class — `ALX_ERR_PENDING_MIGRATIONS` (from
+ * `status --check`), `ALX_ERR_AUDIT_FAILED` and `ALX_ERR_COLLECTIONS_DRIFT` (from
  * `converge --check`). Lets a wrapper script mirror the CLI's exit semantics
  * without hardcoding numbers. Anything unmapped exits 1; success is 0.
  */
 export const EXIT_CODES: Readonly<
   Record<
-    MigronautErrorCode | 'PENDING_MIGRATIONS' | 'AUDIT_FAILED' | 'COLLECTIONS_DRIFT',
+    | MigronautErrorCode
+    | 'ALX_ERR_PENDING_MIGRATIONS'
+    | 'ALX_ERR_AUDIT_FAILED'
+    | 'ALX_ERR_COLLECTIONS_DRIFT',
     number
   >
 >;
@@ -2918,41 +3056,51 @@ export function createLogger(stream?: NodeJS.WritableStream, level?: LogLevel): 
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
-/** Construction options shared by every migronaut error — `cause` keeps the wrapped Error */
+/**
+ * The second argument of every migronaut error, as `Error` takes one:
+ * `new LockLostError(message, { cause, context })`. Each subclass sets its own
+ * `code`; only {@link MigronautError} itself reads one from the options.
+ */
 export interface MigronautErrorOptions {
+  /** The error this one wraps — set only when given, so `error.cause.stack` points where it failed */
   cause?: unknown;
+  /** Plain, JSON-safe data about the failure — `error.context`, `{}` when not given */
+  context?: Record<string, unknown>;
 }
 
-/** Base error for all migronaut failures. Carries a typed code and context */
+/**
+ * Base error for all migronaut failures. Every instance carries a typed `code`
+ * and a `context` (`{}` when nothing was given), and `cause` when it wraps
+ * another error.
+ */
 export class MigronautError extends Error {
   readonly code: MigronautErrorCode;
-  readonly context?: Record<string, unknown>;
-  constructor(
-    code: MigronautErrorCode,
-    message: string,
-    context?: Record<string, unknown>,
-    options?: MigronautErrorOptions,
-  );
+  readonly context: Record<string, unknown>;
+  constructor(message: string, options: MigronautErrorOptions & { code: MigronautErrorCode });
 }
 
 /** Thrown when a lock is already held by another process within its TTL */
 export class LockAlreadyHeldError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_LOCK_ALREADY_HELD';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when releasing a lock fails */
 export class LockReleaseFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_LOCK_RELEASE_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a file's checksum differs from the one recorded at apply time */
 export class ChecksumMismatchError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_CHECKSUM_MISMATCH';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a referenced migration file does not exist on disk */
 export class MigrationFileNotFoundError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_MIGRATION_FILE_NOT_FOUND';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -2961,32 +3109,59 @@ export class MigrationFileNotFoundError extends MigronautError {
  * directory (path traversal) when joined into a filesystem path.
  */
 export class MigrationInvalidNameError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_MIGRATION_INVALID_NAME';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a migration file does not export valid up()/down() functions */
 export class MigrationInvalidExportError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_MIGRATION_INVALID_EXPORT';
+  constructor(message: string, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown when a migration file cannot be loaded — a syntax error, a throw at
+ * module scope, an import that does not resolve, a file that cannot be read.
+ * `cause` is what the loader threw; nothing of the file ran.
+ */
+export class MigrationLoadFailedError extends MigronautError {
+  readonly code: 'ALX_ERR_MIGRATION_LOAD_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a migration's up() or down() throws during execution */
 export class MigrationExecutionFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when the merged configuration fails validation */
 export class ConfigInvalidError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_CONFIG_INVALID';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when creating a config file that already exists without `--force` */
 export class ConfigFileExistsError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_CONFIG_FILE_EXISTS';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when connecting to MongoDB fails */
 export class ConnectionFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_CONNECTION_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown when the database refuses or drops an operation of migronaut's own —
+ * reading or writing the changelog, taking a lock, creating the indexes a
+ * background migration needs — after the connection was made. `cause` is the
+ * driver's error; `context.serverCode` is the server's code when it gave one.
+ */
+export class DatabaseOperationFailedError extends MigronautError {
+  readonly code: 'ALX_ERR_DATABASE_OPERATION_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -2995,7 +3170,8 @@ export class ConnectionFailedError extends MigronautError {
  * `onLockLost: 'warn'` to downgrade this to a warning.
  */
 export class LockLostError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_LOCK_LOST';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3003,7 +3179,18 @@ export class LockLostError extends MigronautError {
  * or a SIGINT/SIGTERM. `context.results` lists what was applied first.
  */
 export class RunAbortedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_RUN_ABORTED';
+  constructor(message: string, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown when a run is asked of a {@link MigratorKit} that already has one in
+ * flight, or when it is disconnected under one: one instance runs one thing at
+ * a time. `context.runId` is the run in flight.
+ */
+export class RunInFlightError extends MigronautError {
+  readonly code: 'ALX_ERR_RUN_IN_FLIGHT';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3011,7 +3198,8 @@ export class RunAbortedError extends MigronautError {
  * own work keeps running, but the run stops rather than hanging.
  */
 export class MigrationTimeoutError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_MIGRATION_TIMEOUT';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3019,32 +3207,38 @@ export class MigrationTimeoutError extends MigronautError {
  * transactions (a standalone server — they need a replica set or mongos).
  */
 export class TransactionsUnsupportedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_TRANSACTIONS_UNSUPPORTED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when a user-supplied lifecycle hook throws */
 export class HookFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_HOOK_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when `create` would overwrite an existing migration file */
 export class MigrationFileExistsError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_MIGRATION_FILE_EXISTS';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when attempting to revert a migration that was never applied */
 export class NotAppliedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_NOT_APPLIED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when `migronaut import` targets a non-empty changelog without `--force` */
 export class ImportTargetNotEmptyError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_IMPORT_TARGET_NOT_EMPTY';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** Thrown when attempting to roll back a forward-only (imported or baselined) migration */
 export class IrreversibleMigrationError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_MIGRATION_IRREVERSIBLE';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3053,7 +3247,8 @@ export class IrreversibleMigrationError extends MigronautError {
  * branch. `context.names` lists the late arrivals.
  */
 export class OutOfOrderMigrationError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_MIGRATION_OUT_OF_ORDER';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3063,7 +3258,8 @@ export class OutOfOrderMigrationError extends MigronautError {
  * `context.blockedBy` (the migrations that must go first).
  */
 export class MigrationBlockedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_MIGRATION_BLOCKED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3073,19 +3269,30 @@ export class MigrationBlockedError extends MigronautError {
  * is untrusted input. `context.jobId`, `context.issue`.
  */
 export class QueueJobInvalidError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_QUEUE_JOB_INVALID';
+  constructor(message: string, options?: MigronautErrorOptions);
+}
+
+/**
+ * Thrown by a migration queue that is closed, or closing, when it is asked to
+ * enqueue or start something: the work has to go to an open one.
+ */
+export class QueueClosedError extends MigronautError {
+  readonly code: 'ALX_ERR_QUEUE_CLOSED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
  * Thrown by a queue group's `wait()` when one of its jobs failed or the wait
  * timed out (one budget for the whole call). `context.failedReason` is the
  * worker's (redacted) message, `context.code` the job's own typed error code
- * when it reported one (`MIGRATION_BLOCKED`, `CHECKSUM_MISMATCH`, …),
+ * when it reported one (`ALX_ERR_MIGRATION_BLOCKED`, `ALX_ERR_CHECKSUM_MISMATCH`, …),
  * `context.results` the jobs that finished before it, plus `groupId`, `jobId`,
  * `migration`, `direction` and `timedOut`.
  */
 export class QueueJobFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_QUEUE_JOB_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3113,7 +3320,8 @@ export class QueueJobFailedError extends MigronautError {
  * `context.converge` is the {@link ConvergeResult} so far.
  */
 export class ConvergeFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_CONVERGE_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3125,8 +3333,9 @@ export class ConvergeFailedError extends MigronautError {
  * caller held. The filter is never copied into the error. Experimental.
  */
 export class RevisionConflictError extends MigronautError {
-  readonly context?: RevisionConflictContext;
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_REVISION_CONFLICT';
+  readonly context: RevisionConflictContext;
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /** {@link RevisionConflictError}'s `context` — what a caller decides on */
@@ -3147,7 +3356,8 @@ export interface RevisionConflictContext {
  * `context.version` and `context.current`. Experimental.
  */
 export class ShapeVersionError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_SHAPE_VERSION_UNSUPPORTED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3156,7 +3366,8 @@ export class ShapeVersionError extends MigronautError {
  * run; `context.waitsFor` lists what it waits for. Experimental.
  */
 export class BackgroundPendingError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_BACKGROUND_PENDING';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3164,7 +3375,8 @@ export class BackgroundPendingError extends MigronautError {
  * it and `context.lastError` says what happened last. Experimental.
  */
 export class BackgroundFailedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_BACKGROUND_FAILED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3173,7 +3385,8 @@ export class BackgroundFailedError extends MigronautError {
  * Experimental.
  */
 export class BackgroundConflictError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_BACKGROUND_CONFLICT';
+  constructor(message: string, options?: MigronautErrorOptions);
 }
 
 /**
@@ -3182,5 +3395,6 @@ export class BackgroundConflictError extends MigronautError {
  * and `context.reason` the rule. Experimental.
  */
 export class SandboxRefusedError extends MigronautError {
-  constructor(message: string, context?: Record<string, unknown>, options?: MigronautErrorOptions);
+  readonly code: 'ALX_ERR_SANDBOX_REFUSED';
+  constructor(message: string, options?: MigronautErrorOptions);
 }

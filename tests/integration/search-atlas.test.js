@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { after, before, describe, it } = require('node:test');
 const { ConvergeFailedError } = require('../../src/errors/index.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const ATLAS_URI = process.env.MIGRONAUT_TEST_ATLAS_URI;
 const DB = `migronaut_search_${process.pid}`;
@@ -15,7 +16,7 @@ const DB = `migronaut_search_${process.pid}`;
  * Opt-in and manual: it needs Atlas Search, which a plain `pnpm test` cannot
  * assume, and CI does not run it. An environment-capability skip with a
  * reason, like the real-Redis suite; the coverage gate passes without it. Run
- * it after a change to search-index-spec.js, converge-search.js or the search
+ * it after a change to converge/search-index-spec.js, converge/search.js or the search
  * planner:
  *
  *   docker run --rm -d --name migronaut-atlas -p 27018:27017 -e DO_NOT_TRACK=1 \
@@ -30,9 +31,9 @@ describe(
     timeout: 900_000,
   },
   () => {
-    let client;
-    let db;
-    let project;
+    let client = null;
+    let db = null;
+    let project = null;
     const kits = [];
     let counter = 0;
     /** A collection name of its own per scenario: a dropped index's name stays taken a while */
@@ -52,7 +53,7 @@ describe(
       project?.cleanup();
     });
 
-    function kitWith(collections, overrides = {}) {
+    const kitWith = (collections, overrides = {}) => {
       const kit = makeMigrator(ATLAS_URI, DB, project.dir, {
         collections,
         searchIndexWaitTimeoutMs: 300_000,
@@ -60,7 +61,7 @@ describe(
       });
       kits.push(kit);
       return kit;
-    }
+    };
 
     const rows = (result) =>
       result.collections.flatMap((collection) =>
@@ -70,7 +71,7 @@ describe(
       );
 
     /** Converge and wait for the builds, then prove a fixed point: a second plan finds nothing */
-    async function convergeToFixedPoint(collections, options = {}) {
+    const convergeToFixedPoint = async (collections, options = {}) => {
       const result = await kitWith(collections).converge({
         waitForSearchIndexes: true,
         ...options,
@@ -87,7 +88,7 @@ describe(
       );
       assert.deepStrictEqual(ignored, [], 'add these defaults to search-index-spec.js');
       return { result, replan };
-    }
+    };
 
     const listed = async (collection) =>
       db
@@ -95,12 +96,12 @@ describe(
         .aggregate([{ $listSearchIndexes: {} }])
         .toArray();
 
-    async function seed(collection) {
+    const seed = async (collection) => {
       await db.collection(collection).insertMany([
         { title: 'Alien', year: 1979, genre: 'sci-fi', embedding: [0.1, 0.2, 0.3] },
         { title: 'Heat', year: 1995, genre: 'crime', embedding: [0.3, 0.1, 0.2] },
       ]);
-    }
+    };
 
     const VECTOR = {
       fields: [
@@ -273,7 +274,7 @@ describe(
         },
       ];
       await convergeToFixedPoint(declare('cosine'));
-      let result;
+      let result = null;
       try {
         ({ result } = await convergeToFixedPoint(declare('dotProduct')));
       } catch (error) {
@@ -354,7 +355,7 @@ describe(
       const observer = kitWith([]);
       let seenFree = false;
       const watching = (async () => {
-        while (events.length === 0) await new Promise((resolve) => setTimeout(resolve, 50));
+        while (events.length === 0) await sleep(50);
         seenFree = (await observer.lockInfo()) === null;
       })();
       const result = await kit.converge({ waitForSearchIndexes: true });

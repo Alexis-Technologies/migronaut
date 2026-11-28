@@ -69,7 +69,7 @@ collection overrides ride along as env vars, since they have no dedicated flag:
 
 ```bash
 MIGRONAUT_MIGRATIONS_DIR=./seeds \
-MIGRONAUT_COLLECTION=_migronaut_seeds \
+MIGRONAUT_MIGRATIONS_COLLECTION=_migronaut_seeds \
 MIGRONAUT_LOCK_COLLECTION=_migronaut_seed_locks \
 migronaut up
 ```
@@ -194,7 +194,7 @@ seeds/
 
 ```bash
 MIGRONAUT_MIGRATIONS_DIR=./seeds/$APP_ENV \
-MIGRONAUT_COLLECTION=_migronaut_seeds \
+MIGRONAUT_MIGRATIONS_COLLECTION=_migronaut_seeds \
 MIGRONAUT_LOCK_COLLECTION=_migronaut_seed_locks \
 migronaut up
 ```

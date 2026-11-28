@@ -3,22 +3,22 @@ const { after, before, beforeEach, describe, it } = require('node:test');
 const { Decimal128, Double, Int32, Long, MongoClient, ObjectId } = require('mongodb');
 const {
   applyBatch,
-  controlOutcome,
+  resolveControlOutcome,
   matchOf,
   processPartition,
   readStepResult,
-} = require('../../src/core/background-engine.js');
-const { idRangePartitioner } = require('../../src/core/background-partition.js');
-const { resolveBackgroundSpec } = require('../../src/core/background-spec.js');
-const { BackgroundStore } = require('../../src/core/background-store.js');
-const { createAdaptive } = require('../../src/core/background-throttle.js');
+} = require('../../src/core/background/engine.js');
+const { idRangePartitioner } = require('../../src/core/background/partition.js');
+const { resolveBackgroundSpec } = require('../../src/core/background/spec.js');
+const { BackgroundStore } = require('../../src/core/background/store.js');
+const { createAdaptive } = require('../../src/core/background/throttle.js');
 const { BackgroundFailedError, LockLostError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { updateWithRevision } = require('../../versioning.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
-let store;
+let mongo = null;
+let store = null;
 const DB = 'migronaut_background_engine_test';
 const NAME = '0001-orders.js';
 const HINT = { __v: 1, _id: 1 };
@@ -41,10 +41,10 @@ beforeEach(async () => {
 const moveAddress = ({ address, ...doc }) => ({ ...doc, shipping: { address } });
 
 /** A job and one claimed partition over the whole collection */
-async function setUp(
+const setUp = async (
   raw,
   { partitions = [{ scope: { kind: 'id-range', bracket: 'objectId' } }] } = {},
-) {
+) => {
   const { spec, fns } = resolveBackgroundSpec({ collection: 'orders', from: 1, to: 2, ...raw });
   await store.register(NAME, { status: 'pending', spec });
   const state = await store.commitPlan(NAME, {
@@ -72,12 +72,12 @@ async function setUp(
     logger: silentLogger,
   };
   return { job, state, ...claimed };
-}
+};
 
 const noThrottle = { beforeBatch: async () => {} };
 
 /** Run a claimed partition to an outcome */
-function run({ job, lease, partition }, overrides = {}) {
+const run = ({ job, lease, partition }, overrides = {}) => {
   return processPartition(job, {
     store,
     lease,
@@ -89,7 +89,7 @@ function run({ job, lease, partition }, overrides = {}) {
     readControl: () => store.get(NAME),
     ...overrides,
   });
-}
+};
 
 describe('background engine (integration)', () => {
   it('should keep the stored BSON type of every field it does not change', async () => {
@@ -264,7 +264,10 @@ describe('background engine (integration)', () => {
     // A batch transformation that returns the wrong count fails the slice.
     await orders.updateMany({}, { $set: { __v: 1 } });
     const broken = await setUp({ migrateBatch: async () => [] });
-    await assert.rejects(run(broken), /must return one per document/);
+    await assert.rejects(run(broken), {
+      code: 'ALX_ERR_BACKGROUND_FAILED',
+      message: /must return one per document/,
+    });
   });
 
   it('should stop at the deadline, on a control, on a new plan, and on a lost lease', async () => {
@@ -284,10 +287,13 @@ describe('background engine (integration)', () => {
     assert.strictEqual(yielded.counters.migrated, 10);
     const paused = await run(setup, { readControl: async () => ({ status: 'paused' }) });
     assert.strictEqual(paused.outcome, 'paused');
-    assert.strictEqual(controlOutcome(null, setup.job, setup.partition), 'cancelled');
-    assert.strictEqual(controlOutcome({ status: 'failed' }, setup.job, setup.partition), 'failed');
+    assert.strictEqual(resolveControlOutcome(null, setup.job, setup.partition), 'cancelled');
     assert.strictEqual(
-      controlOutcome({ status: 'running', generation: 9 }, setup.job, setup.partition),
+      resolveControlOutcome({ status: 'failed' }, setup.job, setup.partition),
+      'failed',
+    );
+    assert.strictEqual(
+      resolveControlOutcome({ status: 'running', generation: 9 }, setup.job, setup.partition),
       'stale',
     );
     const stopped = await run(setup, { signal: AbortSignal.abort() });
@@ -326,11 +332,14 @@ describe('background engine (integration)', () => {
     assert.deepStrictEqual(seen, [null, { n: 1 }, { n: 2 }]);
     assert.strictEqual(result.counters.processed, 3);
     assert.strictEqual(await mongo.db.collection('log').countDocuments(), 3);
-    assert.throws(() => readStepResult({ done: 'yes' }), /done a boolean/);
-    assert.throws(
-      () => readStepResult({ done: false, checkpoint: { blob: 'x'.repeat(70_000) } }),
-      /larger than 64 KiB/,
-    );
+    assert.throws(() => readStepResult({ done: 'yes' }), {
+      code: 'ALX_ERR_BACKGROUND_FAILED',
+      message: /done a boolean/,
+    });
+    assert.throws(() => readStepResult({ done: false, checkpoint: { blob: 'x'.repeat(70_000) } }), {
+      code: 'ALX_ERR_BACKGROUND_FAILED',
+      message: /larger than 64 KiB/,
+    });
   });
 
   it('should write through one shared path that a session can join', async () => {
@@ -351,7 +360,7 @@ describe('background engine (integration)', () => {
       partitioner: idRangePartitioner,
     };
     const session = mongo.client.startSession();
-    let result;
+    let result = null;
     try {
       session.startTransaction();
       const docs = await orders.find({ __v: 1 }, { session }).toArray();

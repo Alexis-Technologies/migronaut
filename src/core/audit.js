@@ -1,8 +1,8 @@
 const { mapLimit } = require('../utils/concurrency.js');
-const { errorText } = require('../utils/error.js');
-const { SEARCH_UNAVAILABLE_HINT, listSearchIndexes, probeSearch } = require('./converge-search.js');
+const { formatError } = require('../utils/error.js');
+const { SEARCH_UNAVAILABLE_HINT, listSearchIndexes, probeSearch } = require('./converge/search.js');
 const { toLockInfo } = require('./lock.js');
-const { normalizeLiveSearchIndex, searchBuildState } = require('./search-index-spec.js');
+const { normalizeLiveSearchIndex, searchBuildState } = require('./converge/search-index-spec.js');
 const { READ_OPTIONS, readServer } = require('./server-info.js');
 
 /** Changelog indexes ensureIndexes() creates — audit warns when any is absent */
@@ -13,6 +13,9 @@ const EXPECTED_INDEXES = [
   'status_name',
   'status_appliedAt_name',
 ];
+
+/** Search index lists the audit reads at once */
+const AUDIT_READ_CONCURRENCY = 8;
 
 /**
  * Read-only health check of the setup: configuration, connectivity,
@@ -27,19 +30,19 @@ const EXPECTED_INDEXES = [
  * needs none of the kit's private state. `deps.definitions()` (optional) gives
  * the declared collections, for the search check.
  */
-async function runAudit(deps) {
+const runAudit = async (deps) => {
   const checks = [];
   const record = (name, status, detail) => checks.push({ name, status, detail });
 
   // 1. Configuration. Everything downstream depends on it, so a failure here
   //    is fatal to the audit itself.
-  let config;
+  let config = null;
   try {
     config = await deps.ensureConfig();
     record('config', 'pass', `Loaded (database "${config.dbName}")`);
   } catch (error) {
-    record('config', 'fail', errorText(error));
-    return auditReport(checks);
+    record('config', 'fail', formatError(error));
+    return summarizeAudit(checks);
   }
 
   // 2. Connectivity.
@@ -47,8 +50,8 @@ async function runAudit(deps) {
     await deps.connect();
     record('connection', 'pass', config.client ? 'Using the injected client' : 'Connected');
   } catch (error) {
-    record('connection', 'fail', errorText(error));
-    return auditReport(checks);
+    record('connection', 'fail', formatError(error));
+    return summarizeAudit(checks);
   }
 
   const db = deps.getDb();
@@ -58,8 +61,8 @@ async function runAudit(deps) {
   //    that says nothing about the configuration.
   try {
     const info = await db.admin().command({ hello: 1 });
-    const supportsTransactions = Boolean(info.setName) || info.msg === 'isdbgrid';
-    if (supportsTransactions) {
+    const canUseTransactions = Boolean(info.setName) || info.msg === 'isdbgrid';
+    if (canUseTransactions) {
       record('transactions', 'pass', info.setName ? `Replica set "${info.setName}"` : 'Sharded');
     } else if (config.useTransaction) {
       record('transactions', 'fail', 'useTransaction is on, but this is a standalone server');
@@ -67,7 +70,7 @@ async function runAudit(deps) {
       record('transactions', 'warn', 'Standalone server — useTransaction is unavailable');
     }
   } catch (error) {
-    record('transactions', 'warn', `Could not determine topology: ${errorText(error)}`);
+    record('transactions', 'warn', `Could not determine topology: ${formatError(error)}`);
   }
 
   // 4. Indexes. Missing ones do not break correctness, only performance.
@@ -83,7 +86,7 @@ async function runAudit(deps) {
     if (missing.length === 0) record('indexes', 'pass', 'All changelog indexes present');
     else record('indexes', 'warn', `Missing: ${missing.join(', ')}`);
   } catch (error) {
-    record('indexes', 'warn', `Could not read indexes: ${errorText(error)}`);
+    record('indexes', 'warn', `Could not read indexes: ${formatError(error)}`);
   }
 
   // 5. Lock. A held lock is not itself a problem — a stale one is. Stale by
@@ -102,7 +105,7 @@ async function runAudit(deps) {
         : Date.now() - holder.lockedAt.getTime();
       const ageSeconds = Math.round(ageMs / 1000);
       const ttlMs = holder.ttlMs ?? config.lockTTLSeconds * 1000;
-      const stale = ageMs > ttlMs;
+      const isStale = ageMs > ttlMs;
       // A holder from a release that wrote no TTL: only this configuration's
       // is known, and it may not be the holder's.
       const advice =
@@ -112,12 +115,12 @@ async function runAudit(deps) {
           : ` — past its TTL (${ttlMs / 1000}s), likely from a crashed run (migronaut unlock)`;
       record(
         'lock',
-        stale ? 'warn' : 'pass',
-        `Held by pid ${holder.pid} on ${holder.host} for ${ageSeconds}s${stale ? advice : ''}`,
+        isStale ? 'warn' : 'pass',
+        `Held by pid ${holder.pid} on ${holder.host} for ${ageSeconds}s${isStale ? advice : ''}`,
       );
     }
   } catch (error) {
-    record('lock', 'warn', `Could not read the lock: ${errorText(error)}`);
+    record('lock', 'warn', `Could not read the lock: ${formatError(error)}`);
   }
 
   // 6. Checksum drift, missing files, pending count and ordering, from the
@@ -151,7 +154,7 @@ async function runAudit(deps) {
       record('ordering', 'pass', 'No out-of-order pending migrations');
     }
   } catch (error) {
-    record('checksums', 'warn', `Could not read status: ${errorText(error)}`);
+    record('checksums', 'warn', `Could not read status: ${formatError(error)}`);
   }
 
   // 7. Search — only where declared collections hold search indexes.
@@ -163,7 +166,7 @@ async function runAudit(deps) {
       const finding = await deps.background();
       if (finding !== null) record('background', finding.status, finding.detail);
     } catch (error) {
-      record('background', 'warn', `Could not check background migrations: ${errorText(error)}`);
+      record('background', 'warn', `Could not check background migrations: ${formatError(error)}`);
     }
   }
 
@@ -171,9 +174,9 @@ async function runAudit(deps) {
   // Feature detection instead of version parsing: it also catches a run
   // under `--no-experimental-strip-types` on an otherwise capable Node.
   const nodeVersion = process.versions.node;
-  const wantsTs = (config.fileExtensions ?? []).includes('.ts');
-  const stripsTypes = Boolean(process.features.typescript);
-  if (wantsTs && !stripsTypes) {
+  const hasTsExtension = (config.fileExtensions ?? []).includes('.ts');
+  const canStripTypes = Boolean(process.features.typescript);
+  if (hasTsExtension && !canStripTypes) {
     record(
       'runtime',
       'warn',
@@ -183,11 +186,8 @@ async function runAudit(deps) {
     record('runtime', 'pass', `Node ${nodeVersion}`);
   }
 
-  return auditReport(checks);
-}
-
-/** Search index lists the audit reads at once */
-const AUDIT_READ_CONCURRENCY = 8;
+  return summarizeAudit(checks);
+};
 
 /**
  * Whether the server has the Atlas Search that declared search indexes need,
@@ -195,9 +195,9 @@ const AUDIT_READ_CONCURRENCY = 8;
  * declared — or when the definitions do not load: converge reports that
  * itself, with every issue.
  */
-async function auditSearch(deps, db, config, record) {
+const auditSearch = async (deps, db, config, record) => {
   if (typeof deps.definitions !== 'function') return;
-  let definitions;
+  let definitions = null;
   try {
     definitions = await deps.definitions();
   } catch {
@@ -222,24 +222,24 @@ async function auditSearch(deps, db, config, record) {
       readOptions: READ_OPTIONS,
     });
     if (!probe.available) {
-      const skip = config.onSearchUnavailable === 'skip';
-      record(
+      const shouldSkip = config.onSearchUnavailable === 'skip';
+      return void record(
         'search',
-        skip ? 'warn' : 'fail',
+        shouldSkip ? 'warn' : 'fail',
         `Not available on this server (${probe.reason}) — ${counted}; ` +
-          (skip
+          (shouldSkip
             ? "converge skips them (onSearchUnavailable: 'skip')"
             : `converge refuses them: ${SEARCH_UNAVAILABLE_HINT}`),
       );
-      return;
     }
     const failed = [];
     const stale = [];
     // One list per collection, a few at a time; reported in declaration order.
-    const lists = await mapLimit(declaring, AUDIT_READ_CONCURRENCY, ({ definition }) =>
-      listSearchIndexes(db, definition.name, READ_OPTIONS),
-    );
-    for (const [position, { definition, names }] of declaring.entries()) {
+    const lists = await mapLimit(declaring, AUDIT_READ_CONCURRENCY, ({ definition }) => {
+      return listSearchIndexes(db, definition.name, READ_OPTIONS);
+    });
+    for (let position = 0; position < declaring.length; position++) {
+      const { definition, names } = declaring[position];
       for (const raw of lists[position]) {
         const index = normalizeLiveSearchIndex(raw);
         if (!names.has(index.name)) continue;
@@ -258,12 +258,12 @@ async function auditSearch(deps, db, config, record) {
       record('search', 'pass', `Available — ${counted}`);
     }
   } catch (error) {
-    record('search', 'warn', `Could not check Atlas Search: ${errorText(error)}`);
+    record('search', 'warn', `Could not check Atlas Search: ${formatError(error)}`);
   }
-}
+};
 
 /** Roll individual checks up into the report shape (one pass, both counters) */
-function auditReport(checks) {
+const summarizeAudit = (checks) => {
   let failed = 0;
   let warnings = 0;
   for (const check of checks) {
@@ -271,6 +271,6 @@ function auditReport(checks) {
     else if (check.status === 'warn') warnings += 1;
   }
   return { ok: failed === 0, failed, warnings, checks };
-}
+};
 
 module.exports = { runAudit };

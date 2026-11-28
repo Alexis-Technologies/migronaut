@@ -15,7 +15,7 @@ const stripComments = (source) =>
 const DECLARATION_FILES = ['index.d.ts', 'bullmq.d.ts', 'versioning.d.ts'];
 
 /** Every `.js` file under `dir`, repo-relative — the tree the "nothing in src may…" rules walk */
-function sourceFiles(dir) {
+const sourceFiles = (dir) => {
   const files = [];
   for (const entry of readdirSync(path.join(repoRoot, dir), { withFileTypes: true })) {
     const relative = `${dir}/${entry.name}`;
@@ -23,7 +23,7 @@ function sourceFiles(dir) {
     else if (entry.name.endsWith('.js')) files.push(relative);
   }
   return files;
-}
+};
 
 describe('package entry point', () => {
   it('should expose the public surface through the package root', () => {
@@ -80,7 +80,11 @@ describe('package entry point', () => {
     }
     // The other direction: EXIT_CODES may add CLI-condition codes, but never
     // a typo'd error code.
-    const cliOnly = new Set(['PENDING_MIGRATIONS', 'AUDIT_FAILED', 'COLLECTIONS_DRIFT']);
+    const cliOnly = new Set([
+      'ALX_ERR_PENDING_MIGRATIONS',
+      'ALX_ERR_AUDIT_FAILED',
+      'ALX_ERR_COLLECTIONS_DRIFT',
+    ]);
     for (const key of Object.keys(api.EXIT_CODES)) {
       assert.ok(codes.has(key) || cliOnly.has(key), `EXIT_CODES key ${key} matches no error code`);
     }
@@ -89,14 +93,22 @@ describe('package entry point', () => {
     assert.strictEqual(new Set(values).size, values.length, 'exit codes must be unique');
     assert.ok(values.every((value) => Number.isInteger(value) && value >= 2 && value <= 125));
   });
+
+  it('should start every code with ALX_ERR_, the CLI conditions included', () => {
+    // 3.0 renamed them all at once; a code added in the 2.x format would split the set again.
+    const api = require(path.join(repoRoot, 'index.js'));
+    for (const code of Object.keys(api.EXIT_CODES)) {
+      assert.match(code, /^ALX_ERR_[A-Z_]+$/, `${code} lacks the ALX_ERR_ prefix`);
+    }
+  });
 });
 
 describe('declaration file', () => {
   it('should list every runtime error code in the MigronautErrorCode union', () => {
-    // The one lockstep surface nothing else pins: classes and exit codes are
-    // checked both ways above, but the code-literal union can silently omit a
-    // new code — tsc/tsd cannot force it in, since subclasses do not narrow
-    // `code`. Same textual-pin style schema-sync uses.
+    // The one lockstep surface nothing else pins both ways: classes and exit
+    // codes are checked above, and a subclass's narrowed `code` makes check:dts
+    // refuse a literal missing from the union — but nothing else drops a stale
+    // member. Same textual-pin style schema-sync uses.
     const dts = readRepoFile('index.d.ts');
     const unionMatch = /export type MigronautErrorCode =([\s\S]*?);/.exec(dts);
     assert.ok(unionMatch, 'expected the MigronautErrorCode union in index.d.ts');
@@ -125,6 +137,43 @@ describe('declaration file', () => {
     const code = dts.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     assert.ok(!/from ['"]mongoose['"]/.test(code), 'index.d.ts must not import mongoose');
     assert.ok(dts.includes('interface MongooseLike'));
+  });
+});
+
+describe('error code docs', () => {
+  /** code → class name, for every subclass the error model exports */
+  const runtimeCodes = () => {
+    const errors = require(path.join(repoRoot, 'src', 'errors', 'index.js'));
+    const codes = new Map();
+    for (const [name, ErrorClass] of Object.entries(errors)) {
+      if (name === 'MigronautError' || typeof ErrorClass !== 'function') continue;
+      codes.set(new ErrorClass('probe').code, name);
+    }
+    return codes;
+  };
+  const sortedObject = (map) => Object.fromEntries([...map].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
+
+  it('should list every error code with its class in docs/reference/error-codes.md', () => {
+    const doc = readRepoFile('docs/reference/error-codes.md');
+    const documented = new Map();
+    for (const match of doc.matchAll(/^\| `([A-Z_]+)` \| `(\w+)` \|/gm)) {
+      assert.ok(!documented.has(match[1]), `${match[1]} is documented twice`);
+      documented.set(match[1], match[2]);
+    }
+    assert.deepStrictEqual(sortedObject(documented), sortedObject(runtimeCodes()));
+  });
+
+  it('should list every exit code with its number in docs/reference/cli.md', () => {
+    const { EXIT_CODES } = require(path.join(repoRoot, 'src', 'cli', 'exit-codes.js'));
+    const doc = readRepoFile('docs/reference/cli.md');
+    const documented = new Map();
+    for (const match of doc.matchAll(/^\| `(\d+)` \| `([A-Z_]+)`/gm)) {
+      documented.set(match[2], Number(match[1]));
+    }
+    assert.deepStrictEqual(
+      sortedObject(documented),
+      sortedObject(new Map(Object.entries(EXIT_CODES))),
+    );
   });
 });
 
@@ -239,8 +288,10 @@ describe('bullmq adapter layering', () => {
     assert.ok(files.length >= 6, 'expected the adapter sources');
     for (const file of files) {
       for (const target of requiresOf(file)) {
+        // Node's built-ins are no layer: the rule is about the engine below.
         assert.ok(
-          /^\.\/[\w-]+\.js$/.test(target) ||
+          target.startsWith('node:') ||
+            /^\.\/[\w-]+\.js$/.test(target) ||
             /^\.\.\/utils\/[\w-]+\.js$/.test(target) ||
             target === '../errors/index.js' ||
             target === '../core/migrator.js' ||
@@ -288,10 +339,9 @@ describe('versioning subpath', () => {
     assert.ok(files.length >= 6, 'expected the versioning sources');
     for (const file of files) {
       for (const target of requiresOf(file)) {
-        assert.ok(
-          /^\.\/[\w-]+\.js$/.test(target) || target === '../errors/index.js',
-          `${file} requires ${target}`,
-        );
+        // Node's built-ins cost nothing to load and are no part of the engine.
+        const isOwn = /^\.\/[\w-]+\.js$/.test(target) || target === '../errors/index.js';
+        assert.ok(target.startsWith('node:') || isOwn, `${file} requires ${target}`);
       }
     }
   });
@@ -349,7 +399,7 @@ describe('peer dependencies', () => {
     // mongoose is an optional peer the caller injects; the driver is loaded
     // lazily, from the one place that connects.
     // bson-peer.js is the one lazy door to the driver's BSON (sizes, EJSON).
-    const allowed = new Set(['src/core/migrator.js', 'src/core/bson-peer.js']);
+    const allowed = new Set(['src/core/migrator.js', 'src/core/background/bson-peer.js']);
     const offenders = [];
     for (const file of sourceFiles('src')) {
       for (const target of [
@@ -440,6 +490,38 @@ describe('conventions that only review used to hold', () => {
     assert.deepStrictEqual(offendersOf(/\bconsole\s*\.\s*\w+/), []);
   });
 
+  it('should call Array#find and Array#filter nowhere — the lint bans the other methods', () => {
+    // `find` and `filter` are MongoDB words too (Collection#find, a query's
+    // filter), so the lint cannot ban them by name. An array's takes a
+    // function; MongoDB's takes a filter document.
+    const callback = /\.(?:find|filter)\(\s*(?:async\b|function\b|\(|[\w$]+\s*=>|Boolean\s*\))/;
+    assert.deepStrictEqual(offendersOf(callback), []);
+    assert.ok(callback.test('list.find((item) => item)') && !callback.test('collection.find({})'));
+  });
+
+  it('should destructure no array — a library reads by index', () => {
+    // oxlint has no `no-restricted-syntax`, so this holds alexiskills' rule
+    // instead: declarations and loop heads, arrow parameters, assignments.
+    const patterns = [
+      /\b(?:const|let|var)\s*\[/,
+      /\(\s*(?:[\w$]+\s*,\s*)*\[[\w$\s,.]*\][^()]*\)\s*=>/,
+      /^\s*\[[^\]]+\]\s*=[^=>]/m,
+    ];
+    const samples = [
+      'const [a] = list;',
+      'for (const [k, v] of map)',
+      '([name]) => name',
+      '[a, b] = [b, a];',
+    ];
+    for (const sample of samples) {
+      assert.ok(
+        patterns.some((pattern) => pattern.test(sample)),
+        sample,
+      );
+    }
+    for (const pattern of patterns) assert.deepStrictEqual(offendersOf(pattern), [], `${pattern}`);
+  });
+
   it('should never throw a bare Error — every throw carries a typed code', () => {
     const sanctioned = new Set([
       // Text of the user's scaffold, not migronaut's code.
@@ -483,6 +565,46 @@ describe('published package', () => {
   it('should ship every file the entry points need', () => {
     for (const entry of ['index.js', 'index.d.ts', 'bin', 'src']) {
       assert.ok(packageJson.files.includes(entry), `${entry} must be in "files"`);
+    }
+  });
+
+  it('should leave the folder notes for agents out of the tarball', () => {
+    // A folder's CLAUDE.md sits beside its code; `src` alone would publish it.
+    assert.ok(packageJson.files.includes('!**/CLAUDE.md'));
+  });
+
+  it('should ship the license and the security policy beside the changelog', () => {
+    for (const entry of ['README.md', 'CHANGELOG.md', 'LICENSE', 'SECURITY.md']) {
+      assert.ok(packageJson.files.includes(entry), `${entry} must be in "files"`);
+    }
+  });
+
+  it('should name one version in package.json, the CHANGELOG, ARCHITECTURE.md and the docs', () => {
+    // Four spots, synced by hand in the release commit (CLAUDE.md, Release process).
+    const { version } = packageJson;
+    const released = /^## \[(\d+\.\d+\.\d+[^\]]*)\] - \d{4}-\d{2}-\d{2}$/m.exec(
+      readRepoFile('CHANGELOG.md'),
+    );
+    assert.strictEqual(released?.[1], version, 'the newest CHANGELOG release');
+    const snapshot = /\*\*Snapshot at time of writing:\*\* v(\S+) ·/.exec(
+      readRepoFile('ARCHITECTURE.md'),
+    );
+    assert.strictEqual(snapshot?.[1], version, 'the snapshot line of ARCHITECTURE.md');
+    const config = readRepoFile('docs/.vitepress/config.mts');
+    // `\r?`: a Windows checkout ends its lines with CRLF, and `.` stops at the `\r`.
+    const nav = /\/\/ Hand-synced with package\.json "version".*\r?\n\s*text: 'v([^']+)'/.exec(
+      config,
+    );
+    assert.strictEqual(nav?.[1], version, 'the nav label of the docs site');
+  });
+
+  it('should link every CHANGELOG release, newest first, from the link block', () => {
+    const changelog = readRepoFile('CHANGELOG.md');
+    const headings = [...changelog.matchAll(/^## \[([^\]]+)\]/gm)].map((match) => match[1]);
+    assert.strictEqual(headings[0], 'Unreleased', 'an [Unreleased] section on top');
+    for (const heading of headings) {
+      const label = heading.toLowerCase() === 'unreleased' ? 'unreleased' : heading;
+      assert.match(changelog, new RegExp(`^\\[${label.replaceAll('.', '\\.')}\\]: https://`, 'm'));
     }
   });
 

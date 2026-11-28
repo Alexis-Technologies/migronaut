@@ -9,7 +9,7 @@ const path = require('node:path');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_baseline_test';
 const TARGET = '_migronaut_migrations';
 
@@ -25,22 +25,22 @@ beforeEach(async () => {
   await mongo.db.dropDatabase();
 });
 
-let project;
-let migrator;
+let project = null;
+let migrator = null;
 
 afterEach(async () => {
   await migrator?.disconnect();
   project?.cleanup();
 });
 
-function setup() {
+const setup = () => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir);
-}
+};
 
-function records() {
+const records = () => {
   return mongo.db.collection(TARGET).find().sort({ name: 1 }).toArray();
-}
+};
 
 describe('MigratorKit.baseline (integration)', () => {
   it('should mark files as applied without executing them', async () => {

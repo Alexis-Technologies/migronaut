@@ -1,5 +1,5 @@
 /** Build a complete MigrationRecord for tests, with sensible defaults */
-function makeRecord(overrides = {}) {
+const makeRecord = (overrides = {}) => {
   return {
     name: '0001-test.ts',
     batch: 1,
@@ -11,6 +11,6 @@ function makeRecord(overrides = {}) {
     executedBy: 'tester',
     ...overrides,
   };
-}
+};
 
 module.exports = { makeRecord };

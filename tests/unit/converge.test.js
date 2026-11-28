@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { normalizeDefinition } = require('../../src/core/collections.js');
-const { readLiveState, runConverge } = require('../../src/core/converge.js');
+const { normalizeDefinition } = require('../../src/core/converge/collections.js');
+const { runConverge } = require('../../src/core/converge/converge.js');
+const { readLiveState } = require('../../src/core/converge/live.js');
 const { READ_OPTIONS } = require('../../src/core/server-info.js');
 const { ConvergeFailedError, RunAbortedError } = require('../../src/errors/index.js');
 
@@ -31,7 +32,7 @@ const searchIndex = (name, definition, fields = {}) => ({
  * `normalize` is what the server does to a stored definition, `readyAfter`
  * how many list reads a created or updated index takes to become READY.
  */
-function fakeDb(
+const fakeDb = (
   collections = {},
   {
     fail = {},
@@ -44,7 +45,7 @@ function fakeDb(
     readyAfter,
     below = {},
   } = {},
-) {
+) => {
   const state = {};
   for (const [name, spec] of Object.entries(collections)) {
     state[name] = {
@@ -283,9 +284,9 @@ function fakeDb(
     }),
   };
   return db;
-}
+};
 
-function makeDeps(db, overrides = {}) {
+const makeDeps = (db, overrides = {}) => {
   const events = [];
   const lines = [];
   const log = (level) => (message, fields) => lines.push({ level, message, fields });
@@ -302,7 +303,7 @@ function makeDeps(db, overrides = {}) {
       ...(overrides.now ? { now: overrides.now } : {}),
     },
   };
-}
+};
 
 const definitions = (...list) => list.map((definition) => normalizeDefinition(definition));
 const statuses = (result) =>
@@ -575,7 +576,7 @@ describe('runConverge — refusals and failures', () => {
   it('should stop between steps when aborted, keeping what was applied', async () => {
     const db = fakeDb({});
     let checks = 0;
-    const abort = new RunAbortedError('Stopped', { reason: 'Stopped' });
+    const abort = new RunAbortedError('Stopped', { context: { reason: 'Stopped' } });
     const { deps } = makeDeps(db, {
       assertNotAborted: () => {
         checks += 1;
@@ -825,8 +826,8 @@ describe('runConverge — at scale', () => {
       ),
       (error) => {
         assert.match(error.message, /Could not create indexes "a_1", "b_1" on c/);
-        const statuses = error.context.converge.collections[0].actions.map((a) => a.status);
-        assert.deepStrictEqual(statuses, ['failed', 'failed']);
+        const actionStatuses = error.context.converge.collections[0].actions.map((a) => a.status);
+        assert.deepStrictEqual(actionStatuses, ['failed', 'failed']);
         return true;
       },
     );
@@ -1096,6 +1097,7 @@ describe('runConverge — history', () => {
         { definitions: definitions({ name: 'c', indexes: [{ key: { a: 1 } }] }) },
         undefined,
       ),
+      { code: 'ALX_ERR_CONVERGE_FAILED' },
     );
     assert.strictEqual(entries[0].success, false);
     assert.match(entries[0].error, /denied/);
@@ -1645,7 +1647,7 @@ describe('runConverge — search indexes', () => {
         aborted = true;
       },
       assertNotAborted: () => {
-        if (aborted) throw new RunAbortedError('Stopped', { reason: 'Stopped' });
+        if (aborted) throw new RunAbortedError('Stopped', { context: { reason: 'Stopped' } });
       },
     });
     await assert.rejects(
@@ -1873,10 +1875,10 @@ describe('runConverge — search indexes', () => {
         assert.strictEqual(error.context.phase, phase);
         assert.strictEqual(error.context.collection, collection);
         assert.strictEqual(error.context.converge.collections[0].actions[0].status, 'applied');
-        const statuses = error.context.converge.collections.flatMap((entry) =>
+        const rowStatuses = error.context.converge.collections.flatMap((entry) =>
           entry.actions.map((action) => action.status),
         );
-        assert.ok(!statuses.includes('planned'), 'no row is left planned');
+        assert.ok(!rowStatuses.includes('planned'), 'no row is left planned');
         return true;
       });
     }
@@ -1947,7 +1949,7 @@ describe('runConverge — search indexes', () => {
 describe('runConverge — waiting for search indexes', () => {
   const DYNAMIC = { mappings: { dynamic: true } };
   /** A clock that only moves when the run sleeps */
-  function clock() {
+  const clock = () => {
     const state = { now: 0, pauses: [] };
     return {
       state,
@@ -1957,7 +1959,7 @@ describe('runConverge — waiting for search indexes', () => {
       },
       now: () => state.now,
     };
-  }
+  };
   const waiting = (waitTimeoutMs = 60_000) => ({
     search: { onUnavailable: 'fail', wait: true, waitTimeoutMs },
   });
@@ -2166,7 +2168,10 @@ describe('runConverge — waiting for search indexes', () => {
       },
     });
     delete deps.sleep; // the real pause: a second before the second poll
-    setTimeout(() => controller.abort(new RunAbortedError('Stopped', { reason: 'Stopped' })), 20);
+    setTimeout(
+      () => controller.abort(new RunAbortedError('Stopped', { context: { reason: 'Stopped' } })),
+      20,
+    );
     const startedAt = Date.now();
     await assert.rejects(
       runConverge(
@@ -2228,7 +2233,7 @@ describe('runConverge — waiting for search indexes', () => {
         aborted = true;
       },
       assertNotAborted: () => {
-        if (aborted) throw new RunAbortedError('Stopped', { reason: 'Stopped' });
+        if (aborted) throw new RunAbortedError('Stopped', { context: { reason: 'Stopped' } });
       },
     });
     await assert.rejects(
@@ -2371,7 +2376,7 @@ describe('runConverge — waiting for search indexes', () => {
         aborted = true;
       },
       assertNotAborted: () => {
-        if (aborted) throw new RunAbortedError('Stopped', { reason: 'Stopped' });
+        if (aborted) throw new RunAbortedError('Stopped', { context: { reason: 'Stopped' } });
       },
     });
     const points = [];

@@ -159,7 +159,7 @@ every run.
 Steps run one at a time, in a fixed order per collection: the collection, its validator, new
 indexes, in-place changes, rebuilds, and only then drops — so an index is removed only once
 everything declared exists. The first failure stops the run with
-[`CONVERGE_FAILED`](/reference/error-codes); a rebuild whose new index fails to build (a unique
+[`ALX_ERR_CONVERGE_FAILED`](/reference/error-codes); a rebuild whose new index fails to build (a unique
 index over duplicate values, typically) puts the old one back first.
 
 A whole run, end to end:
@@ -171,7 +171,7 @@ flowchart TB
   LOCK --> READ["read what is live<br/>collections · indexes · search indexes"]
   READ --> PLAN["plan every collection<br/>declared vs live — nothing written"]
   PLAN --> CONFLICT{"any conflict?"}
-  CONFLICT -- yes --> REFUSE(["refused before any write<br/>CONVERGE_FAILED · plan"]):::warn
+  CONFLICT -- yes --> REFUSE(["refused before any write<br/>ALX_ERR_CONVERGE_FAILED · plan"]):::warn
   CONFLICT -- no --> APPLY["per collection: plan again,<br/>then its steps, in order"]:::core
   APPLY --> CHECK["read it once more:<br/>still different → unstable"]
   CHECK --> WAIT{"wait for search<br/>index builds?"}
@@ -303,7 +303,7 @@ remove the old declaration and converge with `prune`.
 ::: warning Vector index updates on a local deployment
 An Atlas CLI local deployment (the `mongodb/mongodb-atlas-local` image — MongoDB 8.0 and 8.3 in our
 tests) refuses every update of a **vector** index; Atlas updates one in place. converge stops at
-that step with `CONVERGE_FAILED` and the same new-name recipe as a hint. Search indexes update
+that step with `ALX_ERR_CONVERGE_FAILED` and the same new-name recipe as a hint. Search indexes update
 fine everywhere.
 :::
 
@@ -323,7 +323,7 @@ migronaut converge --wait-search
 
 With `waitForSearchIndexes: true` (`--wait-search` for one run) converge holds until every declared
 search index is queryable with its declared definition, and fails with
-[`CONVERGE_FAILED`](/reference/error-codes) (`phase: 'wait'`) on a FAILED build of an index the
+[`ALX_ERR_CONVERGE_FAILED`](/reference/error-codes) (`phase: 'wait'`) on a FAILED build of an index the
 run created or changed, or after `searchIndexWaitTimeoutMs` (10 minutes by default; the server goes
 on building). An index that failed — or went `STALE` — before the run, its definition unchanged,
 does not hold the wait: converge cannot fix it, so it is named and warned about instead, and
@@ -346,12 +346,14 @@ expected (a plain `mongo` container in development while production runs on Atla
 `onSearchUnavailable: 'skip'`: everything else converges, and the search indexes are reported as
 `skip`. A converge with no `searchIndexes` declared anywhere never asks the server about Search.
 
-```js
-export default {
-  // …
-  onSearchUnavailable: process.env.NODE_ENV === 'development' ? 'skip' : 'fail',
-};
+Set it where that server runs, not by branching on the environment's name — in the development
+`.env` (or the container's environment):
+
+```sh
+MIGRONAUT_ON_SEARCH_UNAVAILABLE=skip
 ```
+
+Production leaves it unset, and keeps the default, `'fail'`.
 
 `migronaut audit` checks the same thing ahead of time: its `search` check fails where converge
 would refuse, and warns about a FAILED build.

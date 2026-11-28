@@ -7,14 +7,14 @@ const { makeProject } = require('../helpers/project.js');
 
 const customTemplate = path.join(__dirname, '..', 'fixtures', 'templates', 'custom.js');
 
-let project;
+let project = null;
 afterEach(() => project?.cleanup());
 
 /** Build a MigratorKit pointed at a fresh throwaway dir (no DB needed for create) */
-function migrator(overrides = {}) {
+const migrator = (overrides = {}) => {
   project = makeProject();
   return new MigratorKit({ migrationsDir: project.dir, logger: null, ...overrides });
-}
+};
 
 describe('MigratorKit.create (in-process)', () => {
   it('should create a .js migration when createExtension is js', async () => {

@@ -20,8 +20,38 @@ const READ_OPTIONS = Object.freeze({
   bsonRegExp: false,
 });
 
+/**
+ * How migronaut's own bookkeeping — the changelog and the locks — is read and
+ * written: on the primary, majority-committed, whatever the client prefers.
+ * With a client that reads from secondaries, the read-back after taking a
+ * lock saw the document as it was before the write (a lock that was ours,
+ * reported held and left to no one until its TTL), and the applied set could
+ * lag behind the last run — an applied migration ran again. Inside a
+ * migration's transaction the driver leaves the concerns to the transaction.
+ */
+const BOOKKEEPING_OPTIONS = Object.freeze({
+  readPreference: 'primary',
+  readConcern: Object.freeze({ level: 'majority' }),
+  writeConcern: Object.freeze({ w: 'majority' }),
+});
+
 /** listIndexes calls in flight while reading many collections — a pace, not a pool */
 const READ_CONCURRENCY = 8;
+
+const NAMESPACE_NOT_FOUND = 26;
+
+const INDEX_NOT_FOUND = 27;
+
+/**
+ * Whether `version` (`{ major, minor, patch? }`, or undefined when unknown) is at least
+ * `major.minor.patch`
+ */
+const isVersionAtLeast = (version, major, minor, patch = 0) => {
+  if (version === undefined) return false;
+  if (version.major !== major) return version.major > major;
+  if (version.minor !== minor) return version.minor > minor;
+  return (version.patch ?? 0) >= patch;
+};
 
 /**
  * What the server is: a mongos in front of shards (its shard keys matter to
@@ -30,24 +60,25 @@ const READ_CONCURRENCY = 8;
  * server that refuses to say gets the conservative answer: no in-place
  * extras, no shard-key handling.
  */
-async function readServer(db) {
+const readServer = async (db) => {
   const server = { mongos: false, version: undefined, topology: undefined };
   if (typeof db.admin !== 'function') return server;
   try {
     const hello = await db.admin().command({ hello: 1 });
     server.mongos = hello?.msg === 'isdbgrid';
     // What transactions need: a replica set member or a mongos.
-    server.topology = server.mongos
-      ? 'sharded'
-      : typeof hello?.setName === 'string'
-        ? 'replicaSet'
-        : 'standalone';
+    if (server.mongos) server.topology = 'sharded';
+    else if (typeof hello?.setName === 'string') server.topology = 'replicaSet';
+    else server.topology = 'standalone';
   } catch {
     // Unknown — treated as a replica set or standalone.
   }
   try {
     const info = await db.admin().command({ buildInfo: 1 });
-    const [major, minor, patch] = Array.isArray(info?.versionArray) ? info.versionArray : [];
+    const parts = Array.isArray(info?.versionArray) ? info.versionArray : [];
+    const major = parts[0];
+    const minor = parts[1];
+    const patch = parts[2];
     if (Number.isInteger(major) && Number.isInteger(minor)) {
       server.version = { major, minor, ...(Number.isInteger(patch) ? { patch } : {}) };
     }
@@ -55,16 +86,14 @@ async function readServer(db) {
     // Unknown version: only the always-available in-place changes.
   }
   return server;
-}
-
-const NAMESPACE_NOT_FOUND = 26;
-
-const INDEX_NOT_FOUND = 27;
+};
 
 module.exports = {
-  INDEX_NOT_FOUND,
-  NAMESPACE_NOT_FOUND,
-  READ_CONCURRENCY,
   READ_OPTIONS,
+  BOOKKEEPING_OPTIONS,
+  isVersionAtLeast,
+  READ_CONCURRENCY,
+  NAMESPACE_NOT_FOUND,
+  INDEX_NOT_FOUND,
   readServer,
 };

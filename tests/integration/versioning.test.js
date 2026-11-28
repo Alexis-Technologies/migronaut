@@ -12,7 +12,7 @@ const {
 const { startTestMongo } = require('../helpers/mongo.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_versioning_test';
 
 before(async () => {
@@ -28,7 +28,7 @@ beforeEach(async () => {
 });
 
 const kits = [];
-let project;
+let project = null;
 
 afterEach(async () => {
   for (const kit of kits.splice(0)) await kit.disconnect();
@@ -124,19 +124,19 @@ describe('optimistic concurrency (integration)', () => {
       __v: 3,
     });
 
-    const after = await findOneAndUpdateWithRevision(orders, { _id: 1 }, 6, {
+    const updated = await findOneAndUpdateWithRevision(orders, { _id: 1 }, 6, {
       $set: { items: 10 },
     });
-    assert.strictEqual(after.items, 10);
-    assert.strictEqual(after.__rev, 7);
-    const before = await findOneAndUpdateWithRevision(
+    assert.strictEqual(updated.items, 10);
+    assert.strictEqual(updated.__rev, 7);
+    const previous = await findOneAndUpdateWithRevision(
       orders,
       { _id: 1 },
       7,
       { $set: { items: 11 } },
       { returnDocument: 'before' },
     );
-    assert.strictEqual(before.items, 10);
+    assert.strictEqual(previous.items, 10);
     await assert.rejects(
       findOneAndUpdateWithRevision(orders, { _id: 1 }, 7, { $set: { items: 12 } }),
       (error) => error.context.reason === 'conflict' && error.context.actual === 8,

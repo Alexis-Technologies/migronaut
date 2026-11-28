@@ -3,23 +3,27 @@ const { describe, it, mock } = require('node:test');
 const { LOCK_ID, MigrationLock, runWithLock, toLockInfo } = require('../../src/core/lock.js');
 const { LockAlreadyHeldError, LockReleaseFailedError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
-const { keepEventLoopAlive } = require('../helpers/event-loop.js');
+const { settleWithTimers } = require('../helpers/event-loop.js');
+const timersPromises = require('node:timers/promises');
+
+/** Read at call time, so a test's mocked timers reach it */
+const sleep = (ms) => timersPromises.setTimeout(ms);
 
 // The ownership fields an acquire() update would store, or undefined for any
 // other update (a renew() only re-stamps lockedAt). acquire() sends a
 // $replaceWith/$cond pipeline (server-time `$$NOW` stamping) whose taken-branch
 // document carries the `$literal`-wrapped owner token and nonce.
-function heldFromUpdate(update) {
+const heldFromUpdate = (update) => {
   const stage = Array.isArray(update) ? update[0] : update;
   const doc = stage?.$replaceWith?.$cond?.[1];
   return doc ? { owner: doc.owner.$literal, nonce: doc.nonce.$literal } : undefined;
-}
+};
 
-function makeDb() {
+const makeDb = () => {
   // acquire() upserts with an `owner` token and a nonce, then reads them back
   // to confirm ownership. The mock captures both from the update and echoes
   // them from findOne so a successful acquire resolves.
-  let held;
+  let held = null;
   const collection = {
     updateOne: mock.fn((_filter, update) => {
       const taken = heldFromUpdate(update);
@@ -37,7 +41,7 @@ function makeDb() {
   };
   const db = { collection: () => collection };
   return { db, collection };
-}
+};
 
 describe('MigrationLock.acquire', () => {
   it('should upsert the lock document with the configured _id', async () => {
@@ -47,12 +51,13 @@ describe('MigrationLock.acquire', () => {
     assert.strictEqual(collection.updateOne.mock.callCount(), 1);
     const [filter, , options] = collection.updateOne.mock.calls[0].arguments;
     assert.strictEqual(filter._id, LOCK_ID);
-    assert.deepStrictEqual(options, { upsert: true });
+    // Bounded by the TTL on the server: a stalled acquire is not waited for good.
+    assert.deepStrictEqual(options, { upsert: true, maxTimeMS: 60_000 });
   });
 
   it('should throw LockAlreadyHeldError on a duplicate-key error', async () => {
     const { db, collection } = makeDb();
-    // eslint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
+    // oxlint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
     collection.updateOne.mock.mockImplementationOnce(() => Promise.reject({ code: 11000 }));
     collection.findOne.mock.mockImplementationOnce(() =>
       Promise.resolve({ _id: LOCK_ID, pid: 999 }),
@@ -63,7 +68,7 @@ describe('MigrationLock.acquire', () => {
 
   it('should report the holder by run id, never by nonce, in the LockAlreadyHeldError context', async () => {
     const { db, collection } = makeDb();
-    // eslint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
+    // oxlint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
     collection.updateOne.mock.mockImplementationOnce(() => Promise.reject({ code: 11000 }));
     const lockedAt = new Date();
     collection.findOne.mock.mockImplementationOnce(() =>
@@ -241,7 +246,7 @@ describe('MigrationLock.inspect / forceRelease', () => {
     // deleted, not a holder that took the lock in between.
     assert.deepStrictEqual(collection.findOneAndDelete.mock.calls[0].arguments, [
       { _id: LOCK_ID },
-      { includeResultMetadata: true },
+      { includeResultMetadata: true, maxTimeMS: 60_000 },
     ]);
     assert.strictEqual(collection.findOne.mock.callCount(), 0);
     assert.strictEqual(collection.deleteOne.mock.callCount(), 0);
@@ -345,6 +350,7 @@ describe('MigrationLock.release', () => {
     await lock.release();
     assert.deepStrictEqual(collection.deleteOne.mock.calls[0].arguments, [
       { _id: LOCK_ID, owner: 'run-1', nonce: held.nonce },
+      { maxTimeMS: 60_000 },
     ]);
   });
 
@@ -442,22 +448,18 @@ describe('runWithLock', () => {
     assert.deepStrictEqual(events, [['acquired'], ['released', { early: true }]]);
   });
 
-  it('should stop renewing once released early, so a lost lock no longer aborts', async () => {
+  it('should stop renewing once released early, so a lost lock no longer aborts', async (t) => {
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
     const { db, collection } = makeDb();
     // 40ms TTL → a renewal every 20ms, a deadline at 30ms — none must fire.
     const lock = new MigrationLock(db, '_migronaut_locks', 0.04);
-    const keepAlive = keepEventLoopAlive();
-    try {
-      await runWithLock(lock, { logger: silentLogger }, async (signal, control) => {
-        await control.release();
-        const renewals = collection.updateOne.mock.callCount();
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        assert.strictEqual(collection.updateOne.mock.callCount(), renewals, 'no renewal');
-        assert.strictEqual(signal.aborted, false);
-      });
-    } finally {
-      keepAlive();
-    }
+    await runWithLock(lock, { logger: silentLogger }, async (signal, control) => {
+      await control.release();
+      const renewals = collection.updateOne.mock.callCount();
+      await settleWithTimers(t.mock.timers, sleep(100));
+      assert.strictEqual(collection.updateOne.mock.callCount(), renewals, 'no renewal');
+      assert.strictEqual(signal.aborted, false);
+    });
   });
 
   it('should warn when an early release fails, go on, and release at the end', async () => {
@@ -508,13 +510,14 @@ describe('runWithLock', () => {
     assert.strictEqual(collection.deleteOne.mock.callCount(), 1);
   });
 
-  it('should abort via the TTL deadline when renewals keep failing', async () => {
+  it('should abort via the TTL deadline when renewals keep failing', async (t) => {
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
     const { db, collection } = makeDb();
     // 200ms TTL → renew every 100ms, hard deadline at 150ms. Every renewal
     // fails; the deadline is the sole escalation and must fire strictly
     // before the lock becomes stale-reclaimable at 1×TTL.
     const lock = new MigrationLock(db, '_migronaut_locks', 0.2);
-    let held;
+    let held = null;
     collection.updateOne.mock.mockImplementation((_filter, update) => {
       // acquire() carries the owner token; renew() only re-stamps lockedAt.
       const taken = heldFromUpdate(update);
@@ -526,39 +529,35 @@ describe('runWithLock', () => {
     });
     collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, ...held }));
     const started = Date.now();
-    // The mocked driver does no I/O, so the unref'ed deadline timer is the only
-    // pending handle — see tests/helpers/event-loop.js.
-    const release = keepEventLoopAlive();
-    try {
-      await assert.rejects(
-        runWithLock(
-          lock,
-          { logger: silentLogger },
-          (signal) =>
-            new Promise((_resolve, reject) => {
-              signal.addEventListener('abort', () => reject(signal.reason), { once: true });
-            }),
-        ),
-        (error) => {
-          assert.strictEqual(error.code, 'LOCK_LOST');
-          return true;
-        },
-      );
-    } finally {
-      release();
-    }
-    // Aborted around the deadline (~150ms) — strictly before 1×TTL (200ms)
-    // plus scheduling slack.
-    assert.ok(Date.now() - started < 280);
+    const run = runWithLock(
+      lock,
+      { logger: silentLogger },
+      (signal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    await assert.rejects(settleWithTimers(t.mock.timers, run), { code: 'ALX_ERR_LOCK_LOST' });
+    // Aborted at the deadline (150ms of mocked time) — strictly before 1×TTL (200ms).
+    assert.ok(Date.now() - started < 200);
   });
 
   /** A logger that keeps its warnings */
-  function warningLogger() {
+  /** Records what is warned and what is said at error level — a lost lock is the latter */
+  const warningLogger = () => {
     const warnings = [];
-    return { ...silentLogger, warnings, warn: (message) => warnings.push(message) };
-  }
+    const errors = [];
+    return {
+      ...silentLogger,
+      warnings,
+      errors,
+      warn: (message) => warnings.push(message),
+      error: (message) => errors.push(message),
+    };
+  };
 
-  it('should say a reclaimed lock is lost once, and stop renewing what is not its own', async () => {
+  it('should say a reclaimed lock is lost once, and stop renewing what is not its own', async (t) => {
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
     const { db, collection } = makeDb();
     // 100 ms TTL: a renewal every 50 ms. Every one finds the lock reclaimed.
     const lock = new MigrationLock(db, '_migronaut_locks', 0.1);
@@ -570,30 +569,27 @@ describe('runWithLock', () => {
     );
     const logger = warningLogger();
     const reasons = [];
-    let renewalsAtLoss;
-    const release = keepEventLoopAlive();
-    try {
-      // onLockLost: 'warn' — the run goes on for six more renewal intervals.
-      await runWithLock(
-        lock,
-        { logger, onLockLost: 'warn', onLockLostEvent: (reason) => reasons.push(reason) },
-        async () => {
-          while (reasons.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
-          renewalsAtLoss = collection.updateOne.mock.callCount();
-          await new Promise((resolve) => setTimeout(resolve, 320));
-        },
-      );
-    } finally {
-      release();
-    }
+    let renewalsAtLoss = null;
+    // onLockLost: 'warn' — the run goes on for six more renewal intervals.
+    await runWithLock(
+      lock,
+      { logger, onLockLost: 'warn', onLockLostEvent: (reason) => reasons.push(reason) },
+      async () => {
+        while (reasons.length === 0) await settleWithTimers(t.mock.timers, sleep(10));
+        renewalsAtLoss = collection.updateOne.mock.callCount();
+        await settleWithTimers(t.mock.timers, sleep(320));
+      },
+    );
     // It used to be one warning and one `lock:lost` per heartbeat until the
     // run ended — and the deadline's on top.
     assert.deepStrictEqual(reasons, ['another run reclaimed it']);
+    // onLockLost: 'warn' asked for a warning: said once, at that level.
     assert.strictEqual(logger.warnings.filter((line) => /Lost the/.test(line)).length, 1);
     assert.strictEqual(collection.updateOne.mock.callCount(), renewalsAtLoss);
   });
 
-  it('should keep renewing after the deadline — the lock may still be its own', async () => {
+  it('should keep renewing after the deadline — the lock may still be its own', async (t) => {
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
     const { db, collection } = makeDb();
     const lock = new MigrationLock(db, '_migronaut_locks', 0.1);
     let failing = true;
@@ -605,23 +601,18 @@ describe('runWithLock', () => {
     });
     const logger = warningLogger();
     const reasons = [];
-    let renewalsAtLoss;
-    const release = keepEventLoopAlive();
-    try {
-      await runWithLock(
-        lock,
-        { logger, onLockLost: 'warn', onLockLostEvent: (reason) => reasons.push(reason) },
-        async () => {
-          while (reasons.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
-          renewalsAtLoss = collection.updateOne.mock.callCount();
-          // The database is back: renewals go through again.
-          failing = false;
-          await new Promise((resolve) => setTimeout(resolve, 220));
-        },
-      );
-    } finally {
-      release();
-    }
+    let renewalsAtLoss = null;
+    await runWithLock(
+      lock,
+      { logger, onLockLost: 'warn', onLockLostEvent: (reason) => reasons.push(reason) },
+      async () => {
+        while (reasons.length === 0) await settleWithTimers(t.mock.timers, sleep(10));
+        renewalsAtLoss = collection.updateOne.mock.callCount();
+        // The database is back: renewals go through again.
+        failing = false;
+        await settleWithTimers(t.mock.timers, sleep(220));
+      },
+    );
     assert.deepStrictEqual(reasons, ['no successful renewal within the TTL']);
     assert.ok(collection.updateOne.mock.callCount() > renewalsAtLoss, 'the heartbeat went on');
   });
@@ -629,7 +620,7 @@ describe('runWithLock', () => {
   it('should report ttlMs and acquisition latency on lock:acquired', async () => {
     const { db } = makeDb();
     const lock = new MigrationLock(db, '_migronaut_locks', 60);
-    let extra;
+    let extra = null;
     await runWithLock(
       lock,
       { logger: silentLogger, onLockAcquired: (e) => (extra = e) },
@@ -640,13 +631,14 @@ describe('runWithLock', () => {
     assert.ok(extra.acquireMs >= 0);
   });
 
-  it('should not start a second renewal while one is still in flight', async () => {
+  it('should not start a second renewal while one is still in flight', async (t) => {
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
     const { db, collection } = makeDb();
     // 200ms TTL → tick every 100ms. The first renewal never settles until we
     // let it; without the re-entrancy guard, every later tick would overwrite
     // `inFlight` and fire its own overlapping renewal.
     const lock = new MigrationLock(db, '_migronaut_locks', 0.2);
-    let held;
+    let held = null;
     let renewCalls = 0;
     let stuck = true;
     const pending = [];
@@ -663,16 +655,14 @@ describe('runWithLock', () => {
       return new Promise((resolve) => pending.push(() => resolve({ matchedCount: 1 })));
     });
     collection.findOne.mock.mockImplementation(() => Promise.resolve({ _id: LOCK_ID, ...held }));
-    let callsWhileStuck;
-    await runWithLock(
+    let callsWhileStuck = null;
+    const run = runWithLock(
       lock,
       { logger: silentLogger },
       () =>
         new Promise((resolve) => {
-          // Long enough for at least three ticks (~100/200/300ms, later on a
-          // coarse timer like Windows') while the first renewal stays stuck.
-          // Then every renewal is let go — one started by a late tick too, or
-          // the release would wait on it forever.
+          // Three ticks (100/200/300ms) while the first renewal stays stuck.
+          // Then every renewal is let go, or the release would wait on it forever.
           setTimeout(() => {
             callsWhileStuck = renewCalls;
             stuck = false;
@@ -681,6 +671,7 @@ describe('runWithLock', () => {
           }, 350);
         }),
     );
+    await settleWithTimers(t.mock.timers, run);
     assert.strictEqual(callsWhileStuck, 1);
   });
 });
@@ -691,7 +682,7 @@ describe('MigrationLock — id and label', () => {
     assert.strictEqual(lock.id, LOCK_ID);
     assert.strictEqual(lock.label, 'migration lock');
     const { db, collection } = makeDb();
-    // eslint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
+    // oxlint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
     collection.updateOne.mock.mockImplementationOnce(() => Promise.reject({ code: 11000 }));
     await assert.rejects(
       new MigrationLock(db, '_migronaut_locks', 60).acquire(),
@@ -715,18 +706,22 @@ describe('MigrationLock — id and label', () => {
       _id: 'background:0001-orders.js',
     });
     collection.deleteOne.mock.mockImplementationOnce(() => Promise.reject(new Error('down')));
-    await assert.rejects(lock.release(), /Failed to release background coordinator lock/);
-    // eslint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
+    await assert.rejects(lock.release(), {
+      code: 'ALX_ERR_LOCK_RELEASE_FAILED',
+      message: /Failed to release background coordinator lock/,
+    });
+    // oxlint-disable-next-line prefer-promise-reject-errors -- simulates MongoDB's plain-object duplicate-key error
     collection.updateOne.mock.mockImplementationOnce(() => Promise.reject({ code: 11000 }));
     await assert.rejects(
       new MigrationLock(db, '_migronaut_locks', 60, { label: 'watch lock' }).acquire(),
-      /Watch lock is already held/,
+      { code: 'ALX_ERR_LOCK_ALREADY_HELD', message: /Watch lock is already held/ },
     );
   });
 });
 
 describe('runWithLock — any lock-shaped object', () => {
-  it('should run, renew and release a duck-typed lock, naming it in its messages', async () => {
+  it('should run, renew and release a duck-typed lock, naming it in its messages', async (t) => {
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
     const calls = [];
     let held = true;
     const lease = {
@@ -739,28 +734,21 @@ describe('runWithLock — any lock-shaped object', () => {
       },
       release: async () => calls.push('release'),
     };
-    const warnings = [];
-    const logger = { ...silentLogger, warn: (message) => warnings.push(message) };
-    // Once the 50ms timer fires, the unref'ed heartbeat is the only pending
-    // handle — see tests/helpers/event-loop.js.
-    const release = keepEventLoopAlive();
-    let result;
-    try {
-      result = await runWithLock(lease, { logger }, async (signal) => {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        held = false;
-        await new Promise((resolve) => {
-          if (signal.aborted) resolve();
-          signal.addEventListener('abort', resolve, { once: true });
-        });
-        return signal.reason;
+    const errors = [];
+    const logger = { ...silentLogger, error: (message) => errors.push(message) };
+    const run = runWithLock(lease, { logger }, async (signal) => {
+      await sleep(50);
+      held = false;
+      await new Promise((resolve) => {
+        if (signal.aborted) resolve();
+        signal.addEventListener('abort', resolve, { once: true });
       });
-    } finally {
-      release();
-    }
-    assert.strictEqual(result.code, 'LOCK_LOST');
+      return signal.reason;
+    });
+    const result = await settleWithTimers(t.mock.timers, run);
+    assert.strictEqual(result.code, 'ALX_ERR_LOCK_LOST');
     assert.strictEqual(result.message, 'Lost the partition lease mid-run');
-    assert.ok(warnings.some((line) => line.includes('Lost the partition lease mid-run')));
+    assert.ok(errors.some((line) => line.includes('Lost the partition lease mid-run')));
     assert.deepStrictEqual([calls[0], calls.at(-1)], ['acquire', 'release']);
     assert.ok(calls.includes('renew'));
   });

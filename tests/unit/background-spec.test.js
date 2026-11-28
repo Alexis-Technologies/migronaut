@@ -9,34 +9,34 @@ const {
   TERMINAL,
   TRANSITIONS,
   assertSliceMs,
-  backgroundIssues,
-  bracketOfType,
-  keysetFilter,
+  checkBackground,
+  toBracket,
+  buildKeysetFilter,
   matchHash,
   resolveBackgroundSpec,
-  scopeFilter,
-  transition,
-} = require('../../src/core/background-spec.js');
+  buildScopeFilter,
+  resolveTransition,
+} = require('../../src/core/background/spec.js');
 const { assertUpOptions } = require('../../src/core/options.js');
 const {
   BackgroundConflictError,
   ConfigInvalidError,
   MigrationInvalidExportError,
 } = require('../../src/errors/index.js');
-const { requiresIssues } = require('../../src/utils/migration-name.js');
+const { checkRequires } = require('../../src/utils/migration-name.js');
 const { resolveVersioning } = require('../../src/versioning/config.js');
 
 const migrate = (doc) => doc;
 const base = { collection: 'orders', from: 1, to: 2, migrate };
-const pathsOf = (spec, options) => backgroundIssues(spec, options).map((issue) => issue.path);
+const pathsOf = (spec, options) => checkBackground(spec, options).map((issue) => issue.path);
 const messageAt = (spec, path, options) =>
-  backgroundIssues(spec, options).find((issue) => issue.path === path)?.message;
+  checkBackground(spec, options).find((issue) => issue.path === path)?.message;
 
-describe('backgroundIssues — declarative', () => {
+describe('checkBackground — declarative', () => {
   it('should accept a minimal spec and every setting', () => {
-    assert.deepStrictEqual(backgroundIssues(base), []);
+    assert.deepStrictEqual(checkBackground(base), []);
     assert.deepStrictEqual(
-      backgroundIssues({
+      checkBackground({
         ...base,
         filter: { status: 'open' },
         revert: migrate,
@@ -63,7 +63,7 @@ describe('backgroundIssues — declarative', () => {
       [],
     );
     assert.deepStrictEqual(
-      backgroundIssues({ ...base, from: 0, migrate: undefined, migrateBatch: migrate }),
+      checkBackground({ ...base, from: 0, migrate: undefined, migrateBatch: migrate }),
       [],
     );
   });
@@ -185,7 +185,7 @@ describe('backgroundIssues — declarative', () => {
 
   it('should check the spec against the collection versioning', () => {
     const versioning = resolveVersioning({ current: 2 });
-    assert.deepStrictEqual(backgroundIssues(base, { versioning }), []);
+    assert.deepStrictEqual(checkBackground(base, { versioning }), []);
     assert.match(
       messageAt({ ...base, to: 3 }, 'background.to', { versioning }),
       /past the collection's versioning.current \(2\) — raise current first/,
@@ -197,17 +197,17 @@ describe('backgroundIssues — declarative', () => {
     const noRevision = resolveVersioning({ current: 2, revision: false });
     assert.match(messageAt(base, 'background.occ', { versioning: noRevision }), /version-only/);
     assert.deepStrictEqual(
-      backgroundIssues({ ...base, occ: 'version-only' }, { versioning: noRevision }),
+      checkBackground({ ...base, occ: 'version-only' }, { versioning: noRevision }),
       [],
     );
   });
 });
 
-describe('backgroundIssues — step', () => {
+describe('checkBackground — step', () => {
   const step = async () => ({ checkpoint: null, done: true });
 
   it('should accept a step migration and refuse declarative keys on it', () => {
-    assert.deepStrictEqual(backgroundIssues({ step, revertStep: step, collection: 'orders' }), []);
+    assert.deepStrictEqual(checkBackground({ step, revertStep: step, collection: 'orders' }), []);
     assert.match(messageAt({ step, from: 1 }, 'background.from'), /step owns its own writes/);
     assert.match(messageAt({ step, migrate }, 'background.migrate'), /step owns its own writes/);
     assert.match(messageAt({ step, maxParallel: 2 }, 'background.maxParallel'), /must be 1/);
@@ -320,19 +320,17 @@ describe('matchHash', () => {
   });
 });
 
-describe('requiresIssues', () => {
+describe('checkRequires', () => {
   it('should accept earlier bare names and refuse the rest', () => {
-    assert.deepStrictEqual(requiresIssues(undefined, 'b.js'), []);
-    assert.deepStrictEqual(requiresIssues(['a.js'], 'b.js'), []);
-    assert.match(requiresIssues('a.js', 'b.js')[0].message, /array/);
+    assert.deepStrictEqual(checkRequires(undefined, 'b.js'), []);
+    assert.deepStrictEqual(checkRequires(['a.js'], 'b.js'), []);
+    assert.match(checkRequires('a.js', 'b.js')[0].message, /array/);
     assert.deepStrictEqual(
-      requiresIssues(['../a.js', 'a.js', 'a.js', 'b.js', 'c.js'], 'b.js').map(
-        (issue) => issue.path,
-      ),
+      checkRequires(['../a.js', 'a.js', 'a.js', 'b.js', 'c.js'], 'b.js').map((issue) => issue.path),
       ['requires[0]', 'requires[2]', 'requires[3]', 'requires[4]'],
     );
     // An edge only ever points backwards, so no cycle can form.
-    assert.match(requiresIssues(['c.js'], 'b.js')[0].message, /earlier migration/);
+    assert.match(checkRequires(['c.js'], 'b.js')[0].message, /earlier migration/);
   });
 });
 
@@ -340,13 +338,19 @@ describe('state transitions', () => {
   it('should move, keep or refuse every action from every status', () => {
     for (const [action, rule] of Object.entries(TRANSITIONS)) {
       for (const status of STATUSES) {
-        if (rule.from.includes(status)) {
-          assert.deepStrictEqual(transition(status, action), { to: rule.to, applied: 'changed' });
-        } else if (rule.done.includes(status)) {
-          assert.deepStrictEqual(transition(status, action), { to: status, applied: 'unchanged' });
+        if (rule.from.has(status)) {
+          assert.deepStrictEqual(resolveTransition(status, action), {
+            to: rule.to,
+            applied: 'changed',
+          });
+        } else if (rule.done.has(status)) {
+          assert.deepStrictEqual(resolveTransition(status, action), {
+            to: status,
+            applied: 'unchanged',
+          });
         } else {
           assert.throws(
-            () => transition(status, action, { migration: 'm.js' }),
+            () => resolveTransition(status, action, { migration: 'm.js' }),
             (error) =>
               error instanceof BackgroundConflictError &&
               error.context.status === status &&
@@ -356,16 +360,21 @@ describe('state transitions', () => {
         }
       }
     }
-    assert.throws(() => transition('pending', 'explode'), BackgroundConflictError);
+    assert.throws(() => resolveTransition('pending', 'explode'), BackgroundConflictError);
   });
 
   it('should reopen only a completed one, and pause no terminal one', () => {
-    assert.deepStrictEqual(transition('completed', 'reopen'), {
+    assert.deepStrictEqual(resolveTransition('completed', 'reopen'), {
       to: 'running',
       applied: 'changed',
     });
-    assert.deepStrictEqual(transition('blocked', 'unblock'), { to: 'pending', applied: 'changed' });
-    for (const status of TERMINAL) assert.throws(() => transition(status, 'pause'));
+    assert.deepStrictEqual(resolveTransition('blocked', 'unblock'), {
+      to: 'pending',
+      applied: 'changed',
+    });
+    const conflict = { code: 'ALX_ERR_BACKGROUND_CONFLICT' };
+    const pause = (status) => () => resolveTransition(status, 'pause');
+    for (const status of TERMINAL) assert.throws(pause(status), conflict);
   });
 });
 
@@ -388,23 +397,23 @@ describe('_id brackets and scopes', () => {
         'maxKey',
       ],
     );
-    assert.strictEqual(bracketOfType('long'), 'number');
-    assert.strictEqual(bracketOfType('symbol'), 'string');
-    assert.strictEqual(bracketOfType('javascript'), 'exotic');
-    assert.strictEqual(bracketOfType('somethingNew'), 'exotic');
+    assert.strictEqual(toBracket('long'), 'number');
+    assert.strictEqual(toBracket('symbol'), 'string');
+    assert.strictEqual(toBracket('javascript'), 'exotic');
+    assert.strictEqual(toBracket('somethingNew'), 'exotic');
   });
 
   it('should filter a scope by type and bounds, and resume after the last id', () => {
     const id = new ObjectId();
-    assert.deepStrictEqual(scopeFilter({ kind: 'id-range', bracket: 'objectId', gte: id }), {
+    assert.deepStrictEqual(buildScopeFilter({ kind: 'id-range', bracket: 'objectId', gte: id }), {
       _id: { $type: ['objectId'], $gte: id },
     });
-    assert.deepStrictEqual(scopeFilter({ kind: 'id-range', bracket: 'number', lt: 10 }), {
+    assert.deepStrictEqual(buildScopeFilter({ kind: 'id-range', bracket: 'number', lt: 10 }), {
       _id: { $type: ['int', 'long', 'double', 'decimal'], $lt: 10 },
     });
-    assert.deepStrictEqual(scopeFilter({ kind: 'step' }), {});
-    assert.deepStrictEqual(keysetFilter(id), { _id: { $gt: id } });
-    assert.deepStrictEqual(keysetFilter(undefined), {});
+    assert.deepStrictEqual(buildScopeFilter({ kind: 'step' }), {});
+    assert.deepStrictEqual(buildKeysetFilter(id), { _id: { $gt: id } });
+    assert.deepStrictEqual(buildKeysetFilter(undefined), {});
   });
 });
 

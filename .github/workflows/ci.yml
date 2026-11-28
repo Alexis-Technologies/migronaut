@@ -73,8 +73,21 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
+      - name: Cache the MongoDB binary
+        if: matrix.node-version == '22.18.0' && matrix.os == 'ubuntu-latest'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MONGOMS_DOWNLOAD_DIR }}
+          key: mongodb-${{ runner.os }}-${{ env.MONGOMS_VERSION }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test:unit
+      # What the floor is for: type stripping of `.ts` migrations and the ESM
+      # interop. The rest of the integration tier runs on the newest 22.x.
+      - name: Integration on the engines floor
+        if: matrix.node-version == '22.18.0' && matrix.os == 'ubuntu-latest'
+        run: >-
+          node scripts/node-test.js --test-concurrency=1
+          tests/integration/runtime-ts.test.js tests/integration/esm-interop.test.js
 
   test:
     runs-on: ubuntu-latest
@@ -169,7 +182,8 @@ jobs:
     needs: [lint, types, unit, test, compat, docs]
     if: always()
     steps:
-      - name: Fail when any needed job failed or was cancelled
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+      # A skipped job is not a passed one: a needed job that never ran fails the check.
+      - name: Fail when any needed job failed, was cancelled or was skipped
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
         run: exit 1
       - run: echo "All CI jobs passed"

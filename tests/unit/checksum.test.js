@@ -5,8 +5,8 @@ const assert = require('node:assert/strict');
 const { afterEach, beforeEach, describe, it } = require('node:test');
 const { computeChecksum } = require('../../src/utils/checksum.js');
 
-let tmp;
-let file;
+let tmp = null;
+let file = null;
 
 beforeEach(() => {
   tmp = mkdtempSync(path.join(tmpdir(), 'migronaut-checksum-'));

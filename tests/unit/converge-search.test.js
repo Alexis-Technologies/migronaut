@@ -6,11 +6,11 @@ const {
   isSearchUnavailable,
   isTransientError,
   listSearchIndexes,
-  nextPollDelay,
+  computePollDelay,
   probeSearch,
   runSearchStep,
   searchHint,
-} = require('../../src/core/converge-search.js');
+} = require('../../src/core/converge/search.js');
 
 const serverError = (code, message = `server error ${code}`, fields = {}) =>
   Object.assign(new Error(message), { code, ...fields });
@@ -19,7 +19,7 @@ const serverError = (code, message = `server error ${code}`, fields = {}) =>
  * A database with one collection's `$listSearchIndexes` answer (or error) and
  * a `getParameter` answer (a value, or an error code) — what the probe asks.
  */
-function probeDb({ listed = [], listError, parameter, noAdmin = false } = {}) {
+const probeDb = ({ listed = [], listError, parameter, noAdmin = false } = {}) => {
   const calls = [];
   return {
     calls,
@@ -47,7 +47,7 @@ function probeDb({ listed = [], listError, parameter, noAdmin = false } = {}) {
           }),
         }),
   };
-}
+};
 
 const probe = (db, version) =>
   probeSearch(
@@ -256,7 +256,7 @@ describe('probeSearch', () => {
 });
 
 describe('runSearchStep', () => {
-  function commandDb(fail) {
+  const commandDb = (fail) => {
     const commands = [];
     return {
       commands,
@@ -267,7 +267,7 @@ describe('runSearchStep', () => {
         return { ok: 1 };
       },
     };
-  }
+  };
 
   it('should know its three ops', () => {
     assert.deepStrictEqual(
@@ -397,6 +397,8 @@ describe('isTransientError', () => {
     ['a primary that stepped down', serverError(189, 'PrimarySteppedDown')],
     ['a node shutting down', serverError(91, 'ShutdownInProgress')],
     ['a pool reset', labelled('ResetPool')],
+    ['a pool retry, as driver 7 spells it', labelled('PoolRequestedRetry')],
+    ['a pool retry, as older drivers spell it', labelled('PoolRequstedRetry')],
     [
       'a blip wrapped by converge',
       Object.assign(new Error('Could not read'), { cause: serverError(10107, 'not primary') }),
@@ -415,7 +417,7 @@ describe('isTransientError', () => {
   });
 });
 
-describe('nextPollDelay', () => {
+describe('computePollDelay', () => {
   for (const [attempt, remaining, delay] of [
     [0, Infinity, 1000],
     [1, Infinity, 1500],
@@ -427,7 +429,7 @@ describe('nextPollDelay', () => {
     [0, 0, 0],
   ]) {
     it(`should pause ${delay}ms before poll ${attempt + 1} with ${remaining}ms left`, () => {
-      assert.strictEqual(nextPollDelay(attempt, remaining), delay);
+      assert.strictEqual(computePollDelay(attempt, remaining), delay);
     });
   }
 });

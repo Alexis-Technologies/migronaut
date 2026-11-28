@@ -1,8 +1,9 @@
 const assert = require('node:assert/strict');
 const { after, before, describe, it } = require('node:test');
-const { createShardPartitioner } = require('../../src/core/background-shard.js');
+const { createShardPartitioner } = require('../../src/core/background/shard.js');
 const { BackgroundFailedError } = require('../../src/errors/index.js');
 const { makeMigrator, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const SHARDED_URI = process.env.MIGRONAUT_TEST_SHARDED_URI;
 const DB = `migronaut_sharded_${process.pid}`;
@@ -31,11 +32,11 @@ describe(
     timeout: 600_000,
   },
   () => {
-    let mongodb;
-    let client;
-    let db;
-    let admin;
-    let shards;
+    let mongodb = null;
+    let client = null;
+    let db = null;
+    let admin = null;
+    let shards = null;
 
     before(async () => {
       mongodb = require('mongodb');
@@ -50,15 +51,15 @@ describe(
     });
 
     const kits = [];
-    let project;
+    let project = null;
 
     /** A kit on the cluster, declaring `collections` — as root, or as the user in `uri` */
-    function kitWith(collections, uri = SHARDED_URI) {
+    const kitWith = (collections, uri = SHARDED_URI) => {
       project ??= makeProject();
       const kit = makeMigrator(uri, DB, project.dir, { collections });
       kits.push(kit);
       return kit;
-    }
+    };
 
     after(async () => {
       for (const kit of kits) await kit.disconnect();
@@ -76,7 +77,7 @@ describe(
      * A collection sharded on `key`, with `docs` inserted, split at `splits`
      * (each a shard-key document) and the upper half moved to the second shard.
      */
-    async function sharded(name, key, { docs = [], splits = [], moveFrom } = {}) {
+    const sharded = async (name, key, { docs = [], splits = [], moveFrom } = {}) => {
       await db.createCollection(name);
       await admin.command({ shardCollection: ns(name), key });
       if (docs.length > 0) await db.collection(name).insertMany(docs);
@@ -87,17 +88,17 @@ describe(
         await admin.command({ moveRange: ns(name), min: moveFrom, toShard: target });
       }
       return db.collection(name);
-    }
+    };
 
-    async function collectionEntry(name) {
+    const collectionEntry = async (name) => {
       return client
         .db('config')
         .collection('collections')
         .findOne({ _id: ns(name) });
-    }
+    };
 
     /** Hashed bounds are 64-bit: read as Long, or the driver turns the small ones into numbers */
-    async function chunks(name, options = {}) {
+    const chunks = async (name, options = {}) => {
       const entry = await collectionEntry(name);
       return client
         .db('config')
@@ -105,9 +106,9 @@ describe(
         .find({ uuid: entry.uuid }, options)
         .sort({ min: 1 })
         .toArray();
-    }
+    };
 
-    async function chunkOwner(name, point) {
+    const chunkOwner = async (name, point) => {
       for (const chunk of await chunks(name)) {
         // Single-field keys only — enough for the probes that call this.
         const [field] = Object.keys(point);
@@ -118,230 +119,247 @@ describe(
         if (above && below) return chunk.shard;
       }
       return undefined;
-    }
+    };
 
     /** The shards a find (or a command) was sent to, from a queryPlanner explain */
-    function shardsOf(explain) {
+    const shardsOf = (explain) => {
       const plan = explain.queryPlanner?.winningPlan ?? explain.queryPlanner;
       const names = new Set();
       for (const shard of plan?.shards ?? []) names.add(shard.shardName);
       return [...names];
-    }
+    };
 
     const docs = (count, extra = () => ({})) =>
       Array.from({ length: count }, (_, i) => ({ __v: 1, __rev: 0, sk: i, ...extra(i) }));
 
-    it('[probe] should keep a sharded collection in config.collections, its chunks by uuid', async () => {
-      await sharded(
-        'layout',
-        { sk: 1 },
-        { docs: docs(1000), splits: [{ sk: 500 }], moveFrom: { sk: 500 } },
-      );
-      const entry = await collectionEntry('layout');
-      assert.deepStrictEqual(entry.key, { sk: 1 });
-      assert.ok(entry.uuid, 'chunks are keyed by the collection uuid (5.0+)');
-      assert.ok(entry.timestamp, 'the epoch carries a timestamp');
-      const list = await chunks('layout');
-      assert.ok(list.length >= 2);
-      for (const chunk of list) {
-        assert.ok(chunk.min && chunk.max && typeof chunk.shard === 'string');
-        assert.strictEqual(chunk.ns, undefined, 'no ns on a 5.0+ chunk');
-      }
-      const owners = new Set();
-      for (const chunk of list) owners.add(chunk.shard);
-      assert.strictEqual(owners.size, 2);
-      assert.strictEqual(list[0].min.sk._bsontype, 'MinKey');
-      assert.strictEqual(list.at(-1).max.sk._bsontype, 'MaxKey');
-    });
-
-    it('[probe] should list an unsharded collection moved to a shard as unsplittable (8.0)', async () => {
-      await db.collection('plain').insertOne({ a: 1 });
-      const before = await collectionEntry('plain');
-      const { version } = await admin.command({ buildInfo: 1 });
-      if (Number(version.split('.')[0]) < 8) return;
-      await admin.command({ moveCollection: ns('plain'), toShard: shards[1] });
-      const entry = await collectionEntry('plain');
-      assert.strictEqual(entry.unsplittable, true);
-      assert.deepStrictEqual(entry.key, { _id: 1 });
-      assert.ok(before === null || before.unsplittable === true);
-    });
-
-    it('[probe] should target one shard for a shard-key range inside a chunk, and broadcast min/max alone', async () => {
-      const coll = await sharded(
-        'target',
-        { sk: 1 },
-        {
-          docs: docs(1000),
-          splits: [{ sk: 500 }],
-          moveFrom: { sk: 500 },
-        },
-      );
-      await coll.createIndex({ __v: 1, sk: 1, _id: 1 });
-      const ranged = await coll.find({ sk: { $gte: 600, $lt: 700 } }).explain('queryPlanner');
-      assert.strictEqual(shardsOf(ranged).length, 1, 'a range predicate targets');
-      const bounded = await coll
-        .find({})
-        .hint({ __v: 1, sk: 1, _id: 1 })
-        .min({ __v: 1, sk: 600, _id: new mongodb.MinKey() })
-        .max({ __v: 1, sk: 700, _id: new mongodb.MinKey() })
-        .explain('queryPlanner');
-      assert.strictEqual(shardsOf(bounded).length, 2, 'min/max alone do not target');
-      const both = await coll
-        .find({ sk: { $gte: 600, $lt: 700 } })
-        .hint({ __v: 1, sk: 1, _id: 1 })
-        .min({ __v: 1, sk: 600, _id: new mongodb.MinKey() })
-        .max({ __v: 1, sk: 700, _id: new mongodb.MinKey() })
-        .explain('queryPlanner');
-      assert.strictEqual(shardsOf(both).length, 1, 'min/max with the predicate target');
-    });
-
-    it('[probe] should send a range that ends at a chunk boundary to the next chunk too', async () => {
-      const coll = await sharded(
-        'edges',
-        { k: 1 },
-        {
-          docs: docs(300, (i) => ({ k: i })),
-          splits: [{ k: 100 }, { k: 200 }],
-        },
-      );
-      const owner = await chunkOwner('edges', { k: 100 });
-      await admin.command({
-        moveRange: ns('edges'),
-        min: { k: 100 },
-        toShard: shards.find((shard) => shard !== owner),
-      });
-      const reached = async (filter) => shardsOf(await coll.find(filter).explain('queryPlanner'));
-      assert.strictEqual((await reached({ k: { $gte: 120, $lt: 180 } })).length, 1, 'inside');
-      // `$lt` at the boundary is taken as inclusive when the mongos picks shards.
-      assert.strictEqual((await reached({ k: { $gte: 100, $lt: 200 } })).length, 2, 'at the edge');
-    });
-
-    it('[probe] should return exactly the min/max range through mongos, merged in index order', async () => {
-      const coll = await sharded(
-        'ranges',
-        { sk: 1 },
-        {
-          docs: docs(1000, (i) => ({ __v: i % 3 === 0 ? 2 : 1 })),
-          splits: [{ sk: 500 }],
-          moveFrom: { sk: 500 },
-        },
-      );
-      await coll.createIndex({ __v: 1, sk: 1, _id: 1 });
-      const rows = await coll
-        .find({})
-        .hint({ __v: 1, sk: 1, _id: 1 })
-        .min({ __v: 1, sk: 200, _id: new mongodb.MinKey() })
-        .max({ __v: 1, sk: 800, _id: new mongodb.MinKey() })
-        .sort({ __v: 1, sk: 1, _id: 1 })
-        .toArray();
-      let expected = 0;
-      for (let i = 200; i < 800; i++) if (i % 3 !== 0) expected += 1;
-      assert.strictEqual(rows.length, expected, 'the exact range — every v1 document in it');
-      for (let i = 0; i < rows.length; i++) {
-        assert.strictEqual(rows[i].__v, 1);
-        if (i > 0) assert.ok(rows[i - 1].sk < rows[i].sk, 'in index order');
-      }
-    });
-
-    it('[probe] should keep a missing and a null shard key in the chunk that holds null', async () => {
-      const coll = await sharded('nulls', { sk: 1 }, { splits: [{ sk: 0 }], moveFrom: { sk: 0 } });
-      await coll.insertMany([{ _id: 'missing' }, { _id: 'null', sk: null }, { _id: 'one', sk: 1 }]);
-      const explain = await coll.find({ sk: null }).explain('queryPlanner');
-      assert.strictEqual(shardsOf(explain).length, 1, 'null targets the chunk below 0');
-      assert.strictEqual(await coll.countDocuments({ sk: null }), 2);
-    });
-
-    it('[probe] should bound a hashed chunk with NumberLong hashes', async () => {
-      await sharded('hashed', { region: 1, uid: 'hashed' });
-      await db
-        .collection('hashed')
-        .insertMany(Array.from({ length: 200 }, (_, i) => ({ region: 'eu', uid: i })));
-      await sharded('idhashed', { _id: 'hashed' });
-      const promoted = await chunks('idhashed');
-      let numbers = 0;
-      for (const chunk of promoted) if (typeof chunk.min._id === 'number') numbers += 1;
-      assert.ok(numbers > 0, 'promoted to plain numbers by default — lossy past 2^53');
-      for (const name of ['hashed', 'idhashed']) {
-        const field = name === 'hashed' ? 'uid' : '_id';
-        for (const chunk of await chunks(name, { promoteLongs: false })) {
-          for (const bound of [chunk.min[field], chunk.max[field]]) {
-            assert.ok(
-              ['Long', 'MinKey', 'MaxKey'].includes(bound?._bsontype),
-              `${name}: ${bound?._bsontype}`,
-            );
-          }
+    describe('[probe]', () => {
+      it('should keep a sharded collection in config.collections, its chunks by uuid', async () => {
+        await sharded(
+          'layout',
+          { sk: 1 },
+          { docs: docs(1000), splits: [{ sk: 500 }], moveFrom: { sk: 500 } },
+        );
+        const entry = await collectionEntry('layout');
+        assert.deepStrictEqual(entry.key, { sk: 1 });
+        assert.ok(entry.uuid, 'chunks are keyed by the collection uuid (5.0+)');
+        assert.ok(entry.timestamp, 'the epoch carries a timestamp');
+        const list = await chunks('layout');
+        assert.ok(list.length >= 2);
+        for (const chunk of list) {
+          assert.ok(chunk.min && chunk.max && typeof chunk.shard === 'string');
+          assert.strictEqual(chunk.ns, undefined, 'no ns on a 5.0+ chunk');
         }
-      }
-    });
+        const owners = new Set();
+        for (const chunk of list) owners.add(chunk.shard);
+        assert.strictEqual(owners.size, 2);
+        assert.strictEqual(list[0].min.sk._bsontype, 'MinKey');
+        assert.strictEqual(list.at(-1).max.sk._bsontype, 'MaxKey');
+      });
 
-    it('[probe] should send a write filtered by the whole shard key to one shard', async () => {
-      const coll = await sharded(
-        'writes',
-        { sk: 1 },
-        {
-          docs: docs(1000),
-          splits: [{ sk: 500 }],
-          moveFrom: { sk: 500 },
-        },
-      );
-      const doc = await coll.findOne({ sk: 700 });
-      const explain = (q) =>
-        db.command({
-          explain: { update: 'writes', updates: [{ q, u: { $inc: { __rev: 1 } } }] },
-          verbosity: 'queryPlanner',
-        });
-      assert.strictEqual(shardsOf(await explain({ _id: doc._id, sk: 700 })).length, 1);
-      assert.strictEqual(shardsOf(await explain({ _id: doc._id })).length, 2);
-    });
+      it('should list an unsharded collection moved to a shard as unsplittable (8.0)', async () => {
+        await db.collection('plain').insertOne({ a: 1 });
+        const unmoved = await collectionEntry('plain');
+        const { version } = await admin.command({ buildInfo: 1 });
+        if (Number(version.split('.')[0]) < 8) return;
+        await admin.command({ moveCollection: ns('plain'), toShard: shards[1] });
+        const entry = await collectionEntry('plain');
+        assert.strictEqual(entry.unsplittable, true);
+        assert.deepStrictEqual(entry.key, { _id: 1 });
+        assert.ok(unmoved === null || unmoved.unsplittable === true);
+      });
 
-    it('[probe] should move a document whose shard key changes — with retryable writes, the driver default', async () => {
-      const coll = await sharded(
-        'rekey',
-        { sk: 1 },
-        {
-          docs: docs(1000),
-          splits: [{ sk: 500 }],
-          moveFrom: { sk: 500 },
-        },
-      );
-      const doc = await coll.findOne({ sk: 10 });
-      await coll.updateOne({ _id: doc._id, sk: 10 }, { $set: { sk: 900 } });
-      assert.strictEqual((await coll.findOne({ _id: doc._id })).sk, 900, 'nothing refuses it');
-      const strict = await mongodb.MongoClient.connect(SHARDED_URI, { retryWrites: false });
-      try {
-        await assert.rejects(
-          strict
-            .db(DB)
-            .collection('rekey')
-            .updateOne({ _id: doc._id, sk: 900 }, { $set: { sk: 20 } }),
-          (error) => {
-            // Driver 7 puts an error of its own over a refusal of code 20
-            // ("…does not support retryable writes", no code) and keeps the
-            // server's under `originalError`; 6.x threw the server's.
-            const refusal = error.originalError ?? error;
-            assert.ok([72, 20].includes(refusal.code), `code ${refusal.code}: ${refusal.message}`);
-            assert.match(refusal.message, /shard key/i);
-            return true;
+      it('should target one shard for a shard-key range inside a chunk, and broadcast min/max alone', async () => {
+        const coll = await sharded(
+          'target',
+          { sk: 1 },
+          {
+            docs: docs(1000),
+            splits: [{ sk: 500 }],
+            moveFrom: { sk: 500 },
           },
         );
-      } finally {
-        await strict.close();
-      }
-    });
+        await coll.createIndex({ __v: 1, sk: 1, _id: 1 });
+        const ranged = await coll.find({ sk: { $gte: 600, $lt: 700 } }).explain('queryPlanner');
+        assert.strictEqual(shardsOf(ranged).length, 1, 'a range predicate targets');
+        const bounded = await coll
+          .find({})
+          .hint({ __v: 1, sk: 1, _id: 1 })
+          .min({ __v: 1, sk: 600, _id: new mongodb.MinKey() })
+          .max({ __v: 1, sk: 700, _id: new mongodb.MinKey() })
+          .explain('queryPlanner');
+        assert.strictEqual(shardsOf(bounded).length, 2, 'min/max alone do not target');
+        const both = await coll
+          .find({ sk: { $gte: 600, $lt: 700 } })
+          .hint({ __v: 1, sk: 1, _id: 1 })
+          .min({ __v: 1, sk: 600, _id: new mongodb.MinKey() })
+          .max({ __v: 1, sk: 700, _id: new mongodb.MinKey() })
+          .explain('queryPlanner');
+        assert.strictEqual(shardsOf(both).length, 1, 'min/max with the predicate target');
+      });
 
-    it('[probe] should refuse distinct inside a transaction on a sharded collection', async () => {
-      const coll = await sharded('distinct', { sk: 1 }, { docs: docs(100) });
-      const session = client.startSession();
-      try {
-        session.startTransaction();
-        await assert.rejects(coll.distinct('sk', {}, { session }), (error) => {
-          assert.strictEqual(error.code, 263, `code ${error.code}: ${error.message}`);
-          return true;
+      it('should send a range that ends at a chunk boundary to the next chunk too', async () => {
+        const coll = await sharded(
+          'edges',
+          { k: 1 },
+          {
+            docs: docs(300, (i) => ({ k: i })),
+            splits: [{ k: 100 }, { k: 200 }],
+          },
+        );
+        const owner = await chunkOwner('edges', { k: 100 });
+        await admin.command({
+          moveRange: ns('edges'),
+          min: { k: 100 },
+          toShard: shards.find((shard) => shard !== owner),
         });
-      } finally {
-        await session.abortTransaction().catch(() => undefined);
-        await session.endSession();
-      }
+        const reached = async (filter) => shardsOf(await coll.find(filter).explain('queryPlanner'));
+        assert.strictEqual((await reached({ k: { $gte: 120, $lt: 180 } })).length, 1, 'inside');
+        // `$lt` at the boundary is taken as inclusive when the mongos picks shards.
+        assert.strictEqual(
+          (await reached({ k: { $gte: 100, $lt: 200 } })).length,
+          2,
+          'at the edge',
+        );
+      });
+
+      it('should return exactly the min/max range through mongos, merged in index order', async () => {
+        const coll = await sharded(
+          'ranges',
+          { sk: 1 },
+          {
+            docs: docs(1000, (i) => ({ __v: i % 3 === 0 ? 2 : 1 })),
+            splits: [{ sk: 500 }],
+            moveFrom: { sk: 500 },
+          },
+        );
+        await coll.createIndex({ __v: 1, sk: 1, _id: 1 });
+        const rows = await coll
+          .find({})
+          .hint({ __v: 1, sk: 1, _id: 1 })
+          .min({ __v: 1, sk: 200, _id: new mongodb.MinKey() })
+          .max({ __v: 1, sk: 800, _id: new mongodb.MinKey() })
+          .sort({ __v: 1, sk: 1, _id: 1 })
+          .toArray();
+        let expected = 0;
+        for (let i = 200; i < 800; i++) if (i % 3 !== 0) expected += 1;
+        assert.strictEqual(rows.length, expected, 'the exact range — every v1 document in it');
+        for (let i = 0; i < rows.length; i++) {
+          assert.strictEqual(rows[i].__v, 1);
+          if (i > 0) assert.ok(rows[i - 1].sk < rows[i].sk, 'in index order');
+        }
+      });
+
+      it('should keep a missing and a null shard key in the chunk that holds null', async () => {
+        const coll = await sharded(
+          'nulls',
+          { sk: 1 },
+          { splits: [{ sk: 0 }], moveFrom: { sk: 0 } },
+        );
+        await coll.insertMany([
+          { _id: 'missing' },
+          { _id: 'null', sk: null },
+          { _id: 'one', sk: 1 },
+        ]);
+        const explain = await coll.find({ sk: null }).explain('queryPlanner');
+        assert.strictEqual(shardsOf(explain).length, 1, 'null targets the chunk below 0');
+        assert.strictEqual(await coll.countDocuments({ sk: null }), 2);
+      });
+
+      it('should bound a hashed chunk with NumberLong hashes', async () => {
+        await sharded('hashed', { region: 1, uid: 'hashed' });
+        await db
+          .collection('hashed')
+          .insertMany(Array.from({ length: 200 }, (_, i) => ({ region: 'eu', uid: i })));
+        await sharded('idhashed', { _id: 'hashed' });
+        const promoted = await chunks('idhashed');
+        let numbers = 0;
+        for (const chunk of promoted) if (typeof chunk.min._id === 'number') numbers += 1;
+        assert.ok(numbers > 0, 'promoted to plain numbers by default — lossy past 2^53');
+        for (const name of ['hashed', 'idhashed']) {
+          const field = name === 'hashed' ? 'uid' : '_id';
+          for (const chunk of await chunks(name, { promoteLongs: false })) {
+            for (const bound of [chunk.min[field], chunk.max[field]]) {
+              assert.ok(
+                ['Long', 'MinKey', 'MaxKey'].includes(bound?._bsontype),
+                `${name}: ${bound?._bsontype}`,
+              );
+            }
+          }
+        }
+      });
+
+      it('should send a write filtered by the whole shard key to one shard', async () => {
+        const coll = await sharded(
+          'writes',
+          { sk: 1 },
+          {
+            docs: docs(1000),
+            splits: [{ sk: 500 }],
+            moveFrom: { sk: 500 },
+          },
+        );
+        const doc = await coll.findOne({ sk: 700 });
+        const explain = (q) =>
+          db.command({
+            explain: { update: 'writes', updates: [{ q, u: { $inc: { __rev: 1 } } }] },
+            verbosity: 'queryPlanner',
+          });
+        assert.strictEqual(shardsOf(await explain({ _id: doc._id, sk: 700 })).length, 1);
+        assert.strictEqual(shardsOf(await explain({ _id: doc._id })).length, 2);
+      });
+
+      it('should move a document whose shard key changes — with retryable writes, the driver default', async () => {
+        const coll = await sharded(
+          'rekey',
+          { sk: 1 },
+          {
+            docs: docs(1000),
+            splits: [{ sk: 500 }],
+            moveFrom: { sk: 500 },
+          },
+        );
+        const doc = await coll.findOne({ sk: 10 });
+        await coll.updateOne({ _id: doc._id, sk: 10 }, { $set: { sk: 900 } });
+        assert.strictEqual((await coll.findOne({ _id: doc._id })).sk, 900, 'nothing refuses it');
+        const strict = await mongodb.MongoClient.connect(SHARDED_URI, { retryWrites: false });
+        try {
+          await assert.rejects(
+            strict
+              .db(DB)
+              .collection('rekey')
+              .updateOne({ _id: doc._id, sk: 900 }, { $set: { sk: 20 } }),
+            (error) => {
+              // Driver 7 puts an error of its own over a refusal of code 20
+              // ("…does not support retryable writes", no code) and keeps the
+              // server's under `originalError`; 6.x threw the server's.
+              const refusal = error.originalError ?? error;
+              assert.ok(
+                [72, 20].includes(refusal.code),
+                `code ${refusal.code}: ${refusal.message}`,
+              );
+              assert.match(refusal.message, /shard key/i);
+              return true;
+            },
+          );
+        } finally {
+          await strict.close();
+        }
+      });
+
+      it('should refuse distinct inside a transaction on a sharded collection', async () => {
+        const coll = await sharded('distinct', { sk: 1 }, { docs: docs(100) });
+        const session = client.startSession();
+        try {
+          session.startTransaction();
+          await assert.rejects(coll.distinct('sk', {}, { session }), (error) => {
+            assert.strictEqual(error.code, 263, `code ${error.code}: ${error.message}`);
+            return true;
+          });
+        } finally {
+          await session.abortTransaction().catch(() => undefined);
+          await session.endSession();
+        }
+      });
     });
 
     // ─── Declared collections ────────────────────────────────────────────────
@@ -406,7 +424,7 @@ describe(
 `;
 
     /** Run a background migration to the end with four lanes, sampling the leases per shard */
-    async function runSharded(kit, name) {
+    const runSharded = async (kit, name) => {
       await kit.up();
       const sampling = { on: true, peakPerShard: 0, peak: 0 };
       const sampler = (async () => {
@@ -423,7 +441,7 @@ describe(
             sampling.peakPerShard = Math.max(sampling.peakPerShard, count);
           }
           sampling.peak = Math.max(sampling.peak, leased.length);
-          await new Promise((resolve) => setTimeout(resolve, 5));
+          await sleep(5);
         }
       })();
       try {
@@ -432,7 +450,7 @@ describe(
         sampling.on = false;
         await sampler;
       }
-    }
+    };
 
     it('should partition a ranged shard key by chunk runs, one lane per shard', async () => {
       const regions = ['ap', 'eu', 'sa', 'us'];
@@ -522,7 +540,7 @@ describe(
       const deadline = Date.now() + 30_000;
       while ((await db.collection('bg_moving').countDocuments({ __v: 2 })) === 0) {
         if (Date.now() > deadline) throw new Error('no progress');
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        await sleep(20);
       }
       const owner = await chunkOwner('bg_moving', { region: 'sa' });
       await admin.command({
@@ -657,29 +675,31 @@ describe(
       );
     });
 
-    it('[probe] should refuse config reads to a user with readWrite only', async () => {
-      await sharded('limited', { sk: 1 }, { docs: docs(10) });
-      await admin.command({
-        createUser: 'limited',
-        pwd: 'limited',
-        roles: [{ role: 'readWrite', db: DB }],
-      });
-      const url = new URL(SHARDED_URI);
-      url.username = 'limited';
-      url.password = 'limited';
-      url.searchParams.set('authSource', 'admin');
-      const restricted = await mongodb.MongoClient.connect(url.toString());
-      try {
-        assert.strictEqual(await restricted.db(DB).collection('limited').countDocuments(), 10);
-        for (const name of ['collections', 'chunks']) {
-          await assert.rejects(
-            restricted.db('config').collection(name).findOne({}),
-            (error) => error.code === 13,
-          );
+    describe('[probe]', () => {
+      it('should refuse config reads to a user with readWrite only', async () => {
+        await sharded('limited', { sk: 1 }, { docs: docs(10) });
+        await admin.command({
+          createUser: 'limited',
+          pwd: 'limited',
+          roles: [{ role: 'readWrite', db: DB }],
+        });
+        const url = new URL(SHARDED_URI);
+        url.username = 'limited';
+        url.password = 'limited';
+        url.searchParams.set('authSource', 'admin');
+        const restricted = await mongodb.MongoClient.connect(url.toString());
+        try {
+          assert.strictEqual(await restricted.db(DB).collection('limited').countDocuments(), 10);
+          for (const name of ['collections', 'chunks']) {
+            await assert.rejects(
+              restricted.db('config').collection(name).findOne({}),
+              (error) => error.code === 13,
+            );
+          }
+        } finally {
+          await restricted.close();
         }
-      } finally {
-        await restricted.close();
-      }
+      });
     });
   },
 );

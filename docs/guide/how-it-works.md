@@ -135,7 +135,7 @@ sequenceDiagram
   A->>L: acquire: free, or stale?
   L-->>A: ✔ held by A's run
   B->>L: acquire
-  L-->>B: ✖ LOCK_ALREADY_HELD
+  L-->>B: ✖ ALX_ERR_LOCK_ALREADY_HELD
   Note over B: the CLI fails fast —<br/>runMigrations({ onLockHeld:<br/>'wait' }) and queue jobs poll
   loop every ttl/2
     A->>L: renew, if still A's
@@ -150,7 +150,7 @@ sequenceDiagram
   pod whose clock runs fast cannot steal a healthy lock.
 - **A heartbeat keeps a long migration's lock fresh**, so the TTL only decides how fast a crash is
   recovered — not how long a migration may take.
-- **A run that loses its lock stops** before its next migration, with `LOCK_LOST`; it never runs on
+- **A run that loses its lock stops** before its next migration, with `ALX_ERR_LOCK_LOST`; it never runs on
   alongside the new holder.
 - [`migronaut lock`](/commands/lock) shows who holds it, and [`migronaut unlock`](/commands/unlock)
   clears one left by a crash.
@@ -252,7 +252,7 @@ flowchart TB
 
 | Channel | For | Can fail the run? |
 |---|---|---|
-| [Hooks](/guide/hooks) | Logic inside the flow — a notification, a guard | Yes: a throwing hook fails it (`HOOK_FAILED`) |
+| [Hooks](/guide/hooks) | Logic inside the flow — a notification, a guard | Yes: a throwing hook fails it (`ALX_ERR_HOOK_FAILED`) |
 | [Events](/guide/hooks#events) | Metrics, alerts — any number of listeners | No: a throwing or rejecting listener is contained |
 | [Log lines](/guide/migration-logs) | Operators — every line carries the run's correlation | No |
 | [Spans and metrics](/guide/opentelemetry) | Tracing — the migration's span is the parent of what it does | No: telemetry never breaks a run |

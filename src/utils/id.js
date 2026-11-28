@@ -1,6 +1,7 @@
 const { randomUUID } = require('node:crypto');
+
 const { ConfigInvalidError } = require('../errors/index.js');
-const { errorText } = require('./error.js');
+const { formatError } = require('./error.js');
 
 /**
  * Longest id migronaut accepts. Also the limit a queue worker enforces on a
@@ -14,7 +15,7 @@ const MAX_ID_LENGTH = 128;
  * that mints one — everything else asks for an id through it, which is what
  * lets the `generateId` config option replace the format everywhere at once.
  */
-const randomId = () => randomUUID();
+const createRandomId = () => randomUUID();
 
 /**
  * Return `value` when it is usable as an id, throw otherwise. An id is stored
@@ -22,19 +23,21 @@ const randomId = () => randomUUID();
  * gated on by truthiness in the kit, so an empty or non-string value would
  * silently switch off the reentrancy guard and the owner-scoped lock release.
  */
-function assertId(value) {
+const assertId = (value) => {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_ID_LENGTH) {
     throw new ConfigInvalidError(
       `generateId must return a non-empty string of at most ${MAX_ID_LENGTH} characters`,
-      typeof value === 'string' ? { length: value.length } : { returned: typeof value },
+      {
+        context: typeof value === 'string' ? { length: value.length } : { returned: typeof value },
+      },
     );
   }
   return value;
-}
+};
 
 /**
  * Turn the `generateId` config option into the function the kit mints ids
- * with. `undefined` keeps the default (`randomId`); anything else must be a
+ * with. `undefined` keeps the default (`createRandomId`); anything else must be a
  * function, and every id it returns is checked.
  *
  * The user's function is called bare — no arguments, no receiver — so a
@@ -46,23 +49,22 @@ function assertId(value) {
  * reentrancy guard that checks it, and a promise would be stored as a truthy
  * non-id.
  */
-function createIdGenerator(generateId) {
-  if (generateId === undefined) return randomId;
+const createIdGenerator = (generateId) => {
+  if (generateId === undefined) return createRandomId;
   if (typeof generateId !== 'function') {
     throw new ConfigInvalidError('generateId must be a function', {
-      generateId: typeof generateId,
+      context: { generateId: typeof generateId },
     });
   }
   return () => {
-    let value;
+    let value = undefined;
     try {
       value = generateId();
     } catch (error) {
-      throw new ConfigInvalidError(
-        'generateId threw',
-        { cause: errorText(error) },
-        { cause: error },
-      );
+      throw new ConfigInvalidError('generateId threw', {
+        cause: error,
+        context: { cause: formatError(error) },
+      });
     }
     if (typeof value?.then === 'function') {
       // The promise is dropped, so its rejection must not surface as an
@@ -72,6 +74,6 @@ function createIdGenerator(generateId) {
     }
     return assertId(value);
   };
-}
+};
 
-module.exports = { MAX_ID_LENGTH, assertId, createIdGenerator, randomId };
+module.exports = { MAX_ID_LENGTH, createRandomId, assertId, createIdGenerator };

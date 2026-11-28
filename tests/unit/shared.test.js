@@ -3,17 +3,18 @@ const { describe, it, mock } = require('node:test');
 const {
   EXIT_CODES,
   attachSignalHandlers,
-  exitCodeFor,
-  partialFromOpts,
+  resolveExitCode,
+  toPartialConfig,
   reportUsageError,
   resolveLevel,
+  stopActiveMigrators,
 } = require('../../src/cli/shared.js');
 const { ConfigInvalidError, LockAlreadyHeldError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 
-describe('partialFromOpts', () => {
+describe('toPartialConfig', () => {
   it('should map the CLI flags onto config keys', () => {
-    const partial = partialFromOpts({
+    const partial = toPartialConfig({
       uri: 'mongodb://x:27017',
       db: 'shop',
       dir: './migrations',
@@ -30,58 +31,58 @@ describe('partialFromOpts', () => {
   it('should omit keys for absent flags instead of writing undefined', () => {
     // An `undefined` value would still be an own key and shadow the config
     // file's value in the merge.
-    assert.deepStrictEqual(partialFromOpts({}), {});
+    assert.deepStrictEqual(toPartialConfig({}), {});
   });
 
   it('should let --no-env win over --env-file', () => {
-    const partial = partialFromOpts({ env: false, envFile: '.env.ci' });
+    const partial = toPartialConfig({ env: false, envFile: '.env.ci' });
     assert.strictEqual(partial.envFile, false);
   });
 
   it('should pass --env-file through when --no-env is absent', () => {
-    assert.strictEqual(partialFromOpts({ envFile: '.env.ci' }).envFile, '.env.ci');
+    assert.strictEqual(toPartialConfig({ envFile: '.env.ci' }).envFile, '.env.ci');
   });
 });
 
-describe('exitCodeFor', () => {
+describe('resolveExitCode', () => {
   it('should map a typed error to its dedicated code', () => {
-    assert.strictEqual(exitCodeFor(new LockAlreadyHeldError('held')), 3);
-    assert.strictEqual(exitCodeFor(new ConfigInvalidError('bad')), 6);
+    assert.strictEqual(resolveExitCode(new LockAlreadyHeldError('held')), 3);
+    assert.strictEqual(resolveExitCode(new ConfigInvalidError('bad')), 6);
   });
 
   it('should collapse a non-Migronaut error to 1', () => {
-    assert.strictEqual(exitCodeFor(new Error('boom')), 1);
-    assert.strictEqual(exitCodeFor('string failure'), 1);
+    assert.strictEqual(resolveExitCode(new Error('boom')), 1);
+    assert.strictEqual(resolveExitCode('string failure'), 1);
   });
 });
 
 describe('reportUsageError', () => {
   /** Run `fn` with both streams captured and the exit code put back afterwards */
-  function captured(fn) {
-    const out = [];
-    const err = [];
-    const stdout = mock.method(process.stdout, 'write', (chunk) => out.push(chunk) > 0);
-    const stderr = mock.method(process.stderr, 'write', (chunk) => err.push(chunk) > 0);
+  const captured = (fn) => {
+    const written = [];
+    const errored = [];
+    const stdout = mock.method(process.stdout, 'write', (chunk) => written.push(chunk) > 0);
+    const stderr = mock.method(process.stderr, 'write', (chunk) => errored.push(chunk) > 0);
     try {
       fn();
-      return { out: out.join(''), err: err.join(''), code: process.exitCode };
+      return { out: written.join(''), err: errored.join(''), code: process.exitCode };
     } finally {
       stdout.mock.restore();
       stderr.mock.restore();
       process.exitCode = undefined;
     }
-  }
+  };
 
-  it('should exit as CONFIG_INVALID with the message on stderr', () => {
+  it('should exit as ALX_ERR_CONFIG_INVALID with the message on stderr', () => {
     const seen = captured(() => reportUsageError("unknown option '--bogus'"));
-    assert.strictEqual(seen.code, EXIT_CODES.CONFIG_INVALID);
+    assert.strictEqual(seen.code, EXIT_CODES.ALX_ERR_CONFIG_INVALID);
     assert.strictEqual(seen.err, "error: unknown option '--bogus'\n");
     assert.strictEqual(seen.out, '');
   });
 
   it('should show the help in place of the message when there is one', () => {
     const seen = captured(() => reportUsageError('no command given', { help: 'Usage: x' }));
-    assert.strictEqual(seen.code, EXIT_CODES.CONFIG_INVALID);
+    assert.strictEqual(seen.code, EXIT_CODES.ALX_ERR_CONFIG_INVALID);
     assert.strictEqual(seen.err, 'Usage: x\n');
   });
 
@@ -89,10 +90,10 @@ describe('reportUsageError', () => {
     const seen = captured(() =>
       reportUsageError("option '--yes' does not take a value", { json: true, help: 'Usage: x' }),
     );
-    assert.strictEqual(seen.code, EXIT_CODES.CONFIG_INVALID);
+    assert.strictEqual(seen.code, EXIT_CODES.ALX_ERR_CONFIG_INVALID);
     assert.strictEqual(seen.err, '');
     assert.deepStrictEqual(JSON.parse(seen.out), {
-      error: { code: 'CONFIG_INVALID', message: "option '--yes' does not take a value" },
+      error: { code: 'ALX_ERR_CONFIG_INVALID', message: "option '--yes' does not take a value" },
     });
   });
 });
@@ -121,8 +122,25 @@ describe('EXIT_CODES', () => {
   it('should give the idempotency cases their own codes', () => {
     // "already initialized" / "already imported" must be distinguishable from
     // a crash without parsing stderr — that is what typed exit codes are for.
-    assert.strictEqual(typeof EXIT_CODES.CONFIG_FILE_EXISTS, 'number');
-    assert.strictEqual(typeof EXIT_CODES.IMPORT_TARGET_NOT_EMPTY, 'number');
+    assert.strictEqual(typeof EXIT_CODES.ALX_ERR_CONFIG_FILE_EXISTS, 'number');
+    assert.strictEqual(typeof EXIT_CODES.ALX_ERR_IMPORT_TARGET_NOT_EMPTY, 'number');
+  });
+
+  it('should be frozen and answer nothing for a name every object has', () => {
+    // The CLI reads this very object: a consumer's write must not change it.
+    assert.strictEqual(Object.isFrozen(EXIT_CODES), true);
+    assert.throws(() => {
+      'use strict';
+      EXIT_CODES.ALX_ERR_LOCK_LOST = 1;
+    }, TypeError);
+    assert.strictEqual(EXIT_CODES.toString, undefined);
+    assert.strictEqual(resolveExitCode({ code: 'toString' }), 1);
+  });
+});
+
+describe('stopActiveMigrators', () => {
+  it('should stop nothing and say so when no command is running', () => {
+    assert.strictEqual(stopActiveMigrators('test'), 0);
   });
 });
 

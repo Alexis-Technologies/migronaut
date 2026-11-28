@@ -2,9 +2,33 @@ const { realpathSync } = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { MigrationFileNotFoundError, MigrationInvalidExportError } = require('../errors/index.js');
-const { errorText } = require('./error.js');
-const { requiresIssues } = require('./migration-name.js');
+
+const {
+  MigrationFileNotFoundError,
+  MigrationInvalidExportError,
+  MigrationLoadFailedError,
+} = require('../errors/index.js');
+const { MAX_TIMER_MS } = require('./concurrency.js');
+const { toContextPath, formatError } = require('./error.js');
+const { checkRequires } = require('./migration-name.js');
+
+/** What `fs.access` says when the file is simply not there */
+const MISSING_FILE_CODES = new Set(['ENOENT', 'ENOTDIR']);
+
+/**
+ * What a migration file may export, spelled to compare with a near miss:
+ * lower case, a trailing `s` dropped — `useTransactions`, `timeoutMS` and
+ * `require` are all one of these, mistyped.
+ */
+const EXPORT_SPELLINGS = new Map([
+  ['up', 'up'],
+  ['down', 'down'],
+  ['usetransaction', 'useTransaction'],
+  ['timeoutm', 'timeoutMs'],
+  ['description', 'description'],
+  ['require', 'requires'],
+  ['background', 'background'],
+]);
 
 /** TypeScript source extensions that require a TS-capable runtime to import */
 const TS_EXTENSIONS = new Set(['.ts', '.mts', '.cts']);
@@ -13,29 +37,25 @@ const TS_EXTENSIONS = new Set(['.ts', '.mts', '.cts']);
 let reloadCounter = 0;
 
 /** Narrow an unknown value to a function */
-function isFunction(value) {
-  return typeof value === 'function';
-}
+const isFunction = (value) => typeof value === 'function';
 
 /** True when an import failed because Node cannot load the file's extension */
-function isUnknownExtensionError(error) {
+const isUnknownExtensionError = (error) => {
   if (typeof error !== 'object' || error === null) {
     return false;
   }
   const { code, message } = error;
-  return (
-    code === 'ERR_UNKNOWN_FILE_EXTENSION' ||
-    (typeof message === 'string' && message.includes('Unknown file extension'))
-  );
-}
+  if (code === 'ERR_UNKNOWN_FILE_EXTENSION') return true;
+  return typeof message === 'string' && message.includes('Unknown file extension');
+};
 
 /** True when type stripping refused non-erasable syntax (enum, namespace, …) */
-function isUnsupportedTsSyntaxError(error) {
+const isUnsupportedTsSyntaxError = (error) => {
   if (typeof error !== 'object' || error === null) {
     return false;
   }
   return error.code === 'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX';
-}
+};
 
 /**
  * An actionable message for a dynamic-import failure whose cause is a
@@ -50,9 +70,9 @@ function isUnsupportedTsSyntaxError(error) {
  * `--no-experimental-strip-types`), and non-erasable syntax such as `enum` or
  * `namespace` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`).
  */
-function tsLoadMessageOrNull(filepath, error, noun) {
-  const ext = path.extname(filepath).toLowerCase();
-  if (!TS_EXTENSIONS.has(ext)) {
+const explainTsLoad = (filepath, error, noun) => {
+  const extension = path.extname(filepath).toLowerCase();
+  if (!TS_EXTENSIONS.has(extension)) {
     return null;
   }
   const name = path.basename(filepath);
@@ -63,24 +83,23 @@ function tsLoadMessageOrNull(filepath, error, noun) {
     return `Cannot load TypeScript ${noun} "${name}" — it uses syntax Node's type stripping cannot erase (e.g. enum, namespace). Rewrite with erasable-only syntax, or run migronaut under a TypeScript loader (e.g. tsx).`;
   }
   return null;
-}
+};
 
 /**
  * Translate a dynamic-import failure of a migration into a clear
- * MigrationInvalidExportError (see {@link tsLoadMessageOrNull}), or return
+ * MigrationInvalidExportError (see {@link explainTsLoad}), or return
  * null to let the original error propagate.
  */
-function tsLoadErrorOrNull(filepath, error) {
-  const message = tsLoadMessageOrNull(filepath, error, 'migration');
+const toTsLoadError = (filepath, error) => {
+  const message = explainTsLoad(filepath, error, 'migration');
   if (message === null) {
     return null;
   }
-  return new MigrationInvalidExportError(
-    message,
-    { filepath, cause: errorText(error) },
-    { cause: error },
-  );
-}
+  return new MigrationInvalidExportError(message, {
+    cause: error,
+    context: { filepath: toContextPath(filepath), cause: formatError(error) },
+  });
+};
 
 /**
  * Import a user-authored module (a migration, a collection definition).
@@ -104,60 +123,131 @@ function tsLoadErrorOrNull(filepath, error) {
  * case on a case-insensitive disk), which is not the key the cache holds.
  * Like the query string, this reloads the file itself, not what it requires.
  */
-async function importUserFile(filepath, options = {}) {
+const importUserFile = async (filepath, options = {}) => {
   const url = pathToFileURL(filepath).href;
   if (!options.reload) return import(url);
   delete require.cache[filepath];
-  let resolved;
+  let resolved = '';
   try {
     resolved = realpathSync(filepath);
   } catch {
     // Not there (yet): the import reports it.
   }
-  if (resolved !== undefined) delete require.cache[resolved];
+  if (resolved !== '') delete require.cache[resolved];
   return import(`${url}?migronaut=${++reloadCounter}`);
-}
+};
 
 /**
  * Import a migration file: its module, resolved — the default export of a
  * CommonJS file, the namespace of an ES module with named exports.
  *
+ * Whatever the import threw — a syntax error, a throw at module scope, an
+ * import that does not resolve — leaves as a typed error with the original as
+ * its cause: a raw one carries no code, so a run that applied two files before
+ * it lost them from `--json` and exited 1.
+ *
  * @throws {MigrationFileNotFoundError} when the file does not exist
  * @throws {MigrationInvalidExportError} when TypeScript cannot be loaded
+ * @throws {MigrationLoadFailedError} when the file cannot be read or evaluated
  */
-async function importMigrationModule(filepath, options = {}) {
+const importMigrationModule = async (filepath, options = {}) => {
   try {
     await fs.access(filepath);
-  } catch {
-    throw new MigrationFileNotFoundError('Migration file not found', { filepath });
+  } catch (error) {
+    if (MISSING_FILE_CODES.has(error?.code)) {
+      throw new MigrationFileNotFoundError('Migration file not found', {
+        context: { filepath: toContextPath(filepath) },
+      });
+    }
+    throw new MigrationLoadFailedError('Migration file cannot be read', {
+      cause: error,
+      context: { filepath: toContextPath(filepath), cause: formatError(error) },
+    });
   }
 
-  let imported;
+  let imported = null;
   try {
     imported = await importUserFile(filepath, { reload: options.reload });
   } catch (error) {
-    const tsError = tsLoadErrorOrNull(filepath, error);
+    const tsError = toTsLoadError(filepath, error);
     if (tsError) {
       throw tsError;
     }
-    throw error;
+    throw new MigrationLoadFailedError('Migration file failed to load', {
+      cause: error,
+      context: { filepath: toContextPath(filepath), cause: formatError(error) },
+    });
   }
   // `mod.default ?? mod` handles the CommonJS default-export case
   return imported.default ?? imported;
-}
+};
 
-/** The `requires` export, validated against the file's own name */
-function readRequires(resolved, filepath) {
-  if (resolved.requires === undefined) return {};
-  const issues = requiresIssues(resolved.requires, path.basename(filepath));
+/** The `requires` export, validated against the file's own name — undefined when it has none */
+const readRequiresExport = (resolved, filepath) => {
+  if (resolved.requires === undefined) return undefined;
+  const issues = checkRequires(resolved.requires, path.basename(filepath));
   if (issues.length > 0) {
     throw new MigrationInvalidExportError(`Invalid ${issues[0].path}: ${issues[0].message}`, {
-      filepath,
-      issues,
+      context: { filepath: toContextPath(filepath), issues },
     });
   }
-  return { requires: [...resolved.requires] };
-}
+  return [...resolved.requires];
+};
+
+/** `name` as {@link EXPORT_SPELLINGS} keys it */
+const normalizeSpelling = (name) => {
+  const lower = name.toLowerCase();
+  return lower.endsWith('s') ? lower.slice(0, -1) : lower;
+};
+
+/**
+ * Refuse an export that is a known one mistyped: ignored, it ran the migration
+ * without the transaction or the timeout its author asked for. Exports that
+ * resemble none are the module's own business (a CommonJS file's helpers).
+ */
+const assertNoNearMiss = (resolved, filepath) => {
+  const names = Object.keys(resolved);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const meant = EXPORT_SPELLINGS.get(normalizeSpelling(name));
+    if (meant === undefined || meant === name) continue;
+    throw new MigrationInvalidExportError(`Unknown export '${name}' — did you mean '${meant}'?`, {
+      context: { filepath: toContextPath(filepath), export: name, expected: meant },
+    });
+  }
+};
+
+/** Throw for an optional export that is present but not of its kind */
+const assertOptionalExports = (resolved, filepath) => {
+  const { useTransaction, timeoutMs, description } = resolved;
+  if (useTransaction !== undefined && typeof useTransaction !== 'boolean') {
+    throw new MigrationInvalidExportError('useTransaction must be a boolean', {
+      context: {
+        filepath: toContextPath(filepath),
+        export: 'useTransaction',
+        type: typeof useTransaction,
+      },
+    });
+  }
+  const isTimeout = Number.isInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= MAX_TIMER_MS;
+  if (timeoutMs !== undefined && !isTimeout) {
+    throw new MigrationInvalidExportError(
+      `timeoutMs must be a positive integer, at most ${MAX_TIMER_MS}`,
+      {
+        context: { filepath: toContextPath(filepath), export: 'timeoutMs', type: typeof timeoutMs },
+      },
+    );
+  }
+  if (description !== undefined && typeof description !== 'string') {
+    throw new MigrationInvalidExportError('description must be a string', {
+      context: {
+        filepath: toContextPath(filepath),
+        export: 'description',
+        type: typeof description,
+      },
+    });
+  }
+};
 
 /**
  * What a migration module exports, validated: a regular migration
@@ -169,44 +259,43 @@ function readRequires(resolved, filepath) {
  *
  * @throws {MigrationInvalidExportError}
  */
-function resolveMigrationExports(resolved, filepath) {
+const resolveMigrationExports = (resolved, filepath) => {
+  assertNoNearMiss(resolved, filepath);
+  assertOptionalExports(resolved, filepath);
   if (resolved.background !== undefined) {
     if (resolved.up !== undefined || resolved.down !== undefined) {
       throw new MigrationInvalidExportError(
         'A background migration exports no up() or down() — put the expand steps in a ' +
           'migration of their own',
-        { filepath },
+        { context: { filepath: toContextPath(filepath) } },
       );
     }
     return {
       kind: 'background',
       background: resolved.background,
-      ...(typeof resolved.description === 'string' ? { description: resolved.description } : {}),
-      ...readRequires(resolved, filepath),
+      description: resolved.description,
+      requires: readRequiresExport(resolved, filepath),
     };
   }
 
   if (!isFunction(resolved.up) || !isFunction(resolved.down)) {
     throw new MigrationInvalidExportError('Migration must export async up() and down() functions', {
-      filepath,
+      context: { filepath: toContextPath(filepath) },
     });
   }
 
-  const migration = { up: resolved.up, down: resolved.down };
-
-  if (typeof resolved.useTransaction === 'boolean') {
-    migration.useTransaction = resolved.useTransaction;
-  }
-  if (Number.isInteger(resolved.timeoutMs) && resolved.timeoutMs > 0) {
-    migration.timeoutMs = resolved.timeoutMs;
-  }
-  if (typeof resolved.description === 'string') {
-    migration.description = resolved.description;
-  }
-  Object.assign(migration, readRequires(resolved, filepath));
-
-  return migration;
-}
+  // One literal, every key present: the record of every migration a run
+  // loads has one shape (an export left out is undefined, as it was absent).
+  return {
+    kind: undefined,
+    up: resolved.up,
+    down: resolved.down,
+    useTransaction: resolved.useTransaction,
+    timeoutMs: resolved.timeoutMs,
+    description: resolved.description,
+    requires: readRequiresExport(resolved, filepath),
+  };
+};
 
 /**
  * Dynamically load a migration file and validate its exports.
@@ -221,19 +310,19 @@ function resolveMigrationExports(resolved, filepath) {
  * @throws {MigrationFileNotFoundError} when the file does not exist
  * @throws {MigrationInvalidExportError} when up/down are not both functions
  */
-async function loadMigrationFile(filepath, options = {}) {
+const loadMigrationFile = async (filepath, options = {}) => {
   const migration = resolveMigrationExports(
     await importMigrationModule(filepath, options),
     filepath,
   );
   return migration;
-}
+};
 
 module.exports = {
-  importMigrationModule,
+  explainTsLoad,
+  toTsLoadError,
   importUserFile,
-  loadMigrationFile,
+  importMigrationModule,
   resolveMigrationExports,
-  tsLoadErrorOrNull,
-  tsLoadMessageOrNull,
+  loadMigrationFile,
 };

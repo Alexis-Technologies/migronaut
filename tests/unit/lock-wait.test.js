@@ -5,8 +5,8 @@ const {
   DEFAULT_LOCK_WAIT_TIMEOUT_MS,
   MAX_LOCK_POLL_INTERVAL_MS,
   assertLockWaitOptions,
-  backoffDelay,
-  jitteredDelay,
+  computeBackoff,
+  jitterDelay,
   waitBudget,
   withLockWait,
 } = require('../../src/core/lock-wait.js');
@@ -19,17 +19,17 @@ const {
 
 /** A refusal as lock.js produces it — the holder's lockedAt is what the wait loop watches */
 const held = (lockedAt = new Date(0)) =>
-  new LockAlreadyHeldError('Migration lock is already held', { holder: { lockedAt } });
+  new LockAlreadyHeldError('Migration lock is already held', { context: { holder: { lockedAt } } });
 
 /** An attempt that is refused `refusals` times, then succeeds */
-function refusedThenFree(refusals, makeError = () => held()) {
+const refusedThenFree = (refusals, makeError = () => held()) => {
   let calls = 0;
   return async () => {
     calls += 1;
     if (calls <= refusals) throw makeError(calls);
     return 'done';
   };
-}
+};
 
 const fast = { onLockHeld: 'wait', lockPollIntervalMs: 2, lockWaitTimeoutMs: 1000 };
 
@@ -39,7 +39,7 @@ const fast = { onLockHeld: 'wait', lockPollIntervalMs: 2, lockWaitTimeoutMs: 100
  * millisecond early or late by the wall clock — so a measured wait asserted
  * against the real clock is a flake waiting to happen.
  */
-async function withManualClock(fn) {
+const withManualClock = async (fn) => {
   let now = 1_000_000;
   const dateNow = mock.method(Date, 'now', () => now);
   try {
@@ -49,7 +49,7 @@ async function withManualClock(fn) {
   } finally {
     dateNow.mock.restore();
   }
-}
+};
 
 describe('withLockWait', () => {
   it('should return the first attempt untouched when the lock is free', async () => {
@@ -232,6 +232,7 @@ describe('withLockWait', () => {
         },
         { onLockHeld: 'wait', lockPollIntervalMs: 5, lockWaitTimeoutMs: 30, onSettle },
       ),
+      { code: 'ALX_ERR_LOCK_ALREADY_HELD' },
     );
     assert.strictEqual(settled[1].outcome, 'timeout');
 
@@ -248,7 +249,7 @@ describe('withLockWait', () => {
         onSettle,
       },
     );
-    setTimeout(() => controller.abort(), 10);
+    setImmediate(() => controller.abort());
     await assert.rejects(pending, RunAbortedError);
     assert.strictEqual(settled[2].outcome, 'aborted');
 
@@ -276,6 +277,7 @@ describe('withLockWait', () => {
         },
         { ...fast, onSettle },
       ),
+      /at once/,
     );
     assert.strictEqual(settled.length, 4);
 
@@ -306,8 +308,7 @@ describe('withLockWait', () => {
         3,
         () =>
           new LockAlreadyHeldError('held', {
-            holder: { lockedAt: new Date(0), ttlMs: 60_000 },
-            ttlMs: 60_000,
+            context: { holder: { lockedAt: new Date(0), ttlMs: 60_000 }, ttlMs: 60_000 },
           }),
       ),
       { onLockHeld: 'wait', lockPollIntervalMs: 2, lockWaitTimeoutMs: 1000, logger },
@@ -344,7 +345,7 @@ describe('withLockWait', () => {
         },
         { onLockHeld: 'wait', lockPollIntervalMs: 5000, signal: controller.signal },
       );
-      setTimeout(() => controller.abort(), 10);
+      setImmediate(() => controller.abort());
       await assert.rejects(pending, (error) => {
         assert.ok(error instanceof RunAbortedError);
         assert.strictEqual(error.context.attempts, 1);
@@ -385,7 +386,10 @@ describe('assertLockWaitOptions', () => {
   });
 
   it('should reject a poll interval no timer can honour, and an unknown onLockHeld', () => {
-    assert.throws(() => assertLockWaitOptions({ lockPollIntervalMs: 2 ** 31 }), /at most/);
+    assert.throws(() => assertLockWaitOptions({ lockPollIntervalMs: 2 ** 31 }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /at most/,
+    });
     assert.throws(
       () => assertLockWaitOptions({ onLockHeld: 'Wait' }),
       (error) => error instanceof ConfigInvalidError && error.context.onLockHeld === 'Wait',
@@ -409,7 +413,7 @@ describe('assertLockWaitOptions', () => {
 });
 
 describe('waitBudget', () => {
-  const refusal = (context) => new LockAlreadyHeldError('held', context);
+  const refusal = (context) => new LockAlreadyHeldError('held', { context });
 
   it("should honour the caller's budget whatever the TTL", () => {
     assert.strictEqual(waitBudget(5000, refusal({ ttlMs: 600_000 })), 5000);
@@ -432,31 +436,31 @@ describe('waitBudget', () => {
   });
 });
 
-describe('backoffDelay', () => {
+describe('computeBackoff', () => {
   it('should double from the base, jittered, up to the cap', () => {
     const within = (value, expected) =>
       value >= expected * 0.75 && value <= Math.ceil(expected * 1.25);
-    assert.ok(within(backoffDelay(500, 1), 500));
-    assert.ok(within(backoffDelay(500, 2), 1000));
-    assert.ok(within(backoffDelay(500, 3), 2000));
-    assert.ok(within(backoffDelay(500, 50), MAX_LOCK_POLL_INTERVAL_MS));
+    assert.ok(within(computeBackoff(500, 1), 500));
+    assert.ok(within(computeBackoff(500, 2), 1000));
+    assert.ok(within(computeBackoff(500, 3), 2000));
+    assert.ok(within(computeBackoff(500, 50), MAX_LOCK_POLL_INTERVAL_MS));
   });
 
   it('should never sleep through more than a quarter of the budget, nor below the base', () => {
     for (let attempt = 1; attempt < 20; attempt++) {
-      assert.ok(backoffDelay(10, attempt, 100) <= Math.ceil(25 * 1.25));
+      assert.ok(computeBackoff(10, attempt, 100) <= Math.ceil(25 * 1.25));
     }
     // A base above the cap is kept: the caller asked for it.
-    assert.ok(backoffDelay(8000, 5) >= 8000 * 0.75);
+    assert.ok(computeBackoff(8000, 5) >= 8000 * 0.75);
   });
 });
 
-describe('jitteredDelay', () => {
+describe('jitterDelay', () => {
   it('should stay within ±25% of the base and never drop below 1ms', () => {
     for (let run = 0; run < 200; run++) {
-      const value = jitteredDelay(100);
+      const value = jitterDelay(100);
       assert.ok(value >= 75 && value <= 125, `out of range: ${value}`);
     }
-    assert.ok(jitteredDelay(0.1) >= 1);
+    assert.ok(jitterDelay(0.1) >= 1);
   });
 });

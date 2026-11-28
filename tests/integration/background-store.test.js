@@ -1,14 +1,15 @@
 const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it } = require('node:test');
 const { ObjectId } = require('mongodb');
-const { BackgroundStore, STATE_SCHEMA } = require('../../src/core/background-store.js');
+const { BackgroundStore, STATE_SCHEMA } = require('../../src/core/background/store.js');
 const { runWithLock } = require('../../src/core/lock.js');
 const { LockLostError } = require('../../src/errors/index.js');
 const { silentLogger } = require('../../src/utils/logger.js');
 const { startTestMongo } = require('../helpers/mongo.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
-let mongo;
-let store;
+let mongo = null;
+let store = null;
 const DB = 'migronaut_background_store_test';
 const NAME = '0001-orders.js';
 
@@ -33,7 +34,7 @@ const partitionsOf = (count) =>
   }));
 
 /** Register and commit a first plan of `count` partitions */
-async function planned(count, name = NAME) {
+const planned = async (count, name = NAME) => {
   await store.register(name, { status: 'pending', mode: 'declarative', direction: 'forward' });
   return store.commitPlan(name, {
     generation: 0,
@@ -41,7 +42,7 @@ async function planned(count, name = NAME) {
     partitions: partitionsOf(count),
     fields: { status: 'running' },
   });
-}
+};
 
 const claimArgs = (state, extra = {}) => ({
   generation: state.generation,
@@ -211,7 +212,7 @@ describe('BackgroundStore — leases and slots (integration)', () => {
     const state = await planned(1);
     const claimed = await store.claim(NAME, claimArgs(state, { ttlMs: 400 }));
     await runWithLock(claimed.lease, { logger: silentLogger }, async () => {
-      await new Promise((resolve) => setTimeout(resolve, 700));
+      await sleep(700);
     });
     const [stored] = await store.partitions(NAME);
     assert.strictEqual(stored.lease, undefined);

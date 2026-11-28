@@ -4,8 +4,8 @@ const mongoose = require('mongoose');
 const { defineShapes, versioningPlugin } = require('../../versioning.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 
-let mongo;
-let connection;
+let mongo = null;
+let connection = null;
 const DB = 'migronaut_versioning_mongoose_test';
 
 before(async () => {
@@ -24,12 +24,12 @@ beforeEach(async () => {
 
 let models = 0;
 /** A fresh model over `orders` with the plugin — Mongoose refuses to compile one name twice */
-function orderModel(definition = { versioning: { current: 2 } }) {
+const orderModel = (definition = { versioning: { current: 2 } }) => {
   const schema = new mongoose.Schema({ name: String, tags: [String] });
   schema.plugin(versioningPlugin, definition);
   models += 1;
   return connection.model(`Order${models}`, schema, 'orders');
-}
+};
 
 const raw = (filter) => mongo.db.collection('orders').findOne(filter);
 
@@ -82,7 +82,10 @@ describe('versioningPlugin with mongoose (integration)', () => {
     const created = await Order.create({ name: 'a' });
     const partial = await Order.findById(created._id).select('name');
     partial.name = 'b';
-    await assert.rejects(partial.save(), /loaded without "__rev"/);
+    await assert.rejects(partial.save(), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /loaded without "__rev"/,
+    });
     assert.strictEqual((await raw({ _id: created._id })).name, 'a', 'nothing written');
     // Selected (or everything), it saves — guarded and bumped.
     const whole = await Order.findById(created._id).select('name __rev');

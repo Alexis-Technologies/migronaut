@@ -4,7 +4,7 @@ const { ConfigInvalidError } = require('../../src/errors/index.js');
 const { defineShapes, versioningPlugin } = require('../../src/versioning/index.js');
 
 /** Just enough of a Mongoose schema to see what the plugin does to it */
-function fakeSchema({ versionKey = '__v', paths = {} } = {}) {
+const fakeSchema = ({ versionKey = '__v', paths = {} } = {}) => {
   const options = { versionKey };
   const hooks = [];
   return {
@@ -24,10 +24,10 @@ function fakeSchema({ versionKey = '__v', paths = {} } = {}) {
       }
     },
   };
-}
+};
 
 /** A Mongoose query's `this` for the update hooks */
-function fakeQuery(update, options = {}) {
+const fakeQuery = (update, options = {}) => {
   return {
     update,
     getUpdate() {
@@ -38,10 +38,10 @@ function fakeQuery(update, options = {}) {
     },
     getOptions: () => options,
   };
-}
+};
 
 /** A Mongoose document's `this` for the document hooks */
-function fakeDoc(fields, { isNew = true, where } = {}) {
+const fakeDoc = (fields, { isNew = true, where } = {}) => {
   return {
     isNew,
     fields: { ...fields },
@@ -53,7 +53,7 @@ function fakeDoc(fields, { isNew = true, where } = {}) {
       this.fields[name] = value;
     },
   };
-}
+};
 
 const orders = { versioning: { current: 2 } };
 
@@ -168,11 +168,14 @@ describe('versioningPlugin', () => {
   });
 
   it('should refuse what is not a schema or a definition', () => {
-    assert.throws(() => versioningPlugin({}, orders), /takes a Mongoose schema/);
-    assert.throws(
-      () => versioningPlugin(fakeSchema(), undefined),
-      /needs the collection definition/,
-    );
+    assert.throws(() => versioningPlugin({}, orders), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /takes a Mongoose schema/,
+    });
+    assert.throws(() => versioningPlugin(fakeSchema(), undefined), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /needs the collection definition/,
+    });
     assert.throws(
       () => versioningPlugin(fakeSchema(), { versioning: { current: 0 } }),
       ConfigInvalidError,

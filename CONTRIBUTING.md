@@ -46,9 +46,18 @@ through the injected logger; `null` silences it, which is what tests use.
 Presentation (`src/cli`, `bin`) never touches the database, and core never
 imports the spinner or the table renderer.
 
+**5. The code style is alexiskills'.** `js-conventions` of
+[`@alexify/metaskills`](https://alexiskills.vercel.app) (a devDependency, linked
+into `.claude/skills` by `pnpm install`), its Library profile: `const` arrows,
+loops in one pass instead of array iteration methods in `src/`, strict
+comparisons only, every `let` with a value. `pnpm run lint` holds most of it;
+the "Conventions" section of [CLAUDE.md](CLAUDE.md) says what migronaut does
+differently, and wins.
+
 ## Tests
 
-Node's built-in `node:test` — no external framework.
+Node's built-in `node:test` — no external framework: `describe` and `it`, every
+`it` title starting with `should`, assertions from `node:assert/strict`.
 
 - `tests/unit/` — mocked database, plain stubs. Fast, runs everywhere.
 - `tests/integration/` — a real `mongodb-memory-server` replica set, so
@@ -98,8 +107,8 @@ file's process alive, and the run hangs instead of failing.
 
 `search-atlas.test.js` is manual: CI does not run it. Run it locally after a
 change to how search indexes are compared, planned or applied
-(`src/core/search-index-spec.js`, `src/core/converge-search.js`,
-`src/core/converge-search-run.js`, the search part of `src/core/converge-plan.js`)
+(`src/core/converge/search-index-spec.js`, `src/core/converge/search.js`,
+`src/core/converge/search-run.js`, the search part of `src/core/converge/plan.js`)
 — the unit tests carry the coverage, but only a real `mongot` shows what the
 server reports back. Run it on `mongodb/mongodb-atlas-local:8.0` and `:latest`:
 
@@ -163,5 +172,5 @@ Before "fixing" one of these, read [ARCHITECTURE.md §8](ARCHITECTURE.md):
 migrate-mongo imports are forward-only and refused by `down`/`redo`; `init` has
 no JSON output — `--json` on it is refused with a pointer to `--format json`,
 which selects the config file's format; queue jobs get a
-single attempt, and a job behind a failed migration fails as `MIGRATION_BLOCKED`
+single attempt, and a job behind a failed migration fails as `ALX_ERR_MIGRATION_BLOCKED`
 instead of waiting.

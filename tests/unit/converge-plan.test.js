@@ -1,15 +1,16 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { normalizeDefinition } = require('../../src/core/collections.js');
+const { normalizeDefinition } = require('../../src/core/converge/collections.js');
 const {
   SEARCH_UNAVAILABLE_REASON,
   UNIQUE_REBUILD_REASON,
-  desiredValidator,
+  resolveDesiredValidator,
+  managesValidator,
   isDestructive,
-  liveValidator,
+  readLiveValidator,
   needsConfirmation,
   planCollection,
-} = require('../../src/core/converge-plan.js');
+} = require('../../src/core/converge/plan.js');
 
 const ID_INDEX = { v: 2, key: { _id: 1 }, name: '_id_' };
 const FR = { locale: 'fr', strength: 3, version: '57.1' };
@@ -161,10 +162,12 @@ describe('planCollection — validators', () => {
   });
 
   it('should expose the desired and live validator states', () => {
-    assert.strictEqual(desiredValidator({}), undefined);
-    assert.strictEqual(desiredValidator({ validator: {} }), null);
-    assert.strictEqual(liveValidator(undefined), null);
-    assert.deepStrictEqual(liveValidator({ validator: { a: 1 }, validationAction: 'warn' }), {
+    assert.strictEqual(managesValidator({}), false);
+    assert.strictEqual(resolveDesiredValidator({}), null);
+    assert.strictEqual(managesValidator({ validator: {} }), true);
+    assert.strictEqual(resolveDesiredValidator({ validator: {} }), null);
+    assert.strictEqual(readLiveValidator(undefined), null);
+    assert.deepStrictEqual(readLiveValidator({ validator: { a: 1 }, validationAction: 'warn' }), {
       validator: { a: 1 },
       validationLevel: 'strict',
       validationAction: 'warn',

@@ -1,3 +1,4 @@
+const { isUnauthorized } = require('../utils/error.js');
 const { READ_OPTIONS } = require('./server-info.js');
 
 /**
@@ -12,17 +13,12 @@ const { READ_OPTIONS } = require('./server-info.js');
  * - `readChunks` — the chunks of a sharded collection, in key order.
  */
 
-/** The server's "not authorized" — the one refusal that means "unknown", not "broken" */
-const UNAUTHORIZED = 13;
-
-const isUnauthorized = (error) => error?.code === UNAUTHORIZED;
-
 /**
  * `{ key, uuid, timestamp, unsplittable }` of a sharded collection, `null` when
  * it is not sharded, `undefined` when `config.collections` may not be read.
  */
-async function readShardKey(client, dbName, collection) {
-  let entry;
+const readShardKey = async (client, dbName, collection) => {
+  let entry = null;
   try {
     entry = await client
       .db('config')
@@ -41,7 +37,7 @@ async function readShardKey(client, dbName, collection) {
     uuid: entry.uuid,
     ...(entry.timestamp !== undefined ? { timestamp: entry.timestamp } : {}),
   };
-}
+};
 
 /**
  * The chunks of a sharded collection (`readShardKey`'s result), in key order:
@@ -49,7 +45,7 @@ async function readShardKey(client, dbName, collection) {
  * read. By `uuid` (5.0+), then by namespace (a cluster upgraded from 4.4 that
  * never refreshed its chunks).
  */
-async function readChunks(client, dbName, collection, sharding) {
+const readChunks = async (client, dbName, collection, sharding) => {
   const chunks = client.db('config').collection('chunks');
   // Hashed bounds are NumberLongs: promoted to numbers, they lose precision
   // past 2^53 (ARCHITECTURE §6.8).
@@ -71,6 +67,6 @@ async function readChunks(client, dbName, collection, sharding) {
     if (isUnauthorized(error)) return undefined;
     throw error;
   }
-}
+};
 
-module.exports = { isUnauthorized, readChunks, readShardKey };
+module.exports = { readShardKey, readChunks };

@@ -2,7 +2,10 @@ const { createColors } = require('./colors.js');
 const { sanitizeTerminal } = require('./sanitize.js');
 
 /** Severity order, used to drop messages below the configured level */
-const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
+const LEVELS = { __proto__: null, debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
+
+/** The level methods a sink may have, in the order they are looked for */
+const SINK_METHODS = ['info', 'debug', 'warn', 'error'];
 
 /** A logger whose methods are all no-ops — used to silence all output */
 const silentLogger = {
@@ -10,6 +13,16 @@ const silentLogger = {
   info: () => {},
   warn: () => {},
   error: () => {},
+};
+
+/** Adapters are cached per user logger so pino's child() binds only once */
+const adapters = new WeakMap();
+
+const noop = () => {};
+
+/** warn/error always go to stderr, whatever stream debug/info write to */
+const writeErr = (message) => {
+  process.stderr.write(`${message}\n`);
 };
 
 /**
@@ -24,15 +37,12 @@ const silentLogger = {
  * `'error'` only failures. The structured `fields` second argument that core
  * passes is ignored here: the human line already carries that information.
  */
-function createLogger(stream = process.stdout, level = 'info') {
+const createLogger = (stream = process.stdout, level = 'info') => {
   const outColors = createColors(stream);
   const errColors = createColors(process.stderr);
   const threshold = LEVELS[level] ?? LEVELS.info;
-  const writeOut = (msg) => {
-    stream.write(`${msg}\n`);
-  };
-  const writeErr = (msg) => {
-    process.stderr.write(`${msg}\n`);
+  const writeOut = (message) => {
+    stream.write(`${message}\n`);
   };
   const at = (name, write) => (LEVELS[name] >= threshold ? write : () => {});
   // Sanitized by construction: messages routinely embed migration names and
@@ -43,21 +53,22 @@ function createLogger(stream = process.stdout, level = 'info') {
   // exempt (their sink is not necessarily a terminal) — this is the default
   // terminal logger only.
   return {
-    debug: at('debug', (msg) => writeOut(outColors.dim(sanitizeTerminal(msg)))),
-    info: at('info', (msg) => writeOut(sanitizeTerminal(msg))),
-    warn: at('warn', (msg) => writeErr(errColors.yellow(sanitizeTerminal(msg)))),
-    error: at('error', (msg) => writeErr(errColors.red(sanitizeTerminal(msg)))),
+    debug: at('debug', (message) => writeOut(outColors.dim(sanitizeTerminal(message)))),
+    info: at('info', (message) => writeOut(sanitizeTerminal(message))),
+    warn: at('warn', (message) => writeErr(errColors.yellow(sanitizeTerminal(message)))),
+    error: at('error', (message) => writeErr(errColors.red(sanitizeTerminal(message)))),
   };
-}
+};
 
 const hasMethod = (value, name) => typeof value?.[name] === 'function';
 
 /** A sink is usable when it exposes any of the four level methods */
-const isUsableSink = (value) =>
-  hasMethod(value, 'info') ||
-  hasMethod(value, 'debug') ||
-  hasMethod(value, 'warn') ||
-  hasMethod(value, 'error');
+const isUsableSink = (value) => {
+  for (let i = 0; i < SINK_METHODS.length; i++) {
+    if (hasMethod(value, SINK_METHODS[i])) return true;
+  }
+  return false;
+};
 
 /**
  * Wrap a sink method so a throwing user logger can never break a migration run.
@@ -65,18 +76,17 @@ const isUsableSink = (value) =>
  * and its ecosystem expect for structured logging; everyone else gets
  * `(msg, fields)` so a plain `(msg) => …` logger keeps working unchanged.
  */
-const guard = (fn, pinoStyle) => (msg, fields) => {
-  try {
-    if (fields === undefined) fn(msg);
-    else if (pinoStyle) fn(fields, msg);
-    else fn(msg, fields);
-  } catch {
-    // Logging must never break a migration run.
-  }
+const guard = (method, pinoStyle) => {
+  return (message, fields) => {
+    try {
+      if (fields === undefined) method(message);
+      else if (pinoStyle) method(fields, message);
+      else method(message, fields);
+    } catch {
+      // Logging must never break a migration run.
+    }
+  };
 };
-
-/** Adapters are cached per user logger so pino's child() binds only once */
-const adapters = new WeakMap();
 
 /**
  * Resolve the effective logger from a config value: `null` → silent,
@@ -92,18 +102,18 @@ const adapters = new WeakMap();
  * A logger exposing `child()` is treated as pino-style, so structured fields
  * are passed as the first argument rather than the second.
  */
-function resolveLogger(logger) {
-  if (logger === null) return silentLogger;
+const resolveLogger = (logger) => {
+  // `false` reads as "no logger" as well as `null` does: both are documented.
+  if (logger === null || logger === false) return silentLogger;
   if (logger === undefined) return createLogger();
   if (typeof logger !== 'object' || !isUsableSink(logger)) {
     return silentLogger;
   }
   const cached = adapters.get(logger);
   if (cached !== undefined) return cached;
-  const pinoStyle = hasMethod(logger, 'child');
-  const child = pinoStyle ? logger.child({ component: 'migronaut' }) : null;
+  const isPinoStyle = hasMethod(logger, 'child');
+  const child = isPinoStyle ? logger.child({ component: 'migronaut' }) : null;
   const sink = child && isUsableSink(child) ? child : logger;
-  const noop = () => {};
   // Fallback preference per level: same severity first, then the neighbors a
   // reader of that sink would expect. debug/info never escalate to warn/error
   // (running commentary must not masquerade as problems); warn/error always
@@ -115,13 +125,13 @@ function resolveLogger(logger) {
     return noop;
   };
   const adapter = {
-    debug: guard(pick(['debug', 'info']), pinoStyle),
-    info: guard(pick(['info', 'debug']), pinoStyle),
-    warn: guard(pick(['warn', 'info', 'debug', 'error']), pinoStyle),
-    error: guard(pick(['error', 'warn', 'info', 'debug']), pinoStyle),
+    debug: guard(pick(['debug', 'info']), isPinoStyle),
+    info: guard(pick(['info', 'debug']), isPinoStyle),
+    warn: guard(pick(['warn', 'info', 'debug', 'error']), isPinoStyle),
+    error: guard(pick(['error', 'warn', 'info', 'debug']), isPinoStyle),
   };
   adapters.set(logger, adapter);
   return adapter;
-}
+};
 
 module.exports = { silentLogger, createLogger, resolveLogger };

@@ -11,7 +11,7 @@ const {
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_sequenced_test';
 const CHANGELOG = '_migronaut_migrations';
 
@@ -27,24 +27,24 @@ beforeEach(async () => {
   await mongo.db.dropDatabase();
 });
 
-let project;
-let migrator;
+let project = null;
+let migrator = null;
 
 afterEach(async () => {
   await migrator?.disconnect();
   project?.cleanup();
 });
 
-function setup(overrides = {}) {
+const setup = (overrides = {}) => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir, overrides);
-}
+};
 
-function three() {
+const three = () => {
   project.write('0001-a.js', insertMigration('things', 'a'));
   project.write('0002-b.js', insertMigration('things', 'b'));
   project.write('0003-c.js', insertMigration('things', 'c'));
-}
+};
 
 const markers = async () =>
   (await mongo.db.collection('things').find().sort({ _id: 1 }).toArray()).map((doc) => doc.marker);
@@ -155,7 +155,7 @@ describe('sequenced single-file runs (integration)', () => {
       three();
       await assert.rejects(migrator.up('0003-c.js', { ordered: true }), (error) => {
         assert.ok(error instanceof MigrationBlockedError);
-        assert.strictEqual(error.code, 'MIGRATION_BLOCKED');
+        assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_BLOCKED');
         assert.deepStrictEqual(error.context, {
           name: '0003-c.js',
           direction: 'up',
@@ -189,7 +189,9 @@ describe('sequenced single-file runs (integration)', () => {
         'export async function up() { throw new Error("nope"); }\nexport async function down() {}\n',
       );
       project.write('0002-b.js', insertMigration('things', 'b'));
-      await assert.rejects(migrator.up('0001-a.js'));
+      await assert.rejects(migrator.up('0001-a.js'), {
+        code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED',
+      });
       await assert.rejects(migrator.up('0002-b.js', { ordered: true }), (error) => {
         assert.ok(error instanceof MigrationBlockedError);
         assert.deepStrictEqual(error.context.blockedBy, ['0001-a.js']);
@@ -269,8 +271,14 @@ describe('sequenced single-file runs (integration)', () => {
       // Already applied: a duplicate job is skipped whatever it planned with.
       const [again] = await migrator.up('0001-a.js', { checksum: planned.checksum });
       assert.strictEqual(again.status, 'skipped');
-      await assert.rejects(migrator.up(undefined, { checksum: current.checksum }), /filename/);
-      await assert.rejects(migrator.up('0002-b.js', { checksum: 'nope' }), /SHA-256/);
+      await assert.rejects(migrator.up(undefined, { checksum: current.checksum }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /filename/,
+      });
+      await assert.rejects(migrator.up('0002-b.js', { checksum: 'nope' }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /SHA-256/,
+      });
     });
 
     it('should leave an unordered single-file run exactly as it was', async () => {
@@ -297,13 +305,13 @@ describe('sequenced single-file runs (integration)', () => {
 
     describe('with a file merged late', () => {
       /** 0002 applied first; 0001 then arrives from a parallel branch */
-      async function lateArrival(overrides) {
+      const lateArrival = async (overrides) => {
         setup(overrides);
         project.write('0002-b.js', insertMigration('things', 'b'));
         await migrator.up();
         project.write('0001-a.js', insertMigration('things', 'a'));
         project.write('0003-c.js', insertMigration('things', 'c'));
-      }
+      };
 
       it('should block later files until the late one is applied', async () => {
         await lateArrival();
@@ -425,11 +433,14 @@ describe('sequenced single-file runs (integration)', () => {
       await migrator.redo('0001-a.js', { reason: 'replay' });
       [row] = (await migrator.status()).filter((r) => r.file === '0001-a.js');
       assert.strictEqual(row.reason, 'replay');
-      await assert.rejects(migrator.up('0002-b.js', { reason: '' }), /reason/);
-      await assert.rejects(
-        migrator.up('0002-b.js', { requestedBy: 'x'.repeat(129) }),
-        /requestedBy/,
-      );
+      await assert.rejects(migrator.up('0002-b.js', { reason: '' }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /reason/,
+      });
+      await assert.rejects(migrator.up('0002-b.js', { requestedBy: 'x'.repeat(129) }), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /requestedBy/,
+      });
     });
 
     it('should keep the version of a failed file on its trace', async () => {
@@ -438,7 +449,9 @@ describe('sequenced single-file runs (integration)', () => {
         '0001-a.js',
         'export async function up() { throw new Error("nope"); }\nexport async function down() {}\n',
       );
-      await assert.rejects(migrator.up('0001-a.js', { requestedBy: 'ci' }));
+      await assert.rejects(migrator.up('0001-a.js', { requestedBy: 'ci' }), {
+        code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED',
+      });
       const [row] = await migrator.status();
       assert.strictEqual(row.status, 'failed');
       assert.match(row.failedChecksum, /^[0-9a-f]{64}$/);
@@ -447,12 +460,12 @@ describe('sequenced single-file runs (integration)', () => {
   });
 
   describe("dryRun('up') and the order policy", () => {
-    async function lateArrival(overrides) {
+    const lateArrival = async (overrides) => {
       setup(overrides);
       project.write('0002-b.js', insertMigration('things', 'b'));
       await migrator.up();
       project.write('0001-a.js', insertMigration('things', 'a'));
-    }
+    };
 
     it("should refuse under onOutOfOrder: 'error', exactly as the run would", async () => {
       await lateArrival({ onOutOfOrder: 'error' });

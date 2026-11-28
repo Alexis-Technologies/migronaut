@@ -10,7 +10,7 @@ const CLEAR_LINE = '\r\x1b[K';
  * a no-op, so control sequences never leak into captured output. Writes to
  * stderr by default, keeping stdout clean for command output.
  */
-function createSpinner(stream = process.stderr) {
+const createSpinner = (stream = process.stderr) => {
   let timer = null;
   let frame = 0;
   let text = '';
@@ -43,17 +43,14 @@ function createSpinner(stream = process.stderr) {
    * the middle of a spinner frame: clear the line, let it write, re-render.
    * A plain pass-through while the spinner is idle.
    */
-  const interrupt = (fn) => {
-    if (timer === null) {
-      fn();
-      return;
-    }
+  const interrupt = (write) => {
+    if (timer === null) return void write();
     stream.write(CLEAR_LINE);
-    fn();
+    write();
     render();
   };
 
   return { start, stop, interrupt };
-}
+};
 
 module.exports = { createSpinner };

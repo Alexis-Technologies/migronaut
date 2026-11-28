@@ -102,7 +102,7 @@ nearest `package.json`, so files they create never trigger this.
 ## "Transaction numbers are only allowed on a replica set"
 
 **Why:** you set `useTransaction` but your MongoDB is a standalone server. Transactions require a
-replica set or sharded cluster. Migronaut reports it as `TRANSACTIONS_UNSUPPORTED` (exit 15).
+replica set or sharded cluster. Migronaut reports it as `ALX_ERR_TRANSACTIONS_UNSUPPORTED` (exit 15).
 
 From version 7 the driver words this refusal differently — *"This MongoDB deployment does not
 support retryable writes. Please add retryWrites=false to your connection string."* — which is
@@ -142,7 +142,7 @@ the reverse operation.
 ## "Converge refused: … conflict(s)"
 
 ```
-✖ CONVERGE_FAILED: Converge refused: 1 conflict(s) — users index "email_1": the undeclared index "by_email" covers the same key — …
+✖ ALX_ERR_CONVERGE_FAILED: Converge refused: 1 conflict(s) — users index "email_1": the undeclared index "by_email" covers the same key — …
 ```
 
 **Why:** a declared index has the same key (and partial filter and collation) as a live index
@@ -155,7 +155,7 @@ drops an undeclared index unless asked to.
 ## "Atlas Search is not available on this server"
 
 ```
-✖ CONVERGE_FAILED: Converge refused: 1 conflict(s) — movies search index "default": Atlas Search is not available on this server — use Atlas, …
+✖ ALX_ERR_CONVERGE_FAILED: Converge refused: 1 conflict(s) — movies search index "default": Atlas Search is not available on this server — use Atlas, …
 ```
 
 **Why:** a definition declares `searchIndexes`, and the server has no Atlas Search — a plain

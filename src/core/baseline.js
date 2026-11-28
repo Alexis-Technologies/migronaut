@@ -20,7 +20,7 @@ const FS_CONCURRENCY = 16;
  * `{db, changelog, logger, fields, filepath, listMigrationFiles, nextBatch,
  * truncateAtTarget, environment, executedBy, runId, assertNotAborted}`.
  */
-async function runBaseline(deps, options, signal) {
+const runBaseline = async (deps, options, signal) => {
   const { db, changelog, logger } = deps;
 
   const files = await deps.listMigrationFiles();
@@ -42,14 +42,14 @@ async function runBaseline(deps, options, signal) {
   // Checksums come from the files as they are NOW — that is the contract: the
   // baseline asserts "the database already matches these exact files", and
   // later drift checks police edits against this snapshot.
-  const checksums = await mapLimit(targets, FS_CONCURRENCY, (name) =>
-    computeChecksum(deps.filepath(name)),
-  );
+  const checksums = await mapLimit(targets, FS_CONCURRENCY, (name) => {
+    return computeChecksum(deps.filepath(name));
+  });
 
   const batch = await deps.nextBatch();
-  const records = new Array(targets.length);
+  const records = [];
   for (let i = 0; i < targets.length; i++) {
-    records[i] = {
+    records.push({
       name: targets[i],
       batch,
       status: 'applied',
@@ -60,7 +60,7 @@ async function runBaseline(deps, options, signal) {
       executedBy: deps.executedBy(),
       origin: 'baseline',
       ...(deps.runId() ? { runId: deps.runId() } : {}),
-    };
+    });
   }
 
   // One write, checked against the abort signal first: a baseline is all
@@ -75,6 +75,6 @@ async function runBaseline(deps, options, signal) {
     deps.fields({ baselined: records.length, skipped, batch }),
   );
   return { baselined: targets, skipped, batch };
-}
+};
 
 module.exports = { runBaseline };

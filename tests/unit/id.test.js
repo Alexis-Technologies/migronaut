@@ -5,20 +5,25 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { ConfigInvalidError } = require('../../src/errors/index.js');
-const { MAX_ID_LENGTH, assertId, createIdGenerator, randomId } = require('../../src/utils/id.js');
+const {
+  MAX_ID_LENGTH,
+  assertId,
+  createIdGenerator,
+  createRandomId,
+} = require('../../src/utils/id.js');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-describe('randomId', () => {
+describe('createRandomId', () => {
   it('should mint a UUID, different every time', () => {
-    const first = randomId();
+    const first = createRandomId();
     assert.match(first, UUID);
-    assert.notStrictEqual(randomId(), first);
+    assert.notStrictEqual(createRandomId(), first);
   });
 
   it('should stay under the limit it shares with every other id', () => {
     assert.strictEqual(MAX_ID_LENGTH, 128);
-    assert.ok(randomId().length <= MAX_ID_LENGTH);
+    assert.ok(createRandomId().length <= MAX_ID_LENGTH);
   });
 });
 
@@ -61,7 +66,7 @@ describe('assertId', () => {
       assert.throws(
         () => assertId(value),
         (error) => {
-          assert.strictEqual(error.code, 'CONFIG_INVALID');
+          assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
           assert.deepStrictEqual(error.context, { returned: type });
           return true;
         },
@@ -72,8 +77,8 @@ describe('assertId', () => {
 
 describe('createIdGenerator', () => {
   it('should keep the default when no generator is configured', () => {
-    assert.strictEqual(createIdGenerator(undefined), randomId);
-    assert.strictEqual(createIdGenerator(), randomId);
+    assert.strictEqual(createIdGenerator(undefined), createRandomId);
+    assert.strictEqual(createIdGenerator(), createRandomId);
   });
 
   it('should refuse a generator that is not a function', () => {
@@ -101,10 +106,10 @@ describe('createIdGenerator', () => {
     // first parameter is a seed time or a size, and an argument of ours would
     // be read as one.
     const calls = [];
-    function generator(...args) {
+    const generator = function (...args) {
       calls.push({ args, receiver: this });
       return 'id';
-    }
+    };
     createIdGenerator(generator)('ignored', 21);
     assert.deepStrictEqual(calls, [{ args: [], receiver: undefined }]);
   });
@@ -115,7 +120,7 @@ describe('createIdGenerator', () => {
     assert.strictEqual(newId(), 'ok');
     assert.throws(() => newId(), ConfigInvalidError);
     assert.strictEqual(newId(), 'ok-again');
-    assert.throws(() => newId(), /non-empty string/);
+    assert.throws(() => newId(), { code: 'ALX_ERR_CONFIG_INVALID', message: /non-empty string/ });
   });
 
   it('should wrap a throwing generator, keeping the original error as the cause', () => {
@@ -166,7 +171,10 @@ describe('createIdGenerator', () => {
     process.on('unhandledRejection', onRejection);
     try {
       const newId = createIdGenerator(() => Promise.reject(new Error('never observed')));
-      assert.throws(() => newId(), /must be synchronous/);
+      assert.throws(() => newId(), {
+        code: 'ALX_ERR_CONFIG_INVALID',
+        message: /must be synchronous/,
+      });
       // Unhandled rejections are reported after the microtask queue drains.
       await new Promise((resolve) => setImmediate(resolve));
       assert.deepStrictEqual(rejections, []);
@@ -177,6 +185,9 @@ describe('createIdGenerator', () => {
 
   it('should treat any thenable as a promise', () => {
     const newId = createIdGenerator(() => ({ then: () => {} }));
-    assert.throws(() => newId(), /must be synchronous/);
+    assert.throws(() => newId(), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /must be synchronous/,
+    });
   });
 });

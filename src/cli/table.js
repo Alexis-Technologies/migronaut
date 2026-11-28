@@ -1,17 +1,11 @@
-const { TARGET_LABELS, isDestructive } = require('../core/converge-plan.js');
-const { searchBuildState } = require('../core/search-index-spec.js');
+const { TARGET_LABELS, isDestructive } = require('../core/converge/plan.js');
+const { searchBuildState } = require('../core/converge/search-index-spec.js');
 const { createColors, stripAnsi } = require('../utils/colors.js');
 const { formatDateTime } = require('../utils/date.js');
 // Shared with the logger and spinner — cell values come from the changelog and
 // from migration files, and every sink that prints them sanitizes the same way.
 // Migronaut's own colors are applied after sanitizing, so they survive.
 const { sanitize } = require('../utils/sanitize.js');
-
-/**
- * Resolved per render rather than once at import: color depends on NO_COLOR /
- * FORCE_COLOR / TTY, and `--no-color` is applied after this module is loaded.
- */
-const palette = () => createColors(process.stdout);
 
 /**
  * Codepoint ranges the terminal renders two columns wide (East Asian Wide and
@@ -36,31 +30,67 @@ const WIDE_RANGES = [
   [0x20000, 0x3fffd],
 ];
 
+/** Longest description rendered before it is ellipsized */
+const MAX_DESCRIPTION_WIDTH = 40;
+
+/** Longest migration filename rendered before it is ellipsized */
+const MAX_MIGRATION_WIDTH = 60;
+
+/** Longest index or collection name rendered before it is ellipsized */
+const MAX_NAME_WIDTH = 48;
+
+/** Longest converge detail rendered before it is ellipsized */
+const MAX_DETAIL_WIDTH = 72;
+
+/** The color of each converge action: what changes stands out, what does not recedes */
+const ACTION_COLORS = {
+  __proto__: null,
+  create: 'green',
+  modify: 'cyan',
+  recreate: 'yellow',
+  drop: 'yellow',
+  conflict: 'red',
+};
+
+/** What a search index's build state reads as in the table; FAILED adds its message */
+const BUILD_DETAILS = {
+  __proto__: null,
+  serving: '',
+  failed: 'FAILED',
+  updating: 'updating',
+  stale: 'STALE — not replicating',
+};
+
+/**
+ * Resolved per render rather than once at import: color depends on NO_COLOR /
+ * FORCE_COLOR / TTY, and `--no-color` is applied after this module is loaded.
+ */
+const resolvePalette = () => createColors(process.stdout);
+
 /** Terminal columns a single codepoint occupies (0 for combining marks) */
-function charWidth(codepoint) {
+const measureChar = (codepoint) => {
   // Combining marks attach to the previous glyph and take no width of their own.
   if (codepoint >= 0x0300 && codepoint <= 0x036f) return 0;
   // Variation selectors (VS15/VS16 among them) modify the preceding glyph.
   if (codepoint >= 0xfe00 && codepoint <= 0xfe0f) return 0;
-  for (const [start, end] of WIDE_RANGES) {
-    if (codepoint >= start && codepoint <= end) return 2;
+  for (let i = 0; i < WIDE_RANGES.length; i++) {
+    const range = WIDE_RANGES[i];
+    if (codepoint >= range[0] && codepoint <= range[1]) return 2;
   }
   return 1;
-}
+};
 
 /** Terminal columns of already-ANSI-free text — the shared codepoint walk */
-function widthOfPlain(plain) {
+const measurePlain = (plain) => {
   let width = 0;
-  for (const char of plain) {
-    width += charWidth(char.codePointAt(0));
+  for (const character of plain) {
+    width += measureChar(character.codePointAt(0));
   }
   return width;
-}
+};
 
 /** Number of terminal columns a cell occupies, ignoring ANSI color codes */
-function visibleWidth(text) {
-  return widthOfPlain(stripAnsi(text));
-}
+const measureVisible = (text) => measurePlain(stripAnsi(text));
 
 /**
  * Shorten `text` to at most `max` visible columns, ending with an ellipsis.
@@ -68,26 +98,26 @@ function visibleWidth(text) {
  * escape sequence in half and leave the terminal restyled past the cell.
  * One stripAnsi + one width walk per call — not one of each per check.
  */
-function truncate(text, max) {
+const truncate = (text, max) => {
   const plain = stripAnsi(text);
-  if (widthOfPlain(plain) <= max) return text;
+  if (measurePlain(plain) <= max) return text;
   let out = '';
   let width = 0;
-  for (const char of plain) {
-    const next = width + charWidth(char.codePointAt(0));
+  for (const character of plain) {
+    const next = width + measureChar(character.codePointAt(0));
     if (next > max - 1) break;
-    out += char;
+    out += character;
     width = next;
   }
   return `${out}…`;
-}
+};
 
 /** Build a horizontal border line for the given column widths */
-function borderLine(widths, left, mid, right) {
+const drawBorder = (widths, left, mid, right) => {
   const segments = [];
   for (const width of widths) segments.push('─'.repeat(width + 2));
   return left + segments.join(mid) + right;
-}
+};
 
 /**
  * Render `head` + `rows` (arrays of string cells) as a box-drawing table.
@@ -97,23 +127,25 @@ function borderLine(widths, left, mid, right) {
  * (truncate() above accounts for one more scan) — stripAnsi is not free at
  * 5k rows.
  */
-function renderTable(head, rows) {
+const renderTable = (head, rows) => {
   // Measure every cell once and settle the column widths in the same pass.
-  const headWidths = new Array(head.length);
-  const widths = new Array(head.length);
+  const headWidths = [];
+  const widths = [];
   for (let index = 0; index < head.length; index++) {
-    headWidths[index] = visibleWidth(head[index]);
-    widths[index] = headWidths[index];
+    const width = measureVisible(head[index]);
+    headWidths.push(width);
+    widths.push(width);
   }
-  const cellWidths = new Array(rows.length);
+  const cellWidths = [];
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
     const row = rows[rowIndex];
-    const measured = new Array(row.length);
+    const measured = [];
     for (let index = 0; index < row.length; index++) {
-      measured[index] = visibleWidth(row[index]);
-      if (measured[index] > widths[index]) widths[index] = measured[index];
+      const width = measureVisible(row[index]);
+      measured.push(width);
+      if (width > widths[index]) widths[index] = width;
     }
-    cellWidths[rowIndex] = measured;
+    cellWidths.push(measured);
   }
   const renderRow = (cells, measured) => {
     const padded = [];
@@ -122,39 +154,31 @@ function renderTable(head, rows) {
     }
     return `│ ${padded.join(' │ ')} │`;
   };
-  const colors = palette();
+  const colors = resolvePalette();
   const coloredHead = [];
   for (const title of head) {
     coloredHead.push(colors.cyan(title));
   }
   const lines = [
-    borderLine(widths, '┌', '┬', '┐'),
+    drawBorder(widths, '┌', '┬', '┐'),
     renderRow(coloredHead, headWidths),
-    borderLine(widths, '├', '┼', '┤'),
+    drawBorder(widths, '├', '┼', '┤'),
   ];
   for (let index = 0; index < rows.length; index++) {
     lines.push(renderRow(rows[index], cellWidths[index]));
   }
-  lines.push(borderLine(widths, '└', '┴', '┘'));
+  lines.push(drawBorder(widths, '└', '┴', '┘'));
   return lines.join('\n');
-}
+};
 
-/** Render a checksum indicator cell */
-function checksumCell(colors, value) {
+const renderChecksumCell = (colors, value) => {
   if (value === null) return colors.dim('—');
   return value ? colors.green('ok') : colors.red('MISMATCH');
-}
+};
 
-/** Render a status cell */
-function statusCell(colors, status) {
+const renderStatusCell = (colors, status) => {
   return status === 'applied' ? colors.green('applied') : colors.yellow('pending');
-}
-
-/** Longest description rendered before it is ellipsized */
-const MAX_DESCRIPTION_WIDTH = 40;
-
-/** Longest migration filename rendered before it is ellipsized */
-const MAX_MIGRATION_WIDTH = 60;
+};
 
 /**
  * Width budgets for the two truncatable columns, shrunk to fit the terminal.
@@ -165,7 +189,7 @@ const MAX_MIGRATION_WIDTH = 60;
  * TTY the truncatable columns give way instead of every row wrapping into
  * box-drawing noise — the common case over SSH at 80 columns.
  */
-function truncationBudgets(hasDescription, fixedWidth) {
+const computeBudgets = (hasDescription, fixedWidth) => {
   const columns = process.stdout.isTTY ? process.stdout.columns : undefined;
   if (!columns) {
     return { migration: MAX_MIGRATION_WIDTH, description: MAX_DESCRIPTION_WIDTH };
@@ -180,14 +204,14 @@ function truncationBudgets(hasDescription, fixedWidth) {
   const migration = Math.max(12, Math.min(MAX_MIGRATION_WIDTH, Math.ceil(available * 0.6)));
   const description = Math.max(8, Math.min(MAX_DESCRIPTION_WIDTH, available - migration));
   return { migration, description };
-}
+};
 
 /**
  * Render status rows as a human-readable table string. The Description column
  * appears only when at least one row has one, so the common case stays narrow.
  */
-function renderStatusTable(rows) {
-  const colors = palette();
+const renderStatusTable = (rows) => {
+  const colors = resolvePalette();
   let hasDescription = false;
   for (const row of rows) {
     if (row.description) {
@@ -197,18 +221,18 @@ function renderStatusTable(rows) {
   }
   // Status(7) + Batch(5) + Applied At(19) + Duration(8) + Checksum(8) plus
   // `│ … │ ` framing: 3 columns of overhead per column and one closing bar.
-  const budgets = truncationBudgets(hasDescription, 47 + (hasDescription ? 7 : 6) * 3 + 1);
+  const budgets = computeBudgets(hasDescription, 47 + (hasDescription ? 7 : 6) * 3 + 1);
   const head = ['Migration', 'Status', 'Batch', 'Applied At', 'Duration', 'Checksum'];
   if (hasDescription) head.push('Description');
   const cells = [];
   for (const row of rows) {
     const cell = [
       truncate(sanitize(row.file), budgets.migration),
-      statusCell(colors, row.status),
-      row.batch === null ? '' : String(row.batch),
+      renderStatusCell(colors, row.status),
+      row.batch === null ? '' : `${row.batch}`,
       row.appliedAt ? formatDateTime(row.appliedAt) : '',
       row.duration === null ? '' : `${row.duration}ms`,
-      checksumCell(colors, row.checksumOk),
+      renderChecksumCell(colors, row.checksumOk),
     ];
     if (hasDescription) {
       cell.push(truncate(sanitize(row.description ?? ''), budgets.description));
@@ -216,86 +240,55 @@ function renderStatusTable(rows) {
     cells.push(cell);
   }
   return renderTable(head, cells);
-}
+};
 
 /** Shared render for row-listing commands: the table, or a friendly empty line */
-function renderRowsOrEmpty(rows, { logger }) {
+const renderRowsOrEmpty = (rows, { logger }) => {
   if (rows.length === 0) logger.info('No migrations found');
   else logger.info(renderStatusTable(rows));
-}
+};
 
-/** Render the checksum-source cell for an import row */
-function checksumSourceCell(colors, source) {
+const renderChecksumSourceCell = (colors, source) => {
   if (source === 'recomputed') return colors.green('recomputed');
   if (source === 'reused') return colors.cyan('reused');
   return colors.red('missing');
-}
+};
 
 /** Render mapped import rows as a human-readable table string */
-function renderImportTable(rows) {
-  const colors = palette();
+const renderImportTable = (rows) => {
+  const colors = resolvePalette();
   // Batch(5) + Applied At(19) + Checksum(10) plus the 4-column frame.
-  const budgets = truncationBudgets(false, 34 + 4 * 3 + 1);
+  const budgets = computeBudgets(false, 34 + 4 * 3 + 1);
   const head = ['Migration', 'Batch', 'Applied At', 'Checksum'];
   const cells = [];
   for (const row of rows) {
     cells.push([
       truncate(sanitize(row.file), budgets.migration),
-      String(row.batch),
+      `${row.batch}`,
       formatDateTime(row.appliedAt),
-      checksumSourceCell(colors, row.checksumSource),
+      renderChecksumSourceCell(colors, row.checksumSource),
     ]);
   }
   return renderTable(head, cells);
-}
+};
 
-/** Longest index or collection name rendered before it is ellipsized */
-const MAX_NAME_WIDTH = 48;
-
-/** Longest converge detail rendered before it is ellipsized */
-const MAX_DETAIL_WIDTH = 72;
-
-/** Render a converge action cell: what changes stands out, what does not recedes */
-function convergeActionCell(colors, action) {
-  switch (action) {
-    case 'create':
-      return colors.green(action);
-    case 'modify':
-      return colors.cyan(action);
-    case 'recreate':
-    case 'drop':
-      return colors.yellow(action);
-    case 'conflict':
-      return colors.red(action);
-    default:
-      return colors.dim(action);
-  }
-}
+const renderConvergeActionCell = (colors, action) => colors[ACTION_COLORS[action] ?? 'dim'](action);
 
 /** Where the server is with a search index, when it is not simply serving it */
-function searchBuildDetail(build) {
+const searchBuildDetail = (build) => {
   if (build === undefined) return '';
-  switch (searchBuildState(build)) {
-    case 'serving':
-      return '';
-    case 'failed':
-      return `FAILED${build.message ? `: ${build.message}` : ''}`;
-    case 'updating':
-      return 'updating';
-    case 'stale':
-      return 'STALE — not replicating';
-    default:
-      return build.status;
-  }
-}
+  const state = searchBuildState(build);
+  const detail = BUILD_DETAILS[state] ?? build.status;
+  return state === 'failed' && build.message ? `${detail}: ${build.message}` : detail;
+};
 
 /** Whether a search index row is one worth showing even when nothing changes: not serving yet */
-function searchNotServing(action) {
+const searchNotServing = (action) => {
   return action.target === 'searchIndex' && searchBuildDetail(action.build) !== '';
-}
+};
 
 /** The detail column: what differs, or why the row is what it is — and a search index's build */
-function convergeDetail(action) {
+const renderConvergeDetail = (action) => {
   if (action.reason === 'name' && action.liveName !== undefined) {
     return `renamed from "${action.liveName}"`;
   }
@@ -309,15 +302,25 @@ function convergeDetail(action) {
   const build = searchBuildDetail(action.build);
   if (build) parts.push(build);
   return parts.join(' · ');
-}
+};
+
+/** The lead of a converge summary: everything matched, or how much changed where */
+const renderConvergeSummary = (counts, collections, dryRun) => {
+  if (counts.change === 0 && counts.conflict === 0) {
+    return `✔ ${collections} collection(s) match their declarations`;
+  }
+  const verb = dryRun ? 'Would make' : 'Made';
+  const where = `in ${counts.touched} of ${collections} collection(s)`;
+  return `${verb} ${counts.change} change(s) ${where}`;
+};
 
 /**
  * Render a converge plan (or result) as a table plus a one-line summary.
  * Rows that need nothing are folded into the summary unless `all` — a large
  * schema would otherwise bury its two changes under fifty "unchanged" lines.
  */
-function renderConvergeTable(result, { all = false } = {}) {
-  const colors = palette();
+const renderConvergeTable = (result, { all = false } = {}) => {
+  const colors = resolvePalette();
   const cells = [];
   const counts = {
     change: 0,
@@ -340,29 +343,20 @@ function renderConvergeTable(result, { all = false } = {}) {
       else changes += 1;
       if (isDestructive(action)) counts.destructive += 1;
       if (action.action === 'unchanged' && !all && !searchNotServing(action)) continue;
-      const named = action.target === 'index' || action.target === 'searchIndex';
+      const isNamed = action.target === 'index' || action.target === 'searchIndex';
       cells.push([
         truncate(sanitize(collection.name), MAX_NAME_WIDTH),
         TARGET_LABELS[action.target] ?? action.target,
-        named ? truncate(sanitize(action.name), MAX_NAME_WIDTH) : '',
-        convergeActionCell(colors, action.action),
-        truncate(sanitize(convergeDetail(action)), MAX_DETAIL_WIDTH),
+        isNamed ? truncate(sanitize(action.name), MAX_NAME_WIDTH) : '',
+        renderConvergeActionCell(colors, action.action),
+        truncate(sanitize(renderConvergeDetail(action)), MAX_DETAIL_WIDTH),
       ]);
     }
     counts.change += changes;
     if (changes > 0) counts.touched += 1;
   }
   const collections = result.collections.length;
-  let summary;
-  if (counts.change === 0 && counts.conflict === 0) {
-    summary = `✔ ${collections} collection(s) match their declarations`;
-  } else {
-    const verb = result.dryRun ? 'Would make' : 'Made';
-    summary =
-      `${verb} ${counts.change} change(s) in ${counts.touched} of ${collections} ` +
-      'collection(s)';
-  }
-  const parts = [summary];
+  const parts = [renderConvergeSummary(counts, collections, result.dryRun)];
   if (counts.destructive > 0) parts.push(`${counts.destructive} drop/rebuild`);
   if (counts.conflict > 0) parts.push(colors.red(`${counts.conflict} conflict(s)`));
   if (counts.keep > 0) parts.push(`${counts.keep} undeclared index(es) kept`);
@@ -386,38 +380,42 @@ function renderConvergeTable(result, { all = false } = {}) {
   const line = parts.join(' · ');
   if (cells.length === 0) return line;
   return `${renderTable(['Collection', 'Target', 'Index', 'Action', 'Detail'], cells)}\n${line}`;
-}
+};
 
 /**
  * Render the converge history: one line per converge that changed something
  * or failed, newest first — the audit view (`migronaut converge --history`).
  */
-function renderConvergeHistory(entries) {
+const renderConvergeHistory = (entries) => {
   if (entries.length === 0) return 'No converge has changed anything yet';
-  const colors = palette();
-  const cells = entries.map((entry) => [
-    entry.startedAt instanceof Date ? entry.startedAt.toISOString() : String(entry.startedAt),
-    entry.trigger,
-    entry.success ? colors.green('ok') : colors.red('failed'),
-    String(entry.changed),
-    truncate(sanitize(entry.requestedBy ?? entry.executedBy ?? ''), MAX_NAME_WIDTH),
-    truncate(
-      sanitize(entry.reason ?? (entry.success ? '' : (entry.error ?? ''))),
-      MAX_DETAIL_WIDTH,
-    ),
-  ]);
+  const colors = resolvePalette();
+  const cells = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    cells.push([
+      entry.startedAt instanceof Date ? entry.startedAt.toISOString() : `${entry.startedAt}`,
+      entry.trigger,
+      entry.success ? colors.green('ok') : colors.red('failed'),
+      `${entry.changed}`,
+      truncate(sanitize(entry.requestedBy ?? entry.executedBy ?? ''), MAX_NAME_WIDTH),
+      truncate(
+        sanitize(entry.reason ?? (entry.success ? '' : (entry.error ?? ''))),
+        MAX_DETAIL_WIDTH,
+      ),
+    ]);
+  }
   return renderTable(['When', 'Trigger', 'Result', 'Changes', 'Who', 'Why'], cells);
-}
+};
 
 module.exports = {
-  charWidth,
   sanitize,
-  visibleWidth,
+  measureChar,
+  measureVisible,
   truncate,
   renderTable,
   renderStatusTable,
-  renderImportTable,
   renderRowsOrEmpty,
+  renderImportTable,
   renderConvergeTable,
   renderConvergeHistory,
 };

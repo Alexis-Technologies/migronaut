@@ -3,9 +3,11 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const { after, afterEach, before, beforeEach, describe, it } = require('node:test');
 const { MigratorKit } = require('../../src/core/migrator.js');
+const { MongoClient } = require('mongodb');
 const {
   ConfigInvalidError,
   MigrationFileNotFoundError,
+  MigrationLoadFailedError,
   MigrationTimeoutError,
   NotAppliedError,
 } = require('../../src/errors/index.js');
@@ -17,7 +19,7 @@ const {
   makeProject,
 } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_features_test';
 
 before(async () => {
@@ -28,7 +30,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();
@@ -39,16 +41,16 @@ afterEach(() => {
   project?.cleanup();
 });
 
-function migrator(overrides = {}) {
+const migrator = (overrides = {}) => {
   return makeMigrator(mongo.uri, DB, project.dir, overrides);
-}
+};
 
 /** Write three migrations named so their sort order is obvious */
-function writeThree() {
+const writeThree = () => {
   project.write('0001-a.ts', insertMigration('things', 'a'));
   project.write('0002-b.ts', insertMigration('things', 'b'));
   project.write('0003-c.ts', insertMigration('things', 'c'));
-}
+};
 
 describe('injected MongoClient (integration)', () => {
   it('should reuse the caller’s client and leave it open on disconnect', async () => {
@@ -167,6 +169,23 @@ describe('up --to / down --to (integration)', () => {
 });
 
 describe('lifecycle events (integration)', () => {
+  it('should deliver an event to every listener when one of them throws', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const kit = migrator();
+    const seen = [];
+    kit.on('run:start', () => {
+      throw new Error('a broken listener');
+    });
+    kit.on('run:start', (event) => seen.push(event.runId));
+    try {
+      await kit.up();
+    } finally {
+      await kit.disconnect();
+    }
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(typeof seen[0], 'string');
+  });
+
   it('should emit run and migration events with a shared runId', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     const kit = migrator();
@@ -213,7 +232,7 @@ describe('lifecycle events (integration)', () => {
     kit.on('migration:error', (event) => seen.push(event));
     kit.on('run:end', (event) => seen.push(event));
 
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     await kit.disconnect();
 
     assert.strictEqual(seen[0].migration, '0001-bad.ts');
@@ -232,10 +251,10 @@ describe('lifecycle events (integration)', () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     project.write('0002-bad.ts', failingMigration());
     const kit = migrator();
-    let end;
+    let end = null;
     kit.on('run:end', (event) => (end = event));
 
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     await kit.disconnect();
 
     assert.strictEqual(end.success, false);
@@ -246,7 +265,7 @@ describe('lifecycle events (integration)', () => {
   it('should carry ttlMs and acquireMs on lock:acquired and owner on lock events', async () => {
     project.write('0001-a.ts', insertMigration('things', 'a'));
     const kit = migrator();
-    let acquired;
+    let acquired = null;
     kit.on('lock:acquired', (event) => (acquired = event));
 
     await kit.up();
@@ -303,7 +322,7 @@ export async function down() {}
     const kit = migrator({ timeoutMs: 100 });
     await assert.rejects(kit.up(), (error) => {
       assert.ok(error instanceof MigrationTimeoutError);
-      assert.strictEqual(error.code, 'MIGRATION_TIMEOUT');
+      assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_TIMEOUT');
       assert.strictEqual(error.context.timeoutMs, 100);
       return true;
     });
@@ -335,7 +354,7 @@ export async function down() {}
   it('should release the lock after a timeout', async () => {
     project.write('0001-slow.ts', slow);
     const kit = migrator({ timeoutMs: 100 });
-    await assert.rejects(kit.up());
+    await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_TIMEOUT' });
     await kit.disconnect();
     // A wedged migration must not leave the lock behind for its full TTL.
     assert.strictEqual(await mongo.db.collection('_migronaut_locks').countDocuments(), 0);
@@ -427,13 +446,13 @@ describe('out-of-order detection (integration)', () => {
   const { OutOfOrderMigrationError } = require('../../src/errors/index.js');
 
   /** Apply the newer file first, then merge an older one from a "branch" */
-  async function applyNewerThenMergeOlder(overrides = {}) {
+  const applyNewerThenMergeOlder = async (overrides = {}) => {
     project.write('0002-b.ts', insertMigration('things', 'b'));
     const kit = migrator(overrides);
     await kit.up();
     project.write('0001-a.ts', insertMigration('things', 'a'));
     return kit;
-  }
+  };
 
   it('should warn by default and still apply the late arrival', async () => {
     const warns = [];
@@ -454,7 +473,7 @@ describe('out-of-order detection (integration)', () => {
     const kit = await applyNewerThenMergeOlder({ onOutOfOrder: 'error' });
     await assert.rejects(kit.up(), (error) => {
       assert.ok(error instanceof OutOfOrderMigrationError);
-      assert.strictEqual(error.code, 'MIGRATION_OUT_OF_ORDER');
+      assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_OUT_OF_ORDER');
       assert.deepStrictEqual(error.context.names, ['0001-a.ts']);
       return true;
     });
@@ -501,12 +520,121 @@ describe('out-of-order detection (integration)', () => {
   });
 });
 
+describe('one run at a time (integration)', () => {
+  it('should refuse a second run on a kit with one in flight, as ALX_ERR_RUN_IN_FLIGHT', async () => {
+    project.write(
+      '0001-slow.ts',
+      'export async function up() { await new Promise((resolve) => setTimeout(resolve, 300)); }\n' +
+        'export async function down() {}\n',
+    );
+    const kit = migrator();
+    try {
+      await kit.connect();
+      const first = kit.up();
+      // The first run holds the instance once its run window opens.
+      await new Promise((resolve) => kit.once('migration:start', resolve));
+      await assert.rejects(kit.up(), { code: 'ALX_ERR_RUN_IN_FLIGHT' });
+      // Nor is the client closed under it: the lock release would fail.
+      await assert.rejects(kit.disconnect(), { code: 'ALX_ERR_RUN_IN_FLIGHT' });
+      await first;
+    } finally {
+      await kit.disconnect();
+    }
+  });
+});
+
+describe('a run method stopped by its signal (integration)', () => {
+  it('should finish the migration in flight, skip the rest, and carry the reason', async () => {
+    project.write(
+      '0001-slow.ts',
+      'export async function up() { await new Promise((resolve) => setTimeout(resolve, 300)); }\n' +
+        'export async function down() {}\n',
+    );
+    project.write('0002-a.ts', insertMigration('things', 'a'));
+    const kit = migrator();
+    try {
+      const controller = new AbortController();
+      kit.once('migration:start', () => controller.abort('deploy'));
+      await assert.rejects(kit.up(undefined, { signal: controller.signal }), (error) => {
+        assert.strictEqual(error.code, 'ALX_ERR_RUN_ABORTED');
+        assert.strictEqual(error.cause, 'deploy');
+        assert.deepStrictEqual(
+          error.context.results.map((row) => row.file),
+          ['0001-slow.ts'],
+        );
+        return true;
+      });
+      assert.strictEqual(await mongo.db.collection('things').countDocuments(), 0);
+      // An aborted signal stops the next run before the lock; a non-signal is refused.
+      await assert.rejects(kit.up(undefined, { signal: AbortSignal.abort('later') }), {
+        code: 'ALX_ERR_RUN_ABORTED',
+      });
+      await assert.rejects(kit.down(undefined, { signal: 'stop' }), ConfigInvalidError);
+    } finally {
+      await kit.disconnect();
+    }
+  });
+});
+
+describe('load and bookkeeping failures (integration)', () => {
+  it('should type a file that fails to load and keep the rows applied before it', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    project.write('0002-b.ts', insertMigration('things', 'b'));
+    project.write('0003-broken.js', "throw new Error('boom at module scope');\n");
+    const kit = migrator();
+    try {
+      const error = await kit.up().then(
+        () => assert.fail('up should reject'),
+        (rejection) => rejection,
+      );
+      assert.ok(error instanceof MigrationLoadFailedError);
+      assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_LOAD_FAILED');
+      assert.match(error.cause.message, /boom at module scope/);
+      assert.deepStrictEqual(
+        error.context.results.map((row) => [row.file, row.status]),
+        [
+          ['0001-a.ts', 'applied'],
+          ['0002-b.ts', 'applied'],
+        ],
+      );
+    } finally {
+      await kit.disconnect();
+    }
+  });
+
+  it('should read and write the bookkeeping majority-committed on a client that prefers secondaries', async () => {
+    project.write('0001-a.ts', insertMigration('things', 'a'));
+    const url = new URL(mongo.uri);
+    url.searchParams.set('readPreference', 'secondaryPreferred');
+    const client = new MongoClient(url.href, { monitorCommands: true });
+    const commands = [];
+    client.on('commandStarted', (event) => commands.push(event.command));
+    await client.connect();
+    const kit = new MigratorKit({
+      client,
+      dbName: DB,
+      migrationsDir: project.dir,
+      logger: null,
+    });
+    try {
+      await kit.up();
+    } finally {
+      await kit.disconnect();
+      await client.close();
+    }
+    const changelogRead = commands.find((command) => command.find === '_migronaut_migrations');
+    assert.strictEqual(changelogRead.readConcern?.level, 'majority');
+    const lockWrite = commands.find((command) => command.update === '_migronaut_locks');
+    assert.strictEqual(lockWrite.writeConcern?.w, 'majority');
+  });
+});
+
 describe('failed-attempt trace (integration)', () => {
   it('should record a status:failed trace when a migration throws', async () => {
     project.write('0001-boom.ts', failingMigration());
     const kit = migrator();
     try {
-      await assert.rejects(kit.up());
+      await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
     } finally {
       await kit.disconnect();
     }
@@ -524,7 +652,7 @@ describe('failed-attempt trace (integration)', () => {
     project.write('0001-boom.ts', failingMigration());
     const kit = migrator();
     try {
-      await assert.rejects(kit.up());
+      await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
       const rows = await kit.status();
       assert.strictEqual(rows[0].status, 'failed');
       assert.match(rows[0].error, /intentional failure/);
@@ -542,7 +670,7 @@ describe('failed-attempt trace (integration)', () => {
     // rewrites the SAME filename mid-run — the documented cache gotcha.
     const kit = migrator({ reloadMigrations: true });
     try {
-      await assert.rejects(kit.up());
+      await assert.rejects(kit.up(), { code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED' });
       // The author fixes the file; the next up applies it cleanly.
       project.write('0001-flaky.ts', insertMigration('things', 'fixed'));
       const results = await kit.up();
@@ -567,7 +695,9 @@ describe('failed-attempt trace (integration)', () => {
       await kit.up();
       // Sabotage the file, then force a re-run that fails.
       project.write('0001-a.ts', failingMigration());
-      await assert.rejects(kit.up('0001-a.ts', { force: true }));
+      await assert.rejects(kit.up('0001-a.ts', { force: true }), {
+        code: 'ALX_ERR_MIGRATION_EXECUTION_FAILED',
+      });
     } finally {
       await kit.disconnect();
     }

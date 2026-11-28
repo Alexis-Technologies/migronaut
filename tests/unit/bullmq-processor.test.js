@@ -6,9 +6,9 @@ const {
   createMigrationProcessor,
   isRetryableError,
   isTransientForJob,
-  jobRefOf,
-  ownLine,
-  userlandRow,
+  toJobRef,
+  isOwnLine,
+  formatUserlandRow,
 } = require('../../src/bullmq/processor.js');
 const { MigratorKit } = require('../../src/core/migrator.js');
 const {
@@ -23,8 +23,9 @@ const {
   RunAbortedError,
 } = require('../../src/errors/index.js');
 const { stubKit } = require('../helpers/stub-kit.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
-function fakeJob(name, data, { attempts } = {}) {
+const fakeJob = (name, data, { attempts } = {}) => {
   const job = {
     id: '11',
     name,
@@ -36,7 +37,7 @@ function fakeJob(name, data, { attempts } = {}) {
     updateProgress: mock.fn(async (progress) => job.progressUpdates.push(progress)),
   };
   return job;
-}
+};
 
 const upJob = (overrides = {}, jobOptions) =>
   fakeJob(
@@ -124,12 +125,12 @@ describe('createMigrationProcessor', () => {
 
   describe('writes to a Redis that is away', () => {
     /** A job whose log rows and progress updates never settle — commands queued for good */
-    function stuckJob() {
+    const stuckJob = () => {
       const job = upJob();
       job.log = mock.fn(() => new Promise(() => {}));
       job.updateProgress = mock.fn(() => new Promise(() => {}));
       return job;
-    }
+    };
 
     it('should settle a finished job without them, and let the next one through', async () => {
       const kit = stubKit();
@@ -148,7 +149,7 @@ describe('createMigrationProcessor', () => {
     it('should fail a failed job with its own error, not hang on reporting it', async () => {
       const kit = stubKit({
         up: mock.fn(async () => {
-          throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {});
+          throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js');
         }),
       });
       const processor = createMigrationProcessor({ kit }, { writeWaitMs: 20 });
@@ -368,7 +369,7 @@ describe('createMigrationProcessor', () => {
         up: mock.fn(async (name) => {
           active += 1;
           peak = Math.max(peak, active);
-          await new Promise((resolve) => setTimeout(resolve, 5));
+          await sleep(5);
           active -= 1;
           return [{ file: name, status: 'applied' }];
         }),
@@ -388,7 +389,7 @@ describe('createMigrationProcessor', () => {
       const seen = [];
       const kit = stubKit({
         up: mock.fn(async (name) => {
-          await new Promise((resolve) => setTimeout(resolve, 2));
+          await sleep(2);
           seen.push([name, store.getStore()]);
           return [{ file: name, status: 'applied' }];
         }),
@@ -454,7 +455,9 @@ describe('createMigrationProcessor', () => {
       return mock.fn(async (name) => {
         calls += 1;
         if (calls === 1) {
-          throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+          throw new LockAlreadyHeldError('held', {
+            context: { holder: { lockedAt: new Date(0) } },
+          });
         }
         return [{ file: name, status: 'applied' }];
       });
@@ -477,7 +480,9 @@ describe('createMigrationProcessor', () => {
         up: mock.fn(async (name) => {
           calls += 1;
           if (calls <= 6) {
-            throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+            throw new LockAlreadyHeldError('held', {
+              context: { holder: { lockedAt: new Date(0) } },
+            });
           }
           return [{ file: name, status: 'applied' }];
         }),
@@ -508,7 +513,9 @@ describe('createMigrationProcessor', () => {
       const kit = stubKit({
         up: mock.fn(async () => {
           throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
-            cause: 'E11000 duplicate key error index: email_1 dup key: { email: "a@b.c" }',
+            context: {
+              cause: 'E11000 duplicate key error index: email_1 dup key: { email: "a@b.c" }',
+            },
           });
         }),
       });
@@ -529,7 +536,9 @@ describe('createMigrationProcessor', () => {
       return mock.fn(async (name) => {
         calls += 1;
         if (calls === 1) {
-          throw new MigrationBlockedError('blocked', { blockedBy: ['0000-z.js'], failed });
+          throw new MigrationBlockedError('blocked', {
+            context: { blockedBy: ['0000-z.js'], failed },
+          });
         }
         return [{ file: name, status: 'applied' }];
       });
@@ -558,10 +567,12 @@ describe('createMigrationProcessor', () => {
 
     it('should tell the transient cases apart', () => {
       assert.ok(isTransientForJob(new LockAlreadyHeldError('held')));
-      assert.ok(isTransientForJob(new MigrationBlockedError('b', { failed: [] })));
-      assert.ok(!isTransientForJob(new MigrationBlockedError('b', { failed: ['x'] })));
+      assert.ok(isTransientForJob(new MigrationBlockedError('b', { context: { failed: [] } })));
+      assert.ok(!isTransientForJob(new MigrationBlockedError('b', { context: { failed: ['x'] } })));
       // A block from a hand-made kit without the field is never waited on.
-      assert.ok(!isTransientForJob(new MigrationBlockedError('b', { blockedBy: ['x'] })));
+      assert.ok(
+        !isTransientForJob(new MigrationBlockedError('b', { context: { blockedBy: ['x'] } })),
+      );
       assert.ok(!isTransientForJob(new Error('other')));
     });
   });
@@ -576,14 +587,14 @@ describe('createMigrationProcessor', () => {
 
     it('should throw the original typed error', async () => {
       const original = new MigrationBlockedError('0002-b.js is blocked', {
-        blockedBy: ['0001-a.js'],
+        context: { blockedBy: ['0001-a.js'] },
       });
       const job = upJob();
       await assert.rejects(
         createMigrationProcessor({ kit: failingWith(original) })(job),
         (error) => {
           assert.strictEqual(error, original);
-          assert.strictEqual(error.code, 'MIGRATION_BLOCKED');
+          assert.strictEqual(error.code, 'ALX_ERR_MIGRATION_BLOCKED');
           // The adapter's own jobs have a single attempt — nothing to prevent,
           // so the class name is left exactly as it was.
           assert.strictEqual(error.name, 'MigrationBlockedError');
@@ -597,7 +608,7 @@ describe('createMigrationProcessor', () => {
         groupId: 'g',
         index: 0,
         total: 1,
-        code: 'MIGRATION_BLOCKED',
+        code: 'ALX_ERR_MIGRATION_BLOCKED',
       });
       assert.ok(job.logs.some((row) => /✖ 0002-b\.js is blocked/.test(row)));
     });
@@ -645,7 +656,7 @@ describe('createMigrationProcessor', () => {
 
     it('should fold the cause into the message — it is all a dashboard shows', async () => {
       const error = new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {
-        cause: 'E11000 duplicate key',
+        context: { cause: 'E11000 duplicate key' },
       });
       const job = upJob();
       await assert.rejects(createMigrationProcessor({ kit: failingWith(error) })(job), (thrown) => {
@@ -660,7 +671,7 @@ describe('createMigrationProcessor', () => {
     it('should redact credentials from everything BullMQ stores', async () => {
       const error = new MigrationExecutionFailedError(
         'Failed against mongodb://admin:hunter2@db.internal/app',
-        { cause: 'connect mongodb://admin:hunter2@db.internal/app refused' },
+        { context: { cause: 'connect mongodb://admin:hunter2@db.internal/app refused' } },
       );
       const job = upJob();
       await assert.rejects(createMigrationProcessor({ kit: failingWith(error) })(job), (thrown) => {
@@ -673,7 +684,9 @@ describe('createMigrationProcessor', () => {
     });
 
     it('should not repeat a cause the message already carries', async () => {
-      const error = new MigrationExecutionFailedError('boom: disk full', { cause: 'disk full' });
+      const error = new MigrationExecutionFailedError('boom: disk full', {
+        context: { cause: 'disk full' },
+      });
       await assert.rejects(
         createMigrationProcessor({ kit: failingWith(error) })(upJob()),
         (thrown) => thrown.message === 'boom: disk full',
@@ -691,7 +704,7 @@ describe('createMigrationProcessor', () => {
     it('should pass a thrown non-error through untouched', async () => {
       const kit = stubKit({
         up: mock.fn(async () => {
-          // eslint-disable-next-line no-throw-literal -- intentionally a thrown non-Error
+          // oxlint-disable-next-line no-throw-literal -- intentionally a thrown non-Error
           throw 'a bare string';
         }),
       });
@@ -700,7 +713,7 @@ describe('createMigrationProcessor', () => {
         createMigrationProcessor({ kit })(job),
         (thrown) => thrown === 'a bare string',
       );
-      assert.strictEqual(job.progressUpdates.at(-1).code, 'UNKNOWN');
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'ALX_ERR_UNKNOWN');
     });
 
     it('should surface a failed connect as a retryable failure', async () => {
@@ -725,7 +738,7 @@ describe('createMigrationProcessor', () => {
       const kit = stubKit({
         up: mock.fn(async () => {
           kit.emit('run:start', { runId: 'run-3', command: 'up' });
-          throw new MigrationBlockedError('blocked', { blockedBy: ['0000-z.js'] });
+          throw new MigrationBlockedError('blocked', { context: { blockedBy: ['0000-z.js'] } });
         }),
       });
       const job = upJob();
@@ -737,11 +750,11 @@ describe('createMigrationProcessor', () => {
         return true;
       });
       assert.deepStrictEqual(job.progressUpdates.at(-1).runId, 'run-3');
-      assert.strictEqual(job.progressUpdates.at(-1).code, 'MIGRATION_BLOCKED');
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'ALX_ERR_MIGRATION_BLOCKED');
       assert.match(job.logs.at(-1), /\[run run-3\]$/);
     });
 
-    it("should report 'UNKNOWN' for a code that is not migronaut's", async () => {
+    it("should report 'ALX_ERR_UNKNOWN' for a code that is not migronaut's", async () => {
       const kit = stubKit({
         up: mock.fn(async () => {
           throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
@@ -749,14 +762,14 @@ describe('createMigrationProcessor', () => {
       });
       const job = upJob();
       await assert.rejects(createMigrationProcessor({ kit })(job), /EACCES/);
-      assert.strictEqual(job.progressUpdates.at(-1).code, 'UNKNOWN');
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'ALX_ERR_UNKNOWN');
     });
   });
 
   describe('cancellation and shutdown', () => {
     it("should stop the kit's run when the job's signal aborts mid-run", async () => {
       const controller = new AbortController();
-      let release;
+      let release = null;
       const kit = stubKit({
         up: mock.fn(
           (name) =>
@@ -794,7 +807,9 @@ describe('createMigrationProcessor', () => {
     it('should interrupt a lock wait on shutdown, failing the job as aborted', async () => {
       const kit = stubKit({
         up: mock.fn(async () => {
-          throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+          throw new LockAlreadyHeldError('held', {
+            context: { holder: { lockedAt: new Date(0) } },
+          });
         }),
       });
       const processor = createMigrationProcessor({
@@ -802,7 +817,7 @@ describe('createMigrationProcessor', () => {
         lockWait: { lockPollIntervalMs: 5000, lockWaitTimeoutMs: 60_000 },
       });
       const pending = processor(upJob());
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
       processor.shutdown('deploying');
       await assert.rejects(pending, (error) => {
         assert.ok(error instanceof RunAbortedError);
@@ -814,7 +829,9 @@ describe('createMigrationProcessor', () => {
     it('should put a job a shutdown stopped before its migration back at the head of the queue', async () => {
       const kit = stubKit({
         up: mock.fn(async () => {
-          throw new LockAlreadyHeldError('held', { holder: { lockedAt: new Date(0) } });
+          throw new LockAlreadyHeldError('held', {
+            context: { holder: { lockedAt: new Date(0) } },
+          });
         }),
       });
       const processor = createMigrationProcessor({
@@ -824,7 +841,7 @@ describe('createMigrationProcessor', () => {
       const job = upJob();
       job.moveToWait = mock.fn(async () => 0);
       const pending = processor(job, 'token-11');
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
       processor.shutdown('deploying');
       await assert.rejects(pending, (error) => {
         // The name is what BullMQ checks: neither failed nor completed.
@@ -864,7 +881,7 @@ describe('createMigrationProcessor', () => {
         up: mock.fn(async () => {
           kit.emit('migration:start', { migration: '0001-a.js', direction: 'up' });
           processor.shutdown('deploying');
-          throw new RunAbortedError('Run stopped', { reason: 'deploying' });
+          throw new RunAbortedError('Run stopped', { context: { reason: 'deploying' } });
         }),
       });
       // Called by the stub only once the job runs — after this line.
@@ -911,7 +928,7 @@ describe('createMigrationProcessor', () => {
       let finished = false;
       const kit = stubKit({
         up: mock.fn(async (name) => {
-          await new Promise((resolve) => setTimeout(resolve, 15));
+          await sleep(15);
           finished = true;
           return [{ file: name, status: 'applied' }];
         }),
@@ -922,6 +939,31 @@ describe('createMigrationProcessor', () => {
       await processor.close();
       assert.strictEqual(finished, true);
       assert.strictEqual((await pending).status, 'applied');
+    });
+
+    it('should stop waiting for a job past close({ timeoutMs }), and disconnect once it ends', async () => {
+      let release = null;
+      const kit = stubKit({
+        up: mock.fn(async (name) => {
+          await new Promise((resolve) => {
+            release = resolve;
+          });
+          return [{ file: name, status: 'applied' }];
+        }),
+      });
+      const processor = createMigrationProcessor({ kit });
+      const pending = processor(upJob());
+      await new Promise((resolve) => setImmediate(resolve));
+      const started = Date.now();
+      await processor.close({ timeoutMs: 20 });
+      assert.ok(Date.now() - started < 1000, 'close did not wait for the job');
+      // Still listening: the job in flight is not cut off.
+      assert.ok(kit.listenerCount('run:start') > 0);
+      release();
+      await pending;
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.strictEqual(kit.listenerCount('run:start'), 0);
+      await assert.rejects(processor.close({ timeoutMs: -1 }), { code: 'ALX_ERR_CONFIG_INVALID' });
     });
   });
 
@@ -1042,12 +1084,12 @@ describe('createMigrationProcessor', () => {
     it('should fail a blocked converge without a retry', async () => {
       const kit = stubKit({
         converge: mock.fn(async () => {
-          throw new MigrationBlockedError('converge is blocked: 1 migration(s) still pending', {});
+          throw new MigrationBlockedError('converge is blocked: 1 migration(s) still pending');
         }),
       });
       const job = convergeJob();
       await assert.rejects(createMigrationProcessor({ kit })(job), MigrationBlockedError);
-      assert.strictEqual(job.progressUpdates.at(-1).code, 'MIGRATION_BLOCKED');
+      assert.strictEqual(job.progressUpdates.at(-1).code, 'ALX_ERR_MIGRATION_BLOCKED');
     });
 
     it('should wait out a held lock', async () => {
@@ -1055,7 +1097,7 @@ describe('createMigrationProcessor', () => {
       const kit = stubKit({
         converge: mock.fn(async () => {
           calls += 1;
-          if (calls === 1) throw new LockAlreadyHeldError('held', {});
+          if (calls === 1) throw new LockAlreadyHeldError('held');
           return converged;
         }),
         lockInfo: mock.fn(async () => null),
@@ -1209,7 +1251,7 @@ describe('isRetryableError', () => {
 
 describe('createMigrationProcessor background link', () => {
   const NAME = '0001-orders.js';
-  function linked(overrides = {}, queueOverrides = {}) {
+  const linked = (overrides = {}, queueOverrides = {}) => {
     const added = [];
     const queue = {
       addBulk: mock.fn(async (specs) => {
@@ -1232,7 +1274,7 @@ describe('createMigrationProcessor background link', () => {
       return up(name, options);
     });
     return { kit, queue, added };
-  }
+  };
 
   for (const [what, background, pattern] of [
     ['a non-object', 1, /background must be \{ queue \}/],
@@ -1390,7 +1432,7 @@ describe('userland lines in the job log', () => {
   });
 
   it('should write nothing once the job settled, nor between jobs', async () => {
-    let late;
+    let late = null;
     const kit = stubKit({
       up: mock.fn(async (name, options) => {
         late = () => kit.emit('migration:log', userland(options.job.id, { msg: 'late' }));
@@ -1468,7 +1510,7 @@ describe('userland lines in the job log', () => {
       up: mock.fn(async (_name, options) => {
         kit.emit('run:start', { runId: 'run-1', command: 'up' });
         kit.emit('migration:log', userland(options.job.id));
-        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {});
+        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js');
       }),
     });
     const job = upJob();
@@ -1496,7 +1538,7 @@ describe('userland lines in the job log', () => {
       up: mock.fn(async (_name, options) => {
         kit.emit('run:start', { runId: 'run-1', command: 'up' });
         kit.emit('migration:log', userland(options.job.id, { level: 'error', msg: 'gave up' }));
-        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js', {});
+        throw new MigrationExecutionFailedError('Migration up failed: 0001-a.js');
       }),
     });
     const job = upJob();
@@ -1507,7 +1549,7 @@ describe('userland lines in the job log', () => {
   });
 });
 
-describe('ownLine', () => {
+describe('isOwnLine', () => {
   const ctx = { runId: 'run-1', jobRef: { id: '7', groupId: 'g' } };
   const line = (extra) => ({
     kind: 'migration',
@@ -1518,54 +1560,57 @@ describe('ownLine', () => {
   });
 
   it("should take the job's own run, and nothing of another run or job", () => {
-    assert.strictEqual(ownLine(ctx, line()), true);
-    assert.strictEqual(ownLine(ctx, line({ runId: 'run-0' })), false);
-    assert.strictEqual(ownLine(ctx, line({ jobId: '8' })), false);
-    assert.strictEqual(ownLine({ jobRef: ctx.jobRef }, line()), false, 'no run yet');
-    assert.strictEqual(ownLine({ runId: 'run-1' }, line({ jobId: undefined })), true);
-    assert.strictEqual(ownLine(ctx, line({ kind: 'other' })), false);
+    assert.strictEqual(isOwnLine(ctx, line()), true);
+    assert.strictEqual(isOwnLine(ctx, line({ runId: 'run-0' })), false);
+    assert.strictEqual(isOwnLine(ctx, line({ jobId: '8' })), false);
+    assert.strictEqual(isOwnLine({ jobRef: ctx.jobRef }, line()), false, 'no run yet');
+    assert.strictEqual(
+      isOwnLine({ runId: 'run-1', jobRef: null }, line({ jobId: undefined })),
+      true,
+    );
+    assert.strictEqual(isOwnLine(ctx, line({ kind: 'other' })), false);
   });
 
   it("should take an inline lane's line only by the job and its group", () => {
     const lane = (extra) => line({ kind: 'background', runId: 'lane-1', ...extra });
-    assert.strictEqual(ownLine(ctx, lane()), true);
-    assert.strictEqual(ownLine(ctx, lane({ groupId: undefined })), false);
-    assert.strictEqual(ownLine(ctx, lane({ groupId: 'h' })), false);
-    assert.strictEqual(ownLine(ctx, lane({ jobId: '8' })), false);
-    assert.strictEqual(ownLine({ runId: 'run-1', jobRef: { id: '7' } }, lane()), false);
-    assert.strictEqual(ownLine({ runId: 'run-1' }, lane()), false);
+    assert.strictEqual(isOwnLine(ctx, lane()), true);
+    assert.strictEqual(isOwnLine(ctx, lane({ groupId: undefined })), false);
+    assert.strictEqual(isOwnLine(ctx, lane({ groupId: 'h' })), false);
+    assert.strictEqual(isOwnLine(ctx, lane({ jobId: '8' })), false);
+    assert.strictEqual(isOwnLine({ runId: 'run-1', jobRef: { id: '7' } }, lane()), false);
+    assert.strictEqual(isOwnLine({ runId: 'run-1' }, lane()), false);
   });
 });
 
-describe('jobRefOf', () => {
+describe('toJobRef', () => {
   it("should name the job by its id and group, as the kit's job option", () => {
-    assert.deepStrictEqual(jobRefOf({ id: 11 }, 'g'), { id: '11', groupId: 'g' });
-    assert.deepStrictEqual(jobRefOf({ id: '11' }), { id: '11' });
+    assert.deepStrictEqual(toJobRef({ id: 11 }, 'g'), { id: '11', groupId: 'g' });
+    assert.deepStrictEqual(toJobRef({ id: '11' }), { id: '11' });
   });
 
   it('should drop what the kit would refuse', () => {
-    assert.strictEqual(jobRefOf({}), undefined);
-    assert.strictEqual(jobRefOf({ id: null }), undefined);
-    assert.strictEqual(jobRefOf({ id: 'x'.repeat(1025) }), undefined);
-    assert.deepStrictEqual(jobRefOf({ id: '11' }, 'g'.repeat(200)), { id: '11' });
+    assert.strictEqual(toJobRef({}), null);
+    assert.strictEqual(toJobRef({ id: null }), null);
+    assert.strictEqual(toJobRef({ id: 'x'.repeat(1025) }), null);
+    assert.deepStrictEqual(toJobRef({ id: '11' }, 'g'.repeat(200)), { id: '11' });
   });
 });
 
-describe('userlandRow', () => {
+describe('formatUserlandRow', () => {
   const base = { kind: 'migration', level: 'info', msg: 'done', data: {}, attempt: 1 };
 
   it('should show the level only when it is not info, and the data as JSON', () => {
-    assert.strictEqual(userlandRow(base), '✎ done');
+    assert.strictEqual(formatUserlandRow(base), '✎ done');
     assert.strictEqual(
-      userlandRow({ ...base, level: 'warn', data: { n: 1, big: 2n } }),
+      formatUserlandRow({ ...base, level: 'warn', data: { n: 1, big: 2n } }),
       '✎ warn: done {"n":1,"big":"2"}',
     );
   });
 
   it('should name a retried attempt and a background partition', () => {
-    assert.strictEqual(userlandRow({ ...base, attempt: 2 }), '✎ done (attempt 2)');
+    assert.strictEqual(formatUserlandRow({ ...base, attempt: 2 }), '✎ done (attempt 2)');
     assert.strictEqual(
-      userlandRow({ ...base, kind: 'background', partition: '3' }),
+      formatUserlandRow({ ...base, kind: 'background', partition: '3' }),
       '✎ done [partition 3]',
     );
   });
@@ -1577,10 +1622,10 @@ describe('userlandRow', () => {
       }
     }
     assert.strictEqual(
-      userlandRow({ ...base, data: { broken: new Broken() } }),
+      formatUserlandRow({ ...base, data: { broken: new Broken() } }),
       '✎ done [data not serializable]',
     );
-    const row = userlandRow({ ...base, msg: 'x'.repeat(2000) });
+    const row = formatUserlandRow({ ...base, msg: 'x'.repeat(2000) });
     assert.strictEqual(row.length, 1024);
     assert.ok(row.endsWith('…'));
   });
@@ -1588,27 +1633,30 @@ describe('userlandRow', () => {
   it('should write data only as far as the row shows it', () => {
     const data = {};
     for (let index = 0; index < 1000; index++) data[`k${index}`] = 'v'.repeat(4096);
-    const row = userlandRow({ ...base, data });
+    const row = formatUserlandRow({ ...base, data });
     assert.strictEqual(row.length, 1024);
     assert.ok(row.startsWith('✎ done {"k0":"vvv'));
     assert.ok(row.endsWith('…'));
     // A cycle (never from the kit, whose copies are acyclic) ends at the bound too.
     const cyclic = {};
     cyclic.self = cyclic;
-    assert.strictEqual(userlandRow({ ...base, data: cyclic }).length, 1024);
+    assert.strictEqual(formatUserlandRow({ ...base, data: cyclic }).length, 1024);
   });
 
   it('should keep a row on one line, with no control characters', () => {
     assert.strictEqual(
-      userlandRow({ ...base, msg: 'done\n✔ Applied 0002-x.js\r\nnext\u2028\u001b[2J' }),
+      formatUserlandRow({ ...base, msg: 'done\n✔ Applied 0002-x.js\r\nnext\u2028\u001b[2J' }),
       '✎ done⏎✔ Applied 0002-x.js⏎next⏎[2J',
     );
-    assert.strictEqual(userlandRow({ ...base, data: { note: 'a\nb' } }), '✎ done {"note":"a\\nb"}');
+    assert.strictEqual(
+      formatUserlandRow({ ...base, data: { note: 'a\nb' } }),
+      '✎ done {"note":"a\\nb"}',
+    );
   });
 
   it('should show dates and ids by their JSON, and skip what JSON skips', () => {
     assert.strictEqual(
-      userlandRow({
+      formatUserlandRow({
         ...base,
         data: { at: new Date(0), none: undefined, fn: () => 1, list: [undefined, 1n] },
       }),

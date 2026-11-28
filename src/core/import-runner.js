@@ -19,7 +19,7 @@ const IMPORT_CHUNK_SIZE = 1000;
  * Pure orchestration over capabilities the MigratorKit injects (`deps`):
  * `{config, db, changelog, logger, fields, filepath, assertNotAborted}`.
  */
-async function runImport(deps, options, signal) {
+const runImport = async (deps, options, signal) => {
   const { config, db, changelog, logger } = deps;
 
   const source = options.from ?? MIGRATE_MONGO_COLLECTION;
@@ -36,10 +36,8 @@ async function runImport(deps, options, signal) {
     targetChangelog !== changelog && !dryRun
       ? targetChangelog.ensureIndexes(db)
       : Promise.resolve();
-  const [, rawDocs] = await Promise.all([
-    ensureIndexesPromise,
-    changelog.getForeignDocs(db, source),
-  ]);
+  const reads = await Promise.all([ensureIndexesPromise, changelog.getForeignDocs(db, source)]);
+  const rawDocs = reads[1];
   if (rawDocs.length === 0) {
     logger.info(`Nothing to import from "${source}"`, deps.fields({ source, target }));
     return { source, target, imported: 0, skipped: 0, dryRun, rows: [] };
@@ -54,11 +52,11 @@ async function runImport(deps, options, signal) {
       skipped += 1;
       // The _id is the only handle the operator has for locating the offending
       // source document — an anonymous count is undebuggable after the fact.
-      // String() keeps an ObjectId safe for any sink; the default logger
+      // As text an ObjectId is safe for any sink; the default logger
       // already sanitizes terminal escapes in DB-derived text.
       logger.warn(
-        `⚠ Skipping source doc without a usable fileName (_id: ${String(doc?._id)})`,
-        deps.fields({ source, docId: String(doc?._id) }),
+        `⚠ Skipping source doc without a usable fileName (_id: ${doc?._id})`,
+        deps.fields({ source, docId: `${doc?._id}` }),
       );
     }
   }
@@ -69,7 +67,7 @@ async function runImport(deps, options, signal) {
   if (!options.force && !dryRun && existing.length > 0) {
     throw new ImportTargetNotEmptyError(
       `Target collection "${target}" already has ${existing.length} record(s) — re-run with force to proceed`,
-      { target, existing: existing.length },
+      { context: { target, existing: existing.length } },
     );
   }
 
@@ -147,7 +145,7 @@ async function runImport(deps, options, signal) {
         'a --force re-run is idempotent and will resume',
       deps.fields({ source, target, imported: written, total: records.length }),
     );
-    if (error instanceof MigronautError && error.context) {
+    if (error instanceof MigronautError) {
       error.context = { ...error.context, imported: written, total: records.length };
     }
     throw error;
@@ -158,7 +156,7 @@ async function runImport(deps, options, signal) {
     deps.fields({ source, target, imported: records.length, skipped }),
   );
   return { source, target, imported: records.length, skipped, dryRun, rows };
-}
+};
 
 /**
  * Decide the checksum to store for an imported migration. Order: when
@@ -166,14 +164,14 @@ async function runImport(deps, options, signal) {
  * when it matches a freshly computed hash (algorithms align), else recompute
  * from disk; when the file is missing, fall back to the source hash or empty.
  */
-async function resolveImportChecksum(filepath, fileHash, trustHash) {
+const resolveImportChecksum = async (filepath, fileHash, trustHash) => {
   if (trustHash && fileHash) {
     return { checksum: fileHash, source: 'reused' };
   }
   // computeChecksum directly, treating ENOENT as "missing" — an access()
   // probe first would double the syscalls and open a TOCTOU window in which
   // the answer can change anyway.
-  let recomputed;
+  let recomputed = '';
   try {
     recomputed = await computeChecksum(filepath);
   } catch (error) {
@@ -187,6 +185,6 @@ async function resolveImportChecksum(filepath, fileHash, trustHash) {
     return { checksum: fileHash, source: 'reused' };
   }
   return { checksum: recomputed, source: 'recomputed' };
-}
+};
 
 module.exports = { runImport };

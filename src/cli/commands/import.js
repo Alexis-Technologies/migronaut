@@ -1,8 +1,7 @@
 const { defineCommand } = require('../shared.js');
 const { renderImportTable } = require('../table.js');
 
-/** Register the `import` command (adopt a migrate-mongo changelog) */
-function registerImport(program) {
+const registerImport = (program) => {
   defineCommand(program, {
     name: 'import',
     description: 'Adopt an existing migrate-mongo changelog into the migronaut changelog',
@@ -15,19 +14,20 @@ function registerImport(program) {
     ],
     lockable: true,
     mutating: true,
-    run: (migrator, opts) =>
-      migrator.import({
-        noLock: opts.noLock,
-        ...(opts.from ? { from: opts.from } : {}),
-        ...(opts.to ? { to: opts.to } : {}),
-        ...(opts.dryRun ? { dryRun: true } : {}),
-        ...(opts.trustHash ? { trustHash: true } : {}),
-        ...(opts.force ? { force: true } : {}),
-      }),
+    run: (migrator, flags) => {
+      return migrator.import({
+        noLock: flags.noLock,
+        ...(flags.from ? { from: flags.from } : {}),
+        ...(flags.to ? { to: flags.to } : {}),
+        ...(flags.dryRun ? { dryRun: true } : {}),
+        ...(flags.trustHash ? { trustHash: true } : {}),
+        ...(flags.force ? { force: true } : {}),
+      });
+    },
     render: (result, { logger }) => {
       if (result.rows.length > 0) logger.info(renderImportTable(result.rows));
     },
   });
-}
+};
 
 module.exports = { registerImport };

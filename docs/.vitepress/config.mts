@@ -55,6 +55,8 @@ const jsonLd = {
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
+  // The notes for agents are no page of the site.
+  srcExclude: ['CLAUDE.md'],
   title: '@alexify/migronaut',
   titleTemplate: ':title — MongoDB migrations for Node.js',
   description: ogDescription,
@@ -122,7 +124,7 @@ export default defineConfig({
       { text: 'Reference', link: '/reference/cli', activeMatch: '/reference/' },
       {
         // Hand-synced with package.json "version" — part of the release checklist.
-        text: 'v2.5.0',
+        text: 'v3.0.0',
         items: [
           { text: 'Changelog', link: `${repo}/blob/main/CHANGELOG.md` },
           { text: 'npm', link: 'https://www.npmjs.com/package/@alexify/migronaut' },

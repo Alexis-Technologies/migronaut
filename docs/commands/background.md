@@ -39,7 +39,7 @@ New in 2.3. Actions, flags and the `--json` shapes may still change in a minor r
 | [`verify`](#verify) | The drift watch, once |
 | [`watch [collection]`](#watch) | The live drift watcher, in the foreground |
 
-Each action takes only its own flags: anything else is refused with `CONFIG_INVALID` (exit 6)
+Each action takes only its own flags: anything else is refused with `ALX_ERR_CONFIG_INVALID` (exit 6)
 before the command connects.
 
 ## status
@@ -68,7 +68,7 @@ now out of `maxParallel`. `Note` shows what a blocked one waits for, or the last
 | `--partitions` | List the partitions of the latest generation instead: status, scope (the `_id` type of its range, or `@shard` on a sharded collection), migrated, the lease holder (`slot · host:pid`), claims, last error. `--json` gives each one's full scope and counters. Needs a name |
 | `--check` | Exit `32` if a background migration failed, else `31` if one is not completed — a CI or readiness gate |
 
-An unknown name is `CONFIG_INVALID` (exit 6). With `--partitions` it is `NOT_APPLIED` (exit 9).
+An unknown name is `ALX_ERR_CONFIG_INVALID` (exit 6). With `--partitions` it is `ALX_ERR_NOT_APPLIED` (exit 9).
 
 ## run
 
@@ -92,8 +92,8 @@ runners, queue workers) keep working alongside: `maxParallel` caps all of them t
 Ctrl-C (or SIGTERM) stops the lanes at their next batch. They checkpoint and release their leases,
 and a later run goes on from there (exit `11`). Press it again to exit at once (`130` / `143`).
 
-A background migration that is not registered is `CONFIG_INVALID` (exit 6). One that fails is
-`BACKGROUND_FAILED` (exit 32).
+A background migration that is not registered is `ALX_ERR_CONFIG_INVALID` (exit 6). One that fails is
+`ALX_ERR_BACKGROUND_FAILED` (exit 32).
 
 ## pause, resume, cancel
 
@@ -117,8 +117,8 @@ migronaut background cancel 20261004120000-orders-shipping.js --yes
 | `-y, --yes` | `cancel`: do not ask (required with `--json`) |
 
 A control that does not fit the status (pausing a completed one, resuming one that is not paused)
-is `BACKGROUND_CONFLICT` (exit 33). One whose result is already in place prints `Nothing to do` and
-exits `0`. A name that is not registered is `NOT_APPLIED` (exit 9).
+is `ALX_ERR_BACKGROUND_CONFLICT` (exit 33). One whose result is already in place prints `Nothing to do` and
+exits `0`. A name that is not registered is `ALX_ERR_NOT_APPLIED` (exit 9).
 
 ## retry and repin
 
@@ -194,7 +194,7 @@ is refused and reported, even when the code caught the error. See
 | `0` | It ran, and at least one document would be migrated (or every step ran) |
 | `1` | No document would be migrated (none matched, or every one failed), or a step threw or aborted the transaction |
 | `15` | `--validate` or a step migration on a standalone server, where there are no transactions |
-| `34` | The sandbox refused something (`SANDBOX_REFUSED`) |
+| `34` | The sandbox refused something (`ALX_ERR_SANDBOX_REFUSED`) |
 
 ## unlock
 
@@ -227,7 +227,7 @@ background migration is reopened.
 |---|---|
 | `--report` | Only report drift, never reopen |
 
-Exits `31` (`BACKGROUND_PENDING`) when it found drift, `0` when it did not. It takes no name.
+Exits `31` (`ALX_ERR_BACKGROUND_PENDING`) when it found drift, `0` when it did not. It takes no name.
 
 ## watch
 
@@ -251,7 +251,7 @@ Watching for old-shape writes — Ctrl-C to stop
 
 Ctrl-C or SIGTERM stops it cleanly. The streams close, their positions are saved, their locks are
 released, and it exits `0` with the number of documents upgraded. On a standalone server, which has
-no change streams, it is refused with `CONFIG_INVALID` (exit 6).
+no change streams, it is refused with `ALX_ERR_CONFIG_INVALID` (exit 6).
 
 | Option | Description |
 |---|---|
@@ -291,15 +291,15 @@ Documents in a dry run are relaxed EJSON. No other output carries a document or 
 |---|---|
 | `0` | Done, nothing to do, or a confirmation declined |
 | `1` | `dry-run`: no document would be migrated, or a step failed |
-| `3` | `LOCK_ALREADY_HELD`: `run --once` while another process coordinates it |
-| `6` | `CONFIG_INVALID`: an unknown action, a flag the action does not take, a missing name, an unregistered name (`status`, `run`), `--json` without `--yes` where it asks, `watch` on a standalone server |
-| `9` | `NOT_APPLIED`: a control (or `status --partitions`) on a background migration that is not registered |
-| `11` | `RUN_ABORTED`: `run` stopped by Ctrl-C / SIGTERM (it goes on from there next time) |
-| `15` | `TRANSACTIONS_UNSUPPORTED`: `dry-run --validate` or a step dry run on a standalone server |
-| `31` | `BACKGROUND_PENDING`: `status --check` found one not completed, or `verify` found drift |
-| `32` | `BACKGROUND_FAILED`: `run` ended with it failed, or `status --check` found a failed one |
-| `33` | `BACKGROUND_CONFLICT`: a control that does not fit its status |
-| `34` | `SANDBOX_REFUSED`: a dry run reached for something the sandbox refuses |
+| `3` | `ALX_ERR_LOCK_ALREADY_HELD`: `run --once` while another process coordinates it |
+| `6` | `ALX_ERR_CONFIG_INVALID`: an unknown action, a flag the action does not take, a missing name, an unregistered name (`status`, `run`), `--json` without `--yes` where it asks, `watch` on a standalone server |
+| `9` | `ALX_ERR_NOT_APPLIED`: a control (or `status --partitions`) on a background migration that is not registered |
+| `11` | `ALX_ERR_RUN_ABORTED`: `run` stopped by Ctrl-C / SIGTERM (it goes on from there next time) |
+| `15` | `ALX_ERR_TRANSACTIONS_UNSUPPORTED`: `dry-run --validate` or a step dry run on a standalone server |
+| `31` | `ALX_ERR_BACKGROUND_PENDING`: `status --check` found one not completed, or `verify` found drift |
+| `32` | `ALX_ERR_BACKGROUND_FAILED`: `run` ended with it failed, or `status --check` found a failed one |
+| `33` | `ALX_ERR_BACKGROUND_CONFLICT`: a control that does not fit its status |
+| `34` | `ALX_ERR_SANDBOX_REFUSED`: a dry run reached for something the sandbox refuses |
 | `130` / `143` | `run`: a second Ctrl-C / SIGTERM |
 
 ## Programmatic API

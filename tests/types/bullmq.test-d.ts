@@ -249,7 +249,7 @@ expectType<ParsedJobData>(parseJobData(realJob));
 declare const progress: MigrationJobProgress;
 expectType<'lock-wait' | 'running' | 'search-wait' | 'completed' | 'failed'>(progress.phase);
 expectType<number | undefined>(progress.searchIndexes);
-expectType<MigronautErrorCode | 'UNKNOWN' | undefined>(progress.code);
+expectType<MigronautErrorCode | 'ALX_ERR_UNKNOWN' | undefined>(progress.code);
 expectType<string | undefined>(progress.runId);
 
 // ─── Converge jobs ───────────────────────────────────────────────────────────
@@ -266,6 +266,7 @@ expectType<Promise<MigrationGroup>>(mq.enqueueUp(undefined, { converge: true }))
 
 declare const convergeHandle: ConvergeHandle;
 expectType<Promise<ConvergeJobResult>>(convergeHandle.wait({ timeoutMs: 1000 }));
+expectType<Promise<ConvergeJobResult>>(convergeHandle.wait({ signal: AbortSignal.timeout(1000) }));
 declare const convergeGroup: MigrationGroup;
 expectType<{ id: string; deduplicated: boolean } | null>(convergeGroup.converge);
 declare const convergeWait: GroupWaitResult;

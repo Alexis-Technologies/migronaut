@@ -17,7 +17,7 @@ const { registerUp } = require('./commands/up.js');
 const { reportUsageError } = require('./shared.js');
 
 /** Build the root commander program with all commands and global flags */
-function buildProgram() {
+const buildProgram = () => {
   const program = new Command();
 
   program
@@ -56,23 +56,23 @@ function buildProgram() {
   registerUnlock(program);
 
   return program;
-}
+};
 
 /** Parse argv and execute the matching command */
-async function run(argv) {
+const run = async (argv) => {
   // Checked before parsing: color is decided the first time anything renders,
   // which can precede the command action that would otherwise read the flag.
   // Tokens after a `--` terminator are positionals, never flags.
   const boundary = argv.indexOf('--');
   const flagTokens = boundary === -1 ? argv : argv.slice(0, boundary);
-  const noColor = flagTokens.includes('--no-color');
-  const saved = noColor
+  const hasNoColorFlag = flagTokens.includes('--no-color');
+  const saved = hasNoColorFlag
     ? {
         MIGRONAUT_FORCE_COLOR: process.env.MIGRONAUT_FORCE_COLOR,
         MIGRONAUT_NO_COLOR: process.env.MIGRONAUT_NO_COLOR,
       }
     : undefined;
-  if (noColor) {
+  if (hasNoColorFlag) {
     // An explicit flag on this invocation outranks every ambient signal.
     // MIGRONAUT_NO_COLOR is the top of supportsColor()'s precedence chain once
     // MIGRONAUT_FORCE_COLOR is cleared, so setting these two is enough to beat
@@ -83,10 +83,10 @@ async function run(argv) {
   }
   // Read from the tokens, like --no-color: a command line that does not parse
   // has no parsed options to ask.
-  const json = flagTokens.includes('--json');
-  const program = buildProgram().onUsageError((message, help) =>
-    reportUsageError(message, { json, help }),
-  );
+  const hasJsonFlag = flagTokens.includes('--json');
+  const program = buildProgram().onUsageError((message, help) => {
+    return reportUsageError(message, { json: hasJsonFlag, help });
+  });
   try {
     await program.parseAsync(argv);
   } finally {
@@ -99,6 +99,6 @@ async function run(argv) {
       }
     }
   }
-}
+};
 
 module.exports = { run };

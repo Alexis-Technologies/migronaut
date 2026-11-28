@@ -74,7 +74,7 @@ expectType<ShapeRegistry>(fromList);
 
 // ─── Errors are the package root's classes ────────────────────────────────────
 expectType<typeof RootRevisionConflictError>(RevisionConflictError);
-expectAssignable<Error>(new ShapeVersionError('newer', { reason: 'newer' }));
+expectAssignable<Error>(new ShapeVersionError('newer', { context: { reason: 'newer' } }));
 
 // ─── Upcasting ────────────────────────────────────────────────────────────────
 const lift = upcaster({ versioning: { current: 2 } }, { 1: (doc) => ({ ...doc, b: 1 }) });
@@ -111,7 +111,7 @@ expectError(boundShapes.occ('customers'));
 
 // ─── A conflict's context is typed; an ES-module definition is taken as it is ─
 declare const conflict: RevisionConflictError;
-expectType<'conflict' | 'not-found' | 'unknown' | undefined>(conflict.context?.reason);
-expectType<number | undefined>(conflict.context?.actual);
+expectType<'conflict' | 'not-found' | 'unknown'>(conflict.context.reason);
+expectType<number | undefined>(conflict.context.actual);
 declare const esModule: { default: { versioning: { current: 2 } } };
 expectAssignable<Upcaster>(upcaster(esModule, { 1: (doc) => doc }));

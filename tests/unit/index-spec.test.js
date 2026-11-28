@@ -3,16 +3,16 @@ const { describe, it } = require('node:test');
 const { Int32 } = require('mongodb');
 const {
   compareIndex,
-  defaultIndexName,
-  indexIssues,
-  keyEntries,
+  buildDefaultIndexName,
+  checkIndex,
+  toKeyEntries,
   normalizeDeclaredIndex,
   normalizeLiveIndex,
   restoreSpec,
-  sameDeclaredSignature,
-  sameSignature,
+  isSameDeclaredSignature,
+  isSameSignature,
   SEMANTIC_OPTIONS,
-} = require('../../src/core/index-spec.js');
+} = require('../../src/core/converge/index-spec.js');
 
 // What MongoDB 7.0 returns from listIndexes for these declarations — taken
 // from a real server, so a rule that disagrees with it fails here.
@@ -35,7 +35,7 @@ const declared = (index) => normalizeDeclaredIndex(index);
 const compare = (index, raw, defaultCollation) =>
   compareIndex(declared(index), live(raw), defaultCollation);
 
-describe('defaultIndexName', () => {
+describe('buildDefaultIndexName', () => {
   it("should follow the driver's naming rule", () => {
     const cases = [
       [{ email: 1 }, 'email_1'],
@@ -47,14 +47,14 @@ describe('defaultIndexName', () => {
       [{ 'meta.$**': 1 }, 'meta.$**_1'],
     ];
     for (const [key, name] of cases) {
-      assert.strictEqual(defaultIndexName(keyEntries(key)), name);
+      assert.strictEqual(buildDefaultIndexName(toKeyEntries(key)), name);
     }
   });
 
   it('should keep the order of a Map key', () => {
     assert.strictEqual(
-      defaultIndexName(
-        keyEntries(
+      buildDefaultIndexName(
+        toKeyEntries(
           new Map([
             ['2', 1],
             ['a', -1],
@@ -66,8 +66,8 @@ describe('defaultIndexName', () => {
   });
 });
 
-describe('indexIssues', () => {
-  const issues = (index) => indexIssues(index, 'idx');
+describe('checkIndex', () => {
+  const issues = (index) => checkIndex(index, 'idx');
   const paths = (index) => issues(index).map((issue) => issue.path);
 
   it('should accept every supported shape', () => {
@@ -92,7 +92,7 @@ describe('indexIssues', () => {
       { key: { loc: '2dsphere' }, '2dsphereIndexVersion': 3 },
       { key: { a: 1 }, storageEngine: {}, background: true },
     ]) {
-      assert.deepStrictEqual(issues(index), [], JSON.stringify([...keyEntries(index.key)]));
+      assert.deepStrictEqual(issues(index), [], JSON.stringify([...toKeyEntries(index.key)]));
     }
   });
 
@@ -472,22 +472,22 @@ describe('compareIndex — collation', () => {
   });
 });
 
-describe('sameSignature', () => {
+describe('isSameSignature', () => {
   it('should match same key, filter and collation regardless of name and other options', () => {
     const index = declared({ key: { a: 1 }, name: 'declared', unique: true });
-    assert.ok(sameSignature(index, live({ key: { a: 1 }, name: 'other' })));
-    assert.ok(!sameSignature(index, live({ key: { a: -1 }, name: 'other' })));
+    assert.ok(isSameSignature(index, live({ key: { a: 1 }, name: 'other' })));
+    assert.ok(!isSameSignature(index, live({ key: { a: -1 }, name: 'other' })));
     assert.ok(
-      !sameSignature(
+      !isSameSignature(
         index,
         live({ key: { a: 1 }, name: 'other', partialFilterExpression: { a: 1 } }),
       ),
     );
     assert.ok(
-      !sameSignature(index, live({ key: { a: 1 }, name: 'other', collation: FR_COLLATION })),
+      !isSameSignature(index, live({ key: { a: 1 }, name: 'other', collation: FR_COLLATION })),
     );
     assert.ok(
-      sameSignature(
+      isSameSignature(
         index,
         live({ key: { a: 1 }, name: 'other', collation: FR_COLLATION }),
         FR_COLLATION,
@@ -496,27 +496,27 @@ describe('sameSignature', () => {
   });
 });
 
-describe('sameDeclaredSignature', () => {
+describe('isSameDeclaredSignature', () => {
   it('should treat two declarations of one server index as the same', () => {
     const a = declared({ key: { a: 1 }, name: 'one' });
-    assert.ok(sameDeclaredSignature(a, declared({ key: { a: 1 }, name: 'two', unique: true })));
-    assert.ok(!sameDeclaredSignature(a, declared({ key: { a: -1 } })));
+    assert.ok(isSameDeclaredSignature(a, declared({ key: { a: 1 }, name: 'two', unique: true })));
+    assert.ok(!isSameDeclaredSignature(a, declared({ key: { a: -1 } })));
     const en = declared({ key: { a: 1 }, collation: { locale: 'en' } });
     assert.ok(
-      sameDeclaredSignature(
+      isSameDeclaredSignature(
         en,
         declared({ key: { a: 1 }, collation: { locale: 'en', strength: 3 } }),
       ),
     );
     assert.ok(
-      !sameDeclaredSignature(
+      !isSameDeclaredSignature(
         en,
         declared({ key: { a: 1 }, collation: { locale: 'en', strength: 2 } }),
       ),
     );
     // Apart on a collection with a default collation — a definition cannot know.
     assert.ok(
-      !sameDeclaredSignature(a, declared({ key: { a: 1 }, collation: { locale: 'simple' } })),
+      !isSameDeclaredSignature(a, declared({ key: { a: 1 }, collation: { locale: 'simple' } })),
     );
   });
 });

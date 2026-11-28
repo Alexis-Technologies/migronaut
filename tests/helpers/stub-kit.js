@@ -10,7 +10,7 @@ const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
  * asserted. `up`/`down` emit the lifecycle events a real run would, so what
  * the adapter forwards to a job can be checked without a database.
  */
-function stubKit(overrides = {}) {
+const stubKit = (overrides = {}) => {
   const kit = new EventEmitter();
   // `id-1`, `id-2`, … — a format no default could produce, so a test can tell
   // an id minted through the kit from one the adapter made up itself.
@@ -47,6 +47,6 @@ function stubKit(overrides = {}) {
     ...overrides,
   });
   return kit;
-}
+};
 
 module.exports = { silentLogger, stubKit };

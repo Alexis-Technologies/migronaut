@@ -8,12 +8,14 @@ const {
   QueueJobFailedError,
 } = require('../../src/errors/index.js');
 const { failingMigration, insertMigration, makeProject } = require('./project.js');
+const { waitFor } = require('./wait-for.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const LOCK_COLLECTION = '_migronaut_locks';
 const CHANGELOG = '_migronaut_migrations';
 
 /** A migration whose up() takes `ms` and records whether its signal was aborted meanwhile */
-function slowMigration(collection, value, ms) {
+const slowMigration = (collection, value, ms) => {
   return `export async function up({ db, signal }) {
   await new Promise((resolve) => setTimeout(resolve, ${ms}));
   await db.collection('${collection}').insertOne({ marker: '${value}', aborted: signal?.aborted ?? null });
@@ -22,16 +24,16 @@ export async function down({ db }) {
   await db.collection('${collection}').deleteMany({ marker: '${value}' });
 }
 `;
-}
+};
 
 /** A migration whose failure message carries a credentialed URI */
-function leakyMigration() {
+const leakyMigration = () => {
   return `export async function up() {
   throw new Error('cannot reach mongodb://admin:hunter2@db.internal:27017/app');
 }
 export async function down() {}
 `;
-}
+};
 
 /**
  * The adapter's behaviour, written once and run twice: against the in-tree
@@ -50,10 +52,10 @@ export async function down() {}
  * - `logsOf(queue, id)` — a job's log rows
  * - `obliterate(queue)` — drop the queue's keys after the test
  */
-function defineBullMQScenarios(harness) {
-  let project;
-  let connection;
-  let prefix;
+const defineBullMQScenarios = (harness) => {
+  let project = null;
+  let connection = null;
+  let prefix = null;
   const opened = [];
 
   beforeEach(async () => {
@@ -75,7 +77,7 @@ function defineBullMQScenarios(harness) {
     project?.cleanup();
   });
 
-  function createQueue(overrides = {}) {
+  const createQueue = (overrides = {}) => {
     const { config, ...rest } = overrides;
     const mq = createMigrationQueue({
       config: {
@@ -96,7 +98,7 @@ function defineBullMQScenarios(harness) {
     });
     opened.push(mq);
     return mq;
-  }
+  };
 
   const write = (name, body) => project.write(name, body);
   const three = () => {
@@ -114,35 +116,27 @@ function defineBullMQScenarios(harness) {
    * Poll the changelog until `name` has `status` — for a migration job a sync
    * tick enqueued, which runs after the tick has already completed.
    */
-  async function untilRecord(name, status, timeoutMs = 10_000) {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const record = await harness.mongo().db.collection(CHANGELOG).findOne({ name, status });
-      if (record) return record;
-      if (Date.now() > deadline) throw new Error(`${name} did not become ${status}`);
-      await new Promise((resolve) => setTimeout(resolve, 15));
-    }
-  }
+  const untilRecord = (name, status, timeoutMs = 10_000) => {
+    const check = () => harness.mongo().db.collection(CHANGELOG).findOne({ name, status });
+    return waitFor(`${name} to become ${status}`, check, { timeoutMs, intervalMs: 15 });
+  };
 
   /** Poll until every job has finished, then return their views */
-  async function settled(mq, ids, timeoutMs = 10_000) {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const views = await Promise.all(ids.map((id) => mq.getJob(id)));
-      if (views.every((view) => view && (view.state === 'completed' || view.state === 'failed'))) {
-        return views;
-      }
-      if (Date.now() > deadline) {
-        throw new Error(`jobs did not settle: ${views.map((view) => view?.state).join(', ')}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 15));
-    }
-  }
+  const settled = (mq, ids, timeoutMs = 10_000) => {
+    let views = [];
+    const isDone = (view) => view && (view.state === 'completed' || view.state === 'failed');
+    const check = async () => {
+      views = await Promise.all(ids.map((id) => mq.getJob(id)));
+      return views.every(isDone) ? views : null;
+    };
+    const explain = () => views.map((view) => view?.state).join(', ');
+    return waitFor('the jobs to settle', check, { timeoutMs, intervalMs: 15, explain });
+  };
 
   /** A queue whose jobs give up on a block quickly — for scenarios that expect one */
   const QUICK_BLOCK = { lockWait: { lockPollIntervalMs: 20, lockWaitTimeoutMs: 300 } };
 
-  async function holdLock() {
+  const holdLock = async () => {
     await harness.mongo().db.collection(LOCK_COLLECTION).insertOne({
       _id: 'migronaut_lock',
       lockedAt: new Date(),
@@ -151,7 +145,7 @@ function defineBullMQScenarios(harness) {
       executedBy: 'peer',
       owner: 'peer-token',
     });
-  }
+  };
   const releaseLock = () =>
     harness.mongo().db.collection(LOCK_COLLECTION).deleteOne({ _id: 'migronaut_lock' });
 
@@ -259,7 +253,7 @@ function defineBullMQScenarios(harness) {
     write('0001-a.js', insertMigration('things', 'a'));
     const mq = createQueue({ config: { generateId: () => '' } });
     await assert.rejects(mq.enqueueUp(), (error) => {
-      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
       assert.match(error.message, /non-empty string/);
       return true;
     });
@@ -318,7 +312,7 @@ function defineBullMQScenarios(harness) {
     assert.strictEqual(view.state, 'failed');
     assert.match(view.failedReason, /0002-b\.js is blocked/);
     assert.match(view.failedReason, /0001-a\.js/);
-    assert.strictEqual(view.progress.code, 'MIGRATION_BLOCKED');
+    assert.strictEqual(view.progress.code, 'ALX_ERR_MIGRATION_BLOCKED');
     assert.deepStrictEqual(await markers(), []);
     assert.deepStrictEqual(await records(), [], 'a blocked job leaves no trace in the changelog');
   });
@@ -344,12 +338,12 @@ function defineBullMQScenarios(harness) {
     const deadline = Date.now() + 10_000;
     while ((await slow.getJob(first))?.state !== 'active') {
       if (Date.now() > deadline) throw new Error('the first job never started');
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await sleep(15);
     }
     await fast.startWorker();
     while ((await fast.getJob(second))?.progress?.phase !== 'lock-wait') {
       if (Date.now() > deadline) throw new Error('the second job never waited');
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await sleep(15);
     }
     await releaseLock();
 
@@ -370,7 +364,7 @@ function defineBullMQScenarios(harness) {
     await mq.startWorker();
     const [view] = await settled(mq, [group.jobs[0].id]);
     assert.strictEqual(view.state, 'failed');
-    assert.strictEqual(view.progress.code, 'CHECKSUM_MISMATCH');
+    assert.strictEqual(view.progress.code, 'ALX_ERR_CHECKSUM_MISMATCH');
     assert.match(view.failedReason, /not the file this run was planned with/);
     assert.deepStrictEqual(await markers(), []);
   });
@@ -400,7 +394,7 @@ function defineBullMQScenarios(harness) {
       // The cause travels with the message: it is all the queue ever sees.
       assert.match(error.context.failedReason, /intentional failure/);
       // …and the typed code with the error, so a caller branches without parsing.
-      assert.strictEqual(error.context.code, 'MIGRATION_EXECUTION_FAILED');
+      assert.strictEqual(error.context.code, 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
       assert.strictEqual(error.context.results.length, 1);
       assert.strictEqual(error.context.results[0].status, 'applied');
       return true;
@@ -412,11 +406,11 @@ function defineBullMQScenarios(harness) {
     );
     assert.strictEqual(first.state, 'completed');
     assert.strictEqual(second.state, 'failed');
-    assert.strictEqual(second.progress.code, 'MIGRATION_EXECUTION_FAILED');
+    assert.strictEqual(second.progress.code, 'ALX_ERR_MIGRATION_EXECUTION_FAILED');
     assert.strictEqual(second.attemptsMade, 1, 'a failed migration is not retried');
     // The third never ran: it was refused because the second is still pending.
     assert.strictEqual(third.state, 'failed');
-    assert.strictEqual(third.progress.code, 'MIGRATION_BLOCKED');
+    assert.strictEqual(third.progress.code, 'ALX_ERR_MIGRATION_BLOCKED');
     assert.deepStrictEqual(await markers(), ['a']);
     assert.deepStrictEqual(
       (await mq.status()).map((row) => [row.file, row.status]),
@@ -494,6 +488,10 @@ function defineBullMQScenarios(harness) {
     assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
   });
 
+  const eventually = (check, timeoutMs = 10_000) => {
+    return waitFor('the condition', check, { timeoutMs, intervalMs: 15 });
+  };
+
   // ─── The MongoDB lock ──────────────────────────────────────────────────────
 
   it('should wait for a run that holds the MongoDB lock, then apply', async () => {
@@ -528,7 +526,7 @@ function defineBullMQScenarios(harness) {
     await mq.startWorker();
     const [view] = await settled(mq, [group.jobs[0].id]);
     assert.strictEqual(view.state, 'failed');
-    assert.strictEqual(view.progress.code, 'LOCK_ALREADY_HELD');
+    assert.strictEqual(view.progress.code, 'ALX_ERR_LOCK_ALREADY_HELD');
     assert.deepStrictEqual(await markers(), []);
   });
 
@@ -599,7 +597,7 @@ function defineBullMQScenarios(harness) {
     );
     const [view] = await settled(mq, [job.id]);
     assert.strictEqual(view.state, 'failed');
-    assert.strictEqual(view.progress.code, 'MIGRATION_BLOCKED');
+    assert.strictEqual(view.progress.code, 'ALX_ERR_MIGRATION_BLOCKED');
     assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
   });
 
@@ -666,7 +664,10 @@ function defineBullMQScenarios(harness) {
     assert.deepStrictEqual([record.requestedBy, record.reason], ['deploy-bot', 'release 42']);
     // The worker's OS user ran it; the requester is a separate field.
     assert.strictEqual(typeof record.executedBy, 'string');
-    await assert.rejects(mq.enqueueUp(undefined, { reason: '' }), /reason/);
+    await assert.rejects(mq.enqueueUp(undefined, { reason: '' }), {
+      code: 'ALX_ERR_CONFIG_INVALID',
+      message: /reason/,
+    });
   });
 
   it('should name the job in what a migration logs, and keep its userland lines in the job log', async () => {
@@ -750,7 +751,11 @@ export async function down() {}
     const views = await settled(mq, [forced.id, unordered.id]);
     for (const view of views) {
       assert.strictEqual(view.state, 'failed');
-      assert.strictEqual(view.progress.code, 'QUEUE_JOB_INVALID', 'refused before it ever ran');
+      assert.strictEqual(
+        view.progress.code,
+        'ALX_ERR_QUEUE_JOB_INVALID',
+        'refused before it ever ran',
+      );
       assert.match(view.failedReason, /is not allowed by this worker/);
     }
     assert.deepStrictEqual(await markers(), ['a'], 'nothing was re-run');
@@ -823,7 +828,7 @@ export async function down() {}
     const [view] = await settled(mq, [job.id]);
     assert.strictEqual(view.state, 'failed');
     assert.strictEqual(view.attemptsMade, 1);
-    assert.strictEqual(view.progress.code, 'MIGRATION_BLOCKED');
+    assert.strictEqual(view.progress.code, 'ALX_ERR_MIGRATION_BLOCKED');
   });
 
   it('should keep credentials out of what the queue stores', async () => {
@@ -861,7 +866,7 @@ export async function down() {}
     // The migration jobs the sync job added run after it, in the same queue.
     const deadline = Date.now() + 10_000;
     while ((await markers()).length < 3 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await sleep(15);
     }
     assert.deepStrictEqual(await markers(), ['a', 'b', 'c']);
     const batches = new Set((await records()).map((record) => record.batch));
@@ -889,7 +894,7 @@ export async function down() {}
     const deadline = Date.now() + 10_000;
     let written = await records();
     while (written.length < 1 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await sleep(15);
       written = await records();
     }
     assert.deepStrictEqual(
@@ -922,7 +927,7 @@ export async function down() {}
         (await records()).filter((record) => record.status === 'applied').length;
       const deadline = Date.now() + 10_000;
       while ((await applied()) < 2 && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 15));
+        await sleep(15);
       }
       assert.deepStrictEqual(await markers(), ['a', 'b']);
       assert.strictEqual(await applied(), 2);
@@ -963,13 +968,6 @@ export async function down() {}
       });
     return indexes.map((index) => index.name).filter((name) => name !== '_id_');
   };
-  async function eventually(check, timeoutMs = 10_000) {
-    const deadline = Date.now() + timeoutMs;
-    while (!(await check())) {
-      if (Date.now() > deadline) throw new Error('condition not reached');
-      await new Promise((resolve) => setTimeout(resolve, 15));
-    }
-  }
 
   it('should converge after the last migration of a group, and report it from wait()', async () => {
     three();
@@ -1037,7 +1035,7 @@ export async function down() {}
     assert.ok(!('convergeHeld' in first));
     const [refused] = await settled(mq, [first.converge.jobId]);
     assert.strictEqual(refused.state, 'failed');
-    assert.strictEqual(refused.progress.code, 'CONVERGE_FAILED');
+    assert.strictEqual(refused.progress.code, 'ALX_ERR_CONVERGE_FAILED');
     // A job a tick adds is kept like the tick: a schedule can add many.
     const live = await mq.queue.getJob(first.converge.jobId);
     assert.deepStrictEqual(live.opts.removeOnComplete, { count: 100 });
@@ -1097,7 +1095,7 @@ export async function down() {}
     await assert.rejects(group.wait({ timeoutMs: 10_000 }), QueueJobFailedError);
     const [blocked] = await settled(mq, [group.converge.id]);
     assert.strictEqual(blocked.state, 'failed');
-    assert.strictEqual(blocked.progress.code, 'MIGRATION_BLOCKED');
+    assert.strictEqual(blocked.progress.code, 'ALX_ERR_MIGRATION_BLOCKED');
     assert.deepStrictEqual(await indexNames(), []);
 
     write('0002-b.js', insertMigration('things', 'b'));
@@ -1298,7 +1296,7 @@ export async function down() {}
     await mq.close();
 
     assert.deepStrictEqual(await markers(), ['a', 'b'], 'the second migration was not cut short');
-    await assert.rejects(mq.enqueueUp(), /closed/);
+    await assert.rejects(mq.enqueueUp(), { code: 'ALX_ERR_QUEUE_CLOSED', message: /closed/ });
 
     const next = createQueue();
     assert.deepStrictEqual(
@@ -1323,7 +1321,7 @@ export async function down() {}
     const deadline = Date.now() + 10_000;
     while ((await mq.getJob(first))?.progress?.phase !== 'lock-wait') {
       if (Date.now() > deadline) throw new Error('the first job never waited for the lock');
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await sleep(15);
     }
     await mq.close();
 
@@ -1356,6 +1354,6 @@ export async function down() {}
     await releaseLock();
     assert.strictEqual((await mq.audit()).ok, true);
   });
-}
+};
 
 module.exports = { defineBullMQScenarios };

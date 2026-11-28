@@ -1,3 +1,7 @@
+const ESC = String.fromCharCode(27);
+
+const ANSI_PATTERN = new RegExp(`${ESC}\\[[0-9;]*m`, 'g');
+
 /**
  * Decide whether ANSI colors should be emitted to `stream`.
  *
@@ -16,7 +20,7 @@
  * can render, not what migronaut should do, and MIGRONAUT_NO_COLOR already
  * covers the override case.
  */
-function supportsColor(stream, env = process.env) {
+const supportsColor = (stream, env = process.env) => {
   const ownForce = env.MIGRONAUT_FORCE_COLOR;
   if (ownForce !== undefined && ownForce !== '') return ownForce !== '0';
   if (env.MIGRONAUT_NO_COLOR !== undefined && env.MIGRONAUT_NO_COLOR !== '') return false;
@@ -25,25 +29,20 @@ function supportsColor(stream, env = process.env) {
   if (env.NO_COLOR !== undefined && env.NO_COLOR !== '') return false;
   if (env.TERM === 'dumb') return false;
   return Boolean(stream && stream.isTTY);
-}
+};
 
 const paint = (open, close) => (text) => `\x1b[${open}m${text}\x1b[${close}m`;
 const identity = (text) => text;
 
-const ESC = String.fromCharCode(27);
-const ANSI_PATTERN = new RegExp(`${ESC}\\[[0-9;]*m`, 'g');
-
 /** Remove ANSI SGR color codes from a string */
-function stripAnsi(text) {
-  return text.replace(ANSI_PATTERN, '');
-}
+const stripAnsi = (text) => text.replace(ANSI_PATTERN, '');
 
 /**
  * Create the color palette for writing to `stream`: green/yellow/red/cyan/dim
  * wrapper functions plus an `enabled` flag. When colors are unsupported every
  * wrapper is the identity function, so call sites never need to branch.
  */
-function createColors(stream, env = process.env) {
+const createColors = (stream, env = process.env) => {
   const enabled = supportsColor(stream, env);
   if (!enabled) {
     return {
@@ -63,6 +62,6 @@ function createColors(stream, env = process.env) {
     cyan: paint(36, 39),
     dim: paint(2, 22),
   };
-}
+};
 
-module.exports = { supportsColor, createColors, stripAnsi };
+module.exports = { supportsColor, stripAnsi, createColors };

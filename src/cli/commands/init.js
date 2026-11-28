@@ -3,8 +3,7 @@ const { defineCommand } = require('../shared.js');
 
 const FORMATS = new Set(['js', 'ts', 'json']);
 
-/** Register the `init` command */
-function registerInit(program) {
+const registerInit = (program) => {
   defineCommand(program, {
     name: 'init',
     description:
@@ -23,42 +22,42 @@ function registerInit(program) {
     jsonOutput: false,
     // Writing a file needs no database — no spinner, no pre-connect.
     spinner: false,
-    preflight: (opts) => {
+    preflight: (flags) => {
       // `--json` used to mean "generate migronaut.config.json" here — the one
       // command where it did not mean JSON output. Refuse loudly rather than
       // silently reinterpreting a global output flag as a file format.
-      if (opts.json) {
+      if (flags.json) {
         throw new ConfigInvalidError(
           'init has no JSON output — to generate migronaut.config.json, pass --format json',
         );
       }
-      if (opts.format !== undefined && !FORMATS.has(opts.format)) {
+      if (flags.format !== undefined && !FORMATS.has(flags.format)) {
         throw new ConfigInvalidError("--format must be 'js', 'ts' or 'json'", {
-          format: opts.format,
+          context: { format: flags.format },
         });
       }
-      const format = resolveFormat(opts);
-      if (opts.secretProvider && format === 'json') {
+      const format = resolveFormat(flags);
+      if (flags.secretProvider && format === 'json') {
         throw new ConfigInvalidError(
           '--secret-provider is only available for js/ts configs (not --format json)',
         );
       }
     },
-    run: async (migrator, opts) => {
+    run: async (migrator, flags) => {
       await migrator.init({
-        format: resolveFormat(opts),
-        force: opts.force ?? false,
-        ...(opts.secretProvider ? { secretProvider: true } : {}),
+        format: resolveFormat(flags),
+        force: flags.force ?? false,
+        ...(flags.secretProvider ? { secretProvider: true } : {}),
       });
     },
   });
-}
+};
 
 /** Explicit --format wins; --ts/--js are shorthands; the default is js */
-function resolveFormat(opts) {
-  if (opts.format !== undefined) return opts.format;
-  if (opts.ts) return 'ts';
+const resolveFormat = (flags) => {
+  if (flags.format !== undefined) return flags.format;
+  if (flags.ts) return 'ts';
   return 'js';
-}
+};
 
 module.exports = { registerInit };

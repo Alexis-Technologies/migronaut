@@ -6,11 +6,11 @@
  * bail out early — migronaut cannot interrupt a running function on its own.
  * The runner adds `session` on top of this when the migration is transactional.
  */
-function buildContext(client, db, mongoose, signal) {
+const buildContext = (client, db, mongoose, signal) => {
   const context = { client, db };
   if (mongoose) context.mongoose = mongoose;
   if (signal) context.signal = signal;
   return context;
-}
+};
 
 module.exports = { buildContext };

@@ -1,24 +1,35 @@
 const OPTION_PATTERN = /^(?:-([A-Za-z]), )?--([a-z][a-z0-9-]*)(?: <([^>]+)>)?$/;
 
 /** Convert a kebab-case option name to its camelCase opts key */
-const camelize = (name) => name.replace(/-([a-z0-9])/g, (_, char) => char.toUpperCase());
+const camelize = (name) => name.replace(/-([a-z0-9])/g, (_, character) => character.toUpperCase());
 
 /** Pad `label` so descriptions in a help block line up */
 const padLabel = (label, width) => label + ' '.repeat(width - label.length);
 
-/** Render one aligned `label  description` section of a help screen */
-function renderSection(title, rows) {
-  if (rows.length === 0) return [];
+/** Append one aligned `label  description` section of a help screen to `lines` */
+const appendSection = (lines, title, rows) => {
+  if (rows.length === 0) return;
   let width = 0;
   for (const row of rows) {
     if (row[0].length > width) width = row[0].length;
   }
-  const lines = [];
+  lines.push('', `${title}:`);
   for (const row of rows) {
     lines.push(`  ${padLabel(row[0], width)}  ${row[1]}`);
   }
-  return ['', `${title}:`, ...lines];
-}
+};
+
+/**
+ * Whether the token after a value-taking option cannot be its value: there is
+ * none, or it is another flag. A leading digit after `-` is a negative number,
+ * not a flag — `--steps -1` should reach the core validator (which rejects it
+ * with an actionable message), not die as "argument missing".
+ */
+const isMissingValue = (next) => {
+  if (next === undefined) return true;
+  const isNegativeNumber = /^-\d/.test(next);
+  return next.startsWith('-') && next !== '-' && !isNegativeNumber;
+};
 
 /**
  * Minimal commander-compatible CLI framework covering exactly the surface the
@@ -40,7 +51,7 @@ class Command {
   #options = [];
   #arguments = [];
   #commands = [];
-  #actionFn = null;
+  #handler = null;
   #parent = null;
   #values = {};
   /** Lazily-built `--long`/`-s` → option lookup; reset whenever options change */
@@ -68,14 +79,14 @@ class Command {
     if (!match) throw new TypeError(`Unsupported option flags: '${flags}'`);
     const short = match[1] ?? null;
     const rawName = match[2];
-    const negated = rawName.startsWith('no-');
+    const isNegated = rawName.startsWith('no-');
     this.#options.push({
       flags,
       description,
       short,
       long: `--${rawName}`,
-      key: camelize(negated ? rawName.slice(3) : rawName),
-      negated,
+      key: camelize(isNegated ? rawName.slice(3) : rawName),
+      negated: isNegated,
       takesValue: Boolean(match[3]),
     });
     this.#optionIndex = null;
@@ -99,8 +110,8 @@ class Command {
     return sub;
   }
 
-  action(fn) {
-    this.#actionFn = fn;
+  action(handler) {
+    this.#handler = handler;
     return this;
   }
 
@@ -134,58 +145,46 @@ class Command {
     const positionals = [];
     // After a bare `--`, everything is a positional — the standard
     // end-of-options terminator.
-    let optionsEnded = false;
+    let hasOptionsEnded = false;
 
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i];
-      if (optionsEnded) {
+      if (hasOptionsEnded) {
         positionals.push(token);
         continue;
       }
       if (token === '--') {
-        optionsEnded = true;
+        hasOptionsEnded = true;
         continue;
       }
       if (token === '-h' || token === '--help') {
         // Short-circuit, commander-style: the user asking for help must get
         // it even when a later token would fail the parse — mistyping a flag
         // and appending --help to find out what went wrong is the exact case.
-        process.stdout.write(`${this.#helpText(command ?? this)}\n`);
-        return;
+        return void process.stdout.write(`${this.#helpText(command ?? this)}\n`);
       }
       if ((token === '-V' || token === '--version') && this.#version !== null) {
-        process.stdout.write(`${this.#version}\n`);
-        return;
+        return void process.stdout.write(`${this.#version}\n`);
       }
       if (token.startsWith('-') && token !== '-') {
-        let name = token;
-        let inlineValue;
         const separator = token.indexOf('=');
-        if (token.startsWith('--') && separator !== -1) {
-          name = token.slice(0, separator);
-          inlineValue = token.slice(separator + 1);
-        }
+        const hasInlineValue = token.startsWith('--') && separator !== -1;
+        const name = hasInlineValue ? token.slice(0, separator) : token;
+        const inlineValue = hasInlineValue ? token.slice(separator + 1) : undefined;
         const found = this.#findOption(command, name);
         if (!found) return this.#fail(`unknown option '${name}'`);
         const { owner, option } = found;
         if (option.takesValue) {
-          let value = inlineValue;
-          if (value === undefined) {
-            const next = tokens[i + 1];
-            // A leading digit after `-` is a negative number, not a flag —
-            // `--steps -1` should reach the core validator (which rejects it
-            // with an actionable message), not die as "argument missing".
-            const negativeNumber = next !== undefined && /^-\d/.test(next);
-            if (next === undefined || (next.startsWith('-') && next !== '-' && !negativeNumber)) {
-              return this.#fail(
-                `option '${option.flags}' argument missing ` +
-                  `(use ${option.long}=<value> for values starting with '-')`,
-              );
-            }
-            value = next;
-            i++;
+          const isFromNext = inlineValue === undefined;
+          const next = tokens[i + 1];
+          if (isFromNext && isMissingValue(next)) {
+            return this.#fail(
+              `option '${option.flags}' argument missing ` +
+                `(use ${option.long}=<value> for values starting with '-')`,
+            );
           }
-          owner.#values[option.key] = value;
+          if (isFromNext) i++;
+          owner.#values[option.key] = isFromNext ? next : inlineValue;
         } else {
           // `--yes=false` is not "no": the value would be dropped and the flag
           // set — consent to a destructive action, or `--no-lock=false`
@@ -232,8 +231,8 @@ class Command {
       return this.#fail(`too many arguments — unexpected: ${extra.join(', ')}`);
     }
 
-    if (command.#actionFn) {
-      await command.#actionFn(...args, command.#values, command);
+    if (command.#handler) {
+      await command.#handler(...args, command.#values, command);
     }
   }
 
@@ -246,11 +245,11 @@ class Command {
   #seedNegatableDefaults() {
     for (const option of this.#options) {
       if (!option.negated) continue;
-      let twin = false;
+      let hasTwin = false;
       for (const other of this.#options) {
-        if (!other.negated && other.key === option.key) twin = true;
+        if (!other.negated && other.key === option.key) hasTwin = true;
       }
-      if (!twin) this.#values[option.key] = true;
+      if (!hasTwin) this.#values[option.key] = true;
     }
   }
 
@@ -279,10 +278,7 @@ class Command {
 
   /** End the parse on an error — `help`: what to show instead of the message (no command) */
   #fail(message, help) {
-    if (this.#usageError !== null) {
-      this.#usageError(message, help);
-      return;
-    }
+    if (this.#usageError !== null) return void this.#usageError(message, help);
     process.stderr.write(help !== undefined ? `${help}\n` : `error: ${message}\n`);
     process.exitCode = 1;
   }
@@ -308,7 +304,7 @@ class Command {
     for (const spec of target.#arguments) {
       argumentRows.push([spec.name, spec.description]);
     }
-    lines.push(...renderSection('Arguments', argumentRows));
+    appendSection(lines, 'Arguments', argumentRows);
 
     const optionRows = [];
     for (const option of target.#options) {
@@ -318,7 +314,7 @@ class Command {
       optionRows.push(['-V, --version', 'output the version number']);
     }
     optionRows.push(['-h, --help', 'display help for command']);
-    lines.push(...renderSection('Options', optionRows));
+    appendSection(lines, 'Options', optionRows);
 
     // Subcommand help also lists the root's flags: they are accepted after the
     // command name, so hiding them here would misdocument the real surface.
@@ -327,7 +323,7 @@ class Command {
       for (const option of this.#options) {
         globalRows.push([option.flags, option.description]);
       }
-      lines.push(...renderSection('Global Options', globalRows));
+      appendSection(lines, 'Global Options', globalRows);
     }
 
     if (isRoot) {
@@ -336,7 +332,7 @@ class Command {
         const options = sub.#options.length > 0 ? ' [options]' : '';
         commandRows.push([`${sub.#name}${options}${this.#argsUsage(sub)}`, sub.#description]);
       }
-      lines.push(...renderSection('Commands', commandRows));
+      appendSection(lines, 'Commands', commandRows);
     }
     return lines.join('\n');
   }

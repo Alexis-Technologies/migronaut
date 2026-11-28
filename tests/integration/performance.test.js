@@ -7,7 +7,7 @@ const { pendingMigrations } = require('../../src/core/run.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_perf_test';
 
 before(async () => {
@@ -18,7 +18,7 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
+let project = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();
@@ -29,9 +29,9 @@ afterEach(() => {
   project?.cleanup();
 });
 
-function migrator(overrides = {}) {
+const migrator = (overrides = {}) => {
   return makeMigrator(mongo.uri, DB, project.dir, overrides);
-}
+};
 
 describe('changelog indexes (integration)', () => {
   it('should create the indexes the read paths use', async () => {
@@ -261,7 +261,7 @@ describe('offline create (integration)', () => {
       { configPath: path.join(cwd, 'migronaut.config.js') },
     );
     await assert.rejects(kit.status(), (error) => {
-      assert.strictEqual(error.code, 'CONFIG_INVALID');
+      assert.strictEqual(error.code, 'ALX_ERR_CONFIG_INVALID');
       return true;
     });
   });

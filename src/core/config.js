@@ -1,17 +1,20 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+
 const { ConfigInvalidError } = require('../errors/index.js');
 const { isCollectionName } = require('../utils/collection-name.js');
-const { TELEMETRY_KEYS, telemetryIssues } = require('../utils/telemetry.js');
+const { MAX_TIMER_MS } = require('../utils/concurrency.js');
+const { applyEnvFile } = require('../utils/env.js');
+const { toContextPath, formatError } = require('../utils/error.js');
+const { readSmallFile } = require('../utils/file.js');
+const { resolveLogger } = require('../utils/logger.js');
+const { redactDeep } = require('../utils/redact.js');
+const { TELEMETRY_KEYS, checkTelemetry } = require('../utils/telemetry.js');
+const { checkCollections } = require('./converge/collections.js');
 
 /** The keys a `telemetry` object may hold — a Set, read once per key */
 const TELEMETRY_KEY_SET = new Set(TELEMETRY_KEYS);
-const { applyEnvFile } = require('../utils/env.js');
-const { errorText } = require('../utils/error.js');
-const { resolveLogger } = require('../utils/logger.js');
-const { redactDeep } = require('../utils/redact.js');
-const { collectionsIssues } = require('./collections.js');
 
 /**
  * Default values applied when no flag, env var, or config-file value is
@@ -48,16 +51,104 @@ const DEFAULT_CONFIG = {
 /** Candidate config file names, checked in priority order within the cwd */
 const CONFIG_FILE_NAMES = ['migronaut.config.ts', 'migronaut.config.js', 'migronaut.config.json'];
 
+/** The lock TTL in seconds whose milliseconds a timer still honours */
+const MAX_LOCK_TTL_SECONDS = Math.floor(MAX_TIMER_MS / 1000);
+
+/**
+ * The values of every enum key, once: what the config table checks, what the
+ * env table parses, and what migronaut.schema.json lists (a test holds the
+ * schema's `enum` to these).
+ */
+const CREATE_EXTENSIONS = ['ts', 'js'];
+
+const ON_LOCK_LOST = ['abort', 'warn'];
+
+const ON_OUT_OF_ORDER = ['warn', 'error', 'allow'];
+
+const ON_SEARCH_UNAVAILABLE = ['fail', 'skip'];
+
+const ON_DRIFT = ['reopen', 'report'];
+
+const DRIFT_MODES = ['poll', 'stream', 'both'];
+
+const SHARD_AWARE = ['auto', 'off'];
+
+/**
+ * Every key the merged config legitimately carries: the validated ones plus
+ * the code-only ones (the live instances, `generateId` and `telemetry`). Used
+ * only to *mention* typos (`migrationsDirectory`, `useTransactions`) at debug
+ * level — unknown keys stay allowed, matching the documented non-strict
+ * contract.
+ */
+const KNOWN_CONFIG_KEYS = new Set([
+  'logger',
+  'hooks',
+  'mongoose',
+  'client',
+  'generateId',
+  'telemetry',
+  // What `init --format json` writes at the top of the file, for editors.
+  '$schema',
+]);
+
+const TRUE_BOOLEAN_STRINGS = new Set(['true', '1', 'yes']);
+
+const FALSE_BOOLEAN_STRINGS = new Set(['false', '0', 'no']);
+
+/**
+ * Keys never copied from parsed input: JSON.parse creates `__proto__` as an own
+ * enumerable property, so merging it would poison the prototype of the merged
+ * config and let a JSON config file override values it never declared.
+ */
+const UNSAFE_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** What loadConfigFile answers for a factory that failed in a lenient run — never a config value */
+const LENIENT_FAILURE = Symbol('lenient-failure');
+
 const isNonEmptyString = (value) => typeof value === 'string' && value.length > 0;
 const isBoolean = (value) => typeof value === 'boolean';
 const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
-const isExtension = (value) => value === 'ts' || value === 'js';
-const oneOf = (values) => (value) => values.includes(value);
-const quoted = (values) => values.map((value) => `'${value}'`).join(', ');
 
-const ON_DRIFT = ['reopen', 'report'];
-const DRIFT_MODES = ['poll', 'stream', 'both'];
-const SHARD_AWARE = ['auto', 'off'];
+/** A duration that ends in a timer: above MAX_TIMER_MS, Node fires it after 1ms */
+const isTimerMs = (value) => isPositiveInteger(value) && value <= MAX_TIMER_MS;
+
+/** A lock TTL the heartbeat and the deadline can arm */
+const isLockTtl = (value) => isPositiveInteger(value) && value <= MAX_LOCK_TTL_SECONDS;
+/** A check that `value` is one of `values` — a Set, read once per call */
+const makeOneOfCheck = (values) => {
+  const allowed = new Set(values);
+  return (value) => allowed.has(value);
+};
+/** "'warn', 'error' or 'allow'": `values` in single quotes, the last after "or" */
+const formatChoices = (values) => {
+  let text = '';
+  for (let i = 0; i < values.length; i++) {
+    if (i > 0) text += i === values.length - 1 ? ' or ' : ', ';
+    text += `'${values[i]}'`;
+  }
+  return text;
+};
+
+/** `values` each in single quotes, joined by `separator` */
+const quoteAll = (values, separator = ', ') => {
+  let text = '';
+  for (let i = 0; i < values.length; i++) {
+    if (i > 0) text += separator;
+    text += `'${values[i]}'`;
+  }
+  return text;
+};
+
+/** A CONFIG_KEYS row for an enum key: its values, the check and the message from them */
+const defineEnumKey = (key, values) => {
+  return {
+    path: key,
+    check: makeOneOfCheck(values),
+    message: `must be ${formatChoices(values)}`,
+    optional: true,
+    values,
+  };
+};
 
 /**
  * The collections a background migration keeps its state in: the state
@@ -65,21 +156,21 @@ const SHARD_AWARE = ['auto', 'off'];
  * tokens — the last two named after the first, so one setting moves all
  * three (and a test of "must differ" covers them together).
  */
-function backgroundCollectionNames(backgroundCollection) {
+const listBackgroundCollections = (backgroundCollection) => {
   return {
     state: backgroundCollection,
     partitions: `${backgroundCollection}_partitions`,
     watch: `${backgroundCollection}_watch`,
   };
-}
+};
 
-function isStringList(value) {
+const isStringList = (value) => {
   if (!Array.isArray(value) || value.length === 0) return false;
   for (const item of value) {
     if (!isNonEmptyString(item)) return false;
   }
   return true;
-}
+};
 
 /**
  * Validation spec for every checked config key: predicate + failure message.
@@ -111,7 +202,12 @@ const CONFIG_KEYS = [
     check: isCollectionName,
     message: "must be a valid collection name (no '$'/NUL, not system.*)",
   },
-  { path: 'lockTTLSeconds', check: isPositiveInteger, message: 'must be a positive integer' },
+  {
+    path: 'lockTTLSeconds',
+    check: isLockTtl,
+    message: `must be a positive integer, at most ${MAX_LOCK_TTL_SECONDS}`,
+    max: MAX_LOCK_TTL_SECONDS,
+  },
   { path: 'strict', check: isBoolean, message: 'must be a boolean' },
   { path: 'useTransaction', check: isBoolean, message: 'must be a boolean' },
   {
@@ -119,7 +215,7 @@ const CONFIG_KEYS = [
     check: isStringList,
     message: 'must be a non-empty array of non-empty strings',
   },
-  { path: 'createExtension', check: isExtension, message: "must be 'ts' or 'js'" },
+  { ...defineEnumKey('createExtension', CREATE_EXTENSIONS), optional: false },
   { path: 'sequential', check: isBoolean, message: 'must be a boolean' },
   {
     path: 'templatePath',
@@ -133,18 +229,8 @@ const CONFIG_KEYS = [
     message: 'must be a non-empty string',
     optional: true,
   },
-  {
-    path: 'onLockLost',
-    check: (value) => value === 'abort' || value === 'warn',
-    message: "must be 'abort' or 'warn'",
-    optional: true,
-  },
-  {
-    path: 'onOutOfOrder',
-    check: (value) => value === 'warn' || value === 'error' || value === 'allow',
-    message: "must be 'warn', 'error' or 'allow'",
-    optional: true,
-  },
+  defineEnumKey('onLockLost', ON_LOCK_LOST),
+  defineEnumKey('onOutOfOrder', ON_OUT_OF_ORDER),
   {
     path: 'envFile',
     check: (value) => value === false || isNonEmptyString(value),
@@ -160,13 +246,14 @@ const CONFIG_KEYS = [
   },
   {
     path: 'timeoutMs',
-    check: isPositiveInteger,
-    message: 'must be a positive integer',
+    check: isTimerMs,
+    message: `must be a positive integer, at most ${MAX_TIMER_MS}`,
     optional: true,
+    max: MAX_TIMER_MS,
   },
   { path: 'reloadMigrations', check: isBoolean, message: 'must be a boolean', optional: true },
   // Only the outer shape here — each definition is checked by
-  // collectionsIssues (core/collections.js), which reports nested paths
+  // checkCollections (core/converge/collections.js), which reports nested paths
   // (`collections[2].indexes[0].key`) instead of one opaque message.
   {
     path: 'collections',
@@ -181,18 +268,14 @@ const CONFIG_KEYS = [
     optional: true,
   },
   { path: 'convergeAfterUp', check: isBoolean, message: 'must be a boolean', optional: true },
-  {
-    path: 'onSearchUnavailable',
-    check: (value) => value === 'fail' || value === 'skip',
-    message: "must be 'fail' or 'skip'",
-    optional: true,
-  },
+  defineEnumKey('onSearchUnavailable', ON_SEARCH_UNAVAILABLE),
   { path: 'waitForSearchIndexes', check: isBoolean, message: 'must be a boolean', optional: true },
   {
     path: 'searchIndexWaitTimeoutMs',
-    check: isPositiveInteger,
-    message: 'must be a positive integer',
+    check: isTimerMs,
+    message: `must be a positive integer, at most ${MAX_TIMER_MS}`,
     optional: true,
+    max: MAX_TIMER_MS,
   },
   {
     path: 'backgroundCollection',
@@ -201,43 +284,11 @@ const CONFIG_KEYS = [
     optional: true,
   },
   { path: 'backgroundInline', check: isBoolean, message: 'must be a boolean', optional: true },
-  {
-    path: 'backgroundOnDrift',
-    check: oneOf(ON_DRIFT),
-    message: `must be ${quoted(ON_DRIFT)}`,
-    optional: true,
-  },
-  {
-    path: 'backgroundDrift',
-    check: oneOf(DRIFT_MODES),
-    message: `must be ${quoted(DRIFT_MODES)}`,
-    optional: true,
-  },
-  {
-    path: 'backgroundShardAware',
-    check: oneOf(SHARD_AWARE),
-    message: `must be ${quoted(SHARD_AWARE)}`,
-    optional: true,
-  },
+  defineEnumKey('backgroundOnDrift', ON_DRIFT),
+  defineEnumKey('backgroundDrift', DRIFT_MODES),
+  defineEnumKey('backgroundShardAware', SHARD_AWARE),
 ];
 
-/**
- * Every key the merged config legitimately carries: the validated ones plus
- * the code-only ones (the live instances, `generateId` and `telemetry`). Used
- * only to *mention* typos (`migrationsDirectory`, `useTransactions`) at debug
- * level — unknown keys stay allowed, matching the documented non-strict
- * contract.
- */
-const KNOWN_CONFIG_KEYS = new Set([
-  'logger',
-  'hooks',
-  'mongoose',
-  'client',
-  'generateId',
-  'telemetry',
-  // What `init --format json` writes at the top of the file, for editors.
-  '$schema',
-]);
 for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
 
 /**
@@ -245,7 +296,7 @@ for (const spec of CONFIG_KEYS) KNOWN_CONFIG_KEYS.add(spec.path);
  * (empty when valid). With `requireDb: false`, empty `uri`/`dbName` strings
  * are allowed — for commands that never touch the database (`init`, `create`).
  */
-function validateConfig(config, options = {}) {
+const validateConfig = (config, options = {}) => {
   const requireDb = options.requireDb ?? true;
   // An injected client already carries the connection, so a `uri` would be
   // ignored — requiring one would only be busywork.
@@ -267,19 +318,24 @@ function validateConfig(config, options = {}) {
   if (config.generateId !== undefined && typeof config.generateId !== 'function') {
     issues.push({ path: 'generateId', message: 'must be a function' });
   }
-  for (const issue of telemetryIssues(config.telemetry)) issues.push(issue);
+  for (const issue of checkTelemetry(config.telemetry)) issues.push(issue);
   // Inline definitions are checked with the rest of the config — they are
   // pure data, so this costs nothing. Definition *files* are loaded only when
   // a converge runs: importing them here would make one broken file block
   // every command, an emergency `down` included.
   // Every bookkeeping collection has one job: sharing one would mix records.
-  const bookkeeping = bookkeepingCollections(config);
+  const bookkeeping = listBookkeepingCollections(config);
   for (let position = 1; position < bookkeeping.length; position++) {
-    const [key, name, what] = bookkeeping[position];
+    const entry = bookkeeping[position];
+    const key = entry[0];
+    const name = entry[1];
+    const what = entry[2];
     if (name === undefined) continue;
     for (let earlier = 0; earlier < position; earlier++) {
-      const [otherKey, otherName, otherWhat] = bookkeeping[earlier];
-      if (name !== otherName) continue;
+      const other = bookkeeping[earlier];
+      const otherKey = other[0];
+      const otherWhat = other[2];
+      if (name !== other[1]) continue;
       issues.push({
         path: key,
         message: `${what ? `${what} (${name}) ` : ''}must differ from ${otherWhat ? `${otherKey}'s ${otherWhat}` : otherKey}`,
@@ -289,25 +345,28 @@ function validateConfig(config, options = {}) {
   }
   if (Array.isArray(config.collections)) {
     const reserved = [];
-    for (const [, name] of bookkeeping) if (name !== undefined) reserved.push(name);
-    for (const issue of collectionsIssues(config.collections, { reserved })) issues.push(issue);
+    for (let i = 0; i < bookkeeping.length; i++) {
+      const name = bookkeeping[i][1];
+      if (name !== undefined) reserved.push(name);
+    }
+    for (const issue of checkCollections(config.collections, { reserved })) issues.push(issue);
   }
   return issues;
-}
+};
 
 /**
  * Every collection migronaut keeps records in, as `[configKey, name, what?]`
  * — `what` names a collection derived from the key (the background
  * partitions and watch collections).
  */
-function bookkeepingCollections(config) {
+const listBookkeepingCollections = (config) => {
   const entries = [
     ['migrationsCollection', config.migrationsCollection],
     ['lockCollection', config.lockCollection],
     ['convergeLogCollection', config.convergeLogCollection],
   ];
   if (typeof config.backgroundCollection === 'string') {
-    const names = backgroundCollectionNames(config.backgroundCollection);
+    const names = listBackgroundCollections(config.backgroundCollection);
     entries.push(
       ['backgroundCollection', names.state],
       ['backgroundCollection', names.partitions, 'partitions collection'],
@@ -315,35 +374,23 @@ function bookkeepingCollections(config) {
     );
   }
   return entries;
-}
-
-const TRUE_BOOLEAN_STRINGS = new Set(['true', '1', 'yes']);
-const FALSE_BOOLEAN_STRINGS = new Set(['false', '0', 'no']);
+};
 
 /**
  * Parse a string into a boolean. Unrecognized values throw instead of silently
  * becoming false — a typo like MIGRONAUT_STRICT=on must never disable a safety
  * setting (fail closed).
  */
-function parseBoolean(value, name) {
+const parseBoolean = (value, name) => {
   const normalized = value.trim().toLowerCase();
   if (TRUE_BOOLEAN_STRINGS.has(normalized)) return true;
   if (FALSE_BOOLEAN_STRINGS.has(normalized)) return false;
-  throw new ConfigInvalidError(`${name} must be 'true'/'1'/'yes' or 'false'/'0'/'no'`, {
-    name,
-    value,
-  });
-}
-
-/**
- * Keys never copied from parsed input: JSON.parse creates `__proto__` as an own
- * enumerable property, so merging it would poison the prototype of the merged
- * config and let a JSON config file override values it never declared.
- */
-const UNSAFE_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+  const issue = "must be 'true'/'1'/'yes' or 'false'/'0'/'no'";
+  throw new ConfigInvalidError(`${name} ${issue}`, { context: { name, value, issue } });
+};
 
 /** Copy only the defined keys from `source` onto `target`, mutating and returning target */
-function mergeDefined(target, source) {
+const mergeDefined = (target, source) => {
   for (const key of Object.keys(source)) {
     if (UNSAFE_MERGE_KEYS.has(key)) continue;
     const value = source[key];
@@ -352,33 +399,35 @@ function mergeDefined(target, source) {
     }
   }
   return target;
-}
+};
 
 /**
  * Parse a string into a positive integer, failing closed like `parseBoolean`.
  * A bare `Number()` turns a typo into `NaN`, which surfaces as a generic
  * validateConfig issue that never names the variable the user actually set.
  */
-function parsePositiveInteger(value, name) {
+const parsePositiveInteger = (value, name) => {
   const parsed = Number(value.trim());
   if (!isPositiveInteger(parsed)) {
-    throw new ConfigInvalidError(`${name} must be a positive integer`, { name, value });
+    const issue = 'must be a positive integer';
+    throw new ConfigInvalidError(`${name} ${issue}`, { context: { name, value, issue } });
   }
   return parsed;
-}
+};
 
 /** Parse one of a fixed set of string values, failing closed on anything else */
-function parseEnum(allowed) {
+const parseEnum = (allowed) => {
   const values = new Set(allowed);
-  const list = allowed.map((item) => `'${item}'`).join(' or ');
+  const allowedText = quoteAll(allowed, ' or ');
   return (value, name) => {
     const normalized = value.trim();
     if (!values.has(normalized)) {
-      throw new ConfigInvalidError(`${name} must be ${list}`, { name, value });
+      const issue = `must be ${allowedText}`;
+      throw new ConfigInvalidError(`${name} ${issue}`, { context: { name, value, issue } });
     }
     return normalized;
   };
-}
+};
 
 const parseString = (value) => value;
 
@@ -402,27 +451,35 @@ const ENV_KEYS = [
   { env: 'MIGRONAUT_URI', path: 'uri', parse: parseString },
   { env: 'MIGRONAUT_DB', path: 'dbName', parse: parseString },
   { env: 'MIGRONAUT_MIGRATIONS_DIR', path: 'migrationsDir', parse: parseString },
-  { env: 'MIGRONAUT_COLLECTION', path: 'migrationsCollection', parse: parseString },
+  {
+    env: 'MIGRONAUT_MIGRATIONS_COLLECTION',
+    path: 'migrationsCollection',
+    parse: parseString,
+  },
   { env: 'MIGRONAUT_LOCK_COLLECTION', path: 'lockCollection', parse: parseString },
   {
     env: 'MIGRONAUT_CONVERGE_LOG_COLLECTION',
     path: 'convergeLogCollection',
     parse: parseString,
   },
-  { env: 'MIGRONAUT_LOCK_TTL', path: 'lockTTLSeconds', parse: parsePositiveInteger },
+  {
+    env: 'MIGRONAUT_LOCK_TTL_SECONDS',
+    path: 'lockTTLSeconds',
+    parse: parsePositiveInteger,
+  },
   { env: 'MIGRONAUT_STRICT', path: 'strict', parse: parseBoolean },
   { env: 'MIGRONAUT_USE_TRANSACTION', path: 'useTransaction', parse: parseBoolean },
   { env: 'MIGRONAUT_SEQUENTIAL', path: 'sequential', parse: parseBoolean },
-  { env: 'MIGRONAUT_CREATE_EXTENSION', path: 'createExtension', parse: parseEnum(['ts', 'js']) },
+  {
+    env: 'MIGRONAUT_CREATE_EXTENSION',
+    path: 'createExtension',
+    parse: parseEnum(CREATE_EXTENSIONS),
+  },
   { env: 'MIGRONAUT_ENVIRONMENT', path: 'environment', parse: parseString },
   { env: 'MIGRONAUT_TEMPLATE_PATH', path: 'templatePath', parse: parseString },
   { env: 'MIGRONAUT_TIMEOUT_MS', path: 'timeoutMs', parse: parsePositiveInteger },
-  { env: 'MIGRONAUT_ON_LOCK_LOST', path: 'onLockLost', parse: parseEnum(['abort', 'warn']) },
-  {
-    env: 'MIGRONAUT_ON_OUT_OF_ORDER',
-    path: 'onOutOfOrder',
-    parse: parseEnum(['warn', 'error', 'allow']),
-  },
+  { env: 'MIGRONAUT_ON_LOCK_LOST', path: 'onLockLost', parse: parseEnum(ON_LOCK_LOST) },
+  { env: 'MIGRONAUT_ON_OUT_OF_ORDER', path: 'onOutOfOrder', parse: parseEnum(ON_OUT_OF_ORDER) },
   { env: 'MIGRONAUT_ENSURE_INDEXES', path: 'ensureIndexes', parse: parseBoolean },
   { env: 'MIGRONAUT_RELOAD_MIGRATIONS', path: 'reloadMigrations', parse: parseBoolean },
   { env: 'MIGRONAUT_COLLECTIONS_DIR', path: 'collectionsDir', parse: parseString },
@@ -430,7 +487,7 @@ const ENV_KEYS = [
   {
     env: 'MIGRONAUT_ON_SEARCH_UNAVAILABLE',
     path: 'onSearchUnavailable',
-    parse: parseEnum(['fail', 'skip']),
+    parse: parseEnum(ON_SEARCH_UNAVAILABLE),
   },
   { env: 'MIGRONAUT_WAIT_FOR_SEARCH_INDEXES', path: 'waitForSearchIndexes', parse: parseBoolean },
   {
@@ -453,26 +510,60 @@ const ENV_KEYS = [
   },
 ];
 
+/**
+ * The variables 3.0 renamed, by their old name. Still set, one is refused with
+ * the new name rather than ignored: a lock TTL that silently fell back to the
+ * default is what every parse of this layer fails closed against.
+ */
+const RENAMED_ENV_KEYS = {
+  __proto__: null,
+  MIGRONAUT_COLLECTION: 'MIGRONAUT_MIGRATIONS_COLLECTION',
+  MIGRONAUT_LOCK_TTL: 'MIGRONAUT_LOCK_TTL_SECONDS',
+};
+
 /** Build a partial config from the MIGRONAUT_* environment variables */
-function readEnvConfig(env = process.env) {
+const readEnvConfig = (env, issues) => {
   const result = {};
+  for (const name of Object.keys(RENAMED_ENV_KEYS)) {
+    if (env[name] === undefined) continue;
+    issues.push({ path: name, message: `was renamed to ${RENAMED_ENV_KEYS[name]} in 3.0` });
+  }
   for (const spec of ENV_KEYS) {
     const value = env[spec.env];
     if (value === undefined) continue;
-    result[spec.path] = spec.parse(value, spec.env);
+    try {
+      result[spec.path] = spec.parse(value, spec.env);
+    } catch (error) {
+      if (!(error instanceof ConfigInvalidError)) throw error;
+      // Every variable that does not parse, named as the user set it — one
+      // fix and run per typo was the price of throwing at the first.
+      issues.push({ path: spec.env, message: error.context.issue });
+    }
   }
   return result;
-}
+};
+
+/** "Invalid configuration — dbName is required; MIGRONAUT_STRICT must be …": what a person reads */
+const formatIssues = (issues) => {
+  let text = '';
+  for (let i = 0; i < issues.length; i++) {
+    const { path: where, message } = issues[i];
+    // `uri is required` names its key already; the rest say only the rule.
+    const line = message.startsWith(`${where} `) ? message : `${where} ${message}`;
+    text += `${i === 0 ? '' : '; '}${line}`;
+  }
+  return `Invalid configuration — ${text}`;
+};
 
 /** Returns true when `filepath` exists on disk */
-async function pathExists(filepath) {
+const isExistingPath = async (filepath) => {
   try {
     await fs.access(filepath);
     return true;
   } catch {
     return false;
   }
-}
+};
 
 /**
  * Locate a config file in `cwd`, returning its absolute path or null.
@@ -480,26 +571,23 @@ async function pathExists(filepath) {
  * `CONFIG_FILE_NAMES` priority order) wins — preserves the original
  * short-circuit priority without serializing the stat calls.
  */
-async function discoverConfigFile(cwd) {
+const discoverConfigFile = async (cwd) => {
   const candidates = [];
   for (const name of CONFIG_FILE_NAMES) candidates.push(path.join(cwd, name));
   const checks = [];
-  for (const candidate of candidates) checks.push(pathExists(candidate));
+  for (const candidate of candidates) checks.push(isExistingPath(candidate));
   const found = await Promise.all(checks);
   for (let i = 0; i < candidates.length; i++) {
     if (found[i]) return candidates[i];
   }
   return null;
-}
-
-/** What loadConfigFile answers for a factory that failed in a lenient run — never a config value */
-const LENIENT_FAILURE = Symbol('lenient-failure');
+};
 
 /** What a config file came to, in a word — `object` is the one shape that is a config */
-function shapeOf(value) {
+const describeShape = (value) => {
   if (value === null) return 'null';
   return Array.isArray(value) ? 'array' : typeof value;
-}
+};
 
 /**
  * Load and return the config object exported by a config file.
@@ -509,22 +597,21 @@ function shapeOf(value) {
  * lets users fetch values from a secret manager. A factory that throws is
  * surfaced as a ConfigInvalidError. JSON configs are always objects.
  */
-async function loadConfigFile(filepath, lenient = false) {
+const loadConfigFile = async (filepath, lenient = false) => {
   if (filepath.endsWith('.json')) {
-    const raw = await fs.readFile(filepath, 'utf8');
+    const raw = await readSmallFile(filepath, 'Config file');
     try {
       return JSON.parse(raw);
     } catch (error) {
       // A bare SyntaxError has no typed code, which breaks the CLI's exit-code
       // mapping and `--json` error shape.
-      throw new ConfigInvalidError(
-        'Config file is not valid JSON',
-        { path: filepath, cause: errorText(error) },
-        { cause: error },
-      );
+      throw new ConfigInvalidError('Config file is not valid JSON', {
+        cause: error,
+        context: { path: toContextPath(filepath), cause: formatError(error) },
+      });
     }
   }
-  let mod;
+  let mod = null;
   try {
     mod = await import(pathToFileURL(filepath).href);
   } catch (error) {
@@ -532,11 +619,10 @@ async function loadConfigFile(filepath, lenient = false) {
     // get the same treatment as a throwing factory below — including the
     // lenient degradation for commands that never touch the database.
     if (lenient) return null;
-    throw new ConfigInvalidError(
-      'Config file failed to load',
-      { path: filepath, cause: errorText(error) },
-      { cause: error },
-    );
+    throw new ConfigInvalidError('Config file failed to load', {
+      cause: error,
+      context: { path: toContextPath(filepath), cause: formatError(error) },
+    });
   }
   const exported = mod.default ?? mod;
 
@@ -550,15 +636,31 @@ async function loadConfigFile(filepath, lenient = false) {
         // rather than stopping an otherwise offline command.
         return LENIENT_FAILURE;
       }
-      throw new ConfigInvalidError(
-        'Config factory function failed to resolve',
-        { path: filepath, cause: errorText(error) },
-        { cause: error },
-      );
+      throw new ConfigInvalidError('Config factory function failed to resolve', {
+        cause: error,
+        context: { path: toContextPath(filepath), cause: formatError(error) },
+      });
     }
   }
   return exported;
-}
+};
+
+/** The names of declared collection definitions, in order */
+const listDefinitionNames = (definitions) => {
+  const names = [];
+  for (let i = 0; i < definitions.length; i++) names.push(definitions[i].name);
+  return names;
+};
+
+/** The keys of `values` migronaut knows — what the resolved-config line may show */
+const pickKnown = (values) => {
+  const known = {};
+  const keys = Object.keys(values);
+  for (let i = 0; i < keys.length; i++) {
+    if (KNOWN_CONFIG_KEYS.has(keys[i])) known[keys[i]] = values[keys[i]];
+  }
+  return known;
+};
 
 /**
  * Resolve the final MigronautConfig by merging, in priority order:
@@ -571,13 +673,14 @@ async function loadConfigFile(filepath, lenient = false) {
  *
  * Throws ConfigInvalidError when the merged result fails validation.
  */
-async function loadConfig(options = {}) {
+const loadConfig = async (options = {}) => {
   const cwd = options.cwd ?? process.cwd();
   // The CLI's console logger, used only when neither flags nor the config file
   // supply one — so this module's own lines honor `--verbose`/`--quiet` while
   // a user's configured logger still wins.
-  const effectiveLogger = (value) =>
-    resolveLogger(value !== undefined ? value : options.fallbackLogger);
+  const effectiveLogger = (value) => {
+    return resolveLogger(value !== undefined ? value : options.fallbackLogger);
+  };
 
   // Resolved before the merge, because loading the .env file is what supplies
   // the MIGRONAUT_* variables the merge then reads. `false` opts out entirely —
@@ -591,7 +694,7 @@ async function loadConfig(options = {}) {
     // config contract promises.
     if (!isNonEmptyString(envFile)) {
       throw new ConfigInvalidError('Invalid configuration', {
-        issues: [{ path: 'envFile', message: 'must be a non-empty string or false' }],
+        context: { issues: [{ path: 'envFile', message: 'must be a non-empty string or false' }] },
       });
     }
     await applyEnvFile(path.resolve(cwd, envFile));
@@ -607,8 +710,10 @@ async function loadConfig(options = {}) {
     // Only an explicit --config path needs the probe (a typo deserves a clear
     // "not found") — discovery already proved existence, and re-checking it
     // would pay a redundant fs.access on every invocation.
-    if (options.configPath && !(await pathExists(configFilePath))) {
-      throw new ConfigInvalidError('Config file not found', { path: configFilePath });
+    if (options.configPath && !(await isExistingPath(configFilePath))) {
+      throw new ConfigInvalidError('Config file not found', {
+        context: { path: toContextPath(configFilePath) },
+      });
     }
     const lenient = options.lenient ?? false;
     const fileConfig = await loadConfigFile(configFilePath, lenient);
@@ -616,14 +721,14 @@ async function loadConfig(options = {}) {
     // factory with a forgotten `return` used to end in a TypeError from the
     // merge, a JSON `null` in "could not resolve", and a string or an array
     // in keys named '0', '1', … merged in.
-    const usable = fileConfig !== LENIENT_FAILURE && shapeOf(fileConfig) === 'object';
-    if (!usable && fileConfig !== LENIENT_FAILURE && !lenient) {
+    const isUsable = fileConfig !== LENIENT_FAILURE && describeShape(fileConfig) === 'object';
+    if (!isUsable && fileConfig !== LENIENT_FAILURE && !lenient) {
       throw new ConfigInvalidError(
         'Config file must export an object, or a function that returns one',
-        { path: configFilePath, exported: shapeOf(fileConfig) },
+        { context: { path: toContextPath(configFilePath), exported: describeShape(fileConfig) } },
       );
     }
-    if (usable) {
+    if (isUsable) {
       mergeDefined(merged, fileConfig);
     } else {
       // A lenient run (the caller needs no connection): nothing usable from
@@ -634,7 +739,8 @@ async function loadConfig(options = {}) {
     }
   }
 
-  mergeDefined(merged, readEnvConfig());
+  const envIssues = [];
+  mergeDefined(merged, readEnvConfig(process.env, envIssues));
 
   if (options.flags) {
     mergeDefined(merged, options.flags);
@@ -646,30 +752,35 @@ async function loadConfig(options = {}) {
     if (merged.dbName === undefined) merged.dbName = '';
   }
 
-  const issues = validateConfig(merged, { requireDb });
+  const issues = envIssues.concat(validateConfig(merged, { requireDb }));
   if (issues.length > 0) {
-    throw new ConfigInvalidError('Invalid configuration', { issues });
+    throw new ConfigInvalidError(formatIssues(issues), { context: { issues } });
   }
 
   const config = merged;
 
   // A typo'd key (`migrationsDirectory`, `useTransactions`) validates fine and
-  // then silently does nothing; a debug mention is the cheapest way to notice.
-  // The array is only allocated when a stray key actually exists.
-  let unknown;
+  // then silently does nothing — a safety option left at its default. Warned,
+  // not refused: a key of a newer release must not break an older one. The
+  // array is only allocated when a stray key actually exists.
+  let unknown = null;
   for (const key in config) {
     if (!KNOWN_CONFIG_KEYS.has(key)) (unknown ??= []).push(key);
   }
   // Same for `telemetry`: handing over the whole `@opentelemetry/api` module
   // (`trace`, `metrics`) instead of a tracer and a meter turns it off silently.
+  // It is the user's object, so only its own keys are read.
   if (config.telemetry) {
-    for (const key in config.telemetry) {
+    const telemetryKeys = Object.keys(config.telemetry);
+    for (let i = 0; i < telemetryKeys.length; i++) {
+      const key = telemetryKeys[i];
       if (!TELEMETRY_KEY_SET.has(key)) (unknown ??= []).push(`telemetry.${key}`);
     }
   }
   if (unknown) {
-    effectiveLogger(config.logger).debug(
-      `Unrecognized config key(s), ignored: ${unknown.join(', ')}`,
+    effectiveLogger(config.logger).warn(
+      `⚠ Unrecognized config key(s), ignored: ${unknown.join(', ')}`,
+      { keys: unknown },
     );
   }
 
@@ -679,7 +790,9 @@ async function loadConfig(options = {}) {
   }
 
   // "Which config did it actually pick up?" — the merged result, once, at
-  // debug level. Live instances (client, mongoose, hooks, logger, telemetry)
+  // debug level: the keys migronaut knows only — an unknown key may be a
+  // secret the redaction cannot see by its shape (`apiKey`), and it is
+  // ignored anyway (warned above). Live instances (client, mongoose, hooks, logger, telemetry)
   // and the generateId function are elided: they are not serializable and
   // redactDeep rightly refuses to clone them. Declared collections show as
   // names only — validators can run to hundreds of lines. clientOptions shows
@@ -701,9 +814,9 @@ async function loadConfig(options = {}) {
     effectiveLogger(config.logger).debug(
       `Resolved config (source: ${configFilePath ? path.basename(configFilePath) : 'env/flags/defaults'})`,
       redactDeep({
-        ...rest,
+        ...pickKnown(rest),
         ...(clientOptions ? { clientOptions: Object.keys(clientOptions) } : {}),
-        ...(collections ? { collections: collections.map((definition) => definition.name) } : {}),
+        ...(collections ? { collections: listDefinitionNames(collections) } : {}),
         ...(client ? { client: '[injected]' } : {}),
         ...(mongoose ? { mongoose: '[injected]' } : {}),
         ...(hooks ? { hooks: Object.keys(hooks) } : {}),
@@ -715,7 +828,7 @@ async function loadConfig(options = {}) {
   }
 
   return config;
-}
+};
 
 // CONFIG_KEYS and ENV_KEYS are exported for the unit test that pins the two
 // tables against each other — internal to the config layer, not part of the
@@ -724,10 +837,10 @@ module.exports = {
   CONFIG_KEYS,
   DEFAULT_CONFIG,
   ENV_KEYS,
-  backgroundCollectionNames,
-  bookkeepingCollections,
+  listBackgroundCollections,
+  listBookkeepingCollections,
   // Re-exported from utils/collection-name.js, where it moved so that
-  // core/collections.js can use it without a require cycle through here.
+  // core/converge/collections.js can use it without a require cycle through here.
   isCollectionName,
   loadConfig,
   validateConfig,

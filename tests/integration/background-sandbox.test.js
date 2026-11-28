@@ -1,10 +1,11 @@
 const assert = require('node:assert/strict');
 const { after, before, beforeEach, describe, it } = require('node:test');
-const { runSandbox } = require('../../src/core/background-sandbox.js');
+const { runSandbox } = require('../../src/core/background/sandbox.js');
 const { SandboxRefusedError, TransactionsUnsupportedError } = require('../../src/errors/index.js');
 const { startTestMongo } = require('../helpers/mongo.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_background_sandbox_test';
 
 before(async () => {
@@ -40,7 +41,7 @@ const snapshotOf = async () => mongo.db.collection('orders').find().sort({ _id: 
 
 describe('dry-run sandbox (integration)', () => {
   it('should run writes in a transaction that is always aborted, recording them', async () => {
-    const before = await snapshotOf();
+    const snapshot = await snapshotOf();
     const report = await sandbox(async ({ db }) => {
       const orders = db.collection('orders');
       await orders.updateMany({ status: 'new' }, { $set: { status: 'open' } });
@@ -53,7 +54,7 @@ describe('dry-run sandbox (integration)', () => {
     assert.strictEqual(report.value, 3);
     assert.strictEqual(report.ok, true);
     assert.strictEqual(report.aborted, true);
-    assert.deepStrictEqual(await snapshotOf(), before, 'nothing stayed');
+    assert.deepStrictEqual(await snapshotOf(), snapshot, 'nothing stayed');
     assert.strictEqual(await mongo.db.collection('audit').countDocuments(), 0);
     assert.deepStrictEqual(
       report.ops.map((op) => `${op.collection}.${op.method}`),
@@ -209,7 +210,7 @@ describe('dry-run sandbox (integration)', () => {
     });
     assert.strictEqual(report.ok, false);
     assert.match(report.abortedBy, /duplicate key/);
-    const slow = await sandbox(() => new Promise((resolve) => setTimeout(resolve, 2000)), {
+    const slow = await sandbox(() => sleep(2000), {
       deadlineMs: 100,
     });
     assert.strictEqual(slow.stoppedBy, 'deadline');

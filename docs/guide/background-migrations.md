@@ -210,7 +210,7 @@ the failure counting. The step owns everything it writes.
 record with `kind: 'background'`. Its body only **registers** the background migration: a state
 document in `_migronaut_background`, logged as `⧗ Registered` and emitted as
 `background:registered`. No document is touched, and the line goes on. The spec is validated first:
-an invalid one fails as `MIGRATION_INVALID_EXPORT` (exit 20) before anything is written.
+an invalid one fails as `ALX_ERR_MIGRATION_INVALID_EXPORT` (exit 20) before anything is written.
 
 A registered background migration moves through these statuses:
 
@@ -325,8 +325,8 @@ lanes as child jobs. See [Background migrations on the queue](/guide/bullmq#back
 For small collections and tests, `backgroundInline: true` (or `MIGRONAUT_BACKGROUND_INLINE=true`)
 makes `up` run each background migration to the end right after registering it. It runs under the
 migration lock, with `maxParallel` lanes, and runs anything it requires first. A failure fails the
-`up` with `BACKGROUND_FAILED` (exit 32), and a stop fails it with `RUN_ABORTED` (exit 11). A file
-changed since it was registered fails it with `CHECKSUM_MISMATCH` instead of waiting for a deploy
+`up` with `ALX_ERR_BACKGROUND_FAILED` (exit 32), and a stop fails it with `ALX_ERR_RUN_ABORTED` (exit 11). A file
+changed since it was registered fails it with `ALX_ERR_CHECKSUM_MISMATCH` instead of waiting for a deploy
 to finish (this run *is* the deploy): pin the new version with `migronaut background repin`.
 
 Inline mode holds the line for as long as the rewrite takes, which is the very thing background
@@ -737,7 +737,7 @@ You can also start it yourself with `kit.watchBackground(options)`, or in the fo
 - **Missing permissions or too many collections.** A collection it may not watch is left to the
   poll (`fallback`). Past `maxCollections` collections per process, the rest are left to the poll
   too, with a warning.
-- **A standalone server has no change streams.** `watchBackground()` rejects with `CONFIG_INVALID`.
+- **A standalone server has no change streams.** `watchBackground()` rejects with `ALX_ERR_CONFIG_INVALID`.
   A runner or worker that hosts the watcher logs that and keeps the poll.
 
 The stream carries no documents. Its pipeline matches only inserts and replaces of an old shape,
@@ -845,7 +845,7 @@ lease holder (host and pid, never its token) and throttle state.
 Every control takes `requestedBy` and `reason`, recorded in the background migration's history
 (the CLI's `--reason`). `wait` resolves once no lane holds a lease (or after 2 minutes, with
 `stopped: false`). Pausing, resuming, cancelling, retrying or repinning a background migration that
-is not registered fails with `NOT_APPLIED` (exit 9).
+is not registered fails with `ALX_ERR_NOT_APPLIED` (exit 9).
 
 ### Deploys and changed files
 

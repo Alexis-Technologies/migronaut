@@ -7,6 +7,7 @@ const {
 const {
   ConfigInvalidError,
   LockLostError,
+  MigrationLoadFailedError,
   QueueJobInvalidError,
 } = require('../../src/errors/index.js');
 const { stubKit } = require('../helpers/stub-kit.js');
@@ -28,7 +29,7 @@ const answering = (answer) =>
   }));
 
 /** A kit whose background methods answer what each test scripts */
-function backgroundKit(overrides = {}) {
+const backgroundKit = (overrides = {}) => {
   return stubKit({
     backgroundStatus: mock.fn(async () => ({
       migration: NAME,
@@ -43,9 +44,9 @@ function backgroundKit(overrides = {}) {
     verifyBackground: mock.fn(async () => ({ checked: 2, skipped: 0, drift: [] })),
     ...overrides,
   });
-}
+};
 
-function fakeQueue({ qualifiedName = 'bull:migronaut-background' } = {}) {
+const fakeQueue = ({ qualifiedName = 'bull:migronaut-background' } = {}) => {
   const added = [];
   return {
     added,
@@ -57,10 +58,10 @@ function fakeQueue({ qualifiedName = 'bull:migronaut-background' } = {}) {
       }));
     }),
   };
-}
+};
 
 /** A job as a Worker hands it over — with the moves a background job makes */
-function fakeJob(name, data, { waits = [], attempts } = {}) {
+const fakeJob = (name, data, { waits = [], attempts } = {}) => {
   const job = {
     id: '42',
     name,
@@ -78,7 +79,7 @@ function fakeJob(name, data, { waits = [], attempts } = {}) {
     moveToWaitingChildren: mock.fn(async () => waits.shift() ?? false),
   };
   return job;
-}
+};
 
 const coordinatorJob = (data = {}, options) =>
   fakeJob('background', { migration: NAME, ...data }, options);
@@ -94,14 +95,14 @@ const laneJob = (data = {}) =>
   });
 
 /** Run the processor and return what it threw — a move is thrown, by name */
-async function moved(processor, job, token = 'token') {
+const moved = async (processor, job, token = 'token') => {
   try {
     await processor(job, token);
   } catch (error) {
     return error;
   }
   assert.fail('expected the job to be moved');
-}
+};
 
 describe('createBackgroundProcessor options', () => {
   const queue = fakeQueue();
@@ -382,7 +383,7 @@ describe('background lane jobs', () => {
   it('should back off after a failed slice, then give up after maxLaneRetries', async () => {
     const kit = backgroundKit({
       runBackgroundSlice: mock.fn(async () => {
-        throw new LockLostError('lease lost', {});
+        throw new LockLostError('lease lost');
       }),
     });
     const processor = createBackgroundProcessor({ kit, queue: fakeQueue(), maxLaneRetries: 2 });
@@ -390,19 +391,33 @@ describe('background lane jobs', () => {
     const before = Date.now();
     assert.strictEqual((await moved(processor, job)).name, 'DelayedError');
     assert.strictEqual(job.data.retry, 2);
-    assert.ok(job.delayedUntil >= before + 2000, 'the backoff doubles');
+    // 1000 · 2, jittered down to half of it at most.
+    assert.ok(job.delayedUntil >= before + 1000, 'the backoff doubles, jittered');
+    assert.ok(job.delayedUntil <= Date.now() + 2000, 'never past the doubled backoff');
     const last = laneJob({ retry: 2 });
     assert.deepStrictEqual(await processor(last, 'token'), {
       kind: 'background-lane',
       migration: NAME,
       outcome: 'gave-up',
-      code: 'LOCK_LOST',
+      code: 'ALX_ERR_LOCK_LOST',
     });
     assert.match(last.logs.at(-1), /gave up after 2 retries/);
   });
 
+  it('should give up at once on a failure no retry fixes', async () => {
+    const kit = backgroundKit({
+      runBackgroundSlice: mock.fn(async () => {
+        throw new MigrationLoadFailedError('broken file');
+      }),
+    });
+    const processor = createBackgroundProcessor({ kit, queue: fakeQueue(), maxLaneRetries: 5 });
+    const result = await processor(laneJob({ retry: 0 }), 'token');
+    assert.strictEqual(result.outcome, 'gave-up');
+    assert.strictEqual(result.code, 'ALX_ERR_MIGRATION_LOAD_FAILED');
+  });
+
   it('should go back to the queue on shutdown — before it starts, or once its slice stops', async () => {
-    let stopNow;
+    let stopNow = null;
     const kit = backgroundKit({
       runBackgroundSlice: mock.fn(
         () =>
@@ -501,7 +516,7 @@ describe('userland lines of background lanes', () => {
   });
 
   it('should drain the rows before the lane moves on, and take none after', async () => {
-    let late;
+    let late = null;
     const kit = backgroundKit({
       runBackgroundSlice: mock.fn(async (_name, { job }) => {
         kit.emit('migration:log', userland(job.id));
@@ -511,7 +526,7 @@ describe('userland lines of background lanes', () => {
     });
     const processor = createBackgroundProcessor({ kit, queue: fakeQueue() });
     const job = laneJob();
-    let logsAtMove;
+    let logsAtMove = null;
     job.moveToDelayed = mock.fn(async () => {
       logsAtMove = [...job.logs];
     });

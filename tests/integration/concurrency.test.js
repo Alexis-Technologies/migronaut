@@ -5,8 +5,9 @@ const { after, afterEach, before, beforeEach, describe, it } = require('node:tes
 const { LOCK_ID } = require('../../src/core/lock.js');
 const { startTestMongo } = require('../helpers/mongo.js');
 const { insertMigration, makeMigrator, makeProject } = require('../helpers/project.js');
+const { setTimeout: sleep } = require('node:timers/promises');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_concurrency_test';
 const LOCK_COLLECTION = '_migronaut_locks';
 const runnerPath = path.join(__dirname, '..', 'helpers', 'child-runner.js');
@@ -22,8 +23,8 @@ after(async () => {
   await mongo.stop();
 });
 
-let project;
-let children;
+let project = null;
+let children = null;
 
 beforeEach(async () => {
   await mongo.db.dropDatabase();
@@ -42,7 +43,7 @@ afterEach(() => {
  * Start a real child process running `up`. Its stdout lines are parsed as
  * events, and `waitFor` resolves when one of them arrives.
  */
-function startChild(mode) {
+const startChild = (mode) => {
   const child = spawn(process.execPath, [runnerPath, mongo.uri, DB, project.dir, mode ?? ''], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -94,14 +95,14 @@ function startChild(mode) {
         });
       }),
   };
-}
+};
 
 /**
  * Start the shipped CLI as a child process. Signal handling lives in the CLI
  * layer — core deliberately installs no process-wide handlers — so testing it
  * means running the real binary.
  */
-function startCli(args) {
+const startCli = (args) => {
   const child = spawn(
     process.execPath,
     [binPath, '--uri', mongo.uri, '--db', DB, '--dir', project.dir, ...args],
@@ -114,18 +115,18 @@ function startCli(args) {
     child.on('close', (code, signal) => resolve({ code, signal }));
   });
   return { child, exited };
-}
+};
 
 /** Poll `query` on `collection` until it matches, or fail with `label` */
-async function waitForDoc(collection, query, label, timeoutMs = 20_000) {
+const waitForDoc = async (collection, query, label, timeoutMs = 20_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const doc = await mongo.db.collection(collection).findOne(query);
     if (doc) return doc;
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await sleep(25);
   }
   throw new Error(`timed out waiting for ${label}`);
-}
+};
 
 /** Resolve once a lock document exists — i.e. the run is inside its lock */
 const waitForLock = () => waitForDoc(LOCK_COLLECTION, { _id: LOCK_ID }, 'the lock to be acquired');
@@ -144,7 +145,7 @@ const waitForMigrationStarted = (collection, value) =>
   waitForDoc(collection, { marker: value }, 'the migration to start');
 
 /** A migration that blocks until a sentinel document appears */
-function blockingMigration(collection, value) {
+const blockingMigration = (collection, value) => {
   return `export async function up({ db }) {
   await db.collection('${collection}').insertOne({ marker: '${value}' });
   for (let i = 0; i < 400; i++) {
@@ -157,7 +158,7 @@ export async function down({ db }) {
   await db.collection('${collection}').deleteMany({ marker: '${value}' });
 }
 `;
-}
+};
 
 const release = () => mongo.db.collection('signals').insertOne({ _id: 'release', at: new Date() });
 
@@ -171,7 +172,7 @@ describe('two-process lock contention (integration)', () => {
 
     const second = startChild();
     const refusal = await second.waitFor('failed');
-    assert.strictEqual(refusal.code, 'LOCK_ALREADY_HELD');
+    assert.strictEqual(refusal.code, 'ALX_ERR_LOCK_ALREADY_HELD');
 
     await release();
     const firstExit = await first.exited;
@@ -236,8 +237,8 @@ describe('crash and signal handling (integration)', () => {
     // The in-flight migration is allowed to finish, so let it.
     await release();
     const exit = await first.exited;
-    // 11 = RUN_ABORTED: stopped on request, not crashed.
-    assert.strictEqual(exit.code, 11, 'a stopped run reports RUN_ABORTED');
+    // 11 = ALX_ERR_RUN_ABORTED: stopped on request, not crashed.
+    assert.strictEqual(exit.code, 11, 'a stopped run reports ALX_ERR_RUN_ABORTED');
 
     // The graceful path releases the lock immediately — no TTL wait, no
     // `migronaut unlock` needed.
@@ -259,8 +260,8 @@ describe('crash and signal handling (integration)', () => {
     first.child.kill('SIGINT');
     await release();
     const exit = await first.exited;
-    // Ctrl-C follows the same graceful path as SIGTERM: 11 = RUN_ABORTED.
-    assert.strictEqual(exit.code, 11, 'a stopped run reports RUN_ABORTED');
+    // Ctrl-C follows the same graceful path as SIGTERM: 11 = ALX_ERR_RUN_ABORTED.
+    assert.strictEqual(exit.code, 11, 'a stopped run reports ALX_ERR_RUN_ABORTED');
     assert.strictEqual(await mongo.db.collection(LOCK_COLLECTION).countDocuments(), 0);
     const applied = await mongo.db.collection('_migronaut_migrations').find().toArray();
     assert.deepStrictEqual(
@@ -277,7 +278,7 @@ describe('crash and signal handling (integration)', () => {
     // First signal: graceful stop begins, the blocking migration keeps running
     // (we never release it). Second signal: the operator cannot wait.
     first.child.kill('SIGINT');
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sleep(200);
     first.child.kill('SIGINT');
     const exit = await first.exited;
     // 130 = 128 + SIGINT: the immediate-abort escape hatch.

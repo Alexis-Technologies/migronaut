@@ -13,7 +13,7 @@ const {
   makeProject,
 } = require('../helpers/project.js');
 
-let mongo;
+let mongo = null;
 const DB = 'migronaut_up_test';
 
 before(async () => {
@@ -28,18 +28,18 @@ beforeEach(async () => {
   await mongo.db.dropDatabase();
 });
 
-let project;
-let migrator;
+let project = null;
+let migrator = null;
 
 afterEach(async () => {
   await migrator?.disconnect();
   project?.cleanup();
 });
 
-function setup() {
+const setup = () => {
   project = makeProject();
   migrator = makeMigrator(mongo.uri, DB, project.dir);
-}
+};
 
 describe('MigratorKit.up (integration)', () => {
   it('should reject a path-traversing filename instead of loading outside the dir', async () => {

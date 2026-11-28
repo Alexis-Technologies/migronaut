@@ -1,8 +1,7 @@
 const { ConfigInvalidError } = require('../../errors/index.js');
 const { confirm, defineCommand } = require('../shared.js');
 
-/** Register the `baseline` command (adopt an existing database, no prior tool) */
-function registerBaseline(program) {
+const registerBaseline = (program) => {
   defineCommand(program, {
     name: 'baseline',
     description: 'Mark existing migration files as applied without running them',
@@ -16,9 +15,9 @@ function registerBaseline(program) {
     // changelog claims is applied, which is exactly as consequential as a
     // forced re-run — and --json is non-interactive, so it needs an explicit
     // --yes rather than a prompt that can never be answered.
-    preflight: async (opts, _positionals, { logger }) => {
-      if (!opts.yes) {
-        if (opts.json) {
+    preflight: async (flags, _positionals, { logger }) => {
+      if (!flags.yes) {
+        if (flags.json) {
           throw new ConfigInvalidError(
             'baseline needs confirmation — pass --yes to confirm in --json mode',
           );
@@ -33,13 +32,14 @@ function registerBaseline(program) {
       }
       return undefined;
     },
-    run: (migrator, opts) =>
-      migrator.baseline({
-        noLock: opts.noLock,
-        ...(opts.to ? { to: opts.to } : {}),
-      }),
+    run: (migrator, flags) => {
+      return migrator.baseline({
+        noLock: flags.noLock,
+        ...(flags.to ? { to: flags.to } : {}),
+      });
+    },
     // No render: core logs the ✔ Baselined summary itself.
   });
-}
+};
 
 module.exports = { registerBaseline };

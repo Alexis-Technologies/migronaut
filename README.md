@@ -648,8 +648,8 @@ const rows = await migrator.status();   // StatusRow[]
 await migrator.disconnect();
 ```
 
-All errors extend `MigronautError` and carry a typed `code` (`LOCK_ALREADY_HELD`, `CHECKSUM_MISMATCH`,
-`NOT_APPLIED`, …), so `catch` blocks stay type-safe.
+All errors extend `MigronautError` and carry a typed `code` (`ALX_ERR_LOCK_ALREADY_HELD`, `ALX_ERR_CHECKSUM_MISMATCH`,
+`ALX_ERR_NOT_APPLIED`, …), so `catch` blocks stay type-safe.
 
 > [!NOTE]
 > Running several kits against several databases in **one process**? Pass `envFile: false` and
@@ -754,7 +754,7 @@ await mq.enqueueConverge();              // declared indexes and validators, as 
 
 - **Order comes from MongoDB, not from Redis.** Every job is a normal single-file run under the
   usual lock, and refuses while an earlier migration is still pending — so a failed migration
-  stops the line (`MIGRATION_BLOCKED`), and a CLI `migronaut up` at the same moment is safe.
+  stops the line (`ALX_ERR_MIGRATION_BLOCKED`), and a CLI `migronaut up` at the same moment is safe.
 - **One attempt per job, on purpose** — a queue retry would let later migrations overtake the
   failed one. Duplicate enqueues are deduplicated; an already-applied migration completes as
   `skipped`.
@@ -824,7 +824,7 @@ export default {
   // ── Code-only options (omit in migronaut.config.json) ─────────────────────────
   // hooks: { beforeAll, afterAll, beforeEach, afterEach, onError },
   // mongoose: myMongooseInstance, // pass if your migrations use Mongoose models
-  // logger: null,                 // null silences all output; a pino instance works directly
+  // logger: null,                 // null (or false) silences all output; pino works directly
   // generateId: ulid,             // your id format for run ids — any sync `() => string`
   // telemetry: { tracer, meter }, // OpenTelemetry, from your own @opentelemetry/api
 };
@@ -851,7 +851,7 @@ await runMigrations({
 ```
 
 It is called with no arguments and must synchronously return a non-empty string of at most 128
-characters; anything else fails the run with `CONFIG_INVALID` before a migration starts. Ids are
+characters; anything else fails the run with `ALX_ERR_CONFIG_INVALID` before a migration starts. Ids are
 for correlation only — the lock carries a token of its own, so a generator that repeats a value
 can never let two runs hold the lock at once.
 
@@ -938,10 +938,10 @@ optional rather than merely discouraged:
 | `MIGRONAUT_URI` | `uri` | — *(required)* |
 | `MIGRONAUT_DB` | `dbName` | — *(required)* |
 | `MIGRONAUT_MIGRATIONS_DIR` | `migrationsDir` | `./migrations` |
-| `MIGRONAUT_COLLECTION` | `migrationsCollection` | `_migronaut_migrations` |
+| `MIGRONAUT_MIGRATIONS_COLLECTION` | `migrationsCollection` | `_migronaut_migrations` |
 | `MIGRONAUT_LOCK_COLLECTION` | `lockCollection` | `_migronaut_locks` |
 | `MIGRONAUT_CONVERGE_LOG_COLLECTION` | `convergeLogCollection` | `_migronaut_converge` |
-| `MIGRONAUT_LOCK_TTL` | `lockTTLSeconds` | `60` |
+| `MIGRONAUT_LOCK_TTL_SECONDS` | `lockTTLSeconds` | `60` |
 | `MIGRONAUT_STRICT` | `strict` | `false` |
 | `MIGRONAUT_USE_TRANSACTION` | `useTransaction` | `false` |
 | `MIGRONAUT_SEQUENTIAL` | `sequential` | `false` |
@@ -970,7 +970,7 @@ optional rather than merely discouraged:
 variable can express them.
 
 A value that doesn't parse is **rejected, never coerced**: `MIGRONAUT_STRICT=on` or
-`MIGRONAUT_LOCK_TTL=abc` fails with an error naming the variable, rather than quietly turning a
+`MIGRONAUT_LOCK_TTL_SECONDS=abc` fails with an error naming the variable, rather than quietly turning a
 safety setting off.
 
 Three more variables shape the CLI rather than the config:
@@ -1025,32 +1025,41 @@ positional `(db, client)`.
 
 ## Benchmarks
 
-Measured with the zero-dependency harness in [`bench/bench.js`](./bench/bench.js) (in-process
-scenarios: 1s timed run after 2k warmup iterations; DB-bound scenarios against an in-memory
-MongoDB replica set: 500ms timed run after 100 warmup iterations). Reproduce with:
+Measured with the zero-dependency harness in [`bench/bench.js`](./bench/bench.js): each scenario
+is seven timed windows after a warmup, reported as the median and ± half the samples' range — a
+row that moved by less than that did not move. The CPU-bound scenarios run in a process each; the
+database-bound ones share an in-memory MongoDB replica set. The loader is measured cached (a file
+already imported) and cold (`reload: true`, a fresh evaluation). Reproduce with:
 
 ```bash
 pnpm bench
 ```
 
-Apple M3 Max, Node v24.14.1:
+`node bench/bench.js --json` prints the same as a document, with the environment, for comparing
+two runs.
 
-| Scenario | ops/sec |
-|---|--------:|
-| `computeChecksum` — small migration file (~1 KB) | ~17,000 |
-| `computeChecksum` — large migration file (~100 KB) |  ~8,000 |
-| `loadMigrationFile` — CommonJS default export | ~60,000 |
-| `loadMigrationFile` — ESM named exports | ~60,000 |
-| `loadMigrationFile` — TypeScript (native type-stripping) | ~60,000 |
-| `Changelog.getAll` — 1,000 records |     ~17 |
-| `Changelog.getAppliedNames` — 1,000 records |     ~45 |
-| `Changelog.getLastBatch` — 1,000 records |  ~9,000 |
-| `Changelog.markApplied` — idempotent upsert |    ~160 |
-| `Changelog.markReverted` — update existing applied record |    ~160 |
-| `MigrationLock.acquire + release` — uncontended round trip |     ~80 |
-| `MigrationLock.renew` — heartbeat update |    ~170 |
-| `MigratorKit.status()` — 100 applied records |    ~670 |
-| `MigratorKit.up()` — 100 pending files, end-to-end | ~1.3 s per run |
+Apple M3 Max (16 cores), Node v24.14.1, MongoDB 8.2.6:
+
+| Scenario | median | ± |
+|---|--------:|--:|
+| `computeChecksum` — small migration file (~1 KB) | ~19,000 ops/sec | 4% |
+| `computeChecksum` — large migration file (~100 KB) | ~10,000 ops/sec | 4% |
+| `loadMigrationFile` — CommonJS default export, cached | ~65,000 ops/sec | 4% |
+| `loadMigrationFile` — ESM named exports, cached | ~63,000 ops/sec | 4% |
+| `loadMigrationFile` — TypeScript (type stripping), cached | ~64,000 ops/sec | 4% |
+| `loadMigrationFile` — CommonJS default export, cold | ~15,000 ops/sec | 5% |
+| `loadMigrationFile` — ESM named exports, cold | ~12,000 ops/sec | 4% |
+| `loadMigrationFile` — TypeScript (type stripping), cold | ~9,000 ops/sec | 8% |
+| `Changelog.getAll` — 1,000 records | ~22 ops/sec | 4% |
+| `Changelog.getAppliedNames` — 1,000 records | ~60 ops/sec | 2% |
+| `Changelog.getLastBatch` — 1,000 records | ~11,000 ops/sec | 8% |
+| `Changelog.markApplied` — idempotent upsert | ~165 ops/sec | 16% |
+| `Changelog.markReverted` — update existing applied record | ~150 ops/sec | 8% |
+| `MigrationLock.acquire + release` — uncontended round trip | ~90 ops/sec | 13% |
+| `MigrationLock.renew` — heartbeat update | ~170 ops/sec | 12% |
+| `MigratorKit.status()` — 100 applied records | ~900 ops/sec | 8% |
+| `MigratorKit.up()` — 100 pending files, first run | ~1.5 s | — |
+| `MigratorKit.up()` — 100 pending files, cached imports | ~1.5 s | 1% |
 
 Numbers vary by hardware and Node version — treat them as relative guidance, not absolutes. The
 harness exists primarily to catch performance regressions between releases.
