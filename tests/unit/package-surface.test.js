@@ -591,7 +591,10 @@ describe('published package', () => {
     );
     assert.strictEqual(snapshot?.[1], version, 'the snapshot line of ARCHITECTURE.md');
     const config = readRepoFile('docs/.vitepress/config.mts');
-    const nav = /\/\/ Hand-synced with package\.json "version".*\n\s*text: 'v([^']+)'/.exec(config);
+    // `\r?`: a Windows checkout ends its lines with CRLF, and `.` stops at the `\r`.
+    const nav = /\/\/ Hand-synced with package\.json "version".*\r?\n\s*text: 'v([^']+)'/.exec(
+      config,
+    );
     assert.strictEqual(nav?.[1], version, 'the nav label of the docs site');
   });
 
