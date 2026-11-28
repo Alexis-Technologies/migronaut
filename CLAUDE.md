@@ -344,7 +344,7 @@ this section wins where the two differ. What migronaut adds to its steps:
   `## [Unreleased]` while it is built. The release commit on that branch is
   `chore(release): X.Y.Z`; the branch is squash-merged into `main` as
   `Migronaut vX.Y: <headline> (#N)`, and the tag `vX.Y.Z` is lightweight, on that squash commit.
-  Releases so far: 1.0.0 and 2.0.0 – 2.5.0. Tags `v1.1.0`, `v1.2.3` and `v1.3.0` are the
+  Releases so far: 1.0.0, 2.0.0 – 2.5.0 and 3.0.0. Tags `v1.1.0`, `v1.2.3` and `v1.3.0` are the
   upstream `mongo-migrate-kit`'s, not releases of this package.
 - **The bump (step 2).** Additive features are minors even when they add `MigronautErrorCode`
   members (2.1 – 2.4); 2.0.0 was a major for three narrow contract changes, one a new error code.

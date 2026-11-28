@@ -7,6 +7,8 @@ are releases of the upstream `mongo-migrate-kit`, not of this package.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-28
+
 A major release: the error contract, the move to alexiskills 1.2 — the agent skills and
 conventions of the Alexis stack — and a review of the codebase against them. Every error code
 starts with `ALX_ERR_` and every error class takes `(message, options = {})` as `Error` does;
@@ -1335,7 +1337,8 @@ Initial release. Requires **Node.js ≥ 22.18**.
 - Requires **Node.js ≥ 22.18** — `.ts` migrations run natively (built-in type stripping) with no
   loader or build step; `.js` migrations likewise
 
-[unreleased]: https://github.com/Alexis-Technologies/migronaut/compare/v2.5.0...HEAD
+[unreleased]: https://github.com/Alexis-Technologies/migronaut/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.5.0...v3.0.0
 [2.5.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/Alexis-Technologies/migronaut/compare/v2.2.0...v2.3.0

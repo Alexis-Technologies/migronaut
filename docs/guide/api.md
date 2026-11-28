@@ -74,10 +74,16 @@ up, even from a different project's env file.
 | `generateId()` | `Promise<string>` | A new id in the kit's configured format — the [`generateId`](/guide/configuration#custom-id-format) option, else a random UUID. Does not connect. |
 | `lockInfo()` | `Promise<LockInfo \| null>` | Inspect the current lock holder, if any. |
 | `forceUnlock()` | `Promise<LockInfo \| null>` | Force-release the lock; returns who held it. |
-| `stop(reason?)` | `void` | Ask an in-flight run to stop cleanly after the current migration. |
+| `stop(reason?, { cause? })` | `void` | Ask an in-flight run to stop cleanly after the current migration; `cause` becomes the `RunAbortedError`'s `cause`. |
 
 `up`/`down`/`redo` return a [`RunResult[]`](#runresult); `status`/`list`/`dryRun` return
 [`StatusRow[]`](#statusrow).
+
+The run methods — `up`, `down`, `redo`, `baseline`, `import`, `converge` — take a `signal` too:
+aborting it stops the run as `stop()` does, after the migration in flight, and the run rejects
+with a `RunAbortedError` whose `cause` is the signal's `reason`. One kit runs one thing at a time:
+a second run, or `disconnect()`, while one is in flight rejects with `RunInFlightError`
+(`ALX_ERR_RUN_IN_FLIGHT`) — stop the run and await it before you disconnect.
 
 `up`, `down`, `redo` and `converge` take `requestedBy` (≤ 128 characters) and `reason` (≤ 512):
 who asked for the run, and why. They are stamped on what the run writes — `requestedBy` /

@@ -516,7 +516,9 @@ await backgroundProcessor.heal(); // what startBackgroundWorker() does at start
 coordinators add their lanes to it), `jobOptions`, `sliceMs`, `children`, `pollIntervalMs`,
 `stallMs`, `maxLaneRetries` (failed slices in a row before a lane gives up, default 8) and
 `userlandLogRows` (default 1000, counted per slice). The
-processor has `shutdown()`, `close()` and `heal()`. `createMigrationProcessor`'s `background` takes
+processor has `shutdown()`, `close()` and `heal()`; `close({ timeoutMs })`, on it and on the
+migration processor, stops waiting for a job in flight after that long and leaves it to end on
+its own. `createMigrationProcessor`'s `background` takes
 `{ queue, jobOptions?, stallMs? }`. On the producer side,
 `enqueueBackground(queue, kit, { migration?, stallMs?, jobOptions?, requestedBy?, reason? })`
 enqueues coordinators on a background queue you own.
